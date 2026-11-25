@@ -89,7 +89,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                 if (hdr->payload && hdr->payload_size >= skip + 4u) {
                     uint32_t slot = lagfx_le32(hdr->payload + skip);
                     uint32_t tid = slot >> 1;
-                    lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
+                    lagfx_task_entry_t *t = lagfx_protocol_find_task(p, tid);
                     if (t && t->live) t->active_objects.count = 0;
                     LAGFX_LOG("compute: 0x20 drop-task-cache ch=%u stamp=0x%08x slot=%u task=%u live=%d",
                               (unsigned)p->current_chan_id, hdr->stamp, slot, tid, (t && t->live) ? 1 : 0);
@@ -151,7 +151,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                 if (hdr->payload && hdr->payload_size >= skip + 8u) {
                     uint32_t tid = lagfx_le32(hdr->payload + skip);
                     uint32_t ref = lagfx_le32(hdr->payload + skip + 4u);
-                    lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
+                    lagfx_task_entry_t *t = lagfx_protocol_find_task(p, tid);
                     uint32_t removed = 0;
                     if (t && t->live) {
                         for (uint32_t i = 0; i < t->active_objects.count; i++) {

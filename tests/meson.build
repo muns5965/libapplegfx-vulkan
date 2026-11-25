@@ -1350,3 +1350,17 @@ if fs.is_file(meson.current_source_dir() / 'compute-inner-buffer-offset-unit.c')
   )
   test('PGCmdSetBufferOffset field order (unit)', buf_off_test)
 endif
+
+if fs.is_file(meson.current_source_dir() / 'protocol-mode-unit.c')
+  pm_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    pm_deps += [vulkan_dep]
+  endif
+  pm_test = executable('protocol-mode-unit',
+    'protocol-mode-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : pm_deps,
+    build_by_default : true,
+  )
+  test('protocol mode x86/arm64 compute semantics (unit)', pm_test)
+endif
