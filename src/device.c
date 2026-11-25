@@ -318,6 +318,10 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
      * and leave later devices stuck on whatever the first one picked. */
     lagfx_apply_thread_count_env(desc->thread_count);
 
+    if (desc->protocol_mode > 1u) {
+        set_err(errp_out, "lagfx_device_new: protocol_mode must be 0 (x86) or 1 (arm64 vmapple)");
+        return NULL;
+    }
     if (desc->ring_page_shift != 0u && desc->ring_page_shift != 12u && desc->ring_page_shift != 14u) {
         set_err(errp_out, "lagfx_device_new: ring_page_shift must be 0 (default 12), 12 or 14");
         return NULL;
@@ -345,6 +349,7 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
         free(dev);
         return NULL;
     }
+    proto->protocol_mode = desc->protocol_mode;
     proto->ring_page_shift = desc->ring_page_shift;   /* 0 = default 12 */
     LAGFX_LOG("device_new: ring_page_shift=%u", lagfx_ring_page_shift(proto));
     dev->protocol_state = proto;

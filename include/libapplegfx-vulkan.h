@@ -235,6 +235,9 @@ typedef struct {
  * Parameters for creating a paravirt GPU device.
  * ------------------------------------------------------------- */
 
+#define LAGFX_PROTO_X86 0u
+#define LAGFX_PROTO_ARM64_VMAPPLE 1u
+
 typedef struct {
     /* Callbacks into the QEMU device shell. */
     lagfx_shell_callbacks_t shell;
@@ -268,6 +271,11 @@ typedef struct {
     /* Guest PFN -> address shift. 0 = default (12, 4 KiB pages), the value every earlier caller gets. 14 = the guest hands over 16 KiB page
      * numbers. Any other value makes lagfx_device_new fail. Only the PFN encoding changes. */
     uint32_t ring_page_shift;
+
+    /* Guest protocol flavour. 0 = LAGFX_PROTO_X86 (default, the behaviour of every earlier caller). 1 = LAGFX_PROTO_ARM64_VMAPPLE: the command
+     * semantics Apple Henge (pvg_lite.c / pvg_metal.m) implements for an arm64 vmapple guest. Independent of ring_page_shift. Any other value
+     * makes lagfx_device_new fail. */
+    uint32_t protocol_mode;
 
     /* Reserved for future expansion — must be NULL for now. */
     void *reserved[3];
