@@ -82,7 +82,7 @@ lagfx_status_t lagfx_vk_make_host_storage_buffer(struct lagfx_vk_state *vk,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mt == UINT32_MAX) {
-        mt = find_memory_type(vk->phys_device, req.memoryTypeBits, 0u);
+        mt = find_memory_type(vk->phys_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     }
     if (mt == UINT32_MAX) {
         vkDestroyBuffer(vk->device, buf, NULL);
@@ -104,10 +104,30 @@ lagfx_status_t lagfx_vk_make_host_storage_buffer(struct lagfx_vk_state *vk,
         return LAGFX_ERR_BACKEND;
     }
     void *mapped = NULL;
-    if (vkMapMemory(vk->device, mem, 0, size, 0, &mapped) == VK_SUCCESS && mapped) {
+    VkResult map_result = vkMapMemory(vk->device, mem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (map_result != VK_SUCCESS || !mapped) {
+        if (map_result == VK_SUCCESS) vkUnmapMemory(vk->device, mem);
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
+    }
         if (data) memcpy(mapped, data, (size_t)size);
         else      memset(mapped, 0, (size_t)size);
-        vkUnmapMemory(vk->device, mem);
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &props);
+    VkResult flush_result = VK_SUCCESS;
+    if (!(props.memoryTypes[mt].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+        VkMappedMemoryRange range = {
+            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+            .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE,
+        };
+        flush_result = vkFlushMappedMemoryRanges(vk->device, 1, &range);
+    }
+    vkUnmapMemory(vk->device, mem);
+    if (flush_result != VK_SUCCESS) {
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
     }
     *out_buf = buf;
     *out_mem = mem;
@@ -144,6 +164,8 @@ lagfx_status_t lagfx_vk_make_host_storage_buffer_padded(struct lagfx_vk_state *v
     uint32_t mt = find_memory_type(vk->phys_device, req.memoryTypeBits,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mt == UINT32_MAX)
+        mt = find_memory_type(vk->phys_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (mt == UINT32_MAX) { vkDestroyBuffer(vk->device, buf, NULL); return LAGFX_ERR_BACKEND; }
     VkMemoryAllocateInfo mai = {
         .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
@@ -158,13 +180,33 @@ lagfx_status_t lagfx_vk_make_host_storage_buffer_padded(struct lagfx_vk_state *v
         return LAGFX_ERR_BACKEND;
     }
     void *mapped = NULL;
-    if (vkMapMemory(vk->device, mem, 0, alloc_size, 0, &mapped) == VK_SUCCESS && mapped) {
+    VkResult map_result = vkMapMemory(vk->device, mem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (map_result != VK_SUCCESS || !mapped) {
+        if (map_result == VK_SUCCESS) vkUnmapMemory(vk->device, mem);
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
+    }
         memset(mapped, 0, (size_t)alloc_size);
         if (data && data_len > 0u) {
             VkDeviceSize cp = data_len < alloc_size ? data_len : alloc_size;
             memcpy(mapped, data, (size_t)cp);
         }
-        vkUnmapMemory(vk->device, mem);
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &props);
+    VkResult flush_result = VK_SUCCESS;
+    if (!(props.memoryTypes[mt].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+        VkMappedMemoryRange range = {
+            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+            .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE,
+        };
+        flush_result = vkFlushMappedMemoryRanges(vk->device, 1, &range);
+    }
+    vkUnmapMemory(vk->device, mem);
+    if (flush_result != VK_SUCCESS) {
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
     }
     *out_buf = buf; *out_mem = mem;
     return LAGFX_OK;
@@ -204,6 +246,8 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
     uint32_t mt = find_memory_type(vk->phys_device, req.memoryTypeBits,
                                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                    | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (mt == UINT32_MAX)
+        mt = find_memory_type(vk->phys_device, req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     if (mt == UINT32_MAX) {
         vkDestroyBuffer(vk->device, buf, NULL);
         return LAGFX_ERR_BACKEND;
@@ -229,10 +273,30 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
         return LAGFX_ERR_BACKEND;
     }
     void *mapped = NULL;
-    if (vkMapMemory(vk->device, mem, 0, size, 0, &mapped) == VK_SUCCESS && mapped) {
+    VkResult map_result = vkMapMemory(vk->device, mem, 0, VK_WHOLE_SIZE, 0, &mapped);
+    if (map_result != VK_SUCCESS || !mapped) {
+        if (map_result == VK_SUCCESS) vkUnmapMemory(vk->device, mem);
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
+    }
         if (data) memcpy(mapped, data, (size_t)size);
         else      memset(mapped, 0, (size_t)size);
-        vkUnmapMemory(vk->device, mem);
+    VkPhysicalDeviceMemoryProperties props;
+    vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &props);
+    VkResult flush_result = VK_SUCCESS;
+    if (!(props.memoryTypes[mt].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) {
+        VkMappedMemoryRange range = {
+            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+            .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE,
+        };
+        flush_result = vkFlushMappedMemoryRanges(vk->device, 1, &range);
+    }
+    vkUnmapMemory(vk->device, mem);
+    if (flush_result != VK_SUCCESS) {
+        vkDestroyBuffer(vk->device, buf, NULL);
+        vkFreeMemory(vk->device, mem, NULL);
+        return LAGFX_ERR_BACKEND;
     }
     if (out_addr) {
         VkBufferDeviceAddressInfo dai = {
@@ -240,6 +304,11 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
             .buffer = buf,
         };
         *out_addr = vkGetBufferDeviceAddress(vk->device, &dai);
+        if (!*out_addr) {
+            vkDestroyBuffer(vk->device, buf, NULL);
+            vkFreeMemory(vk->device, mem, NULL);
+            return LAGFX_ERR_BACKEND;
+        }
     }
     *out_buf = buf;
     *out_mem = mem;
