@@ -209,5 +209,35 @@ int main(void) {
     fprintf(stdout, "\n=== Summary ===\n");
     fprintf(stdout, "Failures: %d\n", failures);
 
+    /* Separate private mapping: the copy fallback is not a coherence
+     * contract. Check seeded data and explicitly demonstrate independence. */
+    fprintf(stdout, "\n=== Private mapping / copy fallback (not coherence) ===\n");
+    void *private_src = mmap(NULL, region_size, PROT_READ | PROT_WRITE,
+                             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    void *private_base = NULL;
+    lagfx_task_t *private_task = NULL;
+    if (private_src == MAP_FAILED) return 1;
+    memset(private_src, 0x11, region_size);
+    private_task = lagfx_task_create(region_size, &private_base);
+    if (!private_task || !lagfx_task_map_host_memory(private_task, 0, private_src,
+                                                     region_size, false)) {
+        failures++;
+        fprintf(stderr, "FAIL: private map setup\n");
+    } else {
+        volatile uint8_t *p = (volatile uint8_t *)private_src;
+        volatile uint8_t *q = (volatile uint8_t *)private_base;
+        bool copied = q[0] == 0x11 && q[region_size-1] == 0x11;
+        p[0] = 0x22;
+        bool independent = q[0] == 0x11;
+        q[region_size-1] = 0x33;
+        independent = independent && p[region_size-1] == 0x11;
+        fprintf(stdout, "%s: private mapping initial copy\n", copied?"PASS":"FAIL");
+        fprintf(stdout, "%s: private fallback views independent; coherence NOT guaranteed\n", independent?"PASS":"FAIL");
+        if (!copied || !independent) failures++;
+        if (!lagfx_task_unmap(private_task, 0, region_size)) failures++;
+    }
+    if (private_task) lagfx_task_destroy(private_task);
+    munmap(private_src, region_size);
+    fprintf(stdout, "COMBINED failures=%d\n", failures);
     return failures > 0 ? 1 : 0;
 }
