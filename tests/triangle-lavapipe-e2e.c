@@ -621,11 +621,11 @@ int main(void) {
                 { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                   .stage = VK_SHADER_STAGE_VERTEX_BIT,
                   .module = sm_v,
-                  .pName = "main" },
+                  .pName = "triangle_vertex" },
                 { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                   .stage = VK_SHADER_STAGE_FRAGMENT_BIT,
                   .module = sm_f,
-                  .pName = "main" },
+                  .pName = "triangle_fragment" },
             };
             VkGraphicsPipelineCreateInfo apple_gpci = gpci;
             apple_gpci.pStages = apple_stages;

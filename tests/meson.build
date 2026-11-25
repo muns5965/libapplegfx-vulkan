@@ -390,7 +390,9 @@ if fs.is_file(meson.current_source_dir() / 'triangle-lavapipe-e2e.c') \
     dependencies : [vulkan_dep],
     build_by_default : true,
   )
-  test('triangle lavapipe e2e', triangle_e2e_test)
+  test('triangle lavapipe e2e', triangle_e2e_test,
+  env : {'LAGFX_TRIANGLE_SPV_DIR':
+         meson.project_source_root() / 'examples' / 'triangle' / 'out'})
 endif
 
 # Phase 3.C.2: air2spirv (metallib extraction + LLVM Bitcode
