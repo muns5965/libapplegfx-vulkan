@@ -10,6 +10,11 @@
 #include <stdlib.h>
 #include "../src/vulkan/pipeline.c"
 
+void lagfx_log_impl(const char *fmt, ...) {(void)fmt;}
+void lagfx_warn_impl(const char *fmt, ...) {(void)fmt;}
+void lagfx_err_impl(const char *fmt, ...) {(void)fmt;}
+void lagfx_trace_impl(const char *fmt, ...) {(void)fmt;}
+
 enum { COHERENT, NONCOHERENT, INVISIBLE };
 enum { OK, MAP_FAIL, FLUSH_FAIL, ADDRESS_ZERO };
 static int mode, fault, created, allocated, bound, mapped, flushed, unmapped, destroyed, freed, errors;
