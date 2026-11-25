@@ -1338,7 +1338,8 @@ static lagfx_status_t create_cursor_resources(struct lagfx_vk_state *vk) {
                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                        | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (gmtype == UINT32_MAX) {
-        gmtype = find_memory_type(vk->phys_device, greq.memoryTypeBits, 0u);
+        gmtype = find_memory_type(vk->phys_device, greq.memoryTypeBits,
+                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT);
     }
     if (gmtype == UINT32_MAX) {
         LAGFX_ERR("cursor_res: no memory type for glyph image");
@@ -1394,6 +1395,12 @@ static lagfx_status_t create_cursor_resources(struct lagfx_vk_state *vk) {
         return LAGFX_ERR_BACKEND;
     }
 
+    VkPhysicalDeviceMemoryProperties glyph_props;
+    vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &glyph_props);
+    vk->cursor_glyph_coherent = (glyph_props.memoryTypes[gmtype].propertyFlags &
+                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) != 0;
+    vk->cursor_glyph_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+    vk->cursor_sync_failed = false;
     vk->cursor_glyph_w     = glyph_w;
     vk->cursor_glyph_h     = glyph_h;
     vk->cursor_glyph_valid = false;
@@ -1409,6 +1416,10 @@ static void destroy_cursor_resources(struct lagfx_vk_state *vk) {
     if (!vk || vk->device == VK_NULL_HANDLE) {
         return;
     }
+    vk->cursor_glyph_coherent = false;
+    vk->cursor_glyph_valid = false;
+    vk->cursor_glyph_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+    vk->cursor_sync_failed = false;
     if (vk->cursor_glyph_view != VK_NULL_HANDLE) {
         vkDestroyImageView(vk->device, vk->cursor_glyph_view, NULL);
         vk->cursor_glyph_view = VK_NULL_HANDLE;
