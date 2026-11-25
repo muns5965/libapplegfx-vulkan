@@ -96,6 +96,11 @@ int main(void) {
     submit(x, 0x25, 0, xr, 2);
     assert(x2->active_objects.count == 1 && x2->active_objects.object_ids[0] == 0x77);
 
+    /* 0x38 puts a task in the slot equal to its id (compute_inner_ops indexes tasks[task_id]) */
+    x = mk(LAGFX_PROTO_X86);
+    lagfx_task_entry_t *x5 = def_task(x, 5), *x1 = def_task(x, 1);
+    assert(x5 == &x->tasks[5] && x1 == &x->tasks[1]);
+
     puts("protocol-mode-unit: ok");
     return 0;
 }
