@@ -73,7 +73,7 @@ bool lagfx_define_host_task(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
     uint32_t slot_index    = lagfx_le32(a + 0);
     uint32_t root_page_pfn = lagfx_le32(a + 12);
     uint32_t task_id       = slot_index >> 1;
-    if (task_id >= 512u) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("CmdDefineHostTask: taskID=%u out of range", task_id);
         return false;
     }
@@ -107,7 +107,7 @@ bool lagfx_define_task_lists(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     }
     const uint8_t *a = hdr->payload + skip;
     uint32_t task_id = lagfx_le32(a + 0);
-    if (task_id >= 512u) { LAGFX_WARN("compute 0x44: task %u out of range", task_id); return false; }
+    if (task_id >= LAGFX_MAX_TASK_ID) { LAGFX_WARN("compute 0x44: task %u out of range", task_id); return false; }
     lagfx_task_entry_t *t = lagfx_protocol_find_task(p, task_id);
     if (!t) { LAGFX_WARN("compute 0x44: task %u not defined (no 0x38 yet) — skipped", task_id); return false; }
     t->objects_addr   = (uint64_t)lagfx_le32(a + 8) << 32 | lagfx_le32(a + 4);

@@ -43,15 +43,16 @@ int main(void) {
     struct lagfx_protocol *p = calloc(1, sizeof(*p));
     if (!p) return 1;
     p->magic = LAGFX_PROTOCOL_MAGIC;   /* find_task requires a valid protocol */
-    uint32_t task_id = 3u;
-    p->tasks[task_id].live = true;
-    p->tasks[task_id].id = task_id;   /* tasks are found by id, not slot */
+    uint32_t task_id = 65u;               /* id deliberately != slot: the task lives in slot 3 */
+    uint32_t slot = 3u;
+    p->tasks[slot].live = true;
+    p->tasks[slot].id = task_id;   /* tasks are found by id, not slot */
 
     /* Pre-bind slot 1 so the offset update lands on a bound slot. */
-    p->tasks[task_id].bindings.vertex_buffers[1].ref = 0x24u;
-    p->tasks[task_id].bindings.vertex_buffers[1].valid = true;
-    p->tasks[task_id].bindings.fragment_buffers[1].ref = 0x24u;
-    p->tasks[task_id].bindings.fragment_buffers[1].valid = true;
+    p->tasks[slot].bindings.vertex_buffers[1].ref = 0x24u;
+    p->tasks[slot].bindings.vertex_buffers[1].valid = true;
+    p->tasks[slot].bindings.fragment_buffers[1].ref = 0x24u;
+    p->tasks[slot].bindings.fragment_buffers[1].valid = true;
 
     /* Live-wire example from the 2026-07-23 boot: index=1, offset=0x10200. */
     uint8_t body[12];
@@ -60,24 +61,24 @@ int main(void) {
 
     int rc = lagfx_compute_inner_dispatch(p, 0u, task_id, 0x7e, body, sizeof(body));
     CHECK(rc == 0, "0x7e SetVertexBufferOffset dispatch succeeds");
-    CHECK(p->tasks[task_id].bindings.vertex_buffers[1].offset == 0x10200u,
+    CHECK(p->tasks[slot].bindings.vertex_buffers[1].offset == 0x10200u,
           "0x7e updates vertex_buffers[index=1].offset from u64@+4");
-    CHECK(p->tasks[task_id].bindings.vertex_buffers[0].offset == 0u,
+    CHECK(p->tasks[slot].bindings.vertex_buffers[0].offset == 0u,
           "0x7e does NOT touch slot 0 (old swapped read wrote garbage there)");
-    CHECK(p->tasks[task_id].bindings.vertex_buffers[1].ref == 0x24u
-          && p->tasks[task_id].bindings.vertex_buffers[1].valid,
+    CHECK(p->tasks[slot].bindings.vertex_buffers[1].ref == 0x24u
+          && p->tasks[slot].bindings.vertex_buffers[1].valid,
           "0x7e leaves ref/valid alone");
 
     rc = lagfx_compute_inner_dispatch(p, 0u, task_id, 0x6f, body, sizeof(body));
     CHECK(rc == 0, "0x6f SetFragmentBufferOffset dispatch succeeds");
-    CHECK(p->tasks[task_id].bindings.fragment_buffers[1].offset == 0x10200u,
+    CHECK(p->tasks[slot].bindings.fragment_buffers[1].offset == 0x10200u,
           "0x6f updates fragment_buffers[index=1].offset from u64@+4");
-    CHECK(p->tasks[task_id].bindings.fragment_buffers[0].offset == 0u,
+    CHECK(p->tasks[slot].bindings.fragment_buffers[0].offset == 0u,
           "0x6f does NOT touch slot 0");
 
     /* The pre-fix parse read u64@0 as offset: for this wire that is
      * 0x0000010200000001 — assert the fixed parse can no longer produce it. */
-    CHECK(p->tasks[task_id].bindings.vertex_buffers[1].offset != 0x1020000000001ull,
+    CHECK(p->tasks[slot].bindings.vertex_buffers[1].offset != 0x1020000000001ull,
           "swapped-field regression value absent");
 
     /* Out-of-range index is rejected without state change. */
