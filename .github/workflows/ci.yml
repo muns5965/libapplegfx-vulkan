@@ -106,6 +106,12 @@ jobs:
       - name: Compile
         run: meson compile -C build
 
+      - name: Android memory correctness (mock, no Vulkan loader)
+        if: github.ref == 'refs/heads/research/android-memory-correctness'
+        run: |
+          cc -std=gnu11 -DLAGFX_HAVE_VULKAN=1 -Iinclude -Isrc -ffunction-sections -fdata-sections -Wl,--gc-sections tests/android-memory-mock.c -o build/android-memory-mock
+          build/android-memory-mock
+
       - name: Test
         run: meson test -C build --print-errorlogs
 
