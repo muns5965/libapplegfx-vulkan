@@ -88,12 +88,15 @@ int main(void) {
     }
     
     /* Full path smoke test - may skip at runtime if no Vulkan ICD or shader translation fails */
+    int skipped = 0;
     ret = test_build_from_triangle();
     if (ret == 1) {
         fprintf(stderr, "pipeline_build_test: triangle build test failed\n");
         _exit(1);
     } else if (ret == 0) {
         fprintf(stdout, "pipeline_build_test: triangle smoke test passed\n");
+    } else {
+        skipped++;   /* the triangle smoke is a stub that always skips: say so instead of calling it a pass */
     }
     
     /* No-dynamic-rendering test - skips if VK_KHR_dynamic_rendering present */
@@ -102,9 +105,14 @@ int main(void) {
         fprintf(stderr, "pipeline_build_test: no-dynamic-rendering test failed\n");
         _exit(1);
     } else if (ret != 0) {
-        /* Skip code (77) is OK */
+        skipped++;
     }
-    
+
+    if (skipped) {
+        fprintf(stdout, "pipeline_build_test: negative tests passed; %d smoke test(s) SKIPPED (stubs, no triangle pipeline was built)\n", skipped);
+        fflush(stdout);
+        _exit(77);
+    }
     fprintf(stdout, "pipeline_build_test: all tests passed\n");
     fflush(stdout);
     _exit(0);

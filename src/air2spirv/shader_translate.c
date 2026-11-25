@@ -235,7 +235,7 @@ lagfx_status_t lagfx_shader_translate_run(
         LAGFX_ERR("shader_translate: mkstemp(bc) failed: %s", strerror(errno));
         free(llc_path);
         free(retargeted_bc);
-        return LAGFX_ERR_OUT_OF_MEMORY;
+        return LAGFX_ERR_INTERNAL;   /* temp-file failure, not memory */
     }
 
     ssize_t written = write(bc_fd, retargeted_bc, retargeted_bc_len);
@@ -246,7 +246,7 @@ lagfx_status_t lagfx_shader_translate_run(
         close(bc_fd);
         unlink(bc_temp);
         free(llc_path);
-        return LAGFX_ERR_OUT_OF_MEMORY;
+        return LAGFX_ERR_INTERNAL;   /* temp-file failure, not memory */
     }
 
     if (close(bc_fd) != 0) {
@@ -258,7 +258,7 @@ lagfx_status_t lagfx_shader_translate_run(
         LAGFX_ERR("shader_translate: mkstemp(spv) failed: %s", strerror(errno));
         unlink(bc_temp);
         free(llc_path);
-        return LAGFX_ERR_OUT_OF_MEMORY;
+        return LAGFX_ERR_INTERNAL;   /* temp-file failure, not memory */
     }
 
     /* Run llc. */

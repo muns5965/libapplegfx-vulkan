@@ -70,7 +70,7 @@ static int test_smoke_translate_vertex(void) {
     
     free(buf);
     
-    if (st == LAGFX_ERR_BACKEND || st == LAGFX_ERR_PROTOCOL) {
+    if (!llc_available() && (st == LAGFX_ERR_BACKEND || st == LAGFX_ERR_PROTOCOL)) {   /* with llc present a backend/protocol error is a real failure */
         fprintf(stdout, "test_smoke_translate_vertex: skipped (llc unavailable or crashed)\n");
         return 0;
     }
@@ -103,7 +103,7 @@ static int test_smoke_translate_fragment(void) {
     
     free(buf);
     
-    if (st == LAGFX_ERR_BACKEND || st == LAGFX_ERR_PROTOCOL) {
+    if (!llc_available() && (st == LAGFX_ERR_BACKEND || st == LAGFX_ERR_PROTOCOL)) {   /* with llc present a backend/protocol error is a real failure */
         fprintf(stdout, "test_smoke_translate_fragment: skipped (llc unavailable or crashed)\n");
         return 0;
     }
