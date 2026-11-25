@@ -93,6 +93,7 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
                               0, VK_WHOLE_SIZE, 0, &mapped);
     if (vr != VK_SUCCESS || !mapped) {
         if (vr == VK_SUCCESS) vkUnmapMemory(vk->device, vk->cursor_glyph_mem);
+        if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
         LAGFX_ERR("cursor_upload: vkMapMemory failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
@@ -136,6 +137,7 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     }
     vkUnmapMemory(vk->device, vk->cursor_glyph_mem);
     if (vr != VK_SUCCESS) {
+        if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
         LAGFX_ERR("cursor_upload: flush failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
@@ -189,7 +191,9 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
         vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
         if (vr != VK_SUCCESS) {
             VkResult idle = vkDeviceWaitIdle(vk->device);
-            vk->cursor_sync_failed = true;
+            vk->cursor_sync_failed = (idle != VK_SUCCESS || vr == VK_ERROR_DEVICE_LOST);
+            if (idle == VK_SUCCESS && vr != VK_ERROR_DEVICE_LOST)
+                vk->cursor_glyph_layout = VK_IMAGE_LAYOUT_GENERAL;
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) {
                 /* Completion not established: retain pending objects until device teardown. */
                 return LAGFX_ERR_BACKEND;
@@ -201,6 +205,7 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     lagfx_vk_cmdbuf_free(vk, cb);
 
     if (vr != VK_SUCCESS) {
+        if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
         LAGFX_ERR("cursor_upload: submit/wait failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
@@ -262,6 +267,7 @@ lagfx_status_t lagfx_vk_cursor_draw(struct lagfx_vk_state *vk,
                               0, 16, 0, &mapped);
     if (vr != VK_SUCCESS || !mapped) {
         if (vr == VK_SUCCESS) vkUnmapMemory(vk->device, vk->cursor_ubo_mem);
+        if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
         LAGFX_ERR("cursor_draw: vkMapMemory failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
