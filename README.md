@@ -1,75 +1,76 @@
-# libapplegfx-vulkan
+# libapplegfx-vulkan — Android compatibility research
 
-[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/MattJackson)
+[English](#english) · [한국어](#korean) · [Original README / 기존 README](docs/archive/README-upstream.md) · [Upstream](https://github.com/MattJackson/libapplegfx-vulkan) · [MIT License](LICENSE)
 
-[![CI](https://github.com/MattJackson/libapplegfx-vulkan/actions/workflows/ci.yml/badge.svg)](https://github.com/MattJackson/libapplegfx-vulkan/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/MattJackson/libapplegfx-vulkan?display_name=tag&sort=semver)](https://github.com/MattJackson/libapplegfx-vulkan/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+<a id="english"></a>
 
-**Linux clean-room reimplementation of Apple's
-`ParavirtualizedGraphics.framework` host-side library, with a
-Vulkan rendering backend.** The host counterpart to the
-unmodified macOS guest's PVG kexts: decodes the paravirt wire
-protocol, walks the per-task radix page table, translates Metal
-command streams to Vulkan, and renders through Mesa's `lavapipe`
-(or any other Vulkan ICD).
+## English
 
-This is the most technical of the mos project's implementation
-repos — opcode handlers, stamp slots, radix page tables, virtual
-channels all live here. The narrative context — how this fits the
-stack, why Vulkan, what each mechanism does — is in **mos-docs**
-(the documentation library; publication to a public repo is in
-progress). This README is about *what's in the tree* and *how to
-consume it*.
+An experimental Android ARM64 validation fork of Matthew Jackson's [libapplegfx-vulkan](https://github.com/MattJackson/libapplegfx-vulkan), a clean-room host-side reimplementation of Apple's ParavirtualizedGraphics.framework with a Vulkan backend. The upstream library decodes PVG commands and translates Apple AIR shader IR to SPIR-V. This fork documents Android compatibility work performed with the independent [Henge Android port](https://github.com/muns5965/Henge/tree/research/android-port).
 
-## Status
+**Status: 2026-11-25 — Android ARM64 translation and selected GPU rendering verified. Full Metal API and live PVG compatibility are not established.**
 
-**Full render chain proven live** — real guest geometry with
-translated vertex + fragment shaders reaching ~99.7% frame
-coverage on lavapipe. M1–M5 green; consolidation of the winning
-render path to default-on is in progress.
+### Test environment and reproducibility
 
-| Milestone | What it gates | Status |
-|---|---|---|
-| M1 | Build green + kext attaches | done 2026-04-21 |
-| M2 | IOAccelerator class tree visible | done 2026-04-21 |
-| M3 | `MTLCreateSystemDefaultDevice()` non-nil | done 2026-05-03 |
-| M4 | `CmdExecIndirect2` inner parsing + 3-level radix VA→GPA | done 2026-04-26 |
-| **M5** | **First visible pixel via Vulkan/lavapipe** | done 2026-05-18 |
+- Samsung Galaxy S26 Ultra, Android 17, Qualcomm Adreno 840.
+- Tested library revision: [7574eac](https://github.com/muns5965/libapplegfx-vulkan/tree/7574eac0d7396a9f49366f007c7fbeb44245826c).
+- Android NDK r27c, arm64-v8a, API 30 minimum; Vulkan 1.2 SPIR-V host validation.
+- Standalone Henge GPU test APK 4.4; separate from the VM. Android build glue and test harness currently live in Henge, not in this fork.
+- [Test source](https://github.com/muns5965/Henge/tree/fe6064e5ad415efd400572489216731855bfe0cc/tests/gpu-android-gpt) · [Successful CI build](https://github.com/muns5965/Henge/actions/runs/45575251001) · [Download APK 4.4](https://github.com/muns5965/Henge/actions/runs/45575251001/artifacts/15004136515).
+- Install and run the six-stage GPU test, the 11-module corpus translation test, then the ColorFill / TextureCopy GPU output test. Artifacts may expire or require sign-in.
 
-Beyond M5: the clean-room AIR → SPIR-V translator now translates
-the guest's real compiled shaders live on the production path
-(vertex + fragment), a long-standing ring-wrap protocol bug is
-fixed, and the current work is consolidating the winning render
-path to default-on. Background: whitepaper 04 ("M5, first pixel")
-in mos-docs.
+### Android compatibility results
 
-## Where this fits
+PASS = observed success; FAIL = observed failure; NOT TESTED = no completed verification. Results are developer-reported physical-device tests, not universal guarantees. Expected negative-control failures demonstrate that the draw is required and are not functional regressions.
 
-```
-guest macOS (kexts unmodified)
-  │  MMIO + DMA over virtual PCI
-  ▼
-mos-qemu  apple-gfx-pci-linux  device     ◄── dlopens libapplegfx-vulkan.so
-  │  C callback API (lagfx_*)             ◄── pkg-config: libapplegfx-vulkan
-  ▼
-libapplegfx-vulkan   ◄── YOU ARE HERE
-  │  Vulkan API
-  ▼
-Mesa lavapipe (or any Vulkan ICD)
-  │  rendered VkImage
-  ▼
-back up via lagfx_display_read_frame() into QEMU's DisplaySurface
-```
+| Test | Result | Evidence |
+| --- | --- | --- |
+| ARM64 NDK build and native execution | ✅ PASS | Android 17 |
+| Vulkan dynamic dispatch | ✅ PASS | Adreno 840 |
+| 1. AIR triangle | ✅ PASS | 3,724/3,724 |
+| 2. Texture sampling (GLSL) | ✅ PASS | 4,096/4,096 |
+| 3. Alpha blending (GLSL) | ✅ PASS | 4,096/4,096 |
+| 4. FP16 render and conversion (GLSL) | ✅ PASS | 4,096 raw + 4,096 converted |
+| 5. Fresh on-device AIR translation and draw | ✅ PASS | SHA-256 match; 3,724/3,724 |
+| 6. Library render target clear/readback | ✅ PASS | 4,096/4,096 |
+| 7. Real Metal ColorFill | ✅ PASS | 4,096/4,096; 00FF00FF |
+| 8. Real Metal TextureCopy | ✅ PASS | 4,096/4,096; 4080FFFF |
+| Raw .bc APK assets (4.2 / control B) | ❌ FAIL | Install rejected / 설치 거부 |
+| Neutral .airdata APK assets (4.3/4.4) | ✅ PASS | Installed / 설치 성공 |
+| ColorFill no-draw output | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| TextureCopy no-draw output | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| Real login vertex + fragment pair | ⬜ NOT TESTED | GLSL reference vertex |
+| Patterned Metal texture / UV accuracy | ⬜ NOT TESTED | Uniform texture only |
+| UberComposite, Vfx, Xgc GPU rendering | ⬜ NOT TESTED | Translation only |
+| Live Henge PVG / desktop integration | ⬜ NOT TESTED | Standalone APK |
 
-The library is loaded into the QEMU process at runtime; mos-qemu
-links against it via `dependency('libapplegfx-vulkan')`. The
-production runtime in
-[mos-docker](https://github.com/MattJackson/mos-docker) bundles
-`libapplegfx-vulkan.so` into its image alongside the patched QEMU.
-The full repo graph is in the mos-docs component map.
+### Real macOS login AIR shader corpus
 
-## Build
+11 modules and 66 defined-function translations reported successful. Emitted SPIR-V matched the Linux host SHA-256 and passed host `spirv-val --target-env vulkan1.2`. Xgc's size is its main function; the other 55 reported functions were translated separately, not independently GPU-executed.
+
+| Function/module | Stage | Translation | Host hash / validation | Main SPIR-V bytes | GPU render |
+| --- | --- | --- | --- | ---: | --- |
+| ViewportToNDC | Vertex | ✅ 1/1 PASS | ✅ PASS | 2,056 | ⬜ NOT TESTED |
+| UberCompositeVertex | Vertex | ✅ 1/1 PASS | ✅ PASS | 1,952 | ⬜ NOT TESTED |
+| Vfx | Vertex | ✅ 1/1 PASS | ✅ PASS | 2,136 | ⬜ NOT TESTED |
+| ColorFill | Fragment | ✅ 1/1 PASS | ✅ PASS | 900 | ✅ PASS |
+| TextureCopy | Fragment | ✅ 1/1 PASS | ✅ PASS | 1,136 | ✅ PASS |
+| UberCompositeFragment A | Fragment | ✅ 1/1 PASS | ✅ PASS | 1,544 | ⬜ NOT TESTED |
+| UberCompositeFragment B | Fragment | ✅ 1/1 PASS | ✅ PASS | 1,524 | ⬜ NOT TESTED |
+| VfxU11 | Vertex | ✅ 1/1 PASS | ✅ PASS | 2,940 | ⬜ NOT TESTED |
+| TvcmXc_Isrc | Fragment | ✅ 1/1 PASS | ✅ PASS | 6,740 | ⬜ NOT TESTED |
+| VfxXgb | Vertex | ✅ 1/1 PASS | ✅ PASS | 10,208 | ⬜ NOT TESTED |
+| Xgc | Fragment | ✅ 56/56 PASS | ✅ PASS | 337,892 | ⬜ NOT TESTED |
+
+### Actual GPU rendering
+
+ColorFill reads a StorageBuffer; TextureCopy samples an image with a separate sampler. Both use freshly translated Metal fragment shaders with a GLSL reference vertex. Each produced 4,096/4,096 matching pixels, totaling 8,192/8,192. Omitting the draw produced 8,192/8,192 mismatches and exit code 1 in both controls.
+
+The uniform-color TextureCopy test does not establish general UV accuracy. Successful translation and SPIR-V validation do not prove full Metal semantics. Real login vertex pairing, complex composition, live PVG commands, and macOS desktop rendering remain unverified.
+
+### Build and upstream information
+
+The upstream Linux build uses C11, Meson, Ninja and Vulkan headers/loader:
 
 ```sh
 meson setup builddir
@@ -77,267 +78,96 @@ meson compile -C builddir
 meson test -C builddir --print-errorlogs
 ```
 
-**Dependencies:**
+For the Android cross-build, use the pinned [Henge workflow](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml). It builds the actual Vulkan-enabled static library and packages the native test executables. AIR fixtures use a neutral .airdata suffix to avoid the observed .bc APK installation failure.
 
-- C11 compiler, meson ≥ 1.0, ninja, pkg-config
-- Vulkan loader + headers (`libvulkan-dev`, `vulkan-headers`) —
-  optional during scaffold builds; required for actual rendering.
-  When absent, meson reports `Vulkan not found — building with
-  no-op Vulkan init stubs.` and the Vulkan-gated tests self-skip.
-- Mesa with `lavapipe` enabled (`mesa-vulkan-swrast` on Debian/
-  Alpine) — for end-to-end Vulkan rendering tests
-- Linux kernel 5.4+ for `memfd_create` + `mmap(MAP_FIXED)`. Darwin
-  builds with a `mkstemp` fallback for dev convenience; some
-  Linux-only tests (`memory-coherence`) are built but skipped on
-  Darwin
-- `glslangValidator` (optional) — only needed to regenerate
-  `src/shaders/spv/` from GLSL sources; committed `.spv` blobs are
-  used by default
+For the original Linux/QEMU architecture, API, dependencies, milestones, contributing rules, and upstream test descriptions, see the [archived original README](docs/archive/README-upstream.md). Upstream Linux results are not Android test results.
 
-The build produces `libapplegfx-vulkan.so` (versioned) plus a
-`libapplegfx-vulkan.pc` pkg-config file, installed into the prefix.
-mos-qemu's `apple-gfx-pci-linux` device picks the library up via
-`dependency('libapplegfx-vulkan')`.
+### Credits and license
 
-CI (`.github/workflows/`) runs Linux + Alpine + Darwin matrices
-with debug/release builds and ASan/UBSan sanitizers.
+Original library by Matthew Jackson ([MattJackson](https://github.com/MattJackson)); Android test integration is developed in the Henge fork. Library source is [MIT-licensed](LICENSE). Third-party Apple shader fixtures are test inputs; no separate license grant for Apple's material is asserted. See upstream [contribution guidelines](CONTRIBUTING.md) and [security policy](SECURITY.md).
 
-## API surface
+---
 
-The public C API is `include/libapplegfx-vulkan.h` — every exported
-symbol is `lagfx_*`. The shape mirrors Apple's macOS-only
-`ParavirtualizedGraphics.framework` (`PGDevice` /
-`PGShellCallbacks` / `PGDisplay`):
+<a id="korean"></a>
 
-| Apple API | `libapplegfx-vulkan` |
-|---|---|
-| `PGDevice` / `+deviceWithDescriptor:` | `lagfx_device_t` + `lagfx_device_new/free/reset` |
-| `PGDeviceDescriptor` | `lagfx_device_descriptor_t` |
-| `PGShellCallbacks` | `lagfx_shell_callbacks_t` |
-| `PGDisplay` | `lagfx_display_t` + `lagfx_display_new/free` |
-| `PGDisplayDescriptor` | `lagfx_display_descriptor_t` |
-| `PGCommandQueue` (implicit) | inside the device + protocol decoder |
-| MMIO read/write (host-side) | `lagfx_mmio_read` / `lagfx_mmio_write` |
-| `mach_vm_remap` (Darwin) | `lagfx_task_*` (memfd + `mmap(MAP_FIXED)` + `mremap` alias on Linux) |
+## 한국어
 
-**Naming convention:** the public API uses the `lagfx_` prefix
-(short for libapplegfx) to make the independent reimplementation
-clear and sidestep Apple-trademark friction. Repo documentation,
-README keywords, and commit messages may reference
-"ParavirtualizedGraphics" / "PGDevice" / "PVG" for discoverability
-— that's intentional. **Do not rename exported symbols to `pg_*`.**
+Matthew Jackson의 [libapplegfx-vulkan](https://github.com/MattJackson/libapplegfx-vulkan)을 기반으로 Android ARM64 호환성을 검증하는 실험적 포크입니다. 원본은 Apple ParavirtualizedGraphics.framework의 호스트 측 기능을 클린룸 방식으로 재구현하고 Vulkan 백엔드를 사용합니다. PVG 명령을 해석하고 Apple AIR 셰이더 중간 표현을 SPIR-V로 변환합니다. Android 검증은 독립 [Henge Android 포팅 프로젝트](https://github.com/muns5965/Henge/tree/research/android-port)와 연계하여 수행했습니다.
 
-## Code layout
+**기준일: 2026-11-25 — Android ARM64 변환 및 일부 실제 GPU 렌더링 검증 완료. Metal 전체 API 및 실제 PVG 호환은 미확인입니다.**
 
-```
-include/libapplegfx-vulkan.h     public C API (one header)
-src/
-  device.c, display.c, mmio.c    lifecycle + MMIO routing
-  protocol/                      PVG wire-protocol decoder
-    protocol.c                   doorbell, ring drain, dispatch
-    fifo.c                       per-channel FIFO drain
-    opcodes.c                    outer opcode table
-    ops_device.c                 CmdMapMemory / CmdUnmapMemory (vchan)
-    ops_display.c                display setup, opcode 0x04 CmdDefineChildFIFO
-    ops_display_vchan.c          sub-channel PGFIFO drain, cursor
-    ops_cmdbuf.c                 CmdExecIndirect2 inner parsing
-    ops_iosurface.c              IOSurface MMIO ring
-    ops_misc.c, ops_queue.c
-    render_decoder.c             encoderType=Render dispatch
-    render_opcodes.c             95-entry Render opcode table (~10 wired)
-    compute_decoder.c, compute_opcodes.c
-    blit_decoder.c, blit_opcodes.c
-    render_pass.c                render-pass state tracking
-    resource_registry.c          per-task resource handles
-    translate.c                  lagfx_task_translate (radix walker)
-  vulkan/                        Vulkan instance/device + render targets
-    instance.c, command.c, pipeline.c
-    render_target.c, display_blit.c, cursor.c, iosurface.c
-  translate/render_encoder.c     Metal-shape -> Vulkan command encoder
-  memory/task.c                  Linux memfd + mmap(MAP_FIXED) task memory
-  shaders/                       stock shader catalog (MSL src + .spv)
-  air2spirv/                     AIR (Apple shader IR) -> SPIR-V translator
-  common/log.h                   LAGFX_LOG / LAGFX_TRACE
-tests/                           ~30 unit + integration tests
-docs/                            internal architecture notes
-upstream-pr/                     submittable subset for distro packaging
-examples/triangle/               end-to-end example
-```
+### 시험 환경 및 재현 방법
 
-The mechanisms behind these directories — *what* a stamp slot
-actually is, *how* the radix walks, *why* there are three opcode
-decoders — are spelled out in the mos-docs whitepapers, not here.
-See "Background reading" below.
+- 삼성 갤럭시 S26 Ultra, Android 17, Qualcomm Adreno 840.
+- 시험 라이브러리 리비전: [7574eac](https://github.com/muns5965/libapplegfx-vulkan/tree/7574eac0d7396a9f49366f007c7fbeb44245826c).
+- Android NDK r27c, arm64-v8a, 최소 API 30, 호스트 Vulkan 1.2 SPIR-V 검증.
+- VM과 분리된 Henge GPU 시험 APK 4.4. Android 빌드 구성과 시험 코드는 현재 Henge에 위치합니다.
+- [시험 소스](https://github.com/muns5965/Henge/tree/fe6064e5ad415efd400572489216731855bfe0cc/tests/gpu-android-gpt) · [성공한 CI 빌드](https://github.com/muns5965/Henge/actions/runs/45575251001) · [4.4 APK 다운로드](https://github.com/muns5965/Henge/actions/runs/45575251001/artifacts/15004136515).
+- 설치 후 6단계 GPU 시험, 로그인 셰이더 11종 변환 시험, ColorFill / TextureCopy GPU 출력 시험을 각각 실행합니다. 아티팩트는 만료되거나 로그인이 필요할 수 있습니다.
 
-## Tests
+### Android 호환성 검증 결과
+
+PASS는 실제 시험 통과, FAIL은 실제 실패, NOT TESTED는 검증 미완료를 의미합니다. 개발자가 제공한 실기기 시험 결과이며 모든 Android 기기의 호환성을 보장하지 않습니다. Draw 생략 대조군의 예상 실패는 정상 기능의 실패와 구분합니다.
+
+| 시험 | 결과 | 근거 |
+| --- | --- | --- |
+| ARM64 NDK 빌드 및 네이티브 실행 | ✅ PASS | Android 17 |
+| Vulkan 동적 함수 연결 | ✅ PASS | Adreno 840 |
+| 1. AIR 삼각형 | ✅ PASS | 3,724/3,724 |
+| 2. 텍스처 샘플링(GLSL) | ✅ PASS | 4,096/4,096 |
+| 3. 알파 블렌딩(GLSL) | ✅ PASS | 4,096/4,096 |
+| 4. FP16 렌더링 및 변환(GLSL) | ✅ PASS | 4,096 raw + 4,096 converted |
+| 5. 기기 내부 AIR 변환 및 그리기 | ✅ PASS | SHA-256 match; 3,724/3,724 |
+| 6. 라이브러리 렌더 타겟 초기화 및 읽기 | ✅ PASS | 4,096/4,096 |
+| 7. 실제 Metal ColorFill | ✅ PASS | 4,096/4,096; 00FF00FF |
+| 8. 실제 Metal TextureCopy | ✅ PASS | 4,096/4,096; 4080FFFF |
+| 원본 .bc APK 데이터(4.2 / B 대조군) | ❌ FAIL | Install rejected / 설치 거부 |
+| 개선된 .airdata APK 데이터(4.3/4.4) | ✅ PASS | Installed / 설치 성공 |
+| ColorFill Draw 생략 출력 | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| TextureCopy Draw 생략 출력 | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| 실제 로그인 정점·프래그먼트 조합 | ⬜ NOT TESTED | GLSL reference vertex |
+| 패턴 텍스처 및 UV 정확성 | ⬜ NOT TESTED | Uniform texture only |
+| UberComposite·Vfx·Xgc GPU 렌더링 | ⬜ NOT TESTED | Translation only |
+| Henge 실제 PVG·데스크톱 통합 | ⬜ NOT TESTED | Standalone APK |
+
+### 실제 macOS 로그인 AIR 셰이더 검증
+
+AIR 모듈 11종, 정의된 함수 66개 변환 성공이 보고되었습니다. 생성된 SPIR-V는 Linux 호스트 SHA-256과 일치하며 호스트 `spirv-val --target-env vulkan1.2`를 통과했습니다. Xgc 크기는 주 함수 기준이고 나머지 55개 함수는 별도 변환되었으나 GPU 개별 실행은 미검증입니다.
+
+| 함수/모듈 | 단계 | 변환 | 호스트 해시·규격 | 주 SPIR-V 바이트 | GPU 출력 |
+| --- | --- | --- | --- | ---: | --- |
+| ViewportToNDC | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,056 | ⬜ NOT TESTED |
+| UberCompositeVertex | 정점 | ✅ 1/1 PASS | ✅ PASS | 1,952 | ⬜ NOT TESTED |
+| Vfx | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,136 | ⬜ NOT TESTED |
+| ColorFill | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 900 | ✅ PASS |
+| TextureCopy | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,136 | ✅ PASS |
+| UberCompositeFragment A | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,544 | ⬜ NOT TESTED |
+| UberCompositeFragment B | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,524 | ⬜ NOT TESTED |
+| VfxU11 | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,940 | ⬜ NOT TESTED |
+| TvcmXc_Isrc | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 6,740 | ⬜ NOT TESTED |
+| VfxXgb | 정점 | ✅ 1/1 PASS | ✅ PASS | 10,208 | ⬜ NOT TESTED |
+| Xgc | 프래그먼트 | ✅ 56/56 PASS | ✅ PASS | 337,892 | ⬜ NOT TESTED |
+
+### 실제 GPU 렌더링
+
+ColorFill은 StorageBuffer를 읽으며 TextureCopy는 이미지와 별도 샘플러를 이용합니다. 두 시험은 기기에서 새로 변환한 실제 Metal 프래그먼트와 GLSL 기준 정점을 사용합니다. 각각 4,096개 픽셀 전부 일치하여 총 8,192/8,192를 기록했습니다. Draw 생략 대조군은 총 8,192개 전부 불일치했으며 각 종료 코드는 1입니다.
+
+균일 색상 TextureCopy 시험만으로 일반적인 UV 좌표 정확성을 확인할 수 없습니다. 변환과 규격 검증은 Metal 전체 의미론을 보장하지 않습니다. 실제 로그인 정점·프래그먼트 연결, 복합 화면 합성, 실제 PVG 명령 및 macOS 데스크톱 출력은 미검증입니다.
+
+### 빌드 및 원본 프로젝트
+
+원본 Linux 빌드는 C11, Meson, Ninja, Vulkan 헤더 및 로더를 사용합니다.
 
 ```sh
+meson setup builddir
+meson compile -C builddir
 meson test -C builddir --print-errorlogs
 ```
 
-Coverage by milestone gate (full table in `tests/README.md`):
+Android 교차 빌드는 [Henge 시험 워크플로](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml)를 참조하십시오. 실제 Vulkan을 활성화한 정적 라이브러리 및 네이티브 시험 실행 파일을 빌드합니다. .bc APK 설치 실패를 피하기 위해 AIR 시험 데이터에 .airdata 확장자를 사용합니다.
 
-| Test | What it gates |
-|---|---|
-| `header-syntax-check` | Public header compiles standalone |
-| `lifecycle-smoke` | Device + display lifecycle (M1) |
-| `memory-task`, `memory-coherence` | Linux task memory aliasing (Phase 1.C) |
-| `protocol-dispatch` | Outer opcode handler wiring |
-| `m3-stamp-helpers` | Stamp ACK monotonicity + IRQ timing (M3) |
-| `m4-task-translate` | 3-level radix VA→GPA translation (M4) |
-| `m4-execindirect2-parser` | `CmdExecIndirect2` inner-opcode parsing (M4) |
-| `m4-render-opcode-*` | Render opcode handlers wiring to Vulkan (M5) |
-| `m4-blit-opcodes`, `m4-compute-opcodes` | Blit + Compute decoder paths |
-| `m5-display-vchan` | Display vchan PGFIFO drain (M5 stage 10%) |
-| `m5-deadlock-detect` | ABBA deadlock timing regression |
-| `air2spirv`, `apple-stock-shaders` | AIR → SPIR-V end-to-end |
-| `lavapipe-smoke`, `triangle-lavapipe-e2e` | Full Vulkan path (Linux only) |
-| `fuzz-protocol-dispatch` | libFuzzer harness (gated `-Dfuzz=enabled`) |
+기존 Linux/QEMU 아키텍처, API, 의존성, 개발 이력, 기여 및 시험 방법은 [보존된 원본 README](docs/archive/README-upstream.md)를 참조하십시오. 원본 Linux 검증 결과는 Android 검증 결과와 별개입니다.
 
-Linux-only tests (`memory-coherence`, lavapipe-backed) auto-skip
-on Darwin. CI hard-fails on silent skips of Vulkan-gated tests.
+### 출처 및 라이선스
 
-`tests/guest/` holds integration tests that run *inside* a macOS
-guest (`MTLCreateSystemDefaultDevice`, `IOServiceMatching`,
-OpenCV-driven VNC pixel detection) — driven by
-`scripts/smoke-test.sh` and `scripts/regression-run.sh` against a
-running mos-docker VM.
-
-## Standing rules (any contributor / agent should know)
-
-- **Stamps are monotonic.** Never write 0 to a stamp cell. Never
-  set `stampBases[slot] = 0` to "reset" state. Background:
-  whitepaper 05 (stamp slot mechanism) in mos-docs.
-- **MSI vector 0 only.** All stamp / pending-bitmask interrupts
-  fire on vector 0; the kext doesn't bind any other.
-- **Bit number = display\_index, not chan\_id.** When setting
-  `pending_displays_bitmask`, the bit position is the display
-  index (0..7), not the channel id (5..12). This was M3 finding 2.
-- **Validate against real upstream API headers from day 1.**
-  `lagfx_*` shapes mirror Apple's `PG*` Swift/Obj-C surface;
-  divergences should be deliberate and noted, not accidental.
-- **Trademark caution: `lagfx_*` in symbols, "PG" /
-  "ParavirtualizedGraphics" in docs.** Discoverability matters in
-  prose; the binary keeps a clean prefix.
-
-## How it's consumed
-
-- **mos-qemu** — `apple-gfx-pci-linux` device declares
-  `dependency('libapplegfx-vulkan')`. Symbols resolved at link
-  time from `libapplegfx-vulkan.pc`.
-- **mos-docker** — production runtime image installs
-  `libapplegfx-vulkan.so` into `/usr/lib/` and the patched QEMU
-  links against it. See the mos-docs component map,
-  § "where each artifact comes from".
-
-## Background reading
-
-The whitepapers in mos-docs explain the mechanisms this library
-implements. The docs library is being published; until it lands,
-the titles below name what to look for:
-
-- Whitepaper 02 — The opcode catalog
-  — 95 Render + 32 Compute + 24 Blit opcodes inside `CmdExecIndirect2`
-- Whitepaper 03 — Vulkan, not Metal
-  — backend-choice rationale
-- Whitepaper 04 — M5, first pixel
-  — the milestone progression
-- Whitepaper 05 — The stamp slot mechanism
-  — synchronization primitive
-- Whitepaper 06 — The radix page table
-  — task-VA → guest-PA translation
-- Whitepaper 07 — Virtual channels
-  — per-stream child rings, doorbell routing
-
-Reference (byte layouts, opcode tables): the apple-gfx-pci MMIO
-map plus the Render / Compute / Blit opcode tables, also in
-mos-docs.
-
-In-tree internal docs:
-
-- `docs/lavapipe-integration.md` — Mesa lavapipe init recipe and tuning
-- `docs/memory-coherence-audit.md` — the Phase 1.C `mremap` audit
-  (fix landed; documented for the historical record)
-
-## Sibling repos
-
-| Repo | Role |
-|---|---|
-| mos-docs | Documentation library: overview, guides, architecture, whitepapers, reference (publication in progress) |
-| [mos-docker](https://github.com/MattJackson/mos-docker) | Production runtime container |
-| [mos-qemu](https://github.com/MattJackson/mos-qemu) | QEMU 10.2.2 fork — `apple-gfx-pci-linux`, `applesmc`, `dev-hid`, `vmware_vga` patches |
-| [mos-patcher](https://github.com/MattJackson/mos-patcher) | Lilu-style kext: per-instance vtable swap on Sequoia |
-| [mos-opencore](https://github.com/MattJackson/mos-opencore) | OpenCore EFI image build script |
-
-## ABI & consuming the library
-
-From **v0.1.0** the installed API is a stable, semver-governed surface:
-
-- **Public header:** `libapplegfx-vulkan.h` (plus `applegfx/export.h`,
-  `applegfx/version.h`). Opaque handle types only — no Vulkan or internal
-  types cross the boundary. Exactly the `LAGFX_EXPORT`-annotated functions
-  are exported; everything else is hidden.
-- **Discovery:** `pkg-config --cflags --libs libapplegfx-vulkan`
-  (this is what QEMU's configure probes).
-- **Versioning:** semver. Patch/minor releases keep ABI compatibility
-  (soname `libapplegfx-vulkan.so.0`); breaking changes bump the major and
-  the soname. `lagfx_version_major()/_minor()/_patch()` report the linked
-  library at runtime; `LAGFX_VERSION_*` macros report the headers.
-
-```sh
-meson setup build && meson install -C build
-cc app.c $(pkg-config --cflags --libs libapplegfx-vulkan)
-```
-
-## Contributing
-
-Contributions are welcome. See **[CONTRIBUTING.md](CONTRIBUTING.md)** for
-how to build, test, and submit patches, and
-**[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)** for the standards we hold each
-other to. CI (fmt/build/tests as configured) runs on every push and pull
-request, so please build and run the tests locally before opening a PR.
-
-## License
-
-**[MIT](LICENSE).** The whole tree — including the clean-room
-AIR → SPIR-V shader translator — is MIT-licensed. Use it, embed it,
-fork it. (Relicensed from AGPL-3.0 to MIT on 2026-07-19 by the sole
-copyright holder.)
-
-## Reporting issues
-
-- **Security:** [SECURITY.md](SECURITY.md) — privately via GitHub
-  Security Advisories or `matthew@pq.io`.
-- **Private vulnerability reports:** please report security
-  vulnerabilities privately as described in [SECURITY.md](SECURITY.md)
-  rather than in public issues.
-- **Bugs / patches:** see [CONTRIBUTING.md](CONTRIBUTING.md).
-- **Code of conduct:** [CODE\_OF\_CONDUCT.md](CODE_OF_CONDUCT.md).
-
-## Prior art
-
-- Apple's [ParavirtualizedGraphics framework docs](https://developer.apple.com/documentation/paravirtualizedgraphics)
-  — the macOS-host API we mirror.
-- QEMU upstream
-  [`hw/display/apple-gfx-pci.m` + `apple-gfx.m`](https://gitlab.com/qemu-project/qemu/-/tree/master/hw/display)
-  by Phil Dennis-Jordan (Amazon), GPL-2.0+ — the macOS-host
-  implementation we're porting from. Naming convention follows
-  QEMU's `apple-gfx-*` family.
-- [MoltenVK](https://github.com/KhronosGroup/MoltenVK) — precedent
-  for Metal↔Vulkan translation (the *inverse* direction of what
-  this library does — see whitepaper 03).
-- [Mesa lavapipe](https://docs.mesa3d.org/drivers/llvmpipe.html)
-  — the Vulkan CPU renderer we rely on.
-
-## Keywords
-
-Apple ParavirtualizedGraphics, PGDevice on Linux, PGShellCallbacks,
-macOS Metal on Linux, QEMU apple-gfx-pci, paravirt GPU Linux,
-AppleParavirtGPU kext, PVG Linux implementation,
-`MTLCopyAllDevices` under QEMU, Metal over Vulkan, lavapipe Metal,
-AIR to SPIR-V.
-
-## Changelog
-
-Release history and notable changes are tracked in
-[CHANGELOG.md](CHANGELOG.md).
+원본 라이브러리: Matthew Jackson ([MattJackson](https://github.com/MattJackson)). Android 시험 통합은 Henge 포크에서 개발 중입니다. 라이브러리 소스는 [MIT 라이선스](LICENSE)를 따릅니다. Apple 셰이더 시험 데이터에 대해 별도의 이용허락을 주장하지 않습니다. 원본 [기여 지침](CONTRIBUTING.md) 및 [보안 정책](SECURITY.md)을 참조하십시오.
