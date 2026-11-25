@@ -32,7 +32,11 @@ void lagfx_trace_impl(const char *fmt, ...) { (void)fmt; }
     fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
 
 static int llc_available(void) {
-    return access("/opt/homebrew/opt/llvm@20/bin/llc", X_OK) == 0;
+    /* Same candidates as find_llc_binary() in src/air2spirv/shader_translate.c (macOS Homebrew pin, then Linux LLVM 20). */
+    static const char *c[] = { "/opt/homebrew/opt/llvm@20/bin/llc", "/opt/homebrew/opt/llvm/bin/llc",
+                               "/usr/lib/llvm-20/bin/llc", "/usr/bin/llc", NULL };
+    for (int i = 0; c[i]; i++) if (access(c[i], X_OK) == 0) return 1;
+    return 0;
 }
 
 /* Forward declarations */

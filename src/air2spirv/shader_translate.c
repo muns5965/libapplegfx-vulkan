@@ -66,6 +66,7 @@ static char *find_llc_binary(void) {
     /* Fallback to common brew path. */
     static const char *fallbacks[] = {
         "/opt/homebrew/opt/llvm/bin/llc",
+        "/usr/lib/llvm-20/bin/llc",   /* Linux LLVM 20 (apt llvm-20) */
         "/usr/bin/llc",
         NULL,
     };
@@ -229,7 +230,7 @@ lagfx_status_t lagfx_shader_translate_run(
     /* Create temp files. */
     char bc_temp[] = "/tmp/lagfx-translate-XXXXXX.bc";
     char spv_temp[] = "/tmp/lagfx-translate-XXXXXX.spv";
-    int bc_fd = mkstemp(bc_temp);
+    int bc_fd = mkstemps(bc_temp, 3);   /* ".bc": glibc's mkstemp() rejects a template with a suffix */
     if (bc_fd < 0) {
         LAGFX_ERR("shader_translate: mkstemp(bc) failed: %s", strerror(errno));
         free(llc_path);
@@ -252,7 +253,7 @@ lagfx_status_t lagfx_shader_translate_run(
         LAGFX_WARN("shader_translate: close(bc_temp) failed: %s", strerror(errno));
     }
 
-    int spv_fd = mkstemp(spv_temp);
+    int spv_fd = mkstemps(spv_temp, 4);  /* ".spv" */
     if (spv_fd < 0) {
         LAGFX_ERR("shader_translate: mkstemp(spv) failed: %s", strerror(errno));
         unlink(bc_temp);
