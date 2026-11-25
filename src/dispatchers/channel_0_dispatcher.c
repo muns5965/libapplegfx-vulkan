@@ -419,6 +419,14 @@ size_t channel_0_dispatcher_drain(lagfx_protocol_t *p) {
     }
     uint64_t ring_base = p->ring_base_gpa;
 
+    const bool cumulative = lagfx_proto_arm64(p);
+    if (cumulative && (uint32_t)(write_ptr - p->read_ptr) > ring_size) {
+        /* Apple Henge do_root(): more pending than the ring can hold means the pointers are out of step; drop it and resync. */
+        LAGFX_WARN("ch0 drain: %u bytes pending in a %u-byte ring; dropped (rp=0x%x wp=0x%x)",
+                   (unsigned)(write_ptr - p->read_ptr), ring_size, p->read_ptr, write_ptr);
+        p->read_ptr = write_ptr;
+        return 0;
+    }
     if (p->read_ptr == write_ptr) {
         LAGFX_TRACE("ch0 drain: caught up rp=0x%x wp=0x%x", p->read_ptr, write_ptr);
         return 0;
@@ -547,7 +555,9 @@ size_t channel_0_dispatcher_drain(lagfx_protocol_t *p) {
 
         p->total_cmds_seen++;
         cmds++;
-        p->read_ptr = (rp + length) % ring_size;
+        /* arm64 vmapple (Apple Henge do_root): the read pointer is cumulative u32, reduced modulo the ring size only when addressing memory.
+         * x86: kept inside the ring, as before. */
+        p->read_ptr = cumulative ? p->read_ptr + length : (rp + length) % ring_size;
     }
 
     LAGFX_LOG("ch0 drain: drained=%zu new rp=0x%x", cmds, p->read_ptr);

@@ -19,6 +19,7 @@
  */
 
 #include "doorbell.h"
+#include "dispatchers/channel_0_dispatcher.h"
 #include "dispatchers/channel_door_dispatcher.h"
 #include "dispatchers/primary_ring_door_dispatcher.h"
 #include "protocol/state.h"
@@ -323,6 +324,14 @@ uint32_t doorbell_handle_read(void *protocol_state, uint64_t offset) {
             : 0u;
         LAGFX_TRACE("doorbell: read off=0x1018 stamp_bitmask → 0x%x (cleared)", mask);
         return mask;
+    }
+
+    /* arm64 vmapple (Apple Henge gfx_read): reading the root read pointer first runs the root ring (the driver spins on this waiting for
+     * space), then returns the cumulative pointer. */
+    if (offset == 0x100cu && p && lagfx_proto_arm64(p)) {
+        channel_0_dispatcher_drain(p);
+        LAGFX_TRACE("doorbell: read off=0x100c root_rp → 0x%x", p->read_ptr);
+        return p->read_ptr;
     }
 
     int idx = doorbell_reg_index(offset);

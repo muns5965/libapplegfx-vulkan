@@ -115,7 +115,7 @@ Full per-feature table with origin, kind, status and evidence: [docs/metal-vulka
 | Unit tests | Partially verified | 2026-11-26, x86-64 Linux, gcc 13.3, **no Vulkan loader**: 74 tests, 72 passed, 0 failed, 2 skipped. Vulkan-gated code was not compiled or run. Fork-added `pfn-shift`, `protocol-mode`, `task-define` and `diag` unit tests passed. `android-memory-mock` needs Vulkan headers and was not run. |
 | CI | Not verified | Workflow exists (Ubuntu debug/release with lavapipe, Alpine, macOS, sanitizers) but triggers only on pushes to `main` and `research/android-memory-correctness`, pull requests to `main`, and manual runs. GitHub shows **0 workflow runs** for this fork as of 2026-11-26. |
 | APK build | Verified for APK 4.4 | Henge [CI run 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001) succeeded against library `7574eac`. That run is the stand-alone GPU test APK (library `7574eac`), not the VM runner. The VM runner APK was built against library `c53dcb5`, which already contains the 16 KiB PFN support (confirmed on a device in the clone-001 run). The arm64-mode, device-info, task-lookup and 0x20/0x25 changes are in no APK yet. |
-| Real device | Partially verified | Galaxy S26 Ultra, standalone GPU tests (below). Live PVG, arm64 mode and desktop output: not tested. |
+| Real device | Partially verified | Galaxy S26 Ultra, standalone GPU tests (below). Live PVG traffic with a macOS guest (16 KiB PFN rings, command intake) was observed in VM clone runs; arm64 mode, real PVG rendering and desktop output: not verified. |
 
 ## Roadmap
 
