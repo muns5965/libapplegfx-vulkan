@@ -1,14 +1,135 @@
-# libapplegfx-vulkan — Android compatibility research
+# libapplegfx-vulkan — Android / ARM64 research fork
 
-[English](#english) · [한국어](#korean) · [Original README / 기존 README](docs/archive/README-upstream.md) · [Upstream](https://github.com/MattJackson/libapplegfx-vulkan) · [MIT License](LICENSE)
+[English](README.md) · [한국어](README.ko.md) · [Compatibility matrix](docs/metal-vulkan-compatibility.md) · [Original README](docs/archive/README-upstream.md) · [Upstream](https://github.com/MattJackson/libapplegfx-vulkan) · [MIT License](LICENSE)
 
-<a id="english"></a>
+## Project overview
 
-## English
+This is an experimental fork of Matthew Jackson's [libapplegfx-vulkan](https://github.com/MattJackson/libapplegfx-vulkan), a clean-room, host-side reimplementation of Apple's ParavirtualizedGraphics (PVG) framework with a Vulkan backend. The library decodes the PVG wire protocol, walks guest page tables, translates Metal command streams and Apple AIR shaders (AIR → SPIR-V) to Vulkan, and renders through any Vulkan driver.
 
-An experimental Android ARM64 validation fork of Matthew Jackson's [libapplegfx-vulkan](https://github.com/MattJackson/libapplegfx-vulkan), a clean-room host-side reimplementation of Apple's ParavirtualizedGraphics.framework with a Vulkan backend. The upstream library decodes PVG commands and translates Apple AIR shader IR to SPIR-V. This fork documents Android compatibility work performed with the independent [Henge Android port](https://github.com/muns5965/Henge/tree/research/android-port).
+The fork has two goals: run the library on **Android ARM64**, and add an **ARM64 vmapple** protocol mode alongside the original x86 behaviour. It documents what works, what is only recognised at the protocol level, and what is missing. The Metal-to-Vulkan translation itself is **upstream work**; this fork did not write it.
 
-**Status: 2026-11-25 — Android ARM64 translation and selected GPU rendering verified. Full Metal API and live PVG compatibility are not established.**
+**Branch:** `research/android-pfn-shift`. **Documented source revision:** `6a29b1d` (2026-11-26). **Upstream baseline:** `7574eac`.
+
+Reading guide: *Implemented* in this document means code exists. Only *Implemented & Verified* means a test passed for this fork. Recognising an opcode, logging it, or returning a stamp is **not** Metal support; the [compatibility matrix](docs/metal-vulkan-compatibility.md) separates the two.
+
+## Upstream versus fork
+
+| Origin | Meaning | Examples |
+| --- | --- | --- |
+| Upstream implementation | Already in `7574eac` | AIR → SPIR-V translator, render/draw path, blit helpers, display, cursor, IOSurface registry, stamps, ring decoder |
+| Fork implementation | Added by this fork | ARM64 vmapple protocol mode, 16 KiB ring/PFN selection, arm64 device-info table, compute-channel `0x38`/`0x44`, diagnostics |
+| Fork modification | Upstream feature changed by this fork | Vulkan memory-correctness hardening, cursor glyph memory handling, `LAGFX_NO_PROCESS` |
+| Planned | Not implemented | See *Roadmap* |
+
+Per-feature origin is listed in the [compatibility matrix](docs/metal-vulkan-compatibility.md).
+
+## Fork-specific changes
+
+Changes after upstream `7574eac` (23 commits; the first three change the README only):
+
+- **ARM64 vmapple protocol mode** — `lagfx_device_descriptor_t.protocol_mode` (`LAGFX_PROTO_X86` = 0 default, `LAGFX_PROTO_ARM64_VMAPPLE` = 1; any other value makes `lagfx_device_new` fail). Follows the semantics of Apple Henge `pvg_lite.c` / `pvg_metal.m`.
+- **16 KiB ring pages / PFN** — `lagfx_device_descriptor_t.ring_page_shift` (0 or 12 = 4 KiB default, 14 = 16 KiB; other values fail). Applies to the root, shared and channel PFNs, ring page-array indexing, in-page offsets and stamp cells. A one-time diagnostic logs what the ring start holds if the PFN is read as 4 KiB or 16 KiB.
+- **MMIO and device info** — MMIO `0x122c` returns 1 in arm64 mode (9 in x86). arm64 mode uses Apple Henge's `CmdGetDeviceInfo` table verbatim.
+- **Compute-channel opcodes** — `0x38` (define host task) and `0x44` (object/placement lists) handled on compute channels; in arm64 mode `0x25` removes a `{task, ref}` object and `0x20` drops the task's object cache and never executes a command buffer.
+- **Diagnostics** — command sequence, timing, raw bytes of `0x20`/`0x22`/`0x25`, last `0x44` per channel, display-submit reasons, log byte counters. No behaviour depends on them.
+- **Android Vulkan memory correctness** — host-visible and coherent memory requirements for upload buffers, fallback uniform buffer and cursor glyph memory; map and flush failures propagate; cursor and display fence errors are handled before resources are released.
+- **`LAGFX_NO_PROCESS`** — removes the four `system()`/`popen()` calls (debug dumps, `llc` lookup) for runners that forbid process creation.
+- **Tests and docs** — new unit tests (`pfn-shift`, `protocol-mode`, `task-define`, `diag`, `android-memory-mock`), this documentation, and the [ARM64 correspondence document](docs/arm64-vmapple-correspondence.md).
+
+## Metal-to-Vulkan support (summary)
+
+Details, per-opcode status and evidence: [docs/metal-vulkan-compatibility.md](docs/metal-vulkan-compatibility.md).
+
+| Area | Status | Notes |
+| --- | --- | --- |
+| Shader (AIR → SPIR-V) | Implemented & Verified | Android: 11 modules / 66 functions translate and validate. GPU execution verified only for `ColorFill` and `TextureCopy`. |
+| Render pipeline | Partially Implemented | Pipeline build, blending, viewport and scissor implemented; most fixed-function state setters are log-only. |
+| Compute pipeline | Not Implemented | No compute pipeline or dispatch. |
+| Buffer | Implemented, Untested | Vertex/fragment buffer binding; buffer-to-buffer copies are stubs. |
+| Texture | Partially Implemented | Fragment textures implemented; vertex textures and sampler binding are log-only. |
+| Render pass | Implemented, Untested | Colour attachments; depth/stencil and MSAA unverified. |
+| Blit | Partially Implemented | 2 of 24 opcodes act (`CopyFromTextureToTexture`, `FillTextureWithColor`); 22 acknowledge only. |
+| Draw | Partially Implemented | 5 draw forms reach `vkCmdDraw`/`vkCmdDrawIndexed`; instanced-base, patch and indirect draws are log-only. |
+| IOSurface | Partially Implemented | Registry and on-demand `VkImage` surfaces; the opcode handlers do not allocate `VkImage`. |
+| Synchronization | Stub / Placeholder | Stamps/IRQ work at protocol level only. Metal fences and barriers are log-only; `CmdSynchronizeResources` returns not-implemented. |
+| Display | Implemented, Untested | Swap mapping, scanout, readback. Mode commit (`0x11`) is log-ack. |
+| Cursor | Implemented, Untested | Glyph upload and overlay. MMIO `0x1220` cursor move not implemented. |
+
+Info replies (device info, compute info, pipeline info) report what the guest may use. They are protocol answers, **not** evidence that Vulkan can perform the feature.
+
+## ARM64 vmapple support
+
+**Status: Experimental.** The arm64 behaviour is unit-tested only. It has not been run against a live ARM64 guest, and no APK contains it.
+
+| Item | x86 mode (default) | arm64 vmapple mode |
+| --- | --- | --- |
+| Selection | `protocol_mode = 0` | `protocol_mode = 1` |
+| Ring page size | 4 KiB | independent: `ring_page_shift` 12 or 14 |
+| MMIO `0x122c` | 9 | 1 |
+| `CmdGetDeviceInfo` | x86 table | Apple Henge table (verbatim) |
+| Compute `0x20` | command-buffer walker (`CmdExecIndirect2`) | drops task object cache; never executes |
+| Compute `0x25` | registers an object on the first live task (fallback) | removes `{task, ref}` |
+| Compute `0x37` | command-buffer walker | command-buffer walker (unchanged) |
+| Compute `0x38`, `0x44` | handled | handled |
+
+The `0x44` object and placement lists are only recorded; nothing consumes them yet. Metal command execution in arm64 mode is reachable only through `0x37`; how an ARM64 guest submits Metal command buffers is not yet mapped in this library.
+
+### Compatibility and limits: x86
+
+- With a default descriptor (`protocol_mode = 0`, `ring_page_shift = 0`) the x86 behaviour is intended to be unchanged, and `protocol-mode-unit` checks the x86 side of `0x122c` and `0x25`. The x86 `0x20` execution path is not covered by that test.
+- Two changes apply to **both** modes and are not verified against an x86 guest: `CmdDefineHostTask` (`0x38`) now reads its arguments after the `arg_count_8b × 8` barrier-slot bytes and rejects task ids ≥ 512; the compute dispatcher now also handles `0x38` and `0x44`.
+- Diagnostic hooks run in both modes.
+
+### Compatibility and limits: ARM64
+
+- Known mismatches against Apple Henge, recorded and **not fixed** (see the [correspondence document](docs/arm64-vmapple-correspondence.md)): MMIO `0x100c` read (Henge runs the root ring on read and returns the cumulative read pointer), `0x1014` and `0x1018` semantics, `0x1220` cursor move, storage of registers `0x1000–0x1fff` (only `0x1000–0x103f` kept), and root read-pointer arithmetic (cumulative `u32` in Henge, wrapped here).
+- In arm64 mode the device-info table matches Henge's, but 26 of its 39 keys differ from the x86 table; the library has not been run against a guest that consumes it.
+- The correct ring page shift for a real guest is still under investigation (the one-time PFN diagnostic exists for that reason).
+
+## Android support
+
+- **Status as of 2026-11-25:** Android ARM64 translation and selected GPU rendering verified; the full Metal API and live PVG compatibility are not established.
+- Tested on Samsung Galaxy S26 Ultra, Android 17, Adreno 840, NDK r27c, arm64-v8a, API 30+. Results below are developer-reported; they are standalone GPU tests, **not** a live PVG session.
+- Android build glue and the test harness live in the [Henge](https://github.com/muns5965/Henge/tree/research/android-port) repository, not in this fork. Henge's own development status is out of scope here.
+- Fork changes for Android: memory-correctness hardening, `LAGFX_NO_PROCESS`, 16 KiB PFN support. APK `.bc` assets must be renamed (`.airdata`) to install on the tested device.
+
+## Compatibility matrix
+
+Full per-feature table with origin, kind, status and evidence: [docs/metal-vulkan-compatibility.md](docs/metal-vulkan-compatibility.md) ([한국어](docs/metal-vulkan-compatibility.ko.md)).
+
+## Known limitations
+
+- No compute shaders or dispatch; no tessellation, indirect or nested command buffers.
+- 22 of 24 blit opcodes, all Metal fences and barriers, most fixed-function state setters, vertex textures and sampler binding are log-only.
+- `CmdSynchronizeResources` returns not-implemented; stamps are signalled after parsing, not after GPU completion.
+- `CmdDisplaySetProperties` (mode commit) is log-ack only.
+- Pixel-format coverage, depth/stencil attachments and MSAA are unverified; patterned-texture and UV accuracy are untested.
+- Login-screen shaders other than `ColorFill` and `TextureCopy` have not been executed on a GPU; the real login vertex+fragment pair is untested.
+- ARM64 mode: Experimental; open MMIO mismatches listed above; Metal command execution path in arm64 mode not mapped.
+- No live PVG or macOS desktop rendering on Android.
+
+## Testing status
+
+| Layer | Status | Detail |
+| --- | --- | --- |
+| Unit tests | Partially verified | 2026-11-26, x86-64 Linux, gcc 13.3, **no Vulkan loader**: 74 tests, 72 passed, 0 failed, 2 skipped. Vulkan-gated code was not compiled or run. Fork-added `pfn-shift`, `protocol-mode`, `task-define` and `diag` unit tests passed. `android-memory-mock` needs Vulkan headers and was not run. |
+| CI | Not verified | Workflow exists (Ubuntu debug/release with lavapipe, Alpine, macOS, sanitizers) but triggers only on pushes to `main` and `research/android-memory-correctness`, pull requests to `main`, and manual runs. GitHub shows **0 workflow runs** for this fork as of 2026-11-26. |
+| APK build | Verified for APK 4.4 | Henge [CI run 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001) succeeded against library `7574eac`. The arm64-mode, 16 KiB PFN and device-info commits are in no APK. The correspondence document names `c53dcb5` as the library revision of "the APK build"; this differs from `7574eac` and should be reconciled. |
+| Real device | Partially verified | Galaxy S26 Ultra, standalone GPU tests (below). Live PVG, arm64 mode and desktop output: not tested. |
+
+## Roadmap
+
+Derived from open items in the source and documents. It is not a schedule.
+
+- Fix or decide the open ARM64 MMIO mismatches (`0x100c`, `0x1014`/`0x1018`, `0x1220`, register storage, root read pointer) and map ARM64 command-buffer submission.
+- Run arm64 mode and the 16 KiB ring against a real ARM64 guest; settle the ring page shift.
+- Implement the remaining blit opcodes, Metal fences/barriers and `CmdSynchronizeResources`; bind sampler states and vertex textures; wire the fixed-function state setters.
+- Compute pipeline and dispatch.
+- GPU execution tests for the remaining login-screen shaders, patterned textures and UV accuracy.
+- Run CI on this branch (add it to the workflow triggers) and build an APK that contains the arm64-mode changes.
+- Keep this README and the compatibility matrix updated in the same commit or PR as any feature or status change.
+
+## Android validation results
 
 ### Test environment and reproducibility
 
@@ -82,92 +203,6 @@ For the Android cross-build, use the pinned [Henge workflow](https://github.com/
 
 For the original Linux/QEMU architecture, API, dependencies, milestones, contributing rules, and upstream test descriptions, see the [archived original README](docs/archive/README-upstream.md). Upstream Linux results are not Android test results.
 
-### Credits and license
+## Credits and license
 
-Original library by Matthew Jackson ([MattJackson](https://github.com/MattJackson)); Android test integration is developed in the Henge fork. Library source is [MIT-licensed](LICENSE). Third-party Apple shader fixtures are test inputs; no separate license grant for Apple's material is asserted. See upstream [contribution guidelines](CONTRIBUTING.md) and [security policy](SECURITY.md).
-
----
-
-<a id="korean"></a>
-
-## 한국어
-
-Matthew Jackson의 [libapplegfx-vulkan](https://github.com/MattJackson/libapplegfx-vulkan)을 기반으로 Android ARM64 호환성을 검증하는 실험적 포크입니다. 원본은 Apple ParavirtualizedGraphics.framework의 호스트 측 기능을 클린룸 방식으로 재구현하고 Vulkan 백엔드를 사용합니다. PVG 명령을 해석하고 Apple AIR 셰이더 중간 표현을 SPIR-V로 변환합니다. Android 검증은 독립 [Henge Android 포팅 프로젝트](https://github.com/muns5965/Henge/tree/research/android-port)와 연계하여 수행했습니다.
-
-**기준일: 2026-11-25 — Android ARM64 변환 및 일부 실제 GPU 렌더링 검증 완료. Metal 전체 API 및 실제 PVG 호환은 미확인입니다.**
-
-### 시험 환경 및 재현 방법
-
-- 삼성 갤럭시 S26 Ultra, Android 17, Qualcomm Adreno 840.
-- 시험 라이브러리 리비전: [7574eac](https://github.com/muns5965/libapplegfx-vulkan/tree/7574eac0d7396a9f49366f007c7fbeb44245826c).
-- Android NDK r27c, arm64-v8a, 최소 API 30, 호스트 Vulkan 1.2 SPIR-V 검증.
-- VM과 분리된 Henge GPU 시험 APK 4.4. Android 빌드 구성과 시험 코드는 현재 Henge에 위치합니다.
-- [시험 소스](https://github.com/muns5965/Henge/tree/fe6064e5ad415efd400572489216731855bfe0cc/tests/gpu-android-gpt) · [성공한 CI 빌드](https://github.com/muns5965/Henge/actions/runs/45575251001) · [4.4 APK 다운로드](https://github.com/muns5965/Henge/actions/runs/45575251001/artifacts/15004136515).
-- 설치 후 6단계 GPU 시험, 로그인 셰이더 11종 변환 시험, ColorFill / TextureCopy GPU 출력 시험을 각각 실행합니다. 아티팩트는 만료되거나 로그인이 필요할 수 있습니다.
-
-### Android 호환성 검증 결과
-
-PASS는 실제 시험 통과(음성 대조군의 예상 결과 포함), FAIL은 예상하지 않은 시험 실패, FIXED는 기존 문제를 명시된 변경으로 해결한 상태, NOT TESTED는 검증 미완료를 의미합니다. 개발자가 제공한 실기기 시험 결과이며 모든 Android 기기의 호환성을 보장하지 않습니다. Draw 생략 대조군의 예상 실패는 정상 기능의 실패와 구분합니다.
-
-| 시험 | 결과 | 근거 |
-| --- | --- | --- |
-| ARM64 NDK 빌드 및 네이티브 실행 | ✅ PASS | Android 17 |
-| Vulkan 동적 함수 연결 | ✅ PASS | Adreno 840 |
-| 1. AIR 삼각형 | ✅ PASS | 3,724/3,724 |
-| 2. 텍스처 샘플링(GLSL) | ✅ PASS | 4,096/4,096 |
-| 3. 알파 블렌딩(GLSL) | ✅ PASS | 4,096/4,096 |
-| 4. FP16 렌더링 및 변환(GLSL) | ✅ PASS | 4,096 raw + 4,096 converted |
-| 5. 기기 내부 AIR 변환 및 그리기 | ✅ PASS | SHA-256 match; 3,724/3,724 |
-| 6. 라이브러리 렌더 타겟 초기화 및 읽기 | ✅ PASS | 4,096/4,096 |
-| 7. 실제 Metal ColorFill | ✅ PASS | 4,096/4,096; 00FF00FF |
-| 8. 실제 Metal TextureCopy | ✅ PASS | 4,096/4,096; 4080FFFF |
-| Android APK AIR 데이터 파일명(.bc → .airdata) | ✅ FIXED | .bc 확장자 포함 시 설치 거부(4.2 / B 대조군). 원본 바이트를 유지하고 .airdata로 변경한 후 설치·실행 성공(4.3/4.4). 패키징 제약이며 AIR 변환기 또는 GPU 기능의 오류가 아님. |
-| 개선된 .airdata APK 데이터(4.3/4.4) | ✅ PASS | Installed / 설치 성공 |
-| ColorFill 음성 대조군(Draw 생략) | ✅ PASS | 예상대로 4,096/4,096개 픽셀 불일치 및 종료 코드 1 확인 |
-| TextureCopy 음성 대조군(Draw 생략) | ✅ PASS | 예상대로 4,096/4,096개 픽셀 불일치 및 종료 코드 1 확인 |
-| 실제 로그인 정점·프래그먼트 조합 | ⬜ NOT TESTED | GLSL reference vertex |
-| 패턴 텍스처 및 UV 정확성 | ⬜ NOT TESTED | Uniform texture only |
-| UberComposite·Vfx·Xgc GPU 렌더링 | ⬜ NOT TESTED | Translation only |
-| Henge 실제 PVG·데스크톱 통합 | ⬜ NOT TESTED | Standalone APK |
-
-### 실제 macOS 로그인 AIR 셰이더 검증
-
-AIR 모듈 11종, 정의된 함수 66개 변환 성공이 보고되었습니다. 생성된 SPIR-V는 Linux 호스트 SHA-256과 일치하며 호스트 `spirv-val --target-env vulkan1.2`를 통과했습니다. Xgc 크기는 주 함수 기준이고 나머지 55개 함수는 별도 변환되었으나 GPU 개별 실행은 미검증입니다.
-
-| 함수/모듈 | 단계 | 변환 | 호스트 해시·규격 | 주 SPIR-V 바이트 | GPU 출력 |
-| --- | --- | --- | --- | ---: | --- |
-| ViewportToNDC | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,056 | ⬜ NOT TESTED |
-| UberCompositeVertex | 정점 | ✅ 1/1 PASS | ✅ PASS | 1,952 | ⬜ NOT TESTED |
-| Vfx | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,136 | ⬜ NOT TESTED |
-| ColorFill | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 900 | ✅ PASS |
-| TextureCopy | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,136 | ✅ PASS |
-| UberCompositeFragment A | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,544 | ⬜ NOT TESTED |
-| UberCompositeFragment B | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 1,524 | ⬜ NOT TESTED |
-| VfxU11 | 정점 | ✅ 1/1 PASS | ✅ PASS | 2,940 | ⬜ NOT TESTED |
-| TvcmXc_Isrc | 프래그먼트 | ✅ 1/1 PASS | ✅ PASS | 6,740 | ⬜ NOT TESTED |
-| VfxXgb | 정점 | ✅ 1/1 PASS | ✅ PASS | 10,208 | ⬜ NOT TESTED |
-| Xgc | 프래그먼트 | ✅ 56/56 PASS | ✅ PASS | 337,892 | ⬜ NOT TESTED |
-
-### 실제 GPU 렌더링
-
-ColorFill은 StorageBuffer를 읽으며 TextureCopy는 이미지와 별도 샘플러를 이용합니다. 두 시험은 기기에서 새로 변환한 실제 Metal 프래그먼트와 GLSL 기준 정점을 사용합니다. 각각 4,096개 픽셀 전부 일치하여 총 8,192/8,192를 기록했습니다. Draw 생략 대조군은 총 8,192개 전부 불일치했으며 각 종료 코드는 1입니다.
-
-균일 색상 TextureCopy 시험만으로 일반적인 UV 좌표 정확성을 확인할 수 없습니다. 변환과 규격 검증은 Metal 전체 의미론을 보장하지 않습니다. 실제 로그인 정점·프래그먼트 연결, 복합 화면 합성, 실제 PVG 명령 및 macOS 데스크톱 출력은 미검증입니다.
-
-### 빌드 및 원본 프로젝트
-
-원본 Linux 빌드는 C11, Meson, Ninja, Vulkan 헤더 및 로더를 사용합니다.
-
-```sh
-meson setup builddir
-meson compile -C builddir
-meson test -C builddir --print-errorlogs
-```
-
-Android 교차 빌드는 [Henge 시험 워크플로](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml)를 참조하십시오. 실제 Vulkan을 활성화한 정적 라이브러리 및 네이티브 시험 실행 파일을 빌드합니다. AIR 시험 데이터에는 `.airdata` 확장자를 사용합니다. 시험 기기에서는 원본 `.bc` 확장자가 포함된 APK의 설치가 거부되었으나 데이터 바이트를 변경하지 않고 확장자만 변경한 후 설치에 성공했습니다. Android의 기존 RenderScript `.bc` 감지 로직이 유력한 원인이지만 패키지 관리자의 정확한 설치 거부 코드는 확보하지 못했습니다. 이는 파일 경로 자체의 오류로 확인된 것이 아니라 APK 내부 파일명 확장자 및 패키징 문제이며, AIR 변환 기능의 결함으로 확인된 사항은 아닙니다. 확장자 변경 후 동일 데이터의 변환 및 일부 GPU 렌더링 시험을 통과했습니다. `.bc` 확장자를 그대로 사용한 APK의 설치 가능성은 확인되지 않았습니다.
-
-기존 Linux/QEMU 아키텍처, API, 의존성, 개발 이력, 기여 및 시험 방법은 [보존된 원본 README](docs/archive/README-upstream.md)를 참조하십시오. 원본 Linux 검증 결과는 Android 검증 결과와 별개입니다.
-
-### 출처 및 라이선스
-
-원본 라이브러리: Matthew Jackson ([MattJackson](https://github.com/MattJackson)). Android 시험 통합은 Henge 포크에서 개발 중입니다. 라이브러리 소스는 [MIT 라이선스](LICENSE)를 따릅니다. Apple 셰이더 시험 데이터에 대해 별도의 이용허락을 주장하지 않습니다. 원본 [기여 지침](CONTRIBUTING.md) 및 [보안 정책](SECURITY.md)을 참조하십시오.
+Original library by Matthew Jackson ([MattJackson](https://github.com/MattJackson)); copyright notices in the source files and the [MIT License](LICENSE) are unchanged. This fork adds the changes listed above. Android test integration is developed in the Henge fork. Third-party Apple shader fixtures are test inputs; no separate license grant for Apple's material is asserted. See the upstream [contribution guidelines](CONTRIBUTING.md) and [security policy](SECURITY.md).
