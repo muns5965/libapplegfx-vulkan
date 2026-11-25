@@ -72,6 +72,12 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
         return LAGFX_ERR_BACKEND;
     }
 
+    if (vk->cursor_sync_failed || !vk->cursor_glyph_mem ||
+        bytes_per_row < (uint64_t)width * 4u) return LAGFX_ERR_BACKEND;
+    /* A linear image may only be host-written in PREINITIALIZED or GENERAL.
+     * Keep it GENERAL after the first upload; serialize GPU reads before
+     * rewriting it. The caller serializes cursor operations per device. */
+    vk->cursor_glyph_valid = false;
     VkImageSubresource subres = {
         .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
         .mipLevel   = 0,
@@ -85,7 +91,8 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     void *mapped = NULL;
     VkResult vr = vkMapMemory(vk->device, vk->cursor_glyph_mem,
                               0, VK_WHOLE_SIZE, 0, &mapped);
-    if (vr != VK_SUCCESS) {
+    if (vr != VK_SUCCESS || !mapped) {
+        if (vr == VK_SUCCESS) vkUnmapMemory(vk->device, vk->cursor_glyph_mem);
         LAGFX_ERR("cursor_upload: vkMapMemory failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
@@ -120,7 +127,18 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
         }
     }
     free(zeroes);
+    if (!vk->cursor_glyph_coherent) {
+        VkMappedMemoryRange range = {
+            .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE,
+            .memory = vk->cursor_glyph_mem, .offset = 0, .size = VK_WHOLE_SIZE,
+        };
+        vr = vkFlushMappedMemoryRanges(vk->device, 1, &range);
+    }
     vkUnmapMemory(vk->device, vk->cursor_glyph_mem);
+    if (vr != VK_SUCCESS) {
+        LAGFX_ERR("cursor_upload: flush failed (%d)", (int)vr);
+        return LAGFX_ERR_BACKEND;
+    }
 
     VkCommandBuffer cb = VK_NULL_HANDLE;
     lagfx_status_t cb_st = lagfx_vk_cmdbuf_alloc(vk, &cb);
@@ -139,8 +157,8 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     }
 
     cursor_pipeline_barrier(cb, vk->cursor_glyph_image,
-                            VK_IMAGE_LAYOUT_PREINITIALIZED,
-                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                            vk->cursor_glyph_layout,
+                            VK_IMAGE_LAYOUT_GENERAL,
                             VK_ACCESS_HOST_WRITE_BIT,
                             VK_ACCESS_SHADER_READ_BIT,
                             VK_PIPELINE_STAGE_HOST_BIT,
@@ -169,6 +187,14 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     if (vr == VK_SUCCESS) {
         const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
         vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+        if (vr != VK_SUCCESS) {
+            VkResult idle = vkDeviceWaitIdle(vk->device);
+            vk->cursor_sync_failed = true;
+            if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) {
+                /* Completion not established: retain pending objects until device teardown. */
+                return LAGFX_ERR_BACKEND;
+            }
+        }
     }
 
     vkDestroyFence(vk->device, fence, NULL);
@@ -182,7 +208,7 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     VkDescriptorImageInfo dii = {
         .sampler     = vk->cursor_sampler,
         .imageView   = vk->cursor_glyph_view,
-        .imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+        .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
     };
     VkWriteDescriptorSet write = {
         .sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
@@ -194,6 +220,7 @@ lagfx_status_t lagfx_vk_cursor_upload_glyph(struct lagfx_vk_state *vk,
     };
     vkUpdateDescriptorSets(vk->device, 1, &write, 0, NULL);
 
+    vk->cursor_glyph_layout = VK_IMAGE_LAYOUT_GENERAL;
     vk->cursor_glyph_valid = true;
     LAGFX_LOG("cursor_upload: %ux%u bpr=%u uploaded OK", width, height,
               bytes_per_row);
@@ -208,6 +235,7 @@ lagfx_status_t lagfx_vk_cursor_draw(struct lagfx_vk_state *vk,
     if (!vk || cb == VK_NULL_HANDLE) {
         return LAGFX_ERR_INVALID_ARG;
     }
+    if (vk->cursor_sync_failed) return LAGFX_ERR_BACKEND;
     if (!vk->cursor_glyph_valid) {
         return LAGFX_OK;
     }
@@ -232,7 +260,8 @@ lagfx_status_t lagfx_vk_cursor_draw(struct lagfx_vk_state *vk,
     void *mapped = NULL;
     VkResult vr = vkMapMemory(vk->device, vk->cursor_ubo_mem,
                               0, 16, 0, &mapped);
-    if (vr != VK_SUCCESS) {
+    if (vr != VK_SUCCESS || !mapped) {
+        if (vr == VK_SUCCESS) vkUnmapMemory(vk->device, vk->cursor_ubo_mem);
         LAGFX_ERR("cursor_draw: vkMapMemory failed (%d)", (int)vr);
         return LAGFX_ERR_BACKEND;
     }
