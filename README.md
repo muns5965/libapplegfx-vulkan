@@ -21,7 +21,7 @@ An experimental Android ARM64 validation fork of Matthew Jackson's [libapplegfx-
 
 ### Android compatibility results
 
-PASS = observed success; FAIL = observed failure; NOT TESTED = no completed verification. Results are developer-reported physical-device tests, not universal guarantees. Expected negative-control failures demonstrate that the draw is required and are not functional regressions.
+PASS = observed success (including expected negative-control behavior); FAIL = unexpected test failure; FIXED = previously observed issue resolved by a documented change; NOT TESTED = no completed verification. Results are developer-reported physical-device tests, not universal guarantees. Expected negative-control failures demonstrate that the draw is required and are not functional regressions.
 
 | Test | Result | Evidence |
 | --- | --- | --- |
@@ -35,10 +35,10 @@ PASS = observed success; FAIL = observed failure; NOT TESTED = no completed veri
 | 6. Library render target clear/readback | ✅ PASS | 4,096/4,096 |
 | 7. Real Metal ColorFill | ✅ PASS | 4,096/4,096; 00FF00FF |
 | 8. Real Metal TextureCopy | ✅ PASS | 4,096/4,096; 4080FFFF |
-| Raw .bc APK assets (4.2 / control B) | ❌ FAIL | Install rejected / 설치 거부 |
+| Android APK AIR asset naming (.bc → .airdata) | ✅ FIXED | APK installation rejected with .bc assets (4.2 / control B); identical AIR bytes renamed to .airdata install and execute successfully (4.3/4.4). Packaging limitation, not an AIR translator or GPU failure. |
 | Neutral .airdata APK assets (4.3/4.4) | ✅ PASS | Installed / 설치 성공 |
-| ColorFill no-draw output | ❌ FAIL | 4,096 mismatches; expected / 예상 |
-| TextureCopy no-draw output | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| ColorFill negative control (draw omitted) | ✅ PASS | Expected 4,096/4,096 mismatches and exit 1 observed |
+| TextureCopy negative control (draw omitted) | ✅ PASS | Expected 4,096/4,096 mismatches and exit 1 observed |
 | Real login vertex + fragment pair | ⬜ NOT TESTED | GLSL reference vertex |
 | Patterned Metal texture / UV accuracy | ⬜ NOT TESTED | Uniform texture only |
 | UberComposite, Vfx, Xgc GPU rendering | ⬜ NOT TESTED | Translation only |
@@ -78,7 +78,7 @@ meson compile -C builddir
 meson test -C builddir --print-errorlogs
 ```
 
-For the Android cross-build, use the pinned [Henge workflow](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml). It builds the actual Vulkan-enabled static library and packages the native test executables. AIR fixtures use a neutral .airdata suffix to avoid the observed .bc APK installation failure.
+For the Android cross-build, use the pinned [Henge workflow](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml). It builds the actual Vulkan-enabled static library and packages the native test executables. AIR fixtures use a neutral `.airdata` suffix. APKs containing the original `.bc`-suffixed assets were rejected on the tested Android device; renaming the assets without changing their bytes resolved installation. Android's legacy RenderScript `.bc` detection is the likely explanation, but the exact package-manager rejection code was not captured. This is an APK asset filename-extension / packaging issue, not a demonstrated filesystem path or AIR conversion defect. The same AIR contents passed translation and selected GPU rendering tests after renaming; `.bc` packaging itself remains unverified as installable.
 
 For the original Linux/QEMU architecture, API, dependencies, milestones, contributing rules, and upstream test descriptions, see the [archived original README](docs/archive/README-upstream.md). Upstream Linux results are not Android test results.
 
@@ -107,7 +107,7 @@ Matthew Jackson의 [libapplegfx-vulkan](https://github.com/MattJackson/libappleg
 
 ### Android 호환성 검증 결과
 
-PASS는 실제 시험 통과, FAIL은 실제 실패, NOT TESTED는 검증 미완료를 의미합니다. 개발자가 제공한 실기기 시험 결과이며 모든 Android 기기의 호환성을 보장하지 않습니다. Draw 생략 대조군의 예상 실패는 정상 기능의 실패와 구분합니다.
+PASS는 실제 시험 통과(음성 대조군의 예상 결과 포함), FAIL은 예상하지 않은 시험 실패, FIXED는 기존 문제를 명시된 변경으로 해결한 상태, NOT TESTED는 검증 미완료를 의미합니다. 개발자가 제공한 실기기 시험 결과이며 모든 Android 기기의 호환성을 보장하지 않습니다. Draw 생략 대조군의 예상 실패는 정상 기능의 실패와 구분합니다.
 
 | 시험 | 결과 | 근거 |
 | --- | --- | --- |
@@ -121,10 +121,10 @@ PASS는 실제 시험 통과, FAIL은 실제 실패, NOT TESTED는 검증 미완
 | 6. 라이브러리 렌더 타겟 초기화 및 읽기 | ✅ PASS | 4,096/4,096 |
 | 7. 실제 Metal ColorFill | ✅ PASS | 4,096/4,096; 00FF00FF |
 | 8. 실제 Metal TextureCopy | ✅ PASS | 4,096/4,096; 4080FFFF |
-| 원본 .bc APK 데이터(4.2 / B 대조군) | ❌ FAIL | Install rejected / 설치 거부 |
+| Android APK AIR 데이터 파일명(.bc → .airdata) | ✅ FIXED | .bc 확장자 포함 시 설치 거부(4.2 / B 대조군). 원본 바이트를 유지하고 .airdata로 변경한 후 설치·실행 성공(4.3/4.4). 패키징 제약이며 AIR 변환기 또는 GPU 기능의 오류가 아님. |
 | 개선된 .airdata APK 데이터(4.3/4.4) | ✅ PASS | Installed / 설치 성공 |
-| ColorFill Draw 생략 출력 | ❌ FAIL | 4,096 mismatches; expected / 예상 |
-| TextureCopy Draw 생략 출력 | ❌ FAIL | 4,096 mismatches; expected / 예상 |
+| ColorFill 음성 대조군(Draw 생략) | ✅ PASS | 예상대로 4,096/4,096개 픽셀 불일치 및 종료 코드 1 확인 |
+| TextureCopy 음성 대조군(Draw 생략) | ✅ PASS | 예상대로 4,096/4,096개 픽셀 불일치 및 종료 코드 1 확인 |
 | 실제 로그인 정점·프래그먼트 조합 | ⬜ NOT TESTED | GLSL reference vertex |
 | 패턴 텍스처 및 UV 정확성 | ⬜ NOT TESTED | Uniform texture only |
 | UberComposite·Vfx·Xgc GPU 렌더링 | ⬜ NOT TESTED | Translation only |
@@ -164,7 +164,7 @@ meson compile -C builddir
 meson test -C builddir --print-errorlogs
 ```
 
-Android 교차 빌드는 [Henge 시험 워크플로](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml)를 참조하십시오. 실제 Vulkan을 활성화한 정적 라이브러리 및 네이티브 시험 실행 파일을 빌드합니다. .bc APK 설치 실패를 피하기 위해 AIR 시험 데이터에 .airdata 확장자를 사용합니다.
+Android 교차 빌드는 [Henge 시험 워크플로](https://github.com/muns5965/Henge/blob/fe6064e5ad415efd400572489216731855bfe0cc/.github/workflows/gpt-gpu-test.yml)를 참조하십시오. 실제 Vulkan을 활성화한 정적 라이브러리 및 네이티브 시험 실행 파일을 빌드합니다. AIR 시험 데이터에는 `.airdata` 확장자를 사용합니다. 시험 기기에서는 원본 `.bc` 확장자가 포함된 APK의 설치가 거부되었으나 데이터 바이트를 변경하지 않고 확장자만 변경한 후 설치에 성공했습니다. Android의 기존 RenderScript `.bc` 감지 로직이 유력한 원인이지만 패키지 관리자의 정확한 설치 거부 코드는 확보하지 못했습니다. 이는 파일 경로 자체의 오류로 확인된 것이 아니라 APK 내부 파일명 확장자 및 패키징 문제이며, AIR 변환 기능의 결함으로 확인된 사항은 아닙니다. 확장자 변경 후 동일 데이터의 변환 및 일부 GPU 렌더링 시험을 통과했습니다. `.bc` 확장자를 그대로 사용한 APK의 설치 가능성은 확인되지 않았습니다.
 
 기존 Linux/QEMU 아키텍처, API, 의존성, 개발 이력, 기여 및 시험 방법은 [보존된 원본 README](docs/archive/README-upstream.md)를 참조하십시오. 원본 Linux 검증 결과는 Android 검증 결과와 별개입니다.
 
