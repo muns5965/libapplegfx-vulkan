@@ -633,14 +633,14 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
         lagfx_device_last_cursor_show(display->device);
     const lagfx_cursor_glyph_state_t *cg =
         lagfx_device_last_cursor_glyph(display->device);
+    if (vk->cursor_sync_failed) return LAGFX_ERR_BACKEND;
     bool want_cursor = (cs && cs->visible && cg && cg->captured_len > 0);
 
     if (want_cursor && !vk->cursor_glyph_valid) {
         lagfx_status_t up_st = lagfx_vk_cursor_upload_glyph(
             vk, cg->bytes, cg->width, cg->height, cg->bytes_per_row);
         if (up_st != LAGFX_OK) {
-            LAGFX_WARN("display_submit_clear: cursor glyph upload failed (%d)",
-                       (int)up_st);
+            if (vk->cursor_sync_failed) return up_st;
             want_cursor = false;
         }
     }
@@ -718,10 +718,12 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
                                          cs->x, cs->y, cs->hot_x, cs->hot_y);
     }
     vkCmdEndRendering(cb);
-    if (cursor_st != LAGFX_OK) {
+    if (cursor_st != LAGFX_OK && vk->cursor_sync_failed) {
         lagfx_vk_cmdbuf_free(vk, cb);
         return cursor_st;
     }
+    /* Recoverable cursor errors occur before recording any cursor draw.
+     * Submit the base clear even when the optional cursor is absent. */
 
     vr = vkEndCommandBuffer(cb);
     if (vr != VK_SUCCESS) {
@@ -1025,6 +1027,8 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
     }
     struct lagfx_vk_state *vk = display->device->vk;
 
+    if (vk->cursor_sync_failed) return LAGFX_ERR_BACKEND;
+
     const lagfx_cursor_show_state_t  *cs =
         lagfx_device_last_cursor_show(display->device);
     const lagfx_cursor_glyph_state_t *cg =
@@ -1036,7 +1040,7 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
         lagfx_status_t up_st = lagfx_vk_cursor_upload_glyph(
             vk, cg->bytes, cg->width, cg->height, cg->bytes_per_row);
         if (up_st != LAGFX_OK) {
-            return LAGFX_OK;   /* no glyph, nothing to draw */
+            return vk->cursor_sync_failed ? up_st : LAGFX_OK;
         }
     }
 
@@ -1102,7 +1106,8 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
     vkCmdEndRendering(cb);
     if (cursor_st != LAGFX_OK) {
         lagfx_vk_cmdbuf_free(vk, cb);
-        return cursor_st;
+        /* No cursor commands were submitted: base frame remains valid. */
+        return vk->cursor_sync_failed ? cursor_st : LAGFX_OK;
     }
 
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
@@ -1187,7 +1192,8 @@ lagfx_status_t lagfx_display_submit_rendered_frame(
 
 #ifdef LAGFX_HAVE_VULKAN
     /* Cursor overlay before any readback so both scanout paths carry it. */
-    (void)lagfx_display_overlay_cursor(display);
+    lagfx_status_t overlay_st = lagfx_display_overlay_cursor(display);
+    if (overlay_st != LAGFX_OK) return overlay_st;
 
    /* Fallback path when macOS hasn't registered a scanout buffer:
       * CmdDisplaySwapMapping (opcode 0x12) not received yet. Read back
