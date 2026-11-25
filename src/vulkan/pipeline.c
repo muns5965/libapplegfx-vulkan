@@ -767,9 +767,6 @@ static lagfx_status_t create_fallback_ds(struct lagfx_vk_state *vk) {
                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mtype == UINT32_MAX) {
-        mtype = find_memory_type(vk->phys_device, req.memoryTypeBits, 0u);
-    }
-    if (mtype == UINT32_MAX) {
         LAGFX_ERR("pipeline_init: no memory type for fallback UBO");
         vkDestroyBuffer(vk->device, vk->fallback_ubo, NULL);
         vk->fallback_ubo = VK_NULL_HANDLE;
@@ -805,11 +802,18 @@ static lagfx_status_t create_fallback_ds(struct lagfx_vk_state *vk) {
         void *mapped = NULL;
         vr = vkMapMemory(vk->device, vk->fallback_ubo_mem, 0, ubo_size, 0,
                          &mapped);
-        if (vr == VK_SUCCESS && mapped) {
-            float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-            memcpy(mapped, white, sizeof(white));
-            vkUnmapMemory(vk->device, vk->fallback_ubo_mem);
+        if (vr != VK_SUCCESS || !mapped) {
+            LAGFX_ERR("pipeline_init: vkMapMemory(fallback_ubo) failed (%d)", (int)vr);
+            if (vr == VK_SUCCESS) vkUnmapMemory(vk->device, vk->fallback_ubo_mem);
+            vkDestroyBuffer(vk->device, vk->fallback_ubo, NULL);
+            vkFreeMemory(vk->device, vk->fallback_ubo_mem, NULL);
+            vk->fallback_ubo = VK_NULL_HANDLE;
+            vk->fallback_ubo_mem = VK_NULL_HANDLE;
+            return LAGFX_ERR_BACKEND;
         }
+        float white[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
+        memcpy(mapped, white, sizeof(white));
+        vkUnmapMemory(vk->device, vk->fallback_ubo_mem);
     }
 
     VkDescriptorPoolSize pool_size = {
