@@ -351,7 +351,7 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
     }
     proto->protocol_mode = desc->protocol_mode;
     proto->ring_page_shift = desc->ring_page_shift;   /* 0 = default 12 */
-    LAGFX_LOG("device_new: ring_page_shift=%u", lagfx_ring_page_shift(proto));
+    LAGFX_LOG("device_new: ring_page_shift=%u protocol_mode=%s", lagfx_ring_page_shift(proto), proto->protocol_mode ? "arm64-vmapple" : "x86");
     dev->protocol_state = proto;
 
     /* Hand off register-shadow ownership to doorbell.c. This sets

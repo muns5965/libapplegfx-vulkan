@@ -82,34 +82,27 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         /* CmdExecIndirect2 on a compute channel — the inner stream is
          * where Metal commands live. See render-decoder-handlers.md. */
         case LAGFX_OP_EXEC_INDIRECT2: { /* 0x20 */
-            /* Apple Henge pvg_metal.m: a 0x20 whose payload after the barrier
-             * slots is a single u32 (n>=4 bytes) is not an exec — it drops the
-             * object cache of tasks[args[0]>>1]. Only longer payloads exec. */
-            uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
-            if (lagfx_proto_arm64(p) && hdr->payload && hdr->payload_size >= skip + 4u) {
-                uint32_t slot = lagfx_le32(hdr->payload + skip);
-                uint32_t tid = slot >> 1;
-                lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
-                if (t && t->live) t->active_objects.count = 0;
-                LAGFX_LOG("compute: 0x20 drop-task-cache ch=%u stamp=0x%08x slot=%u task=%u live=%d",
-                          (unsigned)p->current_chan_id, hdr->stamp, slot, tid, (t && t->live) ? 1 : 0);
+            if (lagfx_proto_arm64(p)) {
+                /* Apple Henge pvg_metal.m: 0x20 with n>=4 payload bytes (after the barrier slots) drops the object cache of
+                 * tasks[args[0]>>1]. It is never an exec in this mode; a short payload is ignored, not routed to exec. */
+                uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+                if (hdr->payload && hdr->payload_size >= skip + 4u) {
+                    uint32_t slot = lagfx_le32(hdr->payload + skip);
+                    uint32_t tid = slot >> 1;
+                    lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
+                    if (t && t->live) t->active_objects.count = 0;
+                    LAGFX_LOG("compute: 0x20 drop-task-cache ch=%u stamp=0x%08x slot=%u task=%u live=%d",
+                              (unsigned)p->current_chan_id, hdr->stamp, slot, tid, (t && t->live) ? 1 : 0);
+                } else {
+                    LAGFX_WARN("compute: 0x20 (arm64) payload too short (%u, skip %u): ignored, not an exec",
+                               (unsigned)hdr->payload_size, skip);
+                }
             } else {
                 lagfx_compute_exec_cmdbuf(p, hdr);
             }
             break;
         }
 
-        /* Kext-side per-channel exec variant per
-         * M4-inner-opcode-implementation-guide.md §1.1 — same outer
-         * payload as 0x20, kext emits this on the per-channel exec
-         * rings (ch 1..4). Conflicts with LAGFX_OP_CHANNEL_EVENT_37
-         * naming in opcodes.h — the kext-disasm pass classified 0x37
-         * as "ChannelEventMachine-adjacent" before the M4 RE pass
-         * identified it as the per-channel CmdExecIndirect2. The
-         * payload's outer layout (12 + dc*24 + rc*16) distinguishes
-         * the two at runtime; for now route 0x37 to exec_cmdbuf
-         * which handles both empty (event-only) and populated (real
-         * exec) payloads gracefully. */
         case LAGFX_OP_CHANNEL_EVENT_37:  /* 0x37 — see comment above */
             lagfx_compute_exec_cmdbuf(p, hdr);
             break;
