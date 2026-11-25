@@ -59,7 +59,7 @@ Matthew Jackson의 [libapplegfx-vulkan](https://github.com/MattJackson/libappleg
 
 ## ARM64 vmapple 지원
 
-**상태: 실험적 지원.** arm64 동작은 단위 시험만 수행했습니다. 실제 ARM64 게스트에서 실행한 적이 없고 어떤 APK에도 포함되지 않았습니다.
+**상태: 실험적 지원.** arm64 동작은 단위 시험만 수행했습니다(단위 시험은 Vulkan 로더가 없는 빌드에서 실행되므로 Vulkan 의존 코드는 시험되지 않습니다). 실제 ARM64 게스트에서 실행한 적이 없고 어떤 APK에도 포함되지 않았습니다.
 
 | 항목 | x86 모드(기본값) | arm64 vmapple 모드 |
 | --- | --- | --- |
@@ -114,7 +114,7 @@ Matthew Jackson의 [libapplegfx-vulkan](https://github.com/MattJackson/libappleg
 | --- | --- | --- |
 | 단위 시험 | 부분 검증 | 2026-11-26, x86-64 Linux, gcc 13.3, **Vulkan 로더 없음**: 74개 중 72 통과, 0 실패, 2 건너뜀. Vulkan 의존 코드는 컴파일·실행되지 않음. 포크가 추가한 `pfn-shift`, `protocol-mode`, `task-define`, `diag` 단위 시험 통과. `android-memory-mock`은 Vulkan 헤더가 필요해 실행하지 못함. |
 | CI | 미검증 | 워크플로(Ubuntu debug/release + lavapipe, Alpine, macOS, 새니타이저)는 있으나 `main`과 `research/android-memory-correctness` 푸시, `main` 대상 PR, 수동 실행에서만 동작. 2026-11-26 기준 이 포크의 워크플로 실행 기록은 **0건**. |
-| APK 빌드 | APK 4.4 검증 | Henge [CI 실행 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001)이 라이브러리 `7574eac` 기준으로 성공. arm64 모드, 16 KiB PFN, Device Info 커밋은 어떤 APK에도 없음. 대응 문서는 "APK 빌드"의 라이브러리 리비전을 `c53dcb5`로 적고 있어 `7574eac`와 다르므로 정리가 필요. |
+| APK 빌드 | APK 4.4 검증 | Henge [CI 실행 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001)이 라이브러리 `7574eac` 기준으로 성공. 이 실행은 VM 실행용이 아닌 독립 GPU 시험 APK(라이브러리 `7574eac`)입니다. VM 실행용 APK는 라이브러리 `c53dcb5`로 빌드했고, 여기에는 16 KiB PFN 지원이 이미 들어 있습니다(clone-001 실행에서 기기 확인). arm64 모드, Device Info, task 검색, 0x20/0x25 변경은 아직 어떤 APK에도 없습니다. |
 | 실기기 | 부분 검증 | Galaxy S26 Ultra 독립 GPU 시험(아래). 실제 PVG, arm64 모드, 데스크톱 출력은 미시험. |
 
 ## 향후 계획

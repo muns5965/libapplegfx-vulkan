@@ -59,7 +59,7 @@ Info replies (device info, compute info, pipeline info) report what the guest ma
 
 ## ARM64 vmapple support
 
-**Status: Experimental.** The arm64 behaviour is unit-tested only. It has not been run against a live ARM64 guest, and no APK contains it.
+**Status: Experimental.** The arm64 behaviour is unit-tested only (the unit tests run in a build without the Vulkan loader, so Vulkan-dependent code is not exercised by them). It has not been run against a live ARM64 guest, and no APK contains it.
 
 | Item | x86 mode (default) | arm64 vmapple mode |
 | --- | --- | --- |
@@ -114,7 +114,7 @@ Full per-feature table with origin, kind, status and evidence: [docs/metal-vulka
 | --- | --- | --- |
 | Unit tests | Partially verified | 2026-11-26, x86-64 Linux, gcc 13.3, **no Vulkan loader**: 74 tests, 72 passed, 0 failed, 2 skipped. Vulkan-gated code was not compiled or run. Fork-added `pfn-shift`, `protocol-mode`, `task-define` and `diag` unit tests passed. `android-memory-mock` needs Vulkan headers and was not run. |
 | CI | Not verified | Workflow exists (Ubuntu debug/release with lavapipe, Alpine, macOS, sanitizers) but triggers only on pushes to `main` and `research/android-memory-correctness`, pull requests to `main`, and manual runs. GitHub shows **0 workflow runs** for this fork as of 2026-11-26. |
-| APK build | Verified for APK 4.4 | Henge [CI run 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001) succeeded against library `7574eac`. The arm64-mode, 16 KiB PFN and device-info commits are in no APK. The correspondence document names `c53dcb5` as the library revision of "the APK build"; this differs from `7574eac` and should be reconciled. |
+| APK build | Verified for APK 4.4 | Henge [CI run 45575251001](https://github.com/muns5965/Henge/actions/runs/45575251001) succeeded against library `7574eac`. That run is the stand-alone GPU test APK (library `7574eac`), not the VM runner. The VM runner APK was built against library `c53dcb5`, which already contains the 16 KiB PFN support (confirmed on a device in the clone-001 run). The arm64-mode, device-info, task-lookup and 0x20/0x25 changes are in no APK yet. |
 | Real device | Partially verified | Galaxy S26 Ultra, standalone GPU tests (below). Live PVG, arm64 mode and desktop output: not tested. |
 
 ## Roadmap

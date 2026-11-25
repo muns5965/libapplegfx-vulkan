@@ -33,6 +33,8 @@ lagfx_handler_status_t lagfx_task_define_task2(lagfx_protocol_t *p, const lagfx_
     uint32_t reserved  = lagfx_le32(hdr->payload + 20);
 
     (void)reserved;
+    if (task_id >= LAGFX_MAX_TASK_ID)   /* warn only: the x86 protocol's id range is not confirmed, so behaviour is unchanged */
+        LAGFX_WARN("CmdDefineTask2: taskID=%u >= %u (not rejected)", task_id, LAGFX_MAX_TASK_ID);
 
     /* Look up or allocate task slot. Re-use slot if duplicate. */
     lagfx_task_entry_t *entry = lagfx_protocol_find_task(p, task_id);
