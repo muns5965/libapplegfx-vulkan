@@ -691,7 +691,6 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
     vkCmdPipelineBarrier(cb, src_stage,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, NULL, 0, NULL, 1, &barrier);
-    rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkRenderingAttachmentInfo color_att = {
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -748,6 +747,8 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
         .pCommandBuffers    = &cb,
     };
     vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
+    if (vr == VK_SUCCESS) rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("display_submit_clear: vkQueueSubmit failed (%d)", (int)vr);
         vkDestroyFence(vk->device, fence, NULL);
@@ -758,8 +759,8 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
     const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
     vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
     if (vr != VK_SUCCESS) {
-        vk->cursor_sync_failed = true;
         VkResult idle = vkDeviceWaitIdle(vk->device);
+        vk->cursor_sync_failed = (idle != VK_SUCCESS || vr == VK_ERROR_DEVICE_LOST);
         if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
             return LAGFX_ERR_BACKEND;
     }
@@ -1084,7 +1085,6 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
     vkCmdPipelineBarrier(cb, src_stage,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, NULL, 0, NULL, 1, &barrier);
-    rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     VkRenderingAttachmentInfo color_att = {
         .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
@@ -1126,12 +1126,14 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
         .pCommandBuffers    = &cb,
     };
     VkResult vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    if (vr == VK_ERROR_DEVICE_LOST) vk->cursor_sync_failed = true;
+    if (vr == VK_SUCCESS) rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     if (vr == VK_SUCCESS) {
         vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
                              1000ull * 1000ull * 1000ull);
         if (vr != VK_SUCCESS) {
-            vk->cursor_sync_failed = true;
             VkResult idle = vkDeviceWaitIdle(vk->device);
+            vk->cursor_sync_failed = (idle != VK_SUCCESS || vr == VK_ERROR_DEVICE_LOST);
             if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
                 return LAGFX_ERR_BACKEND;
         }
