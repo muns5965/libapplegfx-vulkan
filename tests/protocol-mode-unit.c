@@ -22,6 +22,13 @@ static void irq(void *o, uint32_t v) { (void)o; (void)v; }
 
 static void put32(uint64_t gpa, uint32_t v) { memcpy(g_mem + gpa, &v, 4); }
 
+static uint32_t g_disp_n, g_disp_chan, g_disp_len, g_disp_words[16];
+static void disp_cb(void *o, uint32_t ch, const uint8_t *cmd, uint32_t len) {
+    (void)o; g_disp_n++; g_disp_chan = ch; g_disp_len = len;
+    memset(g_disp_words, 0, sizeof g_disp_words);
+    memcpy(g_disp_words, cmd, len > sizeof g_disp_words ? sizeof g_disp_words : len);
+}
+
 static uint32_t g_wp;   /* absolute ring write pointer */
 
 static void submit(lagfx_protocol_t *p, uint16_t op, uint16_t arg8, const uint32_t *words, uint32_t nwords) {
@@ -34,6 +41,7 @@ static void submit(lagfx_protocol_t *p, uint16_t op, uint16_t arg8, const uint32
     memcpy(g_mem + ring + (g_wp % 0x10000u), cmd, len);
     g_wp += len;
     put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 0x00, g_wp);
+    p->current_chan_id = 1;   /* the door dispatcher sets this */
     channel_compute_dispatcher_drain(p, 1);
 }
 
@@ -148,6 +156,30 @@ int main(void) {
         lagfx_protocol_t *rx = mk(LAGFX_PROTO_X86);
         rx->ring_armed = true; rx->ring_size = 0x100; rx->write_ptr = 28;
         assert(doorbell_handle_read(rx, 0x100c) == 0u && rx->read_ptr == 0u);
+    }
+
+    /* Display ops (1/2/8): arm64 forwards the raw command (header + barrier slots + args) to the shell; x86 never does; no callback = ignored */
+    {
+        lagfx_protocol_t *d = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        ((lagfx_device_t *)d->dev)->desc.shell.display_command = disp_cb;
+        g_disp_n = 0;
+        uint32_t w[5] = { 4u, 0u /*barrier ch,stamp*/, 0u, 0x0abcu, 0x55u };   /* arg_count_8b=1: 8 barrier bytes, then {a0, pfn} */
+        submit(d, 0x01, 1, w, 5);
+        assert(g_disp_n == 1 && g_disp_chan == 1 && g_disp_len == 12u + 20u);
+        assert((g_disp_words[0] & 0xffff) == 1u && (g_disp_words[0] >> 16) == 1u);   /* op 1, one barrier slot */
+        assert(g_disp_words[1] == g_disp_len);
+        assert(g_disp_words[3] == 4u && g_disp_words[5] == 0u && g_disp_words[6] == 0x0abcu);   /* barrier slot in words 3-4, args from word 5 */
+        submit(d, 0x02, 0, w, 2); submit(d, 0x08, 0, w, 10);
+        assert(g_disp_n == 3);
+        submit(d, 0x30, 0, w, 2);                       /* not a display op */
+        assert(g_disp_n == 3);
+        ((lagfx_device_t *)d->dev)->desc.shell.display_command = NULL;
+        submit(d, 0x01, 0, w, 2);                       /* no callback: no crash */
+        assert(g_disp_n == 3);
+        lagfx_protocol_t *x = mk(LAGFX_PROTO_X86);
+        ((lagfx_device_t *)x->dev)->desc.shell.display_command = disp_cb;
+        submit(x, 0x01, 0, w, 2);
+        assert(g_disp_n == 3);
     }
 
     puts("protocol-mode-unit: ok");

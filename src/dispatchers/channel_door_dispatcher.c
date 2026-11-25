@@ -40,14 +40,19 @@ void channel_door_dispatcher_dispatch(void *protocol_state, uint32_t data) {
             channel_0_dispatcher_drain(p);
             break;
 
+        case 5 ... 15:
+            if (lagfx_proto_arm64(p)) {
+                /* Apple's ring format has no compute/display split by channel number (Henge: "Display: channel 4 op 1"):
+                 * every child channel carries the same command set. */
+                channel_compute_dispatcher_drain(p, chan_id);
+                break;
+            }
+            channel_display_dispatcher_drain(p, chan_id);
+            break;
+
         case 1 ... 4:
             /* Compute channels (vchans) */
             channel_compute_dispatcher_drain(p, chan_id);
-            break;
-
-        case 5 ... 15:
-            /* Display pipes (display_index + 5) */
-            channel_display_dispatcher_drain(p, chan_id);
             break;
 
         default:

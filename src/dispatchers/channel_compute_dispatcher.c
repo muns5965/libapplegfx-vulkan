@@ -103,6 +103,19 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             break;
         }
 
+        case 0x01: case 0x02: case 0x08:
+            if (lagfx_proto_arm64(p)) {   /* Display ops of the ARM64 protocol: the shell owns them */
+                lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+                if (dev && dev->desc.shell.display_command && hdr->payload) {
+                    dev->desc.shell.display_command(dev->desc.shell.opaque, p->current_chan_id,
+                                                    hdr->payload - LAGFX_CMD_HEADER_BYTES, hdr->length);
+                } else {
+                    LAGFX_WARN("compute: arm64 display op 0x%02x ch=%u ignored (no display_command callback or no payload)",
+                               hdr->opcode, (unsigned)p->current_chan_id);
+                }
+            }
+            break;
+
         case LAGFX_OP_CHANNEL_EVENT_37:  /* 0x37 — see comment above */
             lagfx_compute_exec_cmdbuf(p, hdr);
             break;
