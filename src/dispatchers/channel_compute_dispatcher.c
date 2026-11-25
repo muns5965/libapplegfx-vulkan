@@ -81,9 +81,23 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     switch (hdr->opcode) {
         /* CmdExecIndirect2 on a compute channel — the inner stream is
          * where Metal commands live. See render-decoder-handlers.md. */
-        case LAGFX_OP_EXEC_INDIRECT2:  /* 0x20 */
-            lagfx_compute_exec_cmdbuf(p, hdr);
+        case LAGFX_OP_EXEC_INDIRECT2: { /* 0x20 */
+            /* Apple Henge pvg_metal.m: a 0x20 whose payload after the barrier
+             * slots is a single u32 (n>=4 bytes) is not an exec — it drops the
+             * object cache of tasks[args[0]>>1]. Only longer payloads exec. */
+            uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+            if (hdr->payload && hdr->payload_size >= skip + 4u && hdr->payload_size - skip == 4u) {
+                uint32_t slot = lagfx_le32(hdr->payload + skip);
+                uint32_t tid = slot >> 1;
+                lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
+                if (t && t->live) t->active_objects.count = 0;
+                LAGFX_LOG("compute: 0x20 drop-task-cache ch=%u stamp=0x%08x slot=%u task=%u live=%d",
+                          (unsigned)p->current_chan_id, hdr->stamp, slot, tid, (t && t->live) ? 1 : 0);
+            } else {
+                lagfx_compute_exec_cmdbuf(p, hdr);
+            }
             break;
+        }
 
         /* Kext-side per-channel exec variant per
          * M4-inner-opcode-implementation-guide.md §1.1 — same outer
@@ -137,48 +151,28 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             LAGFX_LOG("compute: 0x25 CmdSetObjectAndPlacementList ch=%u stamp=0x%08x payload_size=%u",
                       (unsigned)p->current_chan_id, hdr->stamp,
                       (unsigned)hdr->payload_size);
-            if (hdr->payload && hdr->payload_size >= 8u) {
-                uint32_t count     = lagfx_le32(hdr->payload + 0);
-                uint32_t object_id = lagfx_le32(hdr->payload + 4);
-                /* Channel ID was set when the dispatcher entered the
-                 * per-channel drain; we resolve task via the current
-                 * task association on the channel (or fall back to
-                 * task[0] if not yet bound, which matches the
-                 * observed early-boot pattern). */
-                /* NOTE: the 0x25 payload carries no task id; pvg_lite.c does not
-                 * decode 0x25 either, so the task is NOT known. First-live-task
-                 * is a fallback only; raw payload logged for verification. */
-                LAGFX_LOG("compute: 0x25 raw arg_count_8b=%u first16=%08x %08x %08x %08x (task selection=fallback)",
-                          (unsigned)hdr->arg_count_8b,
-                          lagfx_le32(hdr->payload), lagfx_le32(hdr->payload + 4),
-                          hdr->payload_size >= 12u ? lagfx_le32(hdr->payload + 8) : 0u,
-                          hdr->payload_size >= 16u ? lagfx_le32(hdr->payload + 12) : 0u);
-                lagfx_task_entry_t *task = NULL;
-                for (uint32_t ti = 0; ti < LAGFX_MAX_TASKS; ti++) {
-                    if (p->tasks[ti].live) { task = &p->tasks[ti]; break; }
-                }
-                {   /* diagnostics only: which task the fallback picked, which are live, and which task the last 0x44 named (not known to be the same one) */
-                    char live[160]; uint32_t lo = 0, nlive = 0;
-                    live[0] = 0;
-                    for (uint32_t ti = 0; ti < LAGFX_MAX_TASKS; ti++) {
-                        if (!p->tasks[ti].live) continue;
-                        nlive++;
-                        if (lo + 12 < sizeof live) lo += (uint32_t)snprintf(live + lo, sizeof live - lo, "%u ", p->tasks[ti].id);
+            {
+                /* Apple Henge pvg_metal.m: payload = {task, ref}; 0x25 REMOVES ref
+                 * from tasks[task]'s object set (it does not register). */
+                uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+                if (hdr->payload && hdr->payload_size >= skip + 8u) {
+                    uint32_t tid = lagfx_le32(hdr->payload + skip);
+                    uint32_t ref = lagfx_le32(hdr->payload + skip + 4u);
+                    lagfx_task_entry_t *t = (tid < LAGFX_MAX_TASKS) ? &p->tasks[tid] : NULL;
+                    uint32_t removed = 0;
+                    if (t && t->live) {
+                        for (uint32_t i = 0; i < t->active_objects.count; i++) {
+                            if (t->active_objects.object_ids[i] == ref) {
+                                t->active_objects.object_ids[i] =
+                                    t->active_objects.object_ids[--t->active_objects.count];
+                                removed = 1;
+                                break;
+                            }
+                        }
                     }
-                    uint32_t ch = p->current_chan_id;
-                    LAGFX_LOG("diag 0x25 ch=%u stamp=0x%08x arg8=%u picked_task=%d (first live, fallback) live_tasks=%u [%s] last0x44_on_this_ch=%s%u last0x44_any_ch=%s%u (%llu cmds ago) payload_first_u32=%u",
-                              ch, hdr->stamp, (unsigned)hdr->arg_count_8b, task ? (int)task->id : -1, nlive, live,
-                              (ch < LAGFX_MAX_CHANNELS && p->diag2.last44_valid[ch]) ? "" : "none:", (ch < LAGFX_MAX_CHANNELS) ? p->diag2.last44_task[ch] : 0u,
-                              p->diag2.last44_global_valid ? "" : "none:", p->diag2.last44_global_task,
-                              (unsigned long long)(p->diag2.seq - p->diag2.last44_global_seq), lagfx_le32(hdr->payload));
-                }
-                if (task) {
-                    register_active_object(task, object_id);
-                    LAGFX_LOG("compute: 0x25 registered objectId=0x%x (count=%u) in task=%u (active=%u)",
-                              object_id, count, task->id,
-                              task->active_objects.count);
-                } else {
-                    LAGFX_WARN("compute: 0x25 no live task to register objectId=0x%x", object_id);
+                    LAGFX_LOG("compute: 0x25 remove-object ch=%u stamp=0x%08x task=%u ref=0x%x live=%d removed=%u",
+                              (unsigned)p->current_chan_id, hdr->stamp, tid, ref,
+                              (t && t->live) ? 1 : 0, removed);
                 }
             }
             break;
