@@ -1218,9 +1218,6 @@ static lagfx_status_t create_cursor_resources(struct lagfx_vk_state *vk) {
                                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT
                                       | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
     if (mtype == UINT32_MAX) {
-        mtype = find_memory_type(vk->phys_device, req.memoryTypeBits, 0u);
-    }
-    if (mtype == UINT32_MAX) {
         LAGFX_ERR("cursor_res: no memory type for cursor UBO");
         vkDestroyBuffer(vk->device, vk->cursor_ubo, NULL);
         vk->cursor_ubo = VK_NULL_HANDLE;
