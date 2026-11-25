@@ -265,6 +265,10 @@ typedef struct {
      * See libapplegfx-vulkan/README.md + gpu-cores spec. */
     uint32_t thread_count;
 
+    /* Guest PFN -> address shift. 0 = default (12, 4 KiB pages), the value every earlier caller gets. 14 = the guest hands over 16 KiB page
+     * numbers. Any other value makes lagfx_device_new fail. Only the PFN encoding changes. */
+    uint32_t ring_page_shift;
+
     /* Reserved for future expansion — must be NULL for now. */
     void *reserved[3];
 } lagfx_device_descriptor_t;

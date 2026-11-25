@@ -1265,6 +1265,20 @@ if fs.is_file(meson.current_source_dir() / 'ring-wrap-header-unit.c')
   test('ring-wrap header read (unit)', ring_wrap_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'pfn-shift-unit.c')
+  pfn_shift_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    pfn_shift_deps += [vulkan_dep]
+  endif
+  pfn_shift_test = executable('pfn-shift-unit',
+    'pfn-shift-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : pfn_shift_deps,
+    build_by_default : true,
+  )
+  test('PFN shift 12/14 (unit)', pfn_shift_test)
+endif
+
 # Vertex float-plausibility scorer: text/poison score ~0, real floats ~100.
 if fs.is_file(meson.current_source_dir() / 'vtx-plausibility-unit.c') and vulkan_dep.found()
   vtx_plaus_test = executable('vtx-plausibility-unit',

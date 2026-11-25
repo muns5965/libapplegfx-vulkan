@@ -330,7 +330,7 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
         return 0;
     }
 
-    uint32_t ring_size = LAGFX_COMPUTE_RING_SIZE;
+    uint32_t ring_size = lagfx_ring_size_from_table(p, page0_gpa, LAGFX_COMPUTE_RING_SIZE);
 
     if (write_ptr == read_ptr) {
         LAGFX_TRACE("compute drain: ch=%u caught up rp=0x%x wp=0x%x",
@@ -402,8 +402,8 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
                 body_ok = false;
                 break;
             }
-            uint32_t chunk_off_in_page = (uint32_t)(chunk_gpa & 0xfffu);
-            uint32_t chunk_len = 0x1000u - chunk_off_in_page;
+            uint32_t chunk_off_in_page = (uint32_t)(chunk_gpa & (lagfx_ring_page_size(p) - 1u));
+            uint32_t chunk_len = lagfx_ring_page_size(p) - chunk_off_in_page;
             if (chunk_len > length - bytes_read) {
                 chunk_len = length - bytes_read;
             }

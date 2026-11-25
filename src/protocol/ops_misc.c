@@ -218,7 +218,7 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
     uint32_t kind        = lagfx_misc_le32(hdr->payload + 0);
     uint32_t resp_qwords = lagfx_misc_le32(hdr->payload + 4);
     uint32_t resp_pfn    = lagfx_misc_le32(hdr->payload + 8);
-    uint64_t resp_gpa    = (uint64_t)resp_pfn << 12;
+    uint64_t resp_gpa    = lagfx_pfn_to_gpa(p, resp_pfn);
 
     LAGFX_LOG("CmdGetDeviceInfo2: kind=0x%x resp_qwords=0x%x resp_pfn=0x%x -> gpa=0x%llx",
               kind, resp_qwords, resp_pfn, (unsigned long long)resp_gpa);

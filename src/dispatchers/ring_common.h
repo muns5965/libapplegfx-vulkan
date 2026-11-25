@@ -109,4 +109,9 @@ bool lagfx_ring_read_bytes(lagfx_protocol_t *p,
 #define LAGFX_RING_FIFO_DESC_BYTES        20u
 #define LAGFX_RING_FIFO_DESC_BASE_OFFSET  0x400u
 
+/* Ring size for a channel ring. With 4 KiB ring pages (the default) the fixed size the caller passes is returned unchanged. With 16 KiB ring
+ * pages the ring is as long as its PFN array: the count of non-zero 32-bit entries, times the page size (the way Henge's pvg_lite sizes it).
+ * Falls back to `fixed` if the array cannot be read or is empty. */
+uint32_t lagfx_ring_size_from_table(lagfx_protocol_t *p, uint64_t page0_gpa, uint32_t fixed);
+
 #endif /* LAGFX_DISPATCHERS_RING_COMMON_H */

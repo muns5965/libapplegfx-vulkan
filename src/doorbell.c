@@ -24,6 +24,9 @@
 #include "protocol/state.h"
 #include "common/log.h"
 
+#include "device.h"
+#include "common/le.h"
+
 #include <string.h>
 
 /* === Door Registry ================================================
@@ -56,6 +59,35 @@ const size_t g_doorbell_door_count = sizeof(g_doorbell_doors) / sizeof(doorbell_
  * builds) don't share a single shadow.
  */
 #define LAGFX_MSIX_RANGE_END 0x1000u
+
+
+/* Read-only comparison, logged once at the first primary-ring doorbell: what is at the ring start (and at the shared page) if the PFN is read as a
+   4 KiB page number and as a 16 KiB page number. Only the memory callback's read is used; no ring pointer moves and no command is parsed. The
+   address the device actually uses is the one marked "active". */
+static void pfn_candidates_diag(lagfx_protocol_t *p) {
+    if (!p || p->pfn_diag_done) return;
+    p->pfn_diag_done = 1;
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    if (!dev || !dev->desc.shell.read_memory) return;
+    static const uint32_t shifts[2] = {12u, 14u};
+    for (int i = 0; i < 2; i++) {
+        uint32_t sh = shifts[i];
+        const char *mark = (sh == lagfx_ring_page_shift(p)) ? " active" : "";
+        for (int w = 0; w < 2; w++) {
+            uint64_t pfn = w == 0 ? p->ring_base_pfn : p->ring_shared_page_pfn;
+            uint64_t base = (sh >= 64u || (pfn >> (64u - sh)) != 0u) ? ~(uint64_t)0 : (pfn << sh);
+            uint64_t gpa = base + (w == 0 ? p->ring_start_offset : 0u);
+            uint8_t b[32];
+            memset(b, 0, sizeof b);
+            bool ok = base != ~(uint64_t)0 && dev->desc.shell.read_memory(dev->desc.shell.opaque, gpa, sizeof b, b);
+            LAGFX_LOG("pfn-diag: %s pfn=0x%llx shift=%u gpa=0x%llx read=%s%s first32=%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x | header opcode=0x%04x length=0x%x",
+                      w == 0 ? "ring-start" : "shared-page", (unsigned long long)pfn, sh, (unsigned long long)gpa, ok ? "ok" : "failed", mark,
+                      b[0],b[1],b[2],b[3],b[4],b[5],b[6],b[7],b[8],b[9],b[10],b[11],b[12],b[13],b[14],b[15],
+                      b[16],b[17],b[18],b[19],b[20],b[21],b[22],b[23],b[24],b[25],b[26],b[27],b[28],b[29],b[30],b[31],
+                      (unsigned)lagfx_le16(b), (unsigned)lagfx_le32(b + 4));
+        }
+    }
+}
 
 static inline int doorbell_reg_index(uint64_t offset) {
     if (offset < LAGFX_MSIX_RANGE_END || offset >= 0x2000) return -1;
@@ -157,6 +189,7 @@ void doorbell_handle_write(void *protocol_state, uint64_t offset, uint32_t value
             return;
 
         case 0x1008u: /* primary ring doorbell */
+            pfn_candidates_diag(p);
             LAGFX_LOG("doorbell: write off=0x1008 PRIMARY_RING wp=0x%x → dispatch", value);
             doorbell_dispatch(protocol_state, 0x1008u, value);
             return;
@@ -165,7 +198,7 @@ void doorbell_handle_write(void *protocol_state, uint64_t offset, uint32_t value
             if (p) {
                 p->ring_start_offset = value;
                 p->page_size = 0x1000u;
-                p->ring_base_gpa = ((uint64_t)p->ring_base_pfn << 12) + p->ring_start_offset;
+                p->ring_base_gpa = lagfx_pfn_to_gpa(p, p->ring_base_pfn) + p->ring_start_offset;
             }
             LAGFX_LOG("doorbell: write off=0x1010 ring_start_offset val=0x%08x ring_base_gpa=0x%llx",
                       value, p ? (unsigned long long)p->ring_base_gpa : 0ull);
@@ -197,7 +230,7 @@ void doorbell_handle_write(void *protocol_state, uint64_t offset, uint32_t value
         case 0x1030u: /* ring_base_pfn */
             if (p) {
                 p->ring_base_pfn = value;
-                p->ring_base_gpa = ((uint64_t)value << 12) + p->ring_start_offset;
+                p->ring_base_gpa = lagfx_pfn_to_gpa(p, value) + p->ring_start_offset;
                 if (p->ring_size == 0u) {
                     p->ring_size = 0x10000u;
                 }

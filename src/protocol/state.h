@@ -406,6 +406,8 @@ typedef struct lagfx_protocol {
     uint32_t ring_start_offset; // Offset within base page (BAR0+0x1010)
     uint64_t ring_shared_page_pfn;  // Shared page PFN for descriptors
     uint32_t page_size;         // Page size (observed: 0x1000)
+    uint8_t  pfn_diag_done;     // the one-time ring address comparison has been logged
+    uint32_t ring_page_shift;         // PFN to address shift. 0 = default 12 (4 KiB). 14 = 16 KiB pages (from the device descriptor).
 
     /* Ring pointers (updated by doorbells) */
     uint32_t read_ptr;          // Last processed write pointer (root channel only)
@@ -556,6 +558,20 @@ typedef struct lagfx_protocol {
     uint32_t  scratch_exec_heap_size;
 
 } lagfx_protocol_t;
+
+/* The command rings' page size and PFN encoding. The shift is 12 unless the device was created with another ring_page_shift (the only accepted
+   values are 12 and 14). It applies to the root, shared and channel PFNs, the ring's PFN-array indexing and in-page offsets, and the stamp cells; the
+   resource-mapping lists keep 12-bit entries (Henge's pvg_lite does the same) and Vulkan alignment is untouched. A PFN that would not fit in 64 bits
+   gives ~0, an address no memory callback accepts. */
+static inline uint32_t lagfx_ring_page_shift(const lagfx_protocol_t *p) {
+    return (p && p->ring_page_shift) ? p->ring_page_shift : 12u;
+}
+static inline uint32_t lagfx_ring_page_size(const lagfx_protocol_t *p) { return 1u << lagfx_ring_page_shift(p); }
+static inline uint64_t lagfx_pfn_to_gpa(const lagfx_protocol_t *p, uint64_t pfn) {
+    uint32_t sh = lagfx_ring_page_shift(p);
+    if (sh >= 64u || (pfn >> (64u - sh)) != 0u) return ~(uint64_t)0;
+    return pfn << sh;
+}
 
 /* Validation macro */
 #define LAGFX_PROTOCOL_MAGIC 0x4C414758u  /* "LAGX" */

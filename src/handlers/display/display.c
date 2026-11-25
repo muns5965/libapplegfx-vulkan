@@ -359,7 +359,7 @@ lagfx_handler_status_t lagfx_display_vchan_setup_shared_state(
     }
 
     /* Store shared state GPA and mark as installed */
-    uint64_t ss_gpa = ((uint64_t)ss_pfn << 12);
+    uint64_t ss_gpa = lagfx_pfn_to_gpa(p, ss_pfn);
     if (display_index < 16 && p->dev != NULL) {
         lagfx_device_t *dev = (lagfx_device_t *)p->dev;
         dev->display_ss_gpa[display_index] = ss_gpa;

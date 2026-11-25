@@ -38,7 +38,7 @@ void lagfx_advance_stamp_cell(lagfx_protocol_t *p, uint32_t slot, uint32_t targe
     }
 
     /* (ring_base_pfn << 12) + slot*4 — NOT ring_base_gpa. */
-    uint64_t cell_addr = ((uint64_t)p->ring_base_pfn << 12) + (slot * 4);
+    uint64_t cell_addr = lagfx_pfn_to_gpa(p, p->ring_base_pfn) + (slot * 4);
     uint32_t cur = 0u;
 
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;

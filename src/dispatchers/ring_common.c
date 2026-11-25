@@ -13,6 +13,7 @@
  * 75-line copies of these three functions.
  */
 
+#include <stdlib.h>
 #include "ring_common.h"
 
 #include "../common/le.h"
@@ -47,7 +48,7 @@ bool lagfx_ring_fifo_descriptor_read(lagfx_protocol_t *p,
         return false;
     }
 
-    uint64_t shared_gpa = (uint64_t)p->ring_shared_page_pfn << 12;
+    uint64_t shared_gpa = lagfx_pfn_to_gpa(p, p->ring_shared_page_pfn);
     uint64_t desc_gpa   = shared_gpa
                         + LAGFX_RING_FIFO_DESC_BASE_OFFSET
                         + (uint64_t)(chan_id - 1u) * LAGFX_RING_FIFO_DESC_BYTES;
@@ -81,7 +82,7 @@ bool lagfx_ring_fifo_descriptor_read(lagfx_protocol_t *p,
     *out_desc_gpa  = desc_gpa;
     *out_write_ptr = write_ptr;
     *out_read_ptr  = read_ptr;
-    *out_page0_gpa = (uint64_t)ring_pfn << 12;
+    *out_page0_gpa = lagfx_pfn_to_gpa(p, ring_pfn);
     return true;
 }
 
@@ -95,7 +96,7 @@ bool lagfx_ring_resolve_data_gpa(lagfx_protocol_t *p,
     if (!dev || !dev->desc.shell.read_memory) return false;
 
     uint32_t off_mod = (ring_size != 0u) ? (offset % ring_size) : offset;
-    uint32_t page_idx = off_mod >> 12;
+    uint32_t page_idx = off_mod >> lagfx_ring_page_shift(p);
 
     uint8_t pfn_buf[4];
     if (!dev->desc.shell.read_memory(dev->desc.shell.opaque,
@@ -111,7 +112,7 @@ bool lagfx_ring_resolve_data_gpa(lagfx_protocol_t *p,
                    "not mapped at off=0x%x", page_idx, offset);
         return false;
     }
-    *out_data_gpa = ((uint64_t)data_pfn << 12) + (off_mod & 0xfffu);
+    *out_data_gpa = lagfx_pfn_to_gpa(p, data_pfn) + (off_mod & (lagfx_ring_page_size(p) - 1u));
     return true;
 }
 
@@ -150,8 +151,8 @@ bool lagfx_ring_read_bytes(lagfx_protocol_t *p,
                                           offset + done, &chunk_gpa)) {
             return false;
         }
-        uint32_t chunk_off_in_page = (uint32_t)(chunk_gpa & 0xfffu);
-        uint32_t chunk_len = 0x1000u - chunk_off_in_page;
+        uint32_t chunk_off_in_page = (uint32_t)(chunk_gpa & (lagfx_ring_page_size(p) - 1u));
+        uint32_t chunk_len = lagfx_ring_page_size(p) - chunk_off_in_page;
         if (chunk_len > len - done) chunk_len = len - done;
         if (!dev->desc.shell.read_memory(dev->desc.shell.opaque,
                                           chunk_gpa, chunk_len, out + done)) {
@@ -162,4 +163,22 @@ bool lagfx_ring_read_bytes(lagfx_protocol_t *p,
         done += chunk_len;
     }
     return true;
+}
+
+uint32_t lagfx_ring_size_from_table(lagfx_protocol_t *p, uint64_t page0_gpa, uint32_t fixed) {
+    if (!p || lagfx_ring_page_shift(p) == 12u) return fixed;
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    if (!dev || !dev->desc.shell.read_memory) return fixed;
+    uint32_t page_size = lagfx_ring_page_size(p);
+    uint8_t *tbl = (uint8_t *)malloc(page_size);
+    if (!tbl) return fixed;
+    uint32_t pages = 0;
+    if (dev->desc.shell.read_memory(dev->desc.shell.opaque, page0_gpa, page_size, tbl)) {
+        while (pages < page_size / 4u && lagfx_le32(tbl + 4u * pages) != 0u) pages++;
+    }
+    free(tbl);
+    if (pages == 0u) return fixed;
+    LAGFX_TRACE("ring_size_from_table: page0=0x%llx pages=%u size=0x%x (fixed was 0x%x)",
+                (unsigned long long)page0_gpa, pages, pages << lagfx_ring_page_shift(p), fixed);
+    return pages << lagfx_ring_page_shift(p);
 }

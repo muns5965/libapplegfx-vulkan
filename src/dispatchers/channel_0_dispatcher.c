@@ -366,6 +366,11 @@ size_t channel_0_dispatcher_drain(lagfx_protocol_t *p) {
 
     uint32_t write_ptr = p->write_ptr;
     uint32_t ring_size = p->ring_size;
+    /* With 16 KiB ring pages the first start_offset bytes of the ring buffer are the control area (stamp cells), and the root ring is what follows:
+     * size - start_offset (Henge's pvg_lite does the same). With 4 KiB pages the size is used as it always was. */
+    if (lagfx_ring_page_shift(p) != 12u && ring_size > p->ring_start_offset) {
+        ring_size -= p->ring_start_offset;
+    }
     uint64_t ring_base = p->ring_base_gpa;
 
     if (p->read_ptr == write_ptr) {

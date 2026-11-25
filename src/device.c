@@ -310,6 +310,11 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
      * and leave later devices stuck on whatever the first one picked. */
     lagfx_apply_thread_count_env(desc->thread_count);
 
+    if (desc->ring_page_shift != 0u && desc->ring_page_shift != 12u && desc->ring_page_shift != 14u) {
+        set_err(errp_out, "lagfx_device_new: ring_page_shift must be 0 (default 12), 12 or 14");
+        return NULL;
+    }
+
     lagfx_device_t *dev = (lagfx_device_t *)calloc(1, sizeof(*dev));
     if (!dev) {
         set_err(errp_out, "lagfx_device_new: out of memory");
@@ -332,6 +337,8 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
         free(dev);
         return NULL;
     }
+    proto->ring_page_shift = desc->ring_page_shift;   /* 0 = default 12 */
+    LAGFX_LOG("device_new: ring_page_shift=%u", lagfx_ring_page_shift(proto));
     dev->protocol_state = proto;
 
     /* Hand off register-shadow ownership to doorbell.c. This sets

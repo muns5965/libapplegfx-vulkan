@@ -210,7 +210,7 @@ size_t channel_display_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
         return 0;
     }
 
-    uint32_t ring_size = LAGFX_DISPLAY_RING_SIZE;
+    uint32_t ring_size = lagfx_ring_size_from_table(p, page0_gpa, LAGFX_DISPLAY_RING_SIZE);
 
     if (write_ptr == read_ptr) {
         LAGFX_TRACE("display drain: ch=%u caught up rp=0x%x wp=0x%x",
