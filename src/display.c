@@ -105,13 +105,20 @@ static void display_rt_tint(lagfx_display_t *disp) {
         if (vkEndCommandBuffer(cb) == VK_SUCCESS) {
             VkFence fence = VK_NULL_HANDLE;
             VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
-            vkCreateFence(vk->device, &fci, NULL, &fence);
+            if (vkCreateFence(vk->device, &fci, NULL, &fence) != VK_SUCCESS) {
+                lagfx_vk_cmdbuf_free(vk, cb);
+                return;
+            }
             VkSubmitInfo si = {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1, .pCommandBuffers = &cb,
             };
-            if (vkQueueSubmit(vk->graphics_queue, 1, &si, fence) == VK_SUCCESS)
-                vkWaitForFences(vk->device, 1, &fence, VK_TRUE, 1000000000ull);
+            VkResult submit = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+            if (submit == VK_SUCCESS &&
+                vkWaitForFences(vk->device, 1, &fence, VK_TRUE, 1000000000ull) != VK_SUCCESS) {
+                VkResult idle = vkDeviceWaitIdle(vk->device);
+                if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) return;
+            }
             if (fence != VK_NULL_HANDLE) vkDestroyFence(vk->device, fence, NULL);
             LAGFX_LOG("display_rt_tint: RT cleared teal once (raster-coverage test)");
         }
@@ -295,8 +302,15 @@ void lagfx_display_free(lagfx_display_t *display) {
         for (uint32_t i = 0; i < LAGFX_DISPLAY_STAGING_SLOTS; ++i) {
             lagfx_display_staging_slot_t *s = &display->staging[i];
             if (s->in_flight && s->fence != VK_NULL_HANDLE) {
-                vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
-                                1000ull * 1000ull * 1000ull);
+                VkResult wr = vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
+                                               1000ull * 1000ull * 1000ull);
+                if (wr != VK_SUCCESS) {
+                    VkResult idle = vkDeviceWaitIdle(vk->device);
+                    if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) {
+                        LAGFX_ERR("display_free: pending GPU work; retaining display");
+                        return;
+                    }
+                }
             }
             display_staging_slot_destroy(vk, s);
         }
@@ -698,12 +712,16 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
     };
     vkCmdBeginRendering(cb, &ri);
 
+    lagfx_status_t cursor_st = LAGFX_OK;
     if (want_cursor) {
-        lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
-                             cs->x, cs->y, cs->hot_x, cs->hot_y);
+        cursor_st = lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
+                                         cs->x, cs->y, cs->hot_x, cs->hot_y);
     }
-
     vkCmdEndRendering(cb);
+    if (cursor_st != LAGFX_OK) {
+        lagfx_vk_cmdbuf_free(vk, cb);
+        return cursor_st;
+    }
 
     vr = vkEndCommandBuffer(cb);
     if (vr != VK_SUCCESS) {
@@ -737,6 +755,12 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
 
     const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
     vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+    if (vr != VK_SUCCESS) {
+        vk->cursor_sync_failed = true;
+        VkResult idle = vkDeviceWaitIdle(vk->device);
+        if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
+            return LAGFX_ERR_BACKEND;
+    }
     vkDestroyFence(vk->device, fence, NULL);
     lagfx_vk_cmdbuf_free(vk, cb);
 
@@ -951,8 +975,15 @@ static lagfx_status_t display_staging_ring_ensure(lagfx_display_t *display,
     for (uint32_t i = 0; i < LAGFX_DISPLAY_STAGING_SLOTS; ++i) {
         lagfx_display_staging_slot_t *s = &display->staging[i];
         if (s->in_flight && s->fence != VK_NULL_HANDLE) {
-            vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
-                            1000ull * 1000ull * 1000ull);
+            VkResult wr = vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
+                                           1000ull * 1000ull * 1000ull);
+            if (wr != VK_SUCCESS) {
+                VkResult idle = vkDeviceWaitIdle(vk->device);
+                if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
+                    return LAGFX_ERR_BACKEND;
+                s->in_flight = false;
+                return LAGFX_ERR_BACKEND;
+            }
             s->in_flight = false;
         }
         display_staging_slot_destroy(vk, s);
@@ -1066,9 +1097,13 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
         .pColorAttachments    = &color_att,
     };
     vkCmdBeginRendering(cb, &ri);
-    lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
-                         cs->x, cs->y, cs->hot_x, cs->hot_y);
+    lagfx_status_t cursor_st = lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
+                                                    cs->x, cs->y, cs->hot_x, cs->hot_y);
     vkCmdEndRendering(cb);
+    if (cursor_st != LAGFX_OK) {
+        lagfx_vk_cmdbuf_free(vk, cb);
+        return cursor_st;
+    }
 
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) {
         lagfx_vk_cmdbuf_free(vk, cb);
@@ -1087,10 +1122,16 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
     };
     VkResult vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
     if (vr == VK_SUCCESS) {
-        vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
-                        1000ull * 1000ull * 1000ull);
+        vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
+                             1000ull * 1000ull * 1000ull);
+        if (vr != VK_SUCCESS) {
+            vk->cursor_sync_failed = true;
+            VkResult idle = vkDeviceWaitIdle(vk->device);
+            if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST)
+                return LAGFX_ERR_BACKEND;
+        }
         static int overlay_logged;
-        if (!overlay_logged) {
+        if (vr == VK_SUCCESS && !overlay_logged) {
             overlay_logged = 1;
             LAGFX_LOG("cursor overlay: drawn at (%d,%d) glyph %ux%u onto rt %ux%u",
                       (int)cs->x, (int)cs->y, (unsigned)cg->width,
