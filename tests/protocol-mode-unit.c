@@ -96,10 +96,26 @@ int main(void) {
     submit(x, 0x25, 0, xr, 2);
     assert(x2->active_objects.count == 1 && x2->active_objects.object_ids[0] == 0x77);
 
-    /* 0x38 puts a task in the slot equal to its id (compute_inner_ops indexes tasks[task_id]) */
+    /* Task ids and slots are independent: id 65 then id 0 (slot 0 holds id 65); find by id gives the right one, and
+     * inner ops (which now use find_task) must not see id 65 when asked for id 0. */
     x = mk(LAGFX_PROTO_X86);
-    lagfx_task_entry_t *x5 = def_task(x, 5), *x1 = def_task(x, 1);
-    assert(x5 == &x->tasks[5] && x1 == &x->tasks[1]);
+    lagfx_task_entry_t *x65 = def_task(x, 65), *x0 = def_task(x, 0);
+    assert(x65 != x0 && x65->id == 65 && x0->id == 0);
+    assert(lagfx_protocol_find_task(x, 65) == x65 && lagfx_protocol_find_task(x, 0) == x0);
+    assert(lagfx_protocol_find_task(x, 7) == NULL);
+    x65->active_objects.object_ids[0] = 0x99; x65->active_objects.count = 1;
+    /* arm64 0x25/0x20 on id 0 must not touch id 65 */
+    lagfx_protocol_t *y = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *y65 = def_task(y, 65), *y0 = def_task(y, 0);
+    y65->active_objects.object_ids[0] = 0x99; y65->active_objects.count = 1;
+    y0->active_objects.object_ids[0] = 0x99; y0->active_objects.count = 1;
+    uint32_t r0[2] = { 0, 0x99 };
+    submit(y, 0x25, 0, r0, 2);
+    assert(y0->active_objects.count == 0 && y65->active_objects.count == 1);
+    /* redefine the same id: same entry, state kept */
+    uint32_t w5[4] = { 130, 0, 0, 0x4321 };
+    submit(y, 0x38, 0, w5, 4);
+    assert(lagfx_protocol_find_task(y, 65) == y65 && y65->root_page_pfn == 0x4321 && y65->active_objects.count == 1);
 
     puts("protocol-mode-unit: ok");
     return 0;

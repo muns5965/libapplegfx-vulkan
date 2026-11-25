@@ -23,7 +23,8 @@
 
 
 /* === Constants =================================================== */
-#define LAGFX_MAX_TASKS        64u     /* Max concurrent tasks */
+#define LAGFX_MAX_TASKS        64u     /* Max concurrent tasks (slots in tasks[]) */
+#define LAGFX_MAX_TASK_ID      512u    /* Valid task ids are < this (Apple Henge's task table is 512 wide); a task is found by id, never by slot index. */
 
 #ifdef LAGFX_HAVE_VULKAN
 #  include <vulkan/vulkan.h>

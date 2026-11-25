@@ -79,14 +79,7 @@ bool lagfx_define_host_task(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
     }
     lagfx_task_entry_t *entry = lagfx_protocol_find_task(p, task_id);
     if (!entry) {
-        /* compute_inner_ops.c indexes p->tasks[task_id] directly, so a task goes in the slot that equals its id whenever that slot is free
-         * (ids >= LAGFX_MAX_TASKS fall back to the first free slot; those inner ops reject them anyway). */
-        if (task_id < LAGFX_MAX_TASKS && !p->tasks[task_id].live) {
-            entry = &p->tasks[task_id];
-            memset(entry, 0, sizeof *entry);
-        } else {
-            entry = lagfx_protocol_alloc_task_slot(p);
-        }
+        entry = lagfx_protocol_alloc_task_slot(p);   /* slot index is meaningless: every lookup goes through lagfx_protocol_find_task(id) */
         if (!entry) {
             LAGFX_WARN("CmdDefineHostTask: task table full (max=%u)", LAGFX_MAX_TASKS);
             return false;

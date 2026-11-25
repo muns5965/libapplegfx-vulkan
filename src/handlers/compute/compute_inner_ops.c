@@ -127,12 +127,12 @@ static int op_draw_primitives_16(lagfx_protocol_t *p,
                   body_len>=16?lagfx_le32(body+12):0, hx);
     }
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x01 DrawPrimitives16 task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x01 DrawPrimitives16 task_id=%u not live", task_id);
         return 1;
     }
@@ -171,9 +171,9 @@ static int op_draw_primitives_64(lagfx_protocol_t *p,
         LAGFX_WARN("compute_inner: 0x00 DrawPrimitives64 payload too small (%zu)", body_len);
         return 1;
     }
-    if (task_id >= LAGFX_MAX_TASKS) return 1;
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) return 1;
+    if (task_id >= LAGFX_MAX_TASK_ID) return 1;
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) return 1;
 
     char hx[160]; size_t hn = 0;
     for (size_t q = 0; q < body_len && q < 32u && hn + 3 < sizeof(hx); q++)
@@ -232,12 +232,12 @@ static int op_draw_instanced_primitives_16(lagfx_protocol_t *p,
     uint32_t prim           = lagfx_le16(body + 6);
     if (instance_count == 0u) instance_count = 1u;
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x03 DrawInstancedPrimitives16 task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x03 DrawInstancedPrimitives16 task_id=%u not live", task_id);
         return 1;
     }
@@ -278,12 +278,12 @@ static int op_draw_indexed_primitives_64(lagfx_protocol_t *p,
     uint32_t index_buffer_ref = lagfx_le32(body + 8);
     uint64_t index_buffer_offset = lagfx_le64(body + 12);
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x06 DrawIndexedPrimitives64 task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x06 DrawIndexedPrimitives64 task_id=%u not live", task_id);
         return 1;
     }
@@ -333,12 +333,12 @@ static int op_draw_indexed_primitives_16(lagfx_protocol_t *p,
     uint32_t index_count       = lagfx_le16(body + 8);
     uint32_t index_buffer_offset = lagfx_le16(body + 10);
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x07 DrawIndexedPrimitives16 task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x07 DrawIndexedPrimitives16 task_id=%u not live", task_id);
         return 1;
     }
@@ -487,12 +487,12 @@ static int op_render_describe_render_pass(lagfx_protocol_t *p,
         return 1;
     }
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x1a RenderDescribeRenderPass task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x1a RenderDescribeRenderPass task_id=%u not live", task_id);
         return 1;
     }
@@ -744,12 +744,12 @@ static int op_set_fragment_buffers(lagfx_protocol_t *p,
         return 1;
     }
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x6e SetFragmentBuffers task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x6e SetFragmentBuffers task_id=%u not live", task_id);
         return 1;
     }
@@ -803,12 +803,12 @@ static int op_set_fragment_buffer_offset(lagfx_protocol_t *p,
     uint32_t index  = lagfx_le32(body + 0);
     uint64_t offset = lagfx_le64(body + 4);
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x6f SetFragmentBufferOffset task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x6f SetFragmentBufferOffset task_id=%u not live", task_id);
         return 1;
     }
@@ -888,12 +888,12 @@ static int op_set_fragment_textures(lagfx_protocol_t *p,
         return 1;
     }
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x72 SetFragmentTextures task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x72 SetFragmentTextures task_id=%u not live", task_id);
         return 1;
     }
@@ -983,12 +983,12 @@ static int op_set_vertex_buffers(lagfx_protocol_t *p,
         return 1;
     }
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x7d SetVertexBuffers task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x7d SetVertexBuffers task_id=%u not live", task_id);
         return 1;
     }
@@ -1063,12 +1063,12 @@ static int op_set_vertex_buffer_offset(lagfx_protocol_t *p,
     uint32_t index  = lagfx_le32(body + 0);
     uint64_t offset = lagfx_le64(body + 4);
 
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x7e SetVertexBufferOffset task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x7e SetVertexBufferOffset task_id=%u not live", task_id);
         return 1;
     }
@@ -1105,12 +1105,12 @@ static int op_set_render_pipeline_state(lagfx_protocol_t *p,
     uint32_t reference = lagfx_le32(body + 0);
 
     /* Lookup current task_id by scanning p->tasks table. */
-    if (task_id >= LAGFX_MAX_TASKS) {
+    if (task_id >= LAGFX_MAX_TASK_ID) {
         LAGFX_WARN("compute_inner: 0x74 SetRenderPipelineState task_id=%u out of range", task_id);
         return 1;
     }
-    lagfx_task_entry_t *task = &p->tasks[task_id];
-    if (!task->live) {
+    lagfx_task_entry_t *task = lagfx_protocol_find_task(p, task_id);
+    if (!task || !task->live) {
         LAGFX_WARN("compute_inner: 0x74 SetRenderPipelineState task_id=%u not live", task_id);
         return 1;
     }
@@ -1660,23 +1660,24 @@ static int op_set_scissor_rect(lagfx_protocol_t *p,
     uint64_t h = lagfx_le64(body + 24);
     LAGFX_LOG("compute_inner: 0x75 SetScissorRect t%u origin=(%llu,%llu) size=%llux%llu",
               task_id, x, y, w, h);
+    lagfx_task_entry_t *tk = lagfx_protocol_find_task(p, task_id);
     /* Capture the scissor size as the authoritative per-pass surface size
      * (0x1a render_area is 0). Guard sane bounds. */
-    if (task_id < LAGFX_MAX_TASKS && p->tasks[task_id].live
+    if (tk
         && w >= 16u && w <= 16384u && h >= 16u && h <= 16384u) {
-        p->tasks[task_id].scissor_w = (uint32_t)w;
-        p->tasks[task_id].scissor_h = (uint32_t)h;
+        tk->scissor_w = (uint32_t)w;
+        tk->scissor_h = (uint32_t)h;
     }
     /* Current draw scissor (unguarded — a 1x1 clip is legitimate). Applied
      * per draw via vkCmdSetScissor; reset at 0x1a render-pass begin. */
-    if (task_id < LAGFX_MAX_TASKS && p->tasks[task_id].live
+    if (tk
         && w >= 1u && w <= 16384u && h >= 1u && h <= 16384u
         && x <= 16384u && y <= 16384u) {
-        p->tasks[task_id].sc_x = (uint32_t)x;
-        p->tasks[task_id].sc_y = (uint32_t)y;
-        p->tasks[task_id].sc_w = (uint32_t)w;
-        p->tasks[task_id].sc_h = (uint32_t)h;
-        p->tasks[task_id].sc_have = 1u;
+        tk->sc_x = (uint32_t)x;
+        tk->sc_y = (uint32_t)y;
+        tk->sc_w = (uint32_t)w;
+        tk->sc_h = (uint32_t)h;
+        tk->sc_have = 1u;
     }
     return 0;
 }
@@ -1705,17 +1706,18 @@ static int op_set_viewport(lagfx_protocol_t *p,
     u = lagfx_le64(body + 40); memcpy(&zfar, &u, 8);
     LAGFX_LOG("compute_inner: 0x82 SetViewport t%u origin=(%g,%g) size=%gx%g z=[%g..%g]",
               task_id, origin_x, origin_y, width, height, znear, zfar);
+    lagfx_task_entry_t *tk = lagfx_protocol_find_task(p, task_id);
     /* Store as the layer's destination rect for composite placement. Guard
      * sane bounds (positive, within a 16K display). */
-    if (task_id < LAGFX_MAX_TASKS && p->tasks[task_id].live
+    if (tk
         && width >= 1.0 && width <= 16384.0 && height >= 1.0 && height <= 16384.0
         && origin_x >= 0.0 && origin_x <= 16384.0 && origin_y >= 0.0 && origin_y <= 16384.0) {
-        p->tasks[task_id].vp_x = (uint32_t)(origin_x + 0.5);
-        p->tasks[task_id].vp_y = (uint32_t)(origin_y + 0.5);
-        p->tasks[task_id].vp_w = (uint32_t)(width + 0.5);
-        p->tasks[task_id].vp_h = (uint32_t)(height + 0.5);
-        p->tasks[task_id].vp_valid = 1u;
-        p->tasks[task_id].vp_current = 1u;   /* cleared at 0x1a pass begin */
+        tk->vp_x = (uint32_t)(origin_x + 0.5);
+        tk->vp_y = (uint32_t)(origin_y + 0.5);
+        tk->vp_w = (uint32_t)(width + 0.5);
+        tk->vp_h = (uint32_t)(height + 0.5);
+        tk->vp_valid = 1u;
+        tk->vp_current = 1u;   /* cleared at 0x1a pass begin */
     }
     return 0;
 }

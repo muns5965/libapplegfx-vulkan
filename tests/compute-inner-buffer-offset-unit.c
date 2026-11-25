@@ -42,8 +42,10 @@ static void put_le64(uint8_t *b, uint64_t v) {
 int main(void) {
     struct lagfx_protocol *p = calloc(1, sizeof(*p));
     if (!p) return 1;
+    p->magic = LAGFX_PROTOCOL_MAGIC;   /* find_task requires a valid protocol */
     uint32_t task_id = 3u;
     p->tasks[task_id].live = true;
+    p->tasks[task_id].id = task_id;   /* tasks are found by id, not slot */
 
     /* Pre-bind slot 1 so the offset update lands on a bound slot. */
     p->tasks[task_id].bindings.vertex_buffers[1].ref = 0x24u;
