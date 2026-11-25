@@ -606,7 +606,9 @@ VkDescriptorSet lagfx_build_draw_descriptor_set(
                     char bpath[96];
                     snprintf(bpath, sizeof(bpath), "/tmp/lagfx-binds/pipe0x%x-bind%u.bin",
                              task->pending_pipeline.reference, binding_no[i]);
+#ifndef LAGFX_NO_PROCESS /* see draw_emit.c */
                     (void)system("mkdir -p /tmp/lagfx-binds");
+#endif
                     FILE *bf = fopen(bpath, "wb");
                     if (bf) {
                         fwrite(data, 1, LAGFX_DRAW_DS_BUF_SZ, bf);

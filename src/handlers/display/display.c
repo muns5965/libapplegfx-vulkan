@@ -119,7 +119,11 @@ void lagfx_dump_all_passes(lagfx_protocol_t *p, lagfx_display_t *disp);
 void lagfx_dump_all_passes(lagfx_protocol_t *p, lagfx_display_t *disp) {
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     if (!dev || !dev->vk) return;
+#ifdef LAGFX_NO_PROCESS /* debug dump only; needs system(), which the Henge runner forbids */
+    return;
+#else
     system("mkdir -p /tmp/lagfx-passes");
+#endif
     /* every registered IOSurface = a per-pass render target or texture */
     for (uint32_t i = 0; i < p->resources.count; i++) {
         lagfx_resource_entry_t *e = &p->resources.entries[i];

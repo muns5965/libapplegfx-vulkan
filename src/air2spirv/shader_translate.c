@@ -77,7 +77,11 @@ static char *find_llc_binary(void) {
     }
 
     /* Try system PATH via which(1). */
+#ifdef LAGFX_NO_PROCESS
+    FILE *f = NULL; /* no which(1) lookup without process creation; only the fixed fallbacks above */
+#else
     FILE *f = popen("which llc 2>/dev/null", "r");
+#endif
     if (f) {
         char buf[256];
         if (fgets(buf, sizeof(buf), f)) {

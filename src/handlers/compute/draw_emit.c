@@ -1177,7 +1177,9 @@ void lagfx_emit_pending_draw(lagfx_protocol_t *p, lagfx_task_entry_t *task,
                     if (vks->last_draw_wait_ms >= thresh
                         && vks->slow_bind_dumps < 16u) {
                         uint32_t seq = vks->slow_bind_dumps++;
+#ifndef LAGFX_NO_PROCESS /* Android/Henge runner: no process creation allowed; the dump simply finds no directory */
                         (void)system("mkdir -p /tmp/lagfx-binds-slow");
+#endif
                         for (uint32_t w = 0; w < task->slowsnap_n; w++) {
                             char bp[128];
                             snprintf(bp, sizeof(bp),
