@@ -90,6 +90,7 @@ void lagfx_protocol_complete_stamp_slot(lagfx_protocol_t *p, uint32_t slot, uint
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     if (dev && dev->desc.shell.raise_interrupt) {
         dev->desc.shell.raise_interrupt(dev->desc.shell.opaque, 0u);
+        p->diag2.irq_raised++;
     }
 
     LAGFX_LOG("complete_stamp[slot=%u]: stamp=0x%08x mask=0x%x",

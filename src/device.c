@@ -17,6 +17,7 @@
 #include "doorbell.h"
 #include "display.h"
 #include "protocol/state.h"  /* lagfx_protocol_t typedef */
+#include "protocol/diag.h"
 #include "vulkan/instance.h"
 #include "vulkan/iosurface.h"   /* white_fb teardown */
 #include "shaders/catalog.h"
@@ -90,12 +91,14 @@ static VkShaderModule load_spv_module(VkDevice device, const char *path) {
 uint32_t lagfx_mmio_read(lagfx_device_t *device, uint64_t offset) {
     if (!lagfx_device_is_valid(device)) return 0;
     if (offset < LAGFX_MSIX_RANGE_END) return 0;  /* MSI-X — shell owns */
+    lagfx_diag_mmio((lagfx_protocol_t *)device->protocol_state, false);
     return doorbell_handle_read(device->protocol_state, offset);
 }
 
 void lagfx_mmio_write(lagfx_device_t *device, uint64_t offset, uint32_t value) {
     if (!lagfx_device_is_valid(device)) return;
     if (offset < LAGFX_MSIX_RANGE_END) return;  /* MSI-X — shell owns */
+    lagfx_diag_mmio((lagfx_protocol_t *)device->protocol_state, true);
     doorbell_handle_write(device->protocol_state, offset, value);
 }
 
@@ -159,6 +162,10 @@ static FILE *lagfx_log_file = NULL;
  * Opens the configured log file once, flushes after every write to ensure
  * real-time visibility in Docker logs. Falls back to stderr if file open
  * fails. */
+static uint64_t lagfx_log_bytes = 0, lagfx_log_errs = 0;
+uint64_t lagfx_log_bytes_written(void) { return lagfx_log_bytes; }
+uint64_t lagfx_log_write_errors(void) { return lagfx_log_errs; }
+
 static void lagfx_log_internal(const char *prefix, const char *fmt, va_list args) {
     /* Initialize opcode trace array from env var on first log call */
     lagfx_init_opcode_trace();
@@ -201,9 +208,10 @@ static void lagfx_log_internal(const char *prefix, const char *fmt, va_list args
 
     va_list args_copy;
     va_copy(args_copy, args);
-    fprintf(lagfx_log_file, "LAGFX [%s] ", prefix);
-    vfprintf(lagfx_log_file, fmt, args_copy);
-    fprintf(lagfx_log_file, "\n");
+    int w1 = fprintf(lagfx_log_file, "LAGFX [%s] ", prefix);
+    int w2 = vfprintf(lagfx_log_file, fmt, args_copy);
+    int w3 = fprintf(lagfx_log_file, "\n");
+    if (w1 < 0 || w2 < 0 || w3 < 0) lagfx_log_errs++; else lagfx_log_bytes += (uint64_t)(w1 + w2 + w3);
     fflush(lagfx_log_file);  /* Ensure immediate flush for real-time visibility */
     va_end(args_copy);
 }

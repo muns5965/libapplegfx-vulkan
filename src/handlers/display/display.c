@@ -473,8 +473,9 @@ lagfx_handler_status_t lagfx_display_vchan_display_submit(
         arg2          = lagfx_le32(hdr->payload + 4);
     }
 
-    LAGFX_LOG("vchan_display_submit: display[%u] arg2=0x%08x stamp=0x%08x",
-              display_index, arg2, hdr->stamp);
+    LAGFX_LOG("vchan_display_submit: display[%u] arg2=0x%08x stamp=0x%08x ch=%u",
+              display_index, arg2, hdr->stamp, (unsigned)p->current_chan_id);
+    p->diag2.display_submits++;
 
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
 
@@ -602,6 +603,7 @@ lagfx_handler_status_t lagfx_display_vchan_display_submit(
 
             lagfx_status_t st = lagfx_display_submit_rendered_frame(
                 disp, fb_base, scanout_len);
+            if (st == LAGFX_OK) p->diag2.display_submit_rendered++;
             /* Sustained present bench (LAGFX_BENCH_PRESENTS=N, once): the idle
              * guest presents too sparsely for a representative fps number, so
              * drive the FULL production present path (cursor overlay + composite
@@ -653,9 +655,15 @@ lagfx_handler_status_t lagfx_display_vchan_display_submit(
              * if we get a submit before the display struct exists, just
              * stamp and skip — the next submit will land. */
             LAGFX_LOG("vchan_display_submit: display[%u] not yet "
-                      "instantiated — submit skipped",
-                      display_index);
+                      "instantiated — submit skipped (dev->display_count=%u of max %u: displays are made by the shell with lagfx_display_new)",
+                      display_index, (unsigned)dev->display_count, (unsigned)LAGFX_MAX_DISPLAYS);
+            p->diag2.display_submit_skipped_null++;
         }
+    } else if (dev) {
+        /* Before this diagnostic line an index >= LAGFX_MAX_DISPLAYS fell through here without any log. */
+        LAGFX_LOG("vchan_display_submit: display[%u] index >= LAGFX_MAX_DISPLAYS (%u) — ignored, no display object can exist for it",
+                  display_index, (unsigned)LAGFX_MAX_DISPLAYS);
+        p->diag2.display_submit_ignored_index++;
     }
 
     return LAGFX_HANDLER_OK;

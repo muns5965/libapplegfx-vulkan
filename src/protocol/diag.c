@@ -1,0 +1,75 @@
+/*
+ * libapplegfx-vulkan — command diagnostics. See diag.h. Logging and counters only.
+ */
+#include "diag.h"
+#include "state.h"
+#include "../common/log.h"
+
+#include <stdio.h>
+#include <time.h>
+
+static uint64_t now_ns(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static const char *src_name(int src) { return src == LAGFX_DIAG_ROOT ? "root" : src == LAGFX_DIAG_COMPUTE ? "compute" : "display"; }
+
+void lagfx_diag_note_0x44(lagfx_protocol_t *p, uint32_t chan, uint32_t task) {
+    if (!p) return;
+    if (chan < LAGFX_MAX_CHANNELS) { p->diag2.last44_task[chan] = task; p->diag2.last44_valid[chan] = 1; }
+    p->diag2.last44_global_task = task; p->diag2.last44_global_seq = p->diag2.seq; p->diag2.last44_global_valid = 1;
+}
+
+void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, const uint8_t *raw, uint32_t length) {
+    if (!p || !raw || length < 12u || src < 0 || src > 2) return;
+    uint64_t t = now_ns();
+    if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; }
+    p->diag2.last_cmd_ns = t;
+    uint64_t seq = ++p->diag2.seq;
+    uint16_t op = (uint16_t)(raw[0] | raw[1] << 8);
+    uint16_t arg8 = (uint16_t)(raw[2] | raw[3] << 8);
+    uint32_t stamp = (uint32_t)raw[8] | (uint32_t)raw[9] << 8 | (uint32_t)raw[10] << 16 | (uint32_t)raw[11] << 24;
+    p->diag2.src_cmds[src]++;
+    uint64_t n = ++p->diag2.op_count[src][op & 0xff];
+    if (src == LAGFX_DIAG_COMPUTE && op == 0x20) p->diag2.exec_20++;
+    if (op == 0x43 || op == 0x45) p->diag2.exec_43_45++;
+    /* Bounded: the first 64 of each (source, opcode) and every 64th after that; root commands only the first 16. Counters above never stop. */
+    uint64_t cap = src == LAGFX_DIAG_ROOT ? 16u : 64u;
+    if (n > cap && (n % 64u) != 0u) return;
+    char hex[3 * 64 + 8]; uint32_t shown = length < 64u ? length : 64u, o = 0;
+    for (uint32_t i = 0; i < shown; i++) o += (uint32_t)snprintf(hex + o, sizeof hex - o, "%02x ", raw[i]);
+    if (shown < length) snprintf(hex + o, sizeof hex - o, "...");
+    LAGFX_LOG("diag cmd #%llu t=+%llums src=%s ch=%u rp=0x%x op=0x%04x n=%llu len=%u arg8=%u (barrier bytes %u) stamp=0x%08x raw: %s",
+              (unsigned long long)seq, (unsigned long long)((t - p->diag2.t0_ns) / 1000000ull), src_name(src), chan, rp, op,
+              (unsigned long long)n, length, arg8, (unsigned)arg8 * 8u, stamp, hex);
+}
+
+void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
+    if (!p) return;
+    /* two vCPU threads can arrive here: relaxed atomics keep the counts honest */
+    if (is_write) __atomic_fetch_add(&p->diag2.mmio_writes, 1, __ATOMIC_RELAXED); else __atomic_fetch_add(&p->diag2.mmio_reads, 1, __ATOMIC_RELAXED);
+    /* The clock is looked at only every 256th access. */
+    if (((p->diag2.mmio_reads + p->diag2.mmio_writes) & 0xffu) != 0u) return;
+    uint64_t t = now_ns();
+    p->diag2.last_mmio_ns = t;
+    if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; return; }
+    if (t - p->diag2.last_stats_ns < 10ull * 1000000000ull) return;
+    p->diag2.last_stats_ns = t;
+    char line[900];
+    uint64_t age_cmd = p->diag2.last_cmd_ns ? (t - p->diag2.last_cmd_ns) / 1000000ull : 0;
+    snprintf(line, sizeof line,
+             "g7-gpu: t=+%llus mmio_reads=%llu mmio_writes=%llu root_commands=%llu compute_commands=%llu display_commands=%llu unknown_commands=%llu "
+             "exec20=%llu exec43_45=%llu display_submits=%llu display_submit_no_object=%llu display_submit_index_ignored=%llu display_submit_rendered=%llu "
+             "irq_raised=%llu last_command_age_ms=%llu log_bytes=%llu log_write_errors=%llu",
+             (unsigned long long)((t - p->diag2.t0_ns) / 1000000000ull), (unsigned long long)p->diag2.mmio_reads, (unsigned long long)p->diag2.mmio_writes,
+             (unsigned long long)p->diag2.src_cmds[0], (unsigned long long)p->diag2.src_cmds[1], (unsigned long long)p->diag2.src_cmds[2],
+             (unsigned long long)p->unknown_opcode_count, (unsigned long long)p->diag2.exec_20, (unsigned long long)p->diag2.exec_43_45,
+             (unsigned long long)p->diag2.display_submits, (unsigned long long)p->diag2.display_submit_skipped_null,
+             (unsigned long long)p->diag2.display_submit_ignored_index, (unsigned long long)p->diag2.display_submit_rendered,
+             (unsigned long long)p->diag2.irq_raised, (unsigned long long)age_cmd,
+             (unsigned long long)lagfx_log_bytes_written(), (unsigned long long)lagfx_log_write_errors());
+    fprintf(stderr, "%s\n", line);
+    LAGFX_LOG("%s", line);
+}

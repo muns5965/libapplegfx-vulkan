@@ -1293,6 +1293,20 @@ if fs.is_file(meson.current_source_dir() / 'task-define-unit.c')
   test('compute task define 0x38/0x44 (unit)', task_define_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'diag-unit.c')
+  diag_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    diag_deps += [vulkan_dep]
+  endif
+  diag_test = executable('diag-unit',
+    'diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : diag_deps,
+    build_by_default : true,
+  )
+  test('command diagnostics (unit)', diag_test)
+endif
+
 # Vertex float-plausibility scorer: text/poison score ~0, real floats ~100.
 if fs.is_file(meson.current_source_dir() / 'vtx-plausibility-unit.c') and vulkan_dep.found()
   vtx_plaus_test = executable('vtx-plausibility-unit',

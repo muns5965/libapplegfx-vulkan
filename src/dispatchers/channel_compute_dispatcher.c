@@ -30,6 +30,7 @@
 #include "../common/log.h"
 #include "protocol/opcodes.h"
 #include "protocol/state.h"
+#include "protocol/diag.h"
 #include "protocol/object_resolver.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
@@ -106,6 +107,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
          * events. Documented in paravirt-re/library/PROTOCOL.md §13
          * + journey/opcodes-0x35-0x36-0x39.md. */
         case LAGFX_OP_UNMAP_MEMORY_IMMEDIATE: /* 0x22 — CmdUnmapMemoryImmediate */
+            /* (raw bytes of every 0x20/0x22/0x25 are logged by lagfx_diag_cmd before this switch) */
             LAGFX_LOG("compute: 0x22 CmdUnmapMemoryImmediate ch=%u stamp=0x%08x "
                       "payload_size=%u",
                       (unsigned)p->current_chan_id, hdr->stamp,
@@ -155,6 +157,21 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                 for (uint32_t ti = 0; ti < LAGFX_MAX_TASKS; ti++) {
                     if (p->tasks[ti].live) { task = &p->tasks[ti]; break; }
                 }
+                {   /* diagnostics only: which task the fallback picked, which are live, and which task the last 0x44 named (not known to be the same one) */
+                    char live[160]; uint32_t lo = 0, nlive = 0;
+                    live[0] = 0;
+                    for (uint32_t ti = 0; ti < LAGFX_MAX_TASKS; ti++) {
+                        if (!p->tasks[ti].live) continue;
+                        nlive++;
+                        if (lo + 12 < sizeof live) lo += (uint32_t)snprintf(live + lo, sizeof live - lo, "%u ", p->tasks[ti].id);
+                    }
+                    uint32_t ch = p->current_chan_id;
+                    LAGFX_LOG("diag 0x25 ch=%u stamp=0x%08x arg8=%u picked_task=%d (first live, fallback) live_tasks=%u [%s] last0x44_on_this_ch=%s%u last0x44_any_ch=%s%u (%llu cmds ago) payload_first_u32=%u",
+                              ch, hdr->stamp, (unsigned)hdr->arg_count_8b, task ? (int)task->id : -1, nlive, live,
+                              (ch < LAGFX_MAX_CHANNELS && p->diag2.last44_valid[ch]) ? "" : "none:", (ch < LAGFX_MAX_CHANNELS) ? p->diag2.last44_task[ch] : 0u,
+                              p->diag2.last44_global_valid ? "" : "none:", p->diag2.last44_global_task,
+                              (unsigned long long)(p->diag2.seq - p->diag2.last44_global_seq), lagfx_le32(hdr->payload));
+                }
                 if (task) {
                     register_active_object(task, object_id);
                     LAGFX_LOG("compute: 0x25 registered objectId=0x%x (count=%u) in task=%u (active=%u)",
@@ -169,6 +186,8 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             lagfx_define_host_task(p, hdr);
             break;
         case 0x44:                            /* task object/placement lists (pvg_lite.c:834) */
+            if (hdr->payload && hdr->payload_size >= (uint32_t)hdr->arg_count_8b * 8u + 4u)
+                lagfx_diag_note_0x44(p, p->current_chan_id, lagfx_le32(hdr->payload + (uint32_t)hdr->arg_count_8b * 8u));
             lagfx_define_task_lists(p, hdr);
             break;
         case LAGFX_OP_IOSURFACE_LOOKUP:       /* 0x28 */
@@ -446,6 +465,7 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
                               ? (cmd_buf + LAGFX_CMD_HEADER_BYTES)
                               : NULL;
 
+        lagfx_diag_cmd(p, LAGFX_DIAG_COMPUTE, chan_id, rp, cmd_buf, length);   /* diagnostics only */
         dispatch_command(p, &hdr);
 
         /* Per-channel stamp slot = chan_id (1..4 → SLOT_COMPUTE_1..4). */

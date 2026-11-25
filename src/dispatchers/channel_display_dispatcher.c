@@ -32,6 +32,7 @@
 #include "../common/log.h"
 #include "protocol/opcodes.h"
 #include "protocol/state.h"
+#include "protocol/diag.h"
 #include "handlers/handlers.h"
 
 #include <stddef.h>
@@ -289,6 +290,7 @@ size_t channel_display_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
                               ? (cmd_buf + LAGFX_CMD_HEADER_BYTES)
                               : NULL;
 
+        lagfx_diag_cmd(p, LAGFX_DIAG_DISPLAY, chan_id, rp, cmd_buf, length);   /* diagnostics only */
         dispatch_command(p, &hdr);
 
         /* Display slots are chan_id (5+); see SLOT_DISPLAY_PIPE_0. */

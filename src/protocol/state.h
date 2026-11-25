@@ -528,6 +528,21 @@ typedef struct lagfx_protocol {
         uint8_t  bench_done;
     } diag;
 
+    /* Diagnostics only (no behaviour depends on it): global command sequence, per-source/opcode counters, last 0x44 task per channel, timing.
+     * See src/protocol/diag.c. Times are CLOCK_MONOTONIC nanoseconds. */
+    struct {
+        uint64_t seq;                    /* every command seen by a drain loop, all channels */
+        uint64_t t0_ns, last_stats_ns, last_cmd_ns, last_mmio_ns;
+        uint64_t mmio_reads, mmio_writes;
+        uint64_t src_cmds[3];            /* 0 root, 1 compute, 2 display */
+        uint64_t op_count[3][256];       /* opcode & 0xff */
+        uint64_t exec_20, exec_43_45, unknown_cmds;
+        uint64_t display_submits, display_submit_skipped_null, display_submit_ignored_index, display_submit_rendered;
+        uint64_t irq_raised;
+        uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
+        uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;
+    } diag2;
+
     /* Command counters (for diagnostics) */
     uint64_t total_cmds_seen;
     uint64_t total_cmds_completed;

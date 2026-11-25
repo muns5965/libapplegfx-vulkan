@@ -28,6 +28,7 @@
 #include "../common/log.h"
 #include "protocol/opcodes.h"
 #include "protocol/state.h"
+#include "protocol/diag.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
 
@@ -85,6 +86,11 @@ bool lagfx_define_host_task(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
         }
         entry->id   = task_id;
         entry->live = true;
+    }
+    if (entry->live && entry->root_page_pfn != 0u) {   /* diagnostics only: an existing task gets a new root; nothing else about it is reset here */
+        LAGFX_LOG("CmdDefineHostTask: taskID=%u REDEFINED old_root_pfn=0x%llx new_root_pfn=0x%x (kept: lists_set=%d objects=0x%llx placement=0x%llx active_objects=%u)",
+                  task_id, (unsigned long long)entry->root_page_pfn, root_page_pfn, (int)entry->lists_set,
+                  (unsigned long long)entry->objects_addr, (unsigned long long)entry->placement_addr, (unsigned)entry->active_objects.count);
     }
     entry->root_page_pfn = (uint64_t)root_page_pfn;
     LAGFX_LOG("CmdDefineHostTask: taskID=%u root_page_pfn=0x%x skip=%u stamp=0x%08x",
@@ -531,6 +537,7 @@ size_t channel_0_dispatcher_drain(lagfx_protocol_t *p) {
             LAGFX_TRACE("ch0 drain: bytes[%u] %s", dump_len, hexline);
         }
 
+        lagfx_diag_cmd(p, LAGFX_DIAG_ROOT, 0u, rp, cmd_buf, length);   /* diagnostics only */
         dispatch_command(p, &hdr);
 
         /* Every root-channel command unconditionally signals its
