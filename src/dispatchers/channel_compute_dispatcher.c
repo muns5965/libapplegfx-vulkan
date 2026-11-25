@@ -432,8 +432,17 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
 
     uint32_t rp = read_ptr;
     size_t cmds = 0;
+    const bool a64 = lagfx_proto_arm64(p);
+    /* ARM64 (Apple pvg_lite.c do_channel): free-running u32 counters; more pending than the ring holds means the pointers are garbage: drop it all. */
+    if (a64 && (uint32_t)(write_ptr - rp) > ring_size) {
+        LAGFX_WARN("compute drain: ch=%u %x bytes pending in a %x-byte ring; dropped", chan_id, (unsigned)(write_ptr - rp), ring_size);
+        rp = write_ptr;
+    }
     for (unsigned i = 0; i < LAGFX_COMPUTE_DRAIN_MAX_CMDS; ++i) {
         if (rp == write_ptr) break;
+        if (a64 && (uint32_t)(write_ptr - rp) < LAGFX_CMD_HEADER_BYTES) {   /* a partial header is not yet a command: wait, do not read past wp */
+            break;
+        }
 
         /* Header read MUST be chunk-resolved: at rp=0xffc the 12-byte header
          * straddles the ring-page boundary and the ring's data pages are NOT
@@ -453,6 +462,19 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
         uint32_t length       = lagfx_le32(hdr_buf + 4);
         uint32_t stamp        = lagfx_le32(hdr_buf + 8);
 
+        if (a64 && (length < LAGFX_CMD_HEADER_BYTES || length > (uint32_t)(write_ptr - rp) || (length & 3u))) {
+            /* Apple drops the rest of the ring on such a command instead of stopping with rp unmoved (which would stall this channel forever). */
+            LAGFX_WARN("compute drain: ch=%u bad command len=0x%x op=0x%04x at rp=0x%x (%x bytes pending); rest dropped",
+                       chan_id, length, opcode, rp, (unsigned)(write_ptr - rp));
+            rp = write_ptr;
+            break;
+        }
+        if (a64 && length > LAGFX_COMPUTE_MAX_CMD_BYTES && length <= ring_size) {
+            /* valid for Apple, larger than our scratch: skip it visibly rather than stall */
+            LAGFX_WARN("compute drain: ch=%u command len=0x%x op=0x%04x exceeds scratch; skipped", chan_id, length, opcode);
+            rp += length;
+            continue;
+        }
         if (length < LAGFX_CMD_HEADER_BYTES ||
             length > LAGFX_COMPUTE_MAX_CMD_BYTES ||
             length > ring_size) {

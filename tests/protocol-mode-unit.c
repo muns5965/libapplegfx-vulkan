@@ -5,6 +5,7 @@
 #include "protocol/state.h"
 #include "device.h"
 #include "doorbell.h"
+#include "dispatchers/channel_door_dispatcher.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +181,65 @@ int main(void) {
         ((lagfx_device_t *)x->dev)->desc.shell.display_command = disp_cb;
         submit(x, 0x01, 0, w, 2);
         assert(g_disp_n == 3);
+    }
+
+    /* Child ring robustness (arm64): bad length drops the rest instead of stalling; partial header waits; absurd pending resyncs; ch5..15 go through the same set */
+    {
+        lagfx_protocol_t *d = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        ((lagfx_device_t *)d->dev)->desc.shell.display_command = disp_cb;
+        uint64_t desc = ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET;
+        uint32_t w[2] = {0, 0};
+        g_disp_n = 0;
+        /* 1) length not a multiple of 4: dropped, rp = wp, later commands still work */
+        uint8_t bad[16] = {0}; uint16_t op = 0x01; uint32_t blen = 14;
+        memcpy(bad, &op, 2); memcpy(bad + 4, &blen, 4);
+        memcpy(g_mem + ((uint64_t)RING_PFN0 << 14) + g_wp, bad, 16); g_wp += 16;
+        put32(desc + 0, g_wp);
+        d->current_chan_id = 1; channel_compute_dispatcher_drain(d, 1);
+        uint32_t rpv; memcpy(&rpv, g_mem + desc + 4, 4);
+        assert(rpv == g_wp && g_disp_n == 0);
+        submit(d, 0x01, 0, w, 2);
+        assert(g_disp_n == 1);
+        /* 2) length larger than what is pending: dropped, not read past wp */
+        uint32_t big = 64; memcpy(bad + 4, &big, 4);
+        memcpy(g_mem + ((uint64_t)RING_PFN0 << 14) + g_wp, bad, 16); g_wp += 16;
+        put32(desc + 0, g_wp);
+        channel_compute_dispatcher_drain(d, 1);
+        memcpy(&rpv, g_mem + desc + 4, 4);
+        assert(rpv == g_wp);
+        /* 3) fewer than 12 bytes pending: wait, rp unchanged */
+        uint32_t before; memcpy(&before, g_mem + desc + 4, 4);
+        g_wp += 8; put32(desc + 0, g_wp);
+        channel_compute_dispatcher_drain(d, 1);
+        memcpy(&rpv, g_mem + desc + 4, 4);
+        assert(rpv == before);
+        g_wp -= 8; put32(desc + 0, g_wp);
+        /* 4) pending beyond the ring: resync */
+        put32(desc + 0, before + 0x20000u);
+        channel_compute_dispatcher_drain(d, 1);
+        memcpy(&rpv, g_mem + desc + 4, 4);
+        assert(rpv == before + 0x20000u);
+        g_wp = before + 0x20000u;
+        /* 5) through the doorbell dispatcher: ch4 and ch5 both reach the display callback in arm64; ch5 in x86 does not */
+        for (uint32_t ch = 4; ch <= 5; ch++) {
+            uint64_t dc = desc + 0x14u * (ch - 1);
+            uint32_t n0 = g_disp_n;
+            put32(dc + 0x0c, ch); put32(dc + 0x10, TABLE_PFN);
+            uint8_t c[20] = {0}; uint16_t o = 0x08; uint32_t l = 20, st = 7;
+            memcpy(c, &o, 2); memcpy(c + 4, &l, 4); memcpy(c + 8, &st, 4);
+            memcpy(g_mem + ((uint64_t)RING_PFN0 << 14), c, 20);                    /* rp=wp=0 for this channel's descriptor: command at offset 0 */
+            put32(dc + 0, 20); put32(dc + 4, 0);
+            channel_door_dispatcher_dispatch(d, ch);
+            assert(g_disp_n == n0 + 1 && g_disp_chan == ch);
+        }
+        lagfx_protocol_t *x = mk(LAGFX_PROTO_X86);
+        ((lagfx_device_t *)x->dev)->desc.shell.display_command = disp_cb;
+        uint32_t n0 = g_disp_n;
+        uint64_t dc5 = desc + 0x14u * 4;
+        put32(dc5 + 0x0c, 5); put32(dc5 + 0x10, TABLE_PFN);
+        put32(dc5 + 0, 20); put32(dc5 + 4, 0);
+        channel_door_dispatcher_dispatch(x, 5);
+        assert(g_disp_n == n0);
     }
 
     puts("protocol-mode-unit: ok");

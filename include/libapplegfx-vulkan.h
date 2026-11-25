@@ -137,8 +137,8 @@ typedef struct {
 
     /* OPTIONAL, protocol_mode == LAGFX_PROTO_ARM64_VMAPPLE only. Called for the Display ops (1 set-page, 2 ack, 8 swap) found on any child
      * channel, with the raw command exactly as the guest wrote it: 12-byte header {u16 op, u16 barrier-slot count, u32 length, u32 stamp},
-     * the barrier slots, then the arguments. `len` is the header's length. The shell owns the shared display page, event bit and IRQ for these
-     * ops; the library does not touch them (no double handling). NULL: the ops are logged and ignored. */
+     * the barrier slots, then the arguments. `len` is the header's length. The shell owns the shared display page and the swapped-surface state for these
+     * ops. The library still completes the stamp cell and raises the interrupt (raise_interrupt) after the callback returns, as for every command. NULL: the ops are logged and ignored. */
     void (*display_command)(void *opaque, uint32_t chan_id, const uint8_t *cmd, uint32_t len);
 } lagfx_shell_callbacks_t;
 
