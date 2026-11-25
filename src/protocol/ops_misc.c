@@ -289,7 +289,51 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
         { 0x29, 0          }, /* SupportedTextureWriteRoundingModes */
         { 0x00, 0          }, /* end-of-stream sentinel */
     };
-    const size_t n_pairs = sizeof(pairs) / sizeof(pairs[0]);
+    /* ARM64 vmapple: devices/pvg_lite.c device_info[] verbatim (Apple Henge, research/android-port 53f0d72). */
+    static const struct { uint32_t key; uint32_t value; } arm64_pairs[] = {
+        { 0x01, 4 },
+        { 0x02, 0 },
+        { 0x03, 0x400 },
+        { 0x04, 0x400 },
+        { 0x05, 0x400 },
+        { 0x06, 0x8000 },
+        { 0x07, 1 },
+        { 0x08, 1 },
+        { 0x09, 1 },
+        { 0x0a, 8 },
+        { 0x0b, 0x1ff },
+        { 0x0c, 1 },
+        { 0x0d, 0x10 },
+        { 0x0e, 1 },
+        { 0x0f, 0x100 },
+        { 0x10, 1 },
+        { 0x11, 1 },
+        { 0x12, 0x20007 },
+        { 0x13, 1 },
+        { 0x14, 2 },
+        { 0x15, 1 },
+        { 0x16, 2 },
+        { 0x17, 1 },
+        { 0x18, 1 },
+        { 0x19, 1 },
+        { 0x1a, 1 },
+        { 0x1b, 1 },
+        { 0x1c, 7 },
+        { 0x21, 0xfff },
+        { 0x24, 0xffffffff },
+        { 0x1d, 0x400 },
+        { 0x1e, 0x1f },
+        { 0x1f, 0x10000 },
+        { 0x20, 0x10 },
+        { 0x22, 5 },
+        { 0x29, 7 },
+        { 0x23, 0x800 },
+        { 0x25, 0x3f1 },
+        { 0x28, 0x10 },
+        { 0x00, 0 },
+    };
+    const bool arm64 = lagfx_proto_arm64(p);
+    const size_t n_pairs = arm64 ? sizeof(arm64_pairs) / sizeof(arm64_pairs[0]) : sizeof(pairs) / sizeof(pairs[0]);
 
     /* resp_qwords is in 8-byte units; each pair is 8 bytes, so the
      * capacity in pairs is resp_qwords (one qword == one pair). Clamp
@@ -300,14 +344,13 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
     if (!dev->desc.shell.write_memory(dev->desc.shell.opaque,
                                        resp_gpa,
                                        emit_pairs * sizeof(pairs[0]),
-                                       pairs)) {
+                                       arm64 ? (const void *)arm64_pairs : (const void *)pairs)) {
         LAGFX_WARN("CmdGetDeviceInfo2: DMA writeback failed to gpa=0x%llx",
                    (unsigned long long)resp_gpa);
         return LAGFX_HANDLER_ERR_INTERNAL;
     }
 
-    LAGFX_LOG("CmdGetDeviceInfo2: wrote %zu TLV pairs to resp page "
-              "(MSAA=4, MaxMetalShaderVersion=0x20008, HostGPUFamily=0x10005)",
-              emit_pairs);
+    LAGFX_LOG("CmdGetDeviceInfo2: wrote %zu TLV pairs to resp page (%s table)",
+              emit_pairs, arm64 ? "arm64-vmapple/Apple Henge" : "x86");
     return LAGFX_HANDLER_OK;
 }

@@ -297,8 +297,10 @@ uint32_t doorbell_handle_read(void *protocol_state, uint64_t offset) {
 
     /* Capability gate — modern paravirt path indicator */
     if (offset == 0x122cu) {
-        LAGFX_TRACE("doorbell: read off=0x122c cap_gate → 9");
-        return 9u;
+        /* arm64 vmapple: Apple Henge pvg_lite.c answers "number of displays" = 1. */
+        uint32_t v = lagfx_proto_arm64(p) ? 1u : 9u;
+        LAGFX_TRACE("doorbell: read off=0x122c cap_gate → %u", v);
+        return v;
     }
 
     /* Display bitmask — atomic xchg-and-clear with acquire ordering.
