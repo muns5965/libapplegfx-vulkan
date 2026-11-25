@@ -22,6 +22,7 @@
  */
 
 #include "channel_compute_dispatcher.h"
+#include "channel_0_dispatcher.h"
 #include "ring_common.h"
 #include "../doorbell.h"
 #include "../device.h"
@@ -142,6 +143,14 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                  * task association on the channel (or fall back to
                  * task[0] if not yet bound, which matches the
                  * observed early-boot pattern). */
+                /* NOTE: the 0x25 payload carries no task id; pvg_lite.c does not
+                 * decode 0x25 either, so the task is NOT known. First-live-task
+                 * is a fallback only; raw payload logged for verification. */
+                LAGFX_LOG("compute: 0x25 raw arg_count_8b=%u first16=%08x %08x %08x %08x (task selection=fallback)",
+                          (unsigned)hdr->arg_count_8b,
+                          lagfx_le32(hdr->payload), lagfx_le32(hdr->payload + 4),
+                          hdr->payload_size >= 12u ? lagfx_le32(hdr->payload + 8) : 0u,
+                          hdr->payload_size >= 16u ? lagfx_le32(hdr->payload + 12) : 0u);
                 lagfx_task_entry_t *task = NULL;
                 for (uint32_t ti = 0; ti < LAGFX_MAX_TASKS; ti++) {
                     if (p->tasks[ti].live) { task = &p->tasks[ti]; break; }
@@ -155,6 +164,12 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                     LAGFX_WARN("compute: 0x25 no live task to register objectId=0x%x", object_id);
                 }
             }
+            break;
+        case LAGFX_OP_DEFINE_HOST_TASK:       /* 0x38 on compute ch (pvg_lite.c:826) */
+            lagfx_define_host_task(p, hdr);
+            break;
+        case 0x44:                            /* task object/placement lists (pvg_lite.c:834) */
+            lagfx_define_task_lists(p, hdr);
             break;
         case LAGFX_OP_IOSURFACE_LOOKUP:       /* 0x28 */
             /* Live evidence shows 0x28 on compute channels too — route

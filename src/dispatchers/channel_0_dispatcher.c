@@ -58,6 +58,63 @@
  * return a status; on OK (or fail-open SIZE/STATE errors) we still
  * raise the stamp so the guest doesn't park forever in waitForStamp.
  */
+/* CmdDefineHostTask (0x38) — shared by root and compute channels.
+ * Arguments start after the barrier slots (arg_count_8b * 8 bytes), as in
+ * devices/pvg_lite.c: {u32 slot_index (task_id = slot>>1), u32, u32, u32 root_pfn}. */
+bool lagfx_define_host_task(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
+    uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+    if (!hdr->payload || hdr->payload_size < skip + 16u) {
+        LAGFX_WARN("CmdDefineHostTask: payload too small (%u, skip=%u)",
+                   (unsigned)hdr->payload_size, skip);
+        return false;
+    }
+    const uint8_t *a = hdr->payload + skip;
+    uint32_t slot_index    = lagfx_le32(a + 0);
+    uint32_t root_page_pfn = lagfx_le32(a + 12);
+    uint32_t task_id       = slot_index >> 1;
+    if (task_id >= 512u) {
+        LAGFX_WARN("CmdDefineHostTask: taskID=%u out of range", task_id);
+        return false;
+    }
+    lagfx_task_entry_t *entry = lagfx_protocol_find_task(p, task_id);
+    if (!entry) {
+        entry = lagfx_protocol_alloc_task_slot(p);
+        if (!entry) {
+            LAGFX_WARN("CmdDefineHostTask: task table full (max=%u)", LAGFX_MAX_TASKS);
+            return false;
+        }
+        entry->id   = task_id;
+        entry->live = true;
+    }
+    entry->root_page_pfn = (uint64_t)root_page_pfn;
+    LAGFX_LOG("CmdDefineHostTask: taskID=%u root_page_pfn=0x%x skip=%u stamp=0x%08x",
+              task_id, root_page_pfn, skip, hdr->stamp);
+    return true;
+}
+
+/* Compute 0x44: {u32 task, u32 obj_lo, u32 obj_hi, u32 pl_lo, u32 pl_hi, u32 obj_len, u32 pl_len}. */
+bool lagfx_define_task_lists(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
+    uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+    if (!hdr->payload || hdr->payload_size < skip + 28u) {
+        LAGFX_WARN("compute 0x44: payload too small (%u, skip=%u)", (unsigned)hdr->payload_size, skip);
+        return false;
+    }
+    const uint8_t *a = hdr->payload + skip;
+    uint32_t task_id = lagfx_le32(a + 0);
+    if (task_id >= 512u) { LAGFX_WARN("compute 0x44: task %u out of range", task_id); return false; }
+    lagfx_task_entry_t *t = lagfx_protocol_find_task(p, task_id);
+    if (!t) { LAGFX_WARN("compute 0x44: task %u not defined (no 0x38 yet) — skipped", task_id); return false; }
+    t->objects_addr   = (uint64_t)lagfx_le32(a + 8) << 32 | lagfx_le32(a + 4);
+    t->placement_addr = (uint64_t)lagfx_le32(a + 16) << 32 | lagfx_le32(a + 12);
+    t->objects_len    = lagfx_le32(a + 20);
+    t->placement_len  = lagfx_le32(a + 24);
+    t->lists_set      = true;
+    LAGFX_LOG("compute 0x44: task=%u objects=0x%llx len=0x%x placement=0x%llx len=0x%x skip=%u",
+              task_id, (unsigned long long)t->objects_addr, t->objects_len,
+              (unsigned long long)t->placement_addr, t->placement_len, skip);
+    return true;
+}
+
 static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
     if (!p || !hdr) {
         return;
@@ -311,24 +368,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                            (unsigned)hdr->payload_size);
                 break;
             }
-            uint32_t slot_index    = lagfx_le32(hdr->payload + 0);
-            uint32_t root_page_pfn = lagfx_le32(hdr->payload + 12);
-            uint32_t task_id       = slot_index >> 1;
-
-            lagfx_task_entry_t *entry = lagfx_protocol_find_task(p, task_id);
-            if (!entry) {
-                entry = lagfx_protocol_alloc_task_slot(p);
-                if (!entry) {
-                    LAGFX_WARN("CmdDefineHostTask: task table full (max=%u)",
-                               LAGFX_MAX_TASKS);
-                    break;
-                }
-                entry->id   = task_id;
-                entry->live = true;
-            }
-            entry->root_page_pfn = (uint64_t)root_page_pfn;
-            LAGFX_LOG("CmdDefineHostTask: taskID=%u root_page_pfn=0x%x stamp=0x%08x",
-                      task_id, root_page_pfn, hdr->stamp);
+            lagfx_define_host_task(p, hdr);
             break;
         }
 

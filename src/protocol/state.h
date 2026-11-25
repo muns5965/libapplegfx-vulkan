@@ -276,6 +276,14 @@ typedef struct {
      * record it as a hint for later resource lookups. */
     uint32_t heap_pfn;
     uint32_t heap_size;
+    /* CmdSetObjectAndPlacement-list registration (compute 0x44, per
+     * devices/pvg_lite.c): guest VA of the object list / placement list and
+     * their lengths. Kept so later resource lookup can use them. */
+    uint64_t objects_addr;
+    uint32_t objects_len;
+    uint64_t placement_addr;
+    uint32_t placement_len;
+    bool lists_set;
     bool live;                  /* Slot is in use */
     
     /* Render pass description from PGCmdDescribeRenderPass (0x1a).
