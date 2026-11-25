@@ -144,6 +144,7 @@ struct lagfx_vk_state {
     bool             cursor_glyph_coherent;
     VkImageLayout    cursor_glyph_layout;
     bool             cursor_sync_failed;
+    uint32_t         cursor_error_count;
     VkSampler        cursor_sampler;
     VkBuffer         cursor_ubo;
     VkDeviceMemory   cursor_ubo_mem;
