@@ -36,6 +36,12 @@ static bool mapped_wb_on_swap(void) {
     return e && !strcmp(e, "swap");
 }
 
+const char *lagfx_a64_texwhy_name(unsigned why) {
+    static const char *const nm[TEXWHY_COUNT] = { "slot_unbound", "slot_range", "record_bad", "ref_zero", "no_table", "entry_read", "entry_empty", "not_texture", "unknown_type", "not_mirrored",
+        "table_full", "c_payload", "c_format", "c_type", "c_msaa", "c_dims", "c_vulkan", "c_linear", "c_mapped_nodesc", "c_mapped_bad" };
+    return why < TEXWHY_COUNT ? nm[why] : "?";
+}
+
 #ifndef LAGFX_HAVE_VULKAN
 /* No Vulkan: nothing can be executed. */
 lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const uint8_t *res, uint32_t nres) { (void)p; (void)task; (void)res; (void)nres; return NULL; }
@@ -53,6 +59,7 @@ void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task) { (void)p; (voi
 bool lagfx_a64_res_busy(lagfx_protocol_t *p) { (void)p; return false; }
 void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *l, uint64_t *c, uint64_t *d) { (void)p; if (l) *l = 0; if (c) *c = 0; if (d) *d = 0; }
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref) { (void)p; (void)task; (void)ref; return NULL; }
+bool lagfx_a64_res_diagnose(lagfx_protocol_t *p, uint32_t task, uint32_t ref, lagfx_a64_texdiag_t *o) { (void)p; (void)task; (void)ref; if (o) memset(o, 0, sizeof *o); return false; }
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) { (void)x; }
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { (void)x; (void)o; return false; }
 void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { (void)b; }
@@ -71,11 +78,14 @@ typedef struct { lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; 
     struct lagfx_a64_msurf **ms; uint32_t nms;   /* shared surface images of type 11 mapped textures, newest last (not owning: an entry leaves when its last object is freed) */
     VkCommandBuffer sw_cb; VkFence sw_fence; struct lagfx_a64_msurf *sw_sel[256]; uint32_t sw_n;   /* a display-swap write-back whose GPU copy has not been seen finished: its images / staging buffers are in use */
     uint64_t epoch;              /* bumped by every exec begin / sync: a mapped surface is uploaded / read back at most once per epoch */
+    lagfx_a64_texwhy_t mk_why;   /* why the last obj_make returned NULL (TEXWHY_*; 0 = not a texture failure) */
+    struct { uint32_t task, ref, entry[3]; uint32_t why; } fail[128]; uint32_t nfail;   /* memo of the newest failed creations (ring), keyed by (task, ref, entry): lagfx_a64_res_diagnose */
 } mgr2_t;
 int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = the next swap fence check reports a timeout without looking */
 #define MRUN(p) ((p)->diag2.exec.run)
 #define BUSY(m) ((m)->cur || (m)->pending || (m)->sw_fence)
 #define MAX_MS 256u
+#define MKFAIL(w) do { m->mk_why = (w); } while (0)
 
 /* One guest display surface (mapping id) mirrored as ONE device image + a host-visible staging buffer in the guest's pixel layout (tight rows, w * h * 4 bytes).
  * Every mapped-texture object (any ref / task) naming the same mapping id and size holds a reference; host_valid / guest_stale are the surface's, not the object's. */
@@ -490,14 +500,15 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
     uint8_t h[20 + 64];
     memset(h, 0, sizeof h);
     uint32_t n = size < sizeof h ? size : (uint32_t)sizeof h;
-    if (size < 20u + 4u || (!lagfx_arm64_task_read(p, t, at, h, n) && (n <= 52u || !lagfx_arm64_task_read(p, t, at, h, 52u)))) { MRUN(p).mapped_unsupported++; return false; }
+    if (size < 20u + 4u || (!lagfx_arm64_task_read(p, t, at, h, n) && (n <= 52u || !lagfx_arm64_task_read(p, t, at, h, 52u)))) { MRUN(p).mapped_unsupported++; MKFAIL(TEXWHY_C_PAYLOAD); return false; }
     uint64_t mapping = lagfx_le64(h);
     uint32_t tag = lagfx_le32(h + 8);
     const uint8_t *d = h + 20;
     uint32_t fmt = tag == 0x39u ? (uint32_t)(d[1] | d[2] << 8) : (uint32_t)(d[2] | d[3] << 8);   /* v2 / v1 description (Henge makeMappedTexture) */
     if (mapping > 0xffffffffull) { MRUN(p).mapped_unsupported++; return false; }
     lagfx_guest_surface_t gs;
-    if (!ms_desc(p, (uint32_t)mapping, &gs)) return false;
+    { uint64_t nd = MRUN(p).mapped_no_desc;
+      if (!ms_desc(p, (uint32_t)mapping, &gs)) { MKFAIL(MRUN(p).mapped_no_desc != nd ? TEXWHY_C_MAPPED_NODESC : TEXWHY_C_MAPPED_BAD); return false; } }
     if ((uint64_t)gs.width * gs.height * gs.bpp > LAGFX_A64_MAX_OBJ_BYTES) { MRUN(p).mapped_unsupported++; return false; }
     msurf_t *ms = NULL;
     for (uint32_t i = m->nms; i-- > 0;) if (m->ms[i]->mapping == (uint32_t)mapping && m->ms[i]->w == gs.width && m->ms[i]->h == gs.height && m->ms[i]->fourcc == gs.fourcc) { ms = m->ms[i]; break; }
@@ -541,6 +552,7 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
 static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
     uint32_t type = e[0] & 0xffu, size = e[0] >> 8;
     uint64_t at = (uint64_t)e[2] << 32 | e[1];
+    m->mk_why = 0;
     lagfx_a64_obj_t *o = calloc(1, sizeof *o);
     if (!o) return NULL;
     o->task = t->id, o->ref = ref, memcpy(o->entry, e, 12);
@@ -553,10 +565,10 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, &o->buf, &o->buf_mem, &o->map)) goto bad;
     } else if (type == 2) {
-        if (size < 12 + 0x18 + 12 + 28 || size > 8192u) goto bad;
+        if (size < 12 + 0x18 + 12 + 28 || size > 8192u) { MKFAIL(TEXWHY_C_PAYLOAD); goto bad; }
         uint8_t *d = malloc(size);
-        if (!d) goto bad;
-        if (!lagfx_arm64_task_read(p, t, at, d, size)) { free(d); goto bad; }
+        if (!d) { MKFAIL(TEXWHY_C_PAYLOAD); goto bad; }
+        if (!lagfx_arm64_task_read(p, t, at, d, size)) { free(d); MKFAIL(TEXWHY_C_PAYLOAD); goto bad; }
         uint64_t len = lagfx_le64(d);
         const uint8_t *lay = d + 12;
         uint32_t mips = lagfx_le16(lay) & 0x3fffu;
@@ -595,53 +607,60 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
             if (k_dfmt[i].mtl == fmt) o->format = k_dfmt[i].vk, o->ds_aspects = k_dfmt[i].aspects, o->bpp = 4;   /* bpp only keeps divisions safe: no guest copy is ever made */
         /* MTLTextureType 2 = 2D, 3 = 2D array, 7 = 3D */
         o->img_type = mtype == 7 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
-        if (!ok || o->format == VK_FORMAT_UNDEFINED || (mtype != 2 && mtype != 3 && mtype != 7) || samples > 1 || !o->width || !o->height || o->width > 16384 || o->height > 16384) goto bad;
-        if (mtype == 7) { if (!o->depth || o->depth > 2048) goto bad; } else o->depth = 1;
-        if (!dmips || dmips > LAGFX_A64_MAX_MIPS) goto bad;
+        if (!ok) { MKFAIL(o->tex_block_h > 1 ? TEXWHY_C_FORMAT : TEXWHY_C_PAYLOAD); goto bad; }   /* block height > 1: a block-compressed layout */
+        if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad; }
+        if (mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
+        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); goto bad; }
+        if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
+        if (mtype == 7) { if (!o->depth || o->depth > 2048) { MKFAIL(TEXWHY_C_DIMS); goto bad; } } else o->depth = 1;
+        if (!dmips || dmips > LAGFX_A64_MAX_MIPS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         o->mips = dmips;
         o->layers = mtype == 3 ? array : 1u;
-        if (!o->layers || o->layers > LAGFX_A64_MAX_LAYERS) goto bad;
+        if (!o->layers || o->layers > LAGFX_A64_MAX_LAYERS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         o->kind = LAGFX_A64_TEXTURE, o->length = (len + 0x3fffu) & ~0x3fffull;
         if (o->ds_aspects) {   /* depth / stencil attachment: a plain 2D image of one level, content only on the device */
-            if (mtype != 2 || o->mips != 1) goto bad;
+            if (mtype != 2 || o->mips != 1) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
             o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
-            if (!create_image(vk, m, o)) goto bad;
+            if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
             return o;
         }
-        if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o->buf, &o->buf_mem, &o->map)) goto bad;
-        if (!create_image(vk, m, o)) goto bad;
+        if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o->buf, &o->buf_mem, &o->map)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
+        if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
     } else if (type == 8 || type == 9) {
         /* linear texture without guest pages ({tag, size, ref, description}): a device image only (no guest copy, no write-back), enough for render targets
          * and blits of the uncompressed formats of the table; 2D, one mip, one sample. A linear texture that cannot be mirrored is counted in
          * stats.linear_unsupported (diagnostics) and Render then skips the pass (no_target). */
         uint8_t d[512];
-        if (size < 12 + 20 || size > sizeof d || !lagfx_arm64_task_read(p, t, at, d, size)) goto bad_linear;
+        if (size < 12 + 20 || size > sizeof d || !lagfx_arm64_task_read(p, t, at, d, size)) { MKFAIL(TEXWHY_C_PAYLOAD); goto bad_linear; }
         uint32_t tag = lagfx_le32(d), mtype, fmt, samples;
         const uint8_t *desc = d + 12;
         if (tag == 9 || tag == 0x37) {   /* over a buffer (Henge makeLinearTexture): {tag, size, ref, buffer ref, u64 offset, u64 row, description} */
-            if (size < 0x20 + 0x17) goto bad_linear;
+            if (size < 0x20 + 0x17) { MKFAIL(TEXWHY_C_PAYLOAD); goto bad_linear; }
             o->linear = true, o->lin_buf = lagfx_le32(d + 12), o->lin_off = lagfx_le64(d + 16), o->lin_row = lagfx_le64(d + 24);
             desc = d + 0x20;
             if (tag == 0x37) { mtype = desc[0] & 0xfu, fmt = desc[1] | desc[2] << 8, o->width = lagfx_le32(desc + 7), o->height = lagfx_le32(desc + 11), samples = lagfx_le16(desc + 21); }
             else             { mtype = desc[0] & 0xfu, fmt = desc[2] | desc[3] << 8, o->width = lagfx_le32(desc + 4), o->height = lagfx_le32(desc + 8), samples = lagfx_le16(desc + 18); }
         } else if (tag == 0x34 || tag == 0x39) {
-            if (size < 12 + 0x17) goto bad_linear;
+            if (size < 12 + 0x17) { MKFAIL(TEXWHY_C_PAYLOAD); goto bad_linear; }
             mtype = desc[0] & 0xfu, fmt = desc[1] | desc[2] << 8, o->width = lagfx_le32(desc + 7), o->height = lagfx_le32(desc + 11), samples = lagfx_le16(desc + 21);
         } else if (tag == 0x14 || tag == 1) {
             mtype = desc[0] & 0xfu, fmt = desc[2] | desc[3] << 8, o->width = lagfx_le32(desc + 4), o->height = lagfx_le32(desc + 8), samples = lagfx_le16(desc + 18);
-        } else goto bad_linear;
+        } else { MKFAIL(TEXWHY_C_TYPE); goto bad_linear; }
         o->mtl_format = fmt;
         o->format = VK_FORMAT_UNDEFINED;
         for (size_t i = 0; i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
-        if (mtype != 2 || samples > 1 || o->format == VK_FORMAT_UNDEFINED || !o->width || !o->height || o->width > 16384 || o->height > 16384) goto bad_linear;
+        if (mtype != 2) { MKFAIL(TEXWHY_C_TYPE); goto bad_linear; }
+        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); goto bad_linear; }
+        if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad_linear; }
+        if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad_linear; }
         o->img_type = VK_IMAGE_TYPE_2D, o->depth = 1, o->mips = 1, o->layers = 1, o->tex_mip_count = 1;
         o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = o->linear ? o->lin_row : (uint64_t)o->width * o->bpp;
         o->kind = LAGFX_A64_TEXTURE, o->has_pages = false, o->length = 0;
-        if (o->linear && (!o->lin_buf || !o->lin_row || o->lin_row % o->bpp || o->lin_row / o->bpp < o->width || o->lin_off % o->bpp || o->lin_row > (1ull << 31))) goto bad_linear;
-        if (!create_image(vk, m, o)) goto bad_linear;
+        if (o->linear && (!o->lin_buf || !o->lin_row || o->lin_row % o->bpp || o->lin_row / o->bpp < o->width || o->lin_off % o->bpp || o->lin_row > (1ull << 31))) { MKFAIL(TEXWHY_C_LINEAR); goto bad_linear; }
+        if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad_linear; }
         m->st.linear_made++;
     } else if (type == 11) {   /* mapped texture over a guest display surface */
-        if (!mapped_make(p, m, vk, t, o, at, size)) goto bad;
+        if (!mapped_make(p, m, vk, t, o, at, size)) { if (!m->mk_why) MKFAIL(TEXWHY_C_MAPPED_BAD); goto bad; }
     } else { if (m->quiet_kinds) { free(o); return NULL; } goto bad; }
     return o;
 bad_linear:
@@ -673,6 +692,13 @@ static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x) { return x ? x->cb : VK_NULL_HANDLE; }
 
+static void memo_fail(mgr2_t *m, uint32_t task, uint32_t ref, const uint32_t e[3], uint32_t why) {
+    for (uint32_t i = 0; i < 128u && i < m->nfail; i++)   /* the same (task, ref) keeps one memo */
+        if (m->fail[i].task == task && m->fail[i].ref == ref) { memcpy(m->fail[i].entry, e, 12), m->fail[i].why = why; return; }
+    uint32_t k = m->nfail++ % 128u;
+    m->fail[k].task = task, m->fail[k].ref = ref, memcpy(m->fail[k].entry, e, 12), m->fail[k].why = why;
+}
+
 /* find or (re)create the object for ref in this task; a changed table entry replaces it (Apple: a reused ref is noticed) */
 static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk, const lagfx_task_entry_t *t, uint32_t ref, bool allow_replace) {
     if (!ref || !t->lists_set || !t->objects_addr || (t->objects_len && ((uint64_t)ref + 1u) * 12u > t->objects_len)) return NULL;
@@ -688,9 +714,11 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
         if (!allow_replace) { m->st.bad_object++; return NULL; }   /* commands may already refer to it in this exec */
         obj_release(m, vk, o);   /* deferred while an exec records / is in flight */
         m->objs[slot] = NULL;
-    } else if (m->n >= MAX_OBJS) return NULL;
+    } else {
+        if (slot == m->n && m->n >= MAX_OBJS) { m->st.obj_table_full++; memo_fail(m, t->id, ref, e, TEXWHY_TABLE_FULL); return NULL; }
+    }
     lagfx_a64_obj_t *o = obj_make(p, m, vk, t, ref, e);
-    if (!o) return NULL;   /* nothing remembered: a later exec retries (the entry may be filled in later) */
+    if (!o) { if (m->mk_why) memo_fail(m, t->id, ref, e, m->mk_why); return NULL; }   /* nothing remembered but the memo: a later exec retries (the entry may be filled in later) */
     if (slot == m->n) {
         if (m->n == m->cap) {
             uint32_t nc = m->cap ? m->cap * 2 : 64;
@@ -701,6 +729,8 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
         m->n++;
     }
     m->objs[slot] = o;
+    m->st.obj_slots = m->n;
+    for (uint32_t i = 0; i < 128u && i < m->nfail; i++) if (m->fail[i].task == t->id && m->fail[i].ref == ref) m->fail[i].task = UINT32_MAX;   /* created now: the failure memo is obsolete */
     o->gen = ++m->st.created;
     return o;
 }
@@ -1415,6 +1445,72 @@ void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *live, uint64_t *created
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref) {
     mgr2_t *m = p ? p->a64_res : NULL;
     return m ? obj_find(m, task, ref) : NULL;
+}
+
+/* Names the reason texture handle (task, ref) has no usable mirror object. Read-only: the guest's object table entry is re-read and its payload peeked (format /
+ * extent for the log; the offsets repeat obj_make's, which is the only place that decides what is creatable: the creation failure itself comes from the memo
+ * obj_resolve keeps). Unverified assumption: an entry that is all zero is a slot the guest has not filled (or has deleted); nothing proves which of the two. */
+bool lagfx_a64_res_diagnose(lagfx_protocol_t *p, uint32_t task, uint32_t ref, lagfx_a64_texdiag_t *out) {
+    lagfx_a64_texdiag_t dg;
+    mgr2_t *m = p ? p->a64_res : NULL;
+    lagfx_task_entry_t *t = p ? lagfx_protocol_find_task(p, task) : NULL;
+    if (!out) out = &dg;
+    memset(out, 0, sizeof *out);
+    if (!ref) { out->why = TEXWHY_REF_ZERO; return true; }
+    if (!t || !t->lists_set || !t->objects_addr || (t->objects_len && ((uint64_t)ref + 1u) * 12u > t->objects_len)) { out->why = TEXWHY_NO_TABLE; return true; }
+    uint8_t eb[12];
+    if (!lagfx_arm64_task_read(p, t, t->objects_addr + (uint64_t)ref * 12u, eb, 12)) { out->why = TEXWHY_ENTRY_READ; return true; }
+    uint32_t e[3] = { lagfx_le32(eb), lagfx_le32(eb + 4), lagfx_le32(eb + 8) };
+    uint32_t type = e[0] & 0xffu, size = e[0] >> 8;
+    uint64_t at = (uint64_t)e[2] << 32 | e[1];
+    out->type = type;
+    if (!type) { out->why = TEXWHY_ENTRY_EMPTY; return true; }
+    if (type == 1 || type == 19) { out->why = TEXWHY_NOT_TEXTURE; return true; }
+    if (type != 2 && type != 8 && type != 9 && type != 11) { out->why = TEXWHY_UNKNOWN_TYPE; return true; }
+    /* peek: format and extent as obj_make reads them (best effort, only for the log) */
+    uint8_t d[704];
+    uint32_t n = size < sizeof d ? size : (uint32_t)sizeof d;
+    if (n >= 36u && lagfx_arm64_task_read(p, t, at, d, n)) {
+        if (type == 2) {
+            uint32_t mips = lagfx_le16(d + 12) & 0x3fffu;
+            uint32_t ro = 12u + 0x18u + 36u * mips;
+            if (mips >= 1 && mips <= LAGFX_A64_MAX_MIPS && ro + 12u + 24u <= n) {
+                uint32_t tag = lagfx_le32(d + ro);
+                const uint8_t *ds = d + ro + 12;
+                if (tag == 0x34 || tag == 0x39) out->mtl_format = ds[1] | ds[2] << 8, out->width = lagfx_le32(ds + 7), out->height = lagfx_le32(ds + 11);
+                else out->mtl_format = ds[2] | ds[3] << 8, out->width = lagfx_le32(ds + 4), out->height = lagfx_le32(ds + 8);
+            }
+        } else if (type == 8 || type == 9) {
+            uint32_t tag = lagfx_le32(d);
+            const uint8_t *ds = d + 12;
+            if ((tag == 9 || tag == 0x37) && n >= 0x20u + 0x17u) {
+                ds = d + 0x20;
+                if (tag == 0x37) out->mtl_format = ds[1] | ds[2] << 8, out->width = lagfx_le32(ds + 7), out->height = lagfx_le32(ds + 11);
+                else out->mtl_format = ds[2] | ds[3] << 8, out->width = lagfx_le32(ds + 4), out->height = lagfx_le32(ds + 8);
+            } else if ((tag == 0x34 || tag == 0x39) && n >= 12u + 0x17u) out->mtl_format = ds[1] | ds[2] << 8, out->width = lagfx_le32(ds + 7), out->height = lagfx_le32(ds + 11);
+            else if ((tag == 0x14 || tag == 1) && n >= 12u + 20u) out->mtl_format = ds[2] | ds[3] << 8, out->width = lagfx_le32(ds + 4), out->height = lagfx_le32(ds + 8);
+        } else if (n >= 24u) {   /* mapped: {u64 mapping, u32 tag, ..., description at +20}; the extent is the shell surface's (below) */
+            uint32_t tag = lagfx_le32(d + 8);
+            out->mapping = (uint32_t)lagfx_le64(d);
+            out->mtl_format = tag == 0x39u ? (uint32_t)(d[21] | d[22] << 8) : (uint32_t)(d[22] | d[23] << 8);
+        }
+    }
+    if (type == 11) {   /* the surface behind the mapping id */
+        lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+        const lagfx_shell_callbacks_t *sh = dev ? &dev->desc.shell : NULL;
+        uint8_t sd[256]; size_t sn = 0; lagfx_guest_surface_t gs;
+        memset(sd, 0, sizeof sd);
+        if (sh && sh->get_surface_desc && sh->get_surface_desc(sh->opaque, out->mapping, sd, sizeof sd, &sn) && sn >= LAGFX_SURF_DESC_BYTES && sn <= sizeof sd && lagfx_guest_surface_decode_any(sd, sn, &gs) == LAGFX_OK)
+            out->width = gs.width, out->height = gs.height;
+    }
+    if (m) {
+        lagfx_a64_obj_t *o = obj_find(m, task, ref);
+        if (o && o->kind != LAGFX_A64_TEXTURE) { out->why = TEXWHY_NOT_TEXTURE; return true; }
+        for (uint32_t i = 0; i < 128u && i < m->nfail; i++)
+            if (m->fail[i].task == task && m->fail[i].ref == ref && !memcmp(m->fail[i].entry, e, 12)) { out->why = (lagfx_a64_texwhy_t)m->fail[i].why; return true; }
+    }
+    out->why = TEXWHY_NOT_MIRRORED;
+    return m != NULL;
 }
 
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {

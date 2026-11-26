@@ -82,6 +82,8 @@ typedef struct { int kind; void *obj; VkPipeline pipe; VkDescriptorSet ds; } def
 
 /* Buffers, textures and the exec's command buffer / fence / write-backs belong to the resource mirror (arm64_resources.c): ONE exec context and ONE
  * command buffer per exec. This module keeps only what is Render specific: the (task, ref) table of pipeline objects and the open pass. */
+typedef struct { uint32_t ref; lagfx_a64_texdiag_t dg; } a64_texmiss_t;   /* an unresolved texture handle: ref + lagfx_a64_res_diagnose() result at the time the record named it */
+
 typedef struct {
     lagfx_a64_objects_t *objs;
     lagfx_protocol_t *p;
@@ -104,6 +106,7 @@ typedef struct {
     lagfx_a64_obj_t *ftex[A64_MAX_FB];                             /* fragment textures (114): mirror textures, GENERAL layout */
     a64_samp_t *fsamp[A64_MAX_FSAMP];                              /* fragment samplers (112) */
     lagfx_a64_obj_t *vtex[A64_MAX_FB];                             /* vertex textures (129) */
+    a64_texmiss_t fmiss[A64_MAX_FB], vmiss[A64_MAX_FB];            /* why ftex / vtex slot i is NULL (0 = never named since the encoder began): split of desc_unbound_why[3] */
     a64_samp_t *vsamp[A64_MAX_FSAMP]; VkSampler vvar[A64_MAX_FSAMP];   /* vertex samplers (127) and the LOD-clamp variants of tag 128 */
     VkPipeline bound_vk;                                           /* the VkPipeline bound in the open pass */
     VkSampler defsamp; VkDescriptorPool dpool; VkDescriptorSet last_ds; uint64_t last_ds_key;   /* descriptor sets: one per draw, reused while the binding key is unchanged */
@@ -402,6 +405,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
 static void reset_frag_tables(a64_run_t *r) {
     memset(r->fb, 0, sizeof r->fb), memset(r->ftex, 0, sizeof r->ftex), memset(r->fsamp, 0, sizeof r->fsamp), memset(r->fvar, 0, sizeof r->fvar);
     memset(r->vtex, 0, sizeof r->vtex), memset(r->vsamp, 0, sizeof r->vsamp), memset(r->vvar, 0, sizeof r->vvar);
+    memset(r->fmiss, 0, sizeof r->fmiss), memset(r->vmiss, 0, sizeof r->vmiss);   /* TEXWHY_SLOT_UNBOUND = 0 */
     lagfx_a64_tile_reset(r->tile);
 }
 
@@ -508,6 +512,32 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
     return sb;
 }
 
+/* A sampled texture slot is empty at a draw: count it by reason (desc_tex_why) and log the first 8 distinct textures of each reason, so a device log names them.
+ * Distinct = (task, ref, entry type, format, extent). The reason was fixed when the texture record named the slot (a64_texmiss_t), or is slot_unbound / slot_range. */
+static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, uint32_t stage, int16_t mi_s) {
+    a64_texmiss_t none; memset(&none, 0, sizeof none);
+    const a64_texmiss_t *mm = &none;
+    if (mi_s < 0 || (uint32_t)mi_s >= A64_MAX_FB) none.dg.why = TEXWHY_SLOT_RANGE;
+    else mm = &(stage ? r->fmiss : r->vmiss)[mi_s];
+    unsigned why = (unsigned)mm->dg.why < LAGFX_A64_TEXWHY_COUNT ? (unsigned)mm->dg.why : 0u;
+    __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
+    Q->desc_tex_why[why]++;
+    for (unsigned k = 0; k < Q->desc_tex_nseen[why]; k++) {
+        __typeof__(Q->desc_tex_seen[0][0]) *e = &Q->desc_tex_seen[why][k];
+        if (e->task == r->task->id && e->ref == mm->ref && e->type == mm->dg.type && e->mtl_format == mm->dg.mtl_format && e->w == mm->dg.width && e->h == mm->dg.height) return;
+    }
+    if (Q->desc_tex_nseen[why] >= 8u) return;
+    __typeof__(Q->desc_tex_seen[0][0]) *e = &Q->desc_tex_seen[why][Q->desc_tex_nseen[why]++];
+    e->task = r->task->id, e->ref = mm->ref, e->type = mm->dg.type, e->mtl_format = mm->dg.mtl_format, e->w = mm->dg.width, e->h = mm->dg.height, e->mapping = mm->dg.mapping;
+    static const char *const kind[] = { "?", "buffer", "texture", "?", "?", "?", "function", "serialized", "linear_texture", "linear_texture", "?", "mapped_texture" };
+    char l[320];
+    snprintf(l, sizeof l, "g7-gpu-tex-unbound: why=%s task=%u ref=%u stage=%s slot=%d entry_type=%u kind=%s mtl_format=%u size=%ux%u mapping=%u (distinct %u/8)", lagfx_a64_texwhy_name(why), (unsigned)r->task->id,
+             (unsigned)mm->ref, stage ? "fragment" : "vertex", (int)mi_s, (unsigned)mm->dg.type, mm->dg.type < sizeof kind / sizeof *kind ? kind[mm->dg.type] : "?", (unsigned)mm->dg.mtl_format,
+             (unsigned)mm->dg.width, (unsigned)mm->dg.height, (unsigned)mm->dg.mapping, (unsigned)Q->desc_tex_nseen[why]);
+    fprintf(stderr, "%s\n", l);
+    LAGFX_LOG("%s", l);
+}
+
 /* Fills and binds the set-0 descriptor set of the pipeline from the Metal tables recorded by tags 125/126/110/111/114/112. Anything unbound / misaligned /
  * a feedback loop skips the draw (counted): Metal leaves those undefined. The key (pipeline gen, then per binding the object gen and offset) lets consecutive
  * draws share one set; a replaced object has a new gen, so a stale set is never reused. Mirror textures stay in GENERAL layout (valid for sampling), so no
@@ -563,7 +593,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             r->wrote_storage = true;
         } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? (st ? r->ftex[mi] : r->vtex[mi]) : NULL;
-            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[3]++; return false; }
+            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[3]++; tex_miss(r, p, st, mi_s); return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
@@ -1106,11 +1136,18 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         const bool vs = tag == 129u || tag == 127u, tex = tag == 114u || tag == 129u;
         lagfx_a64_obj_t **tt = vs ? r->vtex : r->ftex; a64_samp_t **ss = vs ? r->vsamp : r->fsamp; VkSampler *vv = vs ? r->vvar : r->fvar;
         uint32_t index = R32(0), count = R32(4), lim = tex ? A64_MAX_FB : A64_MAX_FSAMP;
-        if (count > lim || (uint64_t)n < 8u + 4ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        if (count > lim || (uint64_t)n < 8u + 4ull * count) {
+            if (tex) for (uint32_t i = 0; i < count && index + i < lim; i++) { a64_texmiss_t *mm = &(vs ? r->vmiss : r->fmiss)[index + i]; memset(mm, 0, sizeof *mm), mm->dg.why = TEXWHY_RECORD_BAD; }
+            CNT(p).bad_rec++; tag_unsup(p, tag); break;
+        }
         for (uint32_t i = 0; i < count && index + i < lim; i++) {
             if (tex) {   /* only textures the mirror already holds (the exec's resource list): creating + uploading one now would record copies inside the pass */
-                lagfx_a64_obj_t *t = lagfx_a64_res_lookup(p, r->task->id, R32(8 + i * 4));
+                uint32_t tref = R32(8 + i * 4);
+                lagfx_a64_obj_t *t = lagfx_a64_res_lookup(p, r->task->id, tref);
                 tt[index + i] = t && t->kind == LAGFX_A64_TEXTURE ? t : NULL;
+                a64_texmiss_t *mm = &(vs ? r->vmiss : r->fmiss)[index + i];
+                memset(mm, 0, sizeof *mm);
+                if (!tt[index + i]) mm->ref = tref, (void)lagfx_a64_res_diagnose(p, r->task->id, tref, &mm->dg);   /* why not: counted per reason when a draw needs it */
             } else ss[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP), vv[index + i] = VK_NULL_HANDLE, (vs ? r->vsref : r->fsref)[index + i] = R32(8 + i * 4);
         }
         if (vs) CNT(p).ext_vs_tex_binds++;

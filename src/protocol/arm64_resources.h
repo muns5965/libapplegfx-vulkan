@@ -65,6 +65,7 @@ typedef struct {
     uint64_t gpu_timeout, gpu_fail, busy_skipped;   /* gpu_timeout: bounded wait ran out (pending, not failed); gpu_fail: a Vulkan call failed or the device was lost; busy_skipped: begin refused while the previous exec was still pending */
     uint64_t blit_seen, blit_done, blit_rejected, blit_noop, blit_unsupported;   /* per command */
     uint64_t linear_made, linear_unsupported, linear_resync;   /* type 8/9 linear textures mirrored (device image only) / that could not be */
+    uint64_t obj_slots, obj_table_full;   /* object table size in slots (holes of released objects are reused) / creations refused because all 4096 slots were live */
     uint64_t created, destroyed, deferred_frees;   /* mirror objects built / destroyed; frees parked until the in-flight fence signalled */
     uint64_t blit_tag[16];   /* done, indexed tag - 300 (300..315) */
 } lagfx_a64_stats_t;
@@ -142,6 +143,36 @@ lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32
 /* Test / debug: level 0, layer 0 of a mirrored texture as linear rows (width*bpp) via a one-shot copy; false while an exec records / is pending. */
 bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h);
 #endif
+
+/* Why a texture handle (task, ref) given to setFragmentTexture / setVertexTexture has no usable mirror texture. Classified from the guest's object table entry
+ * (re-read, no side effects) and the memo of failed creations; LAGFX_A64_TEXWHY_COUNT in state.h must equal TEXWHY_COUNT. */
+typedef enum {
+    TEXWHY_SLOT_UNBOUND = 0,   /* no texture record (tag 114 / 129) named this slot since the encoder began (0 so a cleared table means this) */
+    TEXWHY_SLOT_RANGE,         /* slot index >= 32 (A64_MAX_FB) or the shader's index is negative: the table cannot hold it */
+    TEXWHY_RECORD_BAD,         /* the texture record's count was above the table size: the whole record was refused (counted bad_rec) */
+    TEXWHY_REF_ZERO,           /* the record named ref 0 (a nil texture) */
+    TEXWHY_NO_TABLE,           /* task unknown / object lists not set / ref beyond the object table length: the index is not in this exec's object table */
+    TEXWHY_ENTRY_READ,         /* the table entry could not be read from guest memory */
+    TEXWHY_ENTRY_EMPTY,        /* the entry is all zero / type 0: the guest has not filled it in (yet): texture created later than the draw, or already deleted */
+    TEXWHY_NOT_TEXTURE,        /* the entry (or its mirror object) is a buffer */
+    TEXWHY_UNKNOWN_TYPE,       /* entry type is not buffer / texture / linear texture / mapped texture (function, pipeline, sampler, heap, ...) */
+    TEXWHY_NOT_MIRRORED,       /* a texture entry the mirror has no object for and no failed creation on record: not in any exec's resource list, or released by 0x25 / task drop */
+    TEXWHY_TABLE_FULL,         /* creation refused: the mirror's object table is full */
+    TEXWHY_C_PAYLOAD,          /* creation failed: payload unreadable or inconsistent (size, length, mip count) */
+    TEXWHY_C_FORMAT,           /* creation failed: Metal pixel format has no Vulkan mapping in the table (compressed, packed 16 bit, ...) */
+    TEXWHY_C_TYPE,             /* creation failed: texture type is not 2D / 2D array / 3D (cube, 1D, ...), or the linear-texture description tag is unknown */
+    TEXWHY_C_MSAA,             /* creation failed: multisampled texture */
+    TEXWHY_C_DIMS,             /* creation failed: zero or over-large extent, mip / layer count, depth-stencil shape */
+    TEXWHY_C_VULKAN,           /* creation failed: the device refused the image / staging buffer (format features missing, allocation) */
+    TEXWHY_C_LINEAR,           /* creation failed: linear texture whose buffer ref / row / offset is not usable */
+    TEXWHY_C_MAPPED_NODESC,    /* creation failed: mapped texture whose display surface has no descriptor in the shell (surface not created yet / unknown mapping id) */
+    TEXWHY_C_MAPPED_BAD,       /* creation failed: mapped texture whose surface does not decode / is not BGRA|RGhA / too large / image unusable / registry full */
+    TEXWHY_COUNT
+} lagfx_a64_texwhy_t;
+typedef struct { lagfx_a64_texwhy_t why; uint32_t type, mtl_format, width, height, mapping; } lagfx_a64_texdiag_t;   /* type: object table entry type (0 unknown); the rest best effort from the payload (0 unknown) */
+bool lagfx_a64_res_diagnose(lagfx_protocol_t *p, uint32_t task, uint32_t ref, lagfx_a64_texdiag_t *out);   /* classifies one unresolved texture ref; always fills out->why; false if nothing could be said (no mirror manager) */
+const char *lagfx_a64_texwhy_name(unsigned why);
+_Static_assert((int)TEXWHY_COUNT == LAGFX_A64_TEXWHY_COUNT, "state.h LAGFX_A64_TEXWHY_COUNT out of step with lagfx_a64_texwhy_t");
 
 /* LAGFX_ARM64_EXEC=1 (read at every call). */
 bool lagfx_a64_res_enabled(void);

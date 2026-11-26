@@ -23,6 +23,7 @@
 #include "dispatchers/ring_common.h"
 #include "protocol/state.h"
 #include "protocol/arm64_exec_decode.h"
+#include "protocol/arm64_resources.h"
 #include "protocol/arm64_exec_run.h"
 #include "protocol/arm64_objects.h"
 #include "protocol/arm64_pipeline.h"
@@ -412,6 +413,8 @@ static void rr_run(const rr_scene_t *s, rr_result_t *res) {
             { "desc_unbound", P->desc_unbound }, { "desc_failed", P->desc_failed }, { "no_pipeline", R->no_pipeline }, { "no_vertex_buf", R->no_vertex_buf } };
         size_t o2 = strlen(res->why);
         for (size_t i = 0; i < sizeof rf / sizeof rf[0]; i++) if (rf[i].v && o2 < sizeof res->why - 24) o2 += (size_t)snprintf(res->why + o2, sizeof res->why - o2, "%s=%llu ", rf[i].n, (unsigned long long)rf[i].v);
+        for (unsigned c = 0; c < LAGFX_A64_TEXWHY_COUNT; c++)   /* desc_unbound's texture part by reason (the same names as the device's g7-gpu-pipe texwhy[...]) */
+            if (P->desc_tex_why[c] && o2 < sizeof res->why - 40) o2 += (size_t)snprintf(res->why + o2, sizeof res->why - o2, "texwhy_%s=%llu ", lagfx_a64_texwhy_name(c), (unsigned long long)P->desc_tex_why[c]);
     }
     if (getenv("RR_VERBOSE")) {
         const __typeof__(p->diag2.exec.pipe) *P = &p->diag2.exec.pipe;

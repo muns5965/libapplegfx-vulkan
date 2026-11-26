@@ -305,14 +305,16 @@ static uint32_t cb_finish(void) {
     return g_cbn;
 }
 static bool g_res_tex, g_res_lin;
+static uint32_t g_extra_refs[16], g_nextra;   /* more refs for the exec's resource list (the reason tests list objects that must or must not be created) */
 static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len) {
     static const uint32_t refs[] = { REF_TEX, REF_TEX2, REF_PIPE_TRI, REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT, REF_FN_TRI_A, REF_PIPE_TRI2, REF_PIPE_TEX };
     static const uint32_t lrefs[] = { REF_LBUF, REF_LTEX, REF_LRT };
     uint32_t nr = g_res_tex ? 9u : 8u;           /* the textured pipeline is in the resource list only when the test uses it (listing it creates its object) */
-    uint32_t w[3 + 2 * 12 + 4], n = 0;
-    w[n++] = task; w[n++] = nr + (g_res_lin ? 3u : 0u); w[n++] = 1;
+    uint32_t w[3 + 2 * 28 + 4], n = 0;
+    w[n++] = task; w[n++] = nr + (g_res_lin ? 3u : 0u) + g_nextra; w[n++] = 1;
     for (uint32_t i = 0; i < nr; i++) { w[n++] = refs[i]; w[n++] = 0; }
     if (g_res_lin) for (uint32_t i = 0; i < 3; i++) { w[n++] = lrefs[i]; w[n++] = 0; }
+    for (uint32_t i = 0; i < g_nextra; i++) { w[n++] = g_extra_refs[i]; w[n++] = 0; }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
     submit(p, 0x43, 0, w, n);
@@ -450,6 +452,87 @@ static void test_textured_draw(void) {
     pfree(p);
     g_res_tex = false;
     puts("PASS: descriptor binding on lavapipe: 3 storage buffers + texture + inline sampler read back, unbound / feedback skipped, misaligned offset gathered");
+}
+
+
+/* Texture handles that do not resolve, by reason (desc_tex_why). One pass, one draw per handle: each draw samples a different ref in fragment slot 0 and is skipped
+ * (desc_unbound, nothing drawn). Every reason a handle can fail for that the test setup can reach is produced once and must be counted under its own name, and the
+ * first distinct texture of each reason is recorded with its object table entry type / Metal format / extent. */
+static void put_texture_ex(uint32_t ref, uint32_t pay_off, uint32_t fmt, uint32_t mtype, uint32_t w, uint32_t h, uint32_t samples) {
+    put_texture(ref, pay_off);
+    uint8_t t[200]; memset(t, 0, sizeof t);
+    uint32_t rec = 12 + 0x18 + 36, tsize = rec + 12 + 28;
+    va_write(VA_PAY + pay_off, t, 0);   /* (no-op: keeps the layout of put_texture, patched below) */
+    uint8_t *tp = g_mem + ((uint64_t)(DATA_PFN0 + 1) << 14) + (pay_off);   /* VA_PAY is page 1 */
+    uint8_t *d = tp + rec + 12;
+    d[0] = (uint8_t)mtype; d[2] = (uint8_t)fmt; d[3] = (uint8_t)(fmt >> 8);
+    memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4);
+    uint16_t sm = (uint16_t)samples; memcpy(d + 18, &sm, 2);
+    (void)tsize;
+}
+static void test_tex_unbound_reasons(void) {
+    g_res_tex = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    t->objects_len = 12u * 64u;
+    const uint32_t vb[3] = { REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT };
+    const uint32_t R_BC1 = 30, R_MSAA = 31, R_OK_UNLISTED = 32, R_CUBE = 33, R_EMPTY = 34, R_MAPPED = 36, R_DIMS = 37, R_BEYOND = 100;
+    put_texture_ex(R_BC1, 0x800, 130 /* BC1_RGBA */, 2, RT_W, RT_H, 1);
+    put_texture_ex(R_MSAA, 0x900, 80, 2, RT_W, RT_H, 4);
+    put_texture_ex(R_OK_UNLISTED, 0xa00, 80, 2, RT_W, RT_H, 1);
+    put_texture_ex(R_CUBE, 0xb00, 80, 5 /* MTLTextureTypeCube */, RT_W, RT_H, 1);
+    put_texture_ex(R_DIMS, 0xc00, 80, 2, 0, RT_H, 1);
+    { uint8_t mp[56]; memset(mp, 0, sizeof mp); uint64_t mapping = 7; uint32_t tag = 0x2f; memcpy(mp, &mapping, 8); memcpy(mp + 8, &tag, 4); mp[22] = 80;
+      va_write(VA_PAY + 0xd00, mp, sizeof mp); entry(R_MAPPED, 11, sizeof mp, VA_PAY + 0xd00); }   /* a mapped texture; the test shell has no surface descriptor for mapping 7 */
+    g_nextra = 0;
+    g_extra_refs[g_nextra++] = R_BC1; g_extra_refs[g_nextra++] = R_MSAA; g_extra_refs[g_nextra++] = R_CUBE; g_extra_refs[g_nextra++] = R_DIMS; g_extra_refs[g_nextra++] = R_MAPPED;
+    const uint32_t seq[] = { 0 /* nil */, R_BEYOND, R_EMPTY, REF_BUF_POS, REF_FN_VERT, R_OK_UNLISTED, R_BC1, R_MSAA, R_CUBE, R_DIMS, R_MAPPED };
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3);
+    cb_draw(4, 0, 4);                                                       /* no texture record at all: slot_unbound */
+    for (unsigned i = 0; i < sizeof seq / sizeof *seq; i++) { cb_refs(114, 0, &seq[i], 1); cb_draw(4, 0, 4); }
+    { uint8_t big[8 + 4 * 33]; memset(big, 0, sizeof big); uint32_t cnt = 33; memcpy(big + 4, &cnt, 4); cb_cmd(114, big, sizeof big); cb_draw(4, 0, 4); }   /* a record with more handles than the table holds: refused */
+    exec(p, 1, cb_finish());
+    g_nextra = 0;
+    const unsigned NDRAW = 1 + (unsigned)(sizeof seq / sizeof *seq) + 1;
+    assert(RUNC(p).draws == 0 && PIPE(p).desc_unbound == NDRAW && PIPE(p).desc_unbound_why[3] == NDRAW);
+    uint64_t sum = 0;
+    for (unsigned c = 0; c < TEXWHY_COUNT; c++) sum += PIPE(p).desc_tex_why[c];
+    assert(sum == NDRAW);                                                   /* the split adds up to the old single counter */
+    assert(PIPE(p).desc_tex_why[TEXWHY_SLOT_UNBOUND] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_REF_ZERO] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_NO_TABLE] == 1);                     /* ref 100 is beyond the object table length */
+    assert(PIPE(p).desc_tex_why[TEXWHY_ENTRY_EMPTY] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_NOT_TEXTURE] == 1);                  /* a buffer */
+    assert(PIPE(p).desc_tex_why[TEXWHY_UNKNOWN_TYPE] == 1);                 /* a function */
+    assert(PIPE(p).desc_tex_why[TEXWHY_NOT_MIRRORED] == 1);                 /* a well-formed texture that was not in the exec's resource list */
+    assert(PIPE(p).desc_tex_why[TEXWHY_C_FORMAT] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_C_MSAA] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_C_TYPE] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_C_DIMS] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_C_MAPPED_NODESC] == 1);
+    assert(PIPE(p).desc_tex_why[TEXWHY_RECORD_BAD] == 1);
+    /* the logged distinct texture of a reason names the object: entry type, Metal format, extent */
+    assert(PIPE(p).desc_tex_nseen[TEXWHY_C_FORMAT] == 1 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].ref == R_BC1 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].type == 2 &&
+           PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].mtl_format == 130 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].w == RT_W && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].h == RT_H);
+    assert(PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].ref == R_OK_UNLISTED && PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].mtl_format == 80 && PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].task == 1);
+    assert(PIPE(p).desc_tex_seen[TEXWHY_C_MAPPED_NODESC][0].type == 11 && PIPE(p).desc_tex_seen[TEXWHY_C_MAPPED_NODESC][0].mapping == 7);
+    assert(PIPE(p).desc_tex_seen[TEXWHY_UNKNOWN_TYPE][0].type == LAGFX_A64_OBJ_FUNCTION);
+    /* the diagnosis is also callable on its own, and follows the guest: the entry gets filled in later (created later than the first draw) */
+    lagfx_a64_texdiag_t dg;
+    assert(lagfx_a64_res_diagnose(p, 1, R_EMPTY, &dg) && dg.why == TEXWHY_ENTRY_EMPTY);
+    put_texture_ex(R_EMPTY, 0xe00, 80, 2, RT_W, RT_H, 1);
+    assert(lagfx_a64_res_diagnose(p, 1, R_EMPTY, &dg) && dg.why == TEXWHY_NOT_MIRRORED && dg.mtl_format == 80);
+    g_extra_refs[g_nextra++] = R_EMPTY;
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); { uint32_t r1 = R_EMPTY; cb_refs(114, 0, &r1, 1); } cb_draw(4, 0, 4);
+    exec(p, 1, cb_finish());
+    g_nextra = 0;
+    assert(RUNC(p).draws == 1 && PIPE(p).desc_unbound == NDRAW);            /* once the entry is filled in and listed, it resolves and draws */
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    pfree(p);
+    g_res_tex = false;
+    puts("PASS: unresolved texture handles are counted by reason (nil, beyond the table, empty entry, buffer, function, not listed, bad format / MSAA / type / extent, mapped without a surface, refused record) and logged with their format and size");
 }
 
 
@@ -912,6 +995,7 @@ int main(void) {
         test_resolver_triangle_and_topology();
         test_textured_draw();
         test_linear_sampled();
+        test_tex_unbound_reasons();
         test_invalidation();
         test_missing_caps();
     } else {
