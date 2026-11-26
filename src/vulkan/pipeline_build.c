@@ -3,6 +3,9 @@
 #include "pipeline_bundle.h"
 #include "common/log.h"
 #include "common/policy.h"
+#ifdef LAGFX_HAVE_VULKAN
+#include "pipeline_matrix.h"
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -445,6 +448,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
             describe_state(local, sizeof local, &gpci, &rendering_info);
             lagfx_pipeline_bundle_write(desc, vr, local, NULL, 0);
         }
+        lagfx_pipeline_matrix_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_MATRIX, default off: a no-op that returns at once */
         return LAGFX_ERR_BACKEND;
     }
 

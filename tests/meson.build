@@ -1755,6 +1755,16 @@ pipeline_repro_test = executable('pipeline-repro-unit',
 test('pipeline repro (unit, lavapipe)', pipeline_repro_test, workdir : meson.current_source_dir() / '..')
 
 
+# The -13 pipeline matrix (opt-in diagnostics) on lavapipe: rows, bounded output, M10 combinations, the LAGFX_PIPELINE_MATRIX production hook.
+pipeline_matrix_test = executable('pipeline-matrix-unit',
+  'pipeline-matrix-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('pipeline -13 matrix (unit, lavapipe)', pipeline_matrix_test)
+
 # Constexpr sampler extraction (AIR global -> i64 word -> decoded state).
 if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
   constexpr_sampler_test = executable('air2spv-constexpr-sampler-unit',
