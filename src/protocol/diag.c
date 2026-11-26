@@ -105,18 +105,18 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
         lagfx_arm64_cq_stats_t q;
         lagfx_arm64_cq_stats(p, &q);
         lagfx_vk_gpu_fail_stats(&wt, &wf, &sf);
-        if (p->a64cq || wt || wf || sf) {
-            snprintf(line, sizeof line, "g7-gpu-sync: cq_ok=%llu cq_failed_pre=%llu cq_fault_completed=%llu cq_fault_rejected=%llu cq_slow=%llu cq_hard_timeouts=%llu barrier_holds=%llu barrier_drains=%llu barrier_timeouts=%llu fault=%d cq_pending=%llu vk_wait_timeouts=%llu vk_wait_failed=%llu vk_submit_failed=%llu",
+        if (p->a64cq || wt || wf || sf || X->run.mapped_written_back) {
+            snprintf(line, sizeof line, "g7-gpu-sync: cq_ok=%llu cq_failed_pre=%llu cq_fault_completed=%llu cq_fault_rejected=%llu cq_slow=%llu cq_hard_timeouts=%llu barrier_holds=%llu barrier_drains=%llu barrier_timeouts=%llu fault=%d cq_pending=%llu vk_wait_timeouts=%llu vk_wait_failed=%llu vk_submit_failed=%llu mapped_written_back=%llu mapped_bytes_down=%llu",
                      (unsigned long long)q.ok, (unsigned long long)q.failed_pre, (unsigned long long)q.fault_completed, (unsigned long long)q.fault_rejected,
                      (unsigned long long)q.slow, (unsigned long long)q.hard_timeouts, (unsigned long long)q.barrier_holds, (unsigned long long)q.barrier_drains, (unsigned long long)q.barrier_timeouts, (int)q.fault, (unsigned long long)lagfx_arm64_cq_pending(p),
-                     (unsigned long long)wt, (unsigned long long)wf, (unsigned long long)sf);
+                     (unsigned long long)wt, (unsigned long long)wf, (unsigned long long)sf, (unsigned long long)X->run.mapped_written_back, (unsigned long long)X->run.mapped_bytes_down);
             fprintf(stderr, "%s\n", line);
             LAGFX_LOG("%s", line);
         }
     }
     if (X->run.execs) {   /* ARM64 render execution (LAGFX_ARM64_EXEC=1): totals, then the per-tag outcome of every tag seen */
         const __typeof__(X->run) *R = &X->run;
-        char rl[1800], tg[900];
+        char rl[2400], tg[900];
         size_t o = 0;
         tg[0] = 0;
         for (int g = 0; g < 512 && o + 40 < sizeof tg; g++)
@@ -126,13 +126,18 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
         snprintf(rl, sizeof rl,
                  "g7-gpu-run: execs=%llu passes=%llu draws=%llu draws_skipped=%llu submits=%llu submit_failed=%llu submit_pending=%llu seg_render=%llu seg_unsupported=%llu no_vulkan=%llu "
                  "bad_rec=%llu no_pass=%llu no_target=%llu no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu "
-                 "load_uninit_cleared=%llu pipeline_unresolved=%llu obj_unsupported=%llu tag_over=%llu tags(done/partial/unsupported)[%s]",
+                 "load_uninit_cleared=%llu pipeline_unresolved=%llu obj_unsupported=%llu tag_over=%llu "
+                 "mapped_created=%llu mapped_shared=%llu mapped_uploaded=%llu mapped_written_back=%llu mapped_unsupported=%llu mapped_no_desc=%llu mapped_bytes_up=%llu mapped_bytes_down=%llu mapped_pages_skipped=%llu "
+                 "tags(done/partial/unsupported)[%s]",
                  (unsigned long long)R->execs, (unsigned long long)R->passes, (unsigned long long)R->draws, (unsigned long long)R->draws_skipped,
                  (unsigned long long)R->submits, (unsigned long long)R->submit_failed, (unsigned long long)R->submit_pending, (unsigned long long)R->seg_render, (unsigned long long)R->seg_unsupported,
                  (unsigned long long)R->no_vulkan, (unsigned long long)R->bad_rec, (unsigned long long)R->no_pass, (unsigned long long)R->no_target,
                  (unsigned long long)R->no_pipeline, (unsigned long long)R->no_vertex_buf, (unsigned long long)R->no_index_buf,
                  (unsigned long long)R->prim_unsupported, (unsigned long long)R->extra_attach_ignored, (unsigned long long)R->load_uninit_cleared,
-                 (unsigned long long)R->pipeline_unresolved, (unsigned long long)R->obj_unsupported, (unsigned long long)R->tag_over, tg);
+                 (unsigned long long)R->pipeline_unresolved, (unsigned long long)R->obj_unsupported, (unsigned long long)R->tag_over,
+                 (unsigned long long)R->mapped_created, (unsigned long long)R->mapped_shared, (unsigned long long)R->mapped_uploaded, (unsigned long long)R->mapped_written_back,
+                 (unsigned long long)R->mapped_unsupported, (unsigned long long)R->mapped_no_desc, (unsigned long long)R->mapped_bytes_up, (unsigned long long)R->mapped_bytes_down,
+                 (unsigned long long)R->mapped_pages_skipped, tg);
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
     }

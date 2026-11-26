@@ -13,8 +13,13 @@
  *   type 2         texture  {u64 length, u32 vpage, layout{u16 mips, u16 slices, u64 base, u64 stride, mip table of 36 bytes}, description}
  *                  uncompressed, non-MSAA 2D / 2D array / 3D, formats in the table of arm64_resources.c
  *                type 8/9 linear 2D texture {tag, size, ref, description} without guest pages: a device image only (render target / blit), no write-back
- * Not supported (resolve returns NULL, blit using them is counted as 'bad_object'): heaps (13/14), mapped (0xb) textures,
- * cube/1D/MSAA/compressed/depth-stencil textures, type 6/7 objects.
+ *   type 11        mapped texture {u64 mapping id, u32 tag, u32 size, u32 ref, description}: the pixels live in a guest display SURFACE whose descriptor the shell
+ *                  supplies (lagfx_shell_callbacks_t.get_surface_desc, only B8G8R8A8 surfaces). ONE device image of the SURFACE's size per mapping id, shared by every ref /
+ *                  task naming that id, GENERAL layout, usable as colour attachment and sampled. Guest -> image: the surface pages are read (shell read_memory, honouring the
+ *                  row pitch and first-byte offset) into a staging buffer on the flag rules below; image -> guest: flag 0x04 / sync ops write the pixels back (shell
+ *                  write_memory), missing pages are skipped and counted. Counters: diag2.exec.run.mapped_*.
+ * Not supported (resolve returns NULL, blit using them is counted as 'bad_object'): heaps (13/14),
+ * cube/1D/MSAA/compressed/depth-stencil textures, type 6/7 objects, mapped surfaces that are not BGRA.
  * Each supported object owns a host-visible "guest copy" VkBuffer holding the bytes in the GUEST layout (for a buffer it IS the object),
  * and a texture additionally a device VkImage kept in VK_IMAGE_LAYOUT_GENERAL between uses.
  *
@@ -71,6 +76,7 @@ typedef struct lagfx_a64_rexec lagfx_a64_rexec_t;
  * and calls lagfx_a64_res_poll() until DONE. FAILED: a Vulkan failure (before submit nothing is in flight; after a DEVICE_LOST the resources are leaked). */
 typedef enum { LAGFX_A64_DONE = 0, LAGFX_A64_PENDING = 1, LAGFX_A64_FAILED = 2 } lagfx_a64_status_t;
 typedef struct lagfx_a64_obj lagfx_a64_obj_t;
+struct lagfx_a64_msurf;   /* shared device image of one guest surface (mapping id), private to arm64_resources.c */
 
 #ifdef LAGFX_HAVE_VULKAN
 enum { LAGFX_A64_BUFFER = 1, LAGFX_A64_TEXTURE = 2 };
@@ -82,6 +88,7 @@ struct lagfx_a64_obj {
     bool     leak;                      /* creation hit a GPU timeout: never freed */
     bool     host_valid, guest_stale;
     bool     has_pages;                 /* vpage != 0 */
+    struct lagfx_a64_msurf *ms; uint32_t mapping;       /* type 11: the shared surface image (host_valid / guest_stale of the object live in ms); has_pages stays false */
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
     uint64_t vpage;                     /* guest VA = vpage << 14 */

@@ -1447,6 +1447,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-integ-unit.c') and vulkan
   test('arm64 exec render+blit integration (lavapipe, validation)', ei_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
 endif
 
+# ARM64 type-11 mapped textures (guest display surfaces through the shell's get_surface_desc) on lavapipe + validation.
+if fs.is_file(meson.current_source_dir() / 'arm64-mapped-unit.c') and vulkan_dep.found()
+  mp_test = executable('arm64-mapped-unit',
+    'arm64-mapped-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('arm64 mapped textures (type 11) over guest surfaces (lavapipe, validation)', mp_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
+endif
+
 # ARM64 pipeline resolver + descriptor binding + topology + cache invalidation + real-data capture (lavapipe; honest SKIP without fixtures / ICD).
 if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   pu_deps = [libapplegfx_vulkan_dep]

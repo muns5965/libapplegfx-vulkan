@@ -19,6 +19,7 @@
 #include "render_target.h"
 #include "libapplegfx-vulkan.h"
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -39,6 +40,15 @@ lagfx_status_t lagfx_guest_surface_decode(const uint8_t *desc, size_t desc_len, 
  * touched is checked first: a missing page or unreadable list fails with nothing written. Bytes outside the written width stay as they were. */
 lagfx_status_t lagfx_guest_surface_write_bgra(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s,
                                               const uint8_t *src, uint32_t w, uint32_t h, size_t src_stride);
+
+/* Tolerant row-by-row transfer for the ARM64 exec mirror of mapped (type 11) textures. Moves min(w, surface width) x min(h, surface height) BGRA pixels between
+ * `buf` (tightly strided by `stride` bytes) and the guest pages at pixel (0, 0): surface byte offset first_offset + y * row_bytes + 4 * x. Unlike write_bgra a
+ * missing / non-present / unreadable page does NOT fail the transfer: the bytes of that page are skipped (to_guest: not written, guest keeps what it had; from
+ * guest: the buffer bytes are zeroed) and the page is counted once in st->pages_skipped. Every chunk is bounds-checked against the descriptor's page count. Only
+ * an unreadable page list (or bad arguments) fails, with nothing transferred. st may be NULL. */
+typedef struct { uint64_t bytes, pages_skipped, chunks_skipped; } lagfx_guest_surface_xfer_stats_t;
+lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, uint8_t *buf, uint32_t w, uint32_t h, size_t stride,
+                                        bool to_guest, lagfx_guest_surface_xfer_stats_t *st);
 
 #ifdef LAGFX_HAVE_VULKAN
 /* Read `rt` (B8G8R8A8 or R8G8B8A8, converted to BGRA) back from the GPU and write it into the guest surface described by desc. */

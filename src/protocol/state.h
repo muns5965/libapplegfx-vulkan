@@ -558,6 +558,7 @@ typedef struct lagfx_protocol {
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
                 uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
                 uint64_t extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported, obj_unsupported_linear;
+                uint64_t mapped_created, mapped_shared, mapped_uploaded, mapped_written_back, mapped_unsupported, mapped_no_desc, mapped_bytes_up, mapped_bytes_down, mapped_pages_skipped;   /* type 11 mapped textures (guest display surfaces) */
                 uint64_t tag_done[512], tag_partial[512], tag_unsup[512];   /* by inner tag; partial = recorded but not applied to Vulkan */
                 uint64_t tag_over;                                   /* tags >= 512, any outcome */
             } run;

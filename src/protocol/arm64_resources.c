@@ -9,6 +9,7 @@
 #include "../common/log.h"
 #include "../vulkan/command.h"
 #include "../vulkan/render_target.h"
+#include "../vulkan/surface_writeback.h"
 #include "../translate/blit_encoder.h"
 #include "../handlers/compute/blit_inner_ops.h"
 #include "opcodes.h"
@@ -49,7 +50,23 @@ typedef struct { lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; 
     lagfx_a64_rexec_t *pending;  /* submitted, fence not signalled yet: its resources stay alive and untouched */
     lagfx_a64_obj_t **dead; uint32_t ndead, capdead;   /* replaced / forgotten / dropped while an exec was recording or in flight: freed after its fence signalled */
     bool quiet_kinds;            /* begin(): refs of the resource list that are not buffers/textures (pipelines...) are not 'bad objects' */
+    struct lagfx_a64_msurf **ms; uint32_t nms;   /* shared surface images of type 11 mapped textures, newest last (not owning: an entry leaves when its last object is freed) */
+    uint64_t epoch;              /* bumped by every exec begin / sync: a mapped surface is uploaded / read back at most once per epoch */
 } mgr2_t;
+#define MRUN(p) ((p)->diag2.exec.run)
+#define MAX_MS 256u
+
+/* One guest display surface (mapping id) mirrored as ONE device image + a host-visible staging buffer in the guest's pixel layout (tight rows, w * h * 4 bytes).
+ * Every mapped-texture object (any ref / task) naming the same mapping id and size holds a reference; host_valid / guest_stale are the surface's, not the object's. */
+typedef struct lagfx_a64_msurf {
+    mgr2_t *m;
+    uint32_t mapping, w, h, refs;
+    VkFormat format; VkImageUsageFlags usage;
+    VkImage img; VkDeviceMemory img_mem;
+    VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
+    bool host_valid, guest_stale, down_pending;
+    uint64_t up_epoch, down_epoch;
+} msurf_t;
 
 static mgr2_t *mgr_get(lagfx_protocol_t *p, bool create) {
     if (!p->a64_res && create) p->a64_res = calloc(1, sizeof(mgr2_t));
@@ -162,8 +179,24 @@ static const struct { uint32_t mtl; VkFormat vk; uint32_t bpp; } k_fmt[] = {
 
 /* ---- object lifetime ---- */
 
+static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
+    if (!ms || --ms->refs) return;
+    mgr2_t *m = ms->m;
+    for (uint32_t i = 0; m && i < m->nms; i++) if (m->ms[i] == ms) { memmove(&m->ms[i], &m->ms[i + 1], (m->nms - i - 1u) * sizeof *m->ms); m->nms--; break; }
+    if (ms->img) vkDestroyImage(vk->device, ms->img, NULL);
+    if (ms->img_mem) vkFreeMemory(vk->device, ms->img_mem, NULL);
+    free_buf(vk, ms->stage, ms->stage_mem);
+    free(ms);
+}
+
 static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (!o) return;
+    if (o->ms) {   /* the image belongs to the shared surface */
+        if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
+        msurf_unref(vk, o->ms);
+        free(o);
+        return;
+    }
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
@@ -185,6 +218,7 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) {
     for (uint32_t i = 0; i < m->ndead; i++) { if (vk && !busy) obj_free(vk, m->dead[i]); else if (!vk) free(m->dead[i]); }
     free(m->dead);
     free(m->objs);
+    free(m->ms);
     free(m);
     p->a64_res = NULL;
 }
@@ -313,6 +347,120 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     return ok;
 }
 
+/* ---- mapped textures (type 11): pixels live in a guest display surface, descriptor from the shell ---- */
+
+static bool o_hv(const lagfx_a64_obj_t *o) { return o->ms ? o->ms->host_valid : o->host_valid; }
+static void o_set_hv(lagfx_a64_obj_t *o, bool v) { if (o->ms) o->ms->host_valid = v; else o->host_valid = v; }
+static bool o_stale(const lagfx_a64_obj_t *o) { return o->ms ? o->ms->guest_stale : o->guest_stale; }
+static void o_set_stale(lagfx_a64_obj_t *o, bool v) { if (o->ms) o->ms->guest_stale = v; else o->guest_stale = v; }
+
+/* The shell's descriptor of `mapping`, decoded (BGRA only). Counts mapped_no_desc (no callback / unknown id) or mapped_unsupported (does not decode / not BGRA). */
+static bool ms_desc(lagfx_protocol_t *p, uint32_t mapping, lagfx_guest_surface_t *gs) {
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    const lagfx_shell_callbacks_t *sh = dev ? &dev->desc.shell : NULL;
+    uint8_t d[256];
+    size_t n = 0;
+    memset(d, 0, sizeof d);
+    if (!sh || !sh->get_surface_desc || !sh->get_surface_desc(sh->opaque, mapping, d, sizeof d, &n) || n < LAGFX_SURF_DESC_BYTES || n > sizeof d) { MRUN(p).mapped_no_desc++; return false; }
+    if (lagfx_guest_surface_decode(d, n, gs) != LAGFX_OK) { MRUN(p).mapped_unsupported++; return false; }
+    return true;
+}
+
+static const lagfx_shell_callbacks_t *ms_shell(lagfx_protocol_t *p) { lagfx_device_t *dev = (lagfx_device_t *)p->dev; return dev ? &dev->desc.shell : NULL; }
+
+/* guest surface pages -> staging buffer -> image (recorded into cb; the caller adds the barrier). False (counted) if the surface cannot be read: nothing recorded. */
+static bool ms_pull(lagfx_protocol_t *p, mgr2_t *m, VkCommandBuffer cb, msurf_t *ms) {
+    if (ms->up_epoch == m->epoch) return true;   /* already taken in this exec */
+    lagfx_guest_surface_t gs;
+    if (!ms_desc(p, ms->mapping, &gs)) return false;
+    if (gs.width != ms->w || gs.height != ms->h) { MRUN(p).mapped_unsupported++; return false; }   /* the guest re-made the surface with another size */
+    lagfx_guest_surface_xfer_stats_t st;
+    memset(&st, 0, sizeof st);
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * 4u, false, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return false; }
+    MRUN(p).mapped_uploaded++, MRUN(p).mapped_bytes_up += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
+    VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { ms->w, ms->h, 1 } };
+    lagfx_translate_blit_cmd_buffer_image(cb, ms->stage, ms->img, &r, true);
+    ms->up_epoch = m->epoch;
+    return true;
+}
+
+/* image -> staging buffer (recorded); only a surface that holds meaningful pixels (host_valid). Once per epoch. */
+static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms) {
+    if (!ms->host_valid) return false;
+    if (ms->down_epoch == m->epoch && ms->down_pending) return true;
+    barrier(cb);
+    VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { ms->w, ms->h, 1 } };
+    lagfx_translate_blit_cmd_buffer_image(cb, ms->stage, ms->img, &r, false);
+    barrier(cb);
+    ms->down_pending = true, ms->down_epoch = m->epoch;
+    return true;
+}
+
+/* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted) */
+static void ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
+    if (!ms->down_pending) return;
+    ms->down_pending = false;
+    lagfx_guest_surface_t gs;
+    if (!ms_desc(p, ms->mapping, &gs)) return;
+    if (gs.width != ms->w || gs.height != ms->h) { MRUN(p).mapped_unsupported++; return; }
+    lagfx_guest_surface_xfer_stats_t st;
+    memset(&st, 0, sizeof st);
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * 4u, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return; }
+    MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
+    ms->guest_stale = false;
+}
+
+/* Builds o as a type 11 object over {u64 mapping, u32 tag, u32 size, u32 ref, description}. False (counted, o still freeable) if it cannot be. */
+static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk, const lagfx_task_entry_t *t, lagfx_a64_obj_t *o, uint64_t at, uint32_t size) {
+    uint8_t h[20 + 64];
+    memset(h, 0, sizeof h);
+    uint32_t n = size < sizeof h ? size : (uint32_t)sizeof h;
+    if (size < 20u + 4u || (!lagfx_arm64_task_read(p, t, at, h, n) && (n <= 52u || !lagfx_arm64_task_read(p, t, at, h, 52u)))) { MRUN(p).mapped_unsupported++; return false; }
+    uint64_t mapping = lagfx_le64(h);
+    uint32_t tag = lagfx_le32(h + 8);
+    const uint8_t *d = h + 20;
+    uint32_t fmt = tag == 0x39u ? (uint32_t)(d[1] | d[2] << 8) : (uint32_t)(d[2] | d[3] << 8);   /* v2 / v1 description (Henge makeMappedTexture) */
+    if (mapping > 0xffffffffull) { MRUN(p).mapped_unsupported++; return false; }
+    lagfx_guest_surface_t gs;
+    if (!ms_desc(p, (uint32_t)mapping, &gs)) return false;
+    if ((uint64_t)gs.width * gs.height * 4u > LAGFX_A64_MAX_OBJ_BYTES) { MRUN(p).mapped_unsupported++; return false; }
+    msurf_t *ms = NULL;
+    for (uint32_t i = m->nms; i-- > 0;) if (m->ms[i]->mapping == (uint32_t)mapping && m->ms[i]->w == gs.width && m->ms[i]->h == gs.height) { ms = m->ms[i]; break; }
+    if (!ms) {
+        if (m->nms >= MAX_MS) { MRUN(p).mapped_unsupported++; return false; }
+        if (m->nms == 0 || (m->nms & (m->nms - 1u)) == 0) {   /* grow the registry on powers of two */
+            uint32_t nc = m->nms ? m->nms * 2u : 8u;
+            struct lagfx_a64_msurf **nn = realloc(m->ms, nc * sizeof *nn);
+            if (!nn) { MRUN(p).mapped_unsupported++; return false; }
+            m->ms = nn;
+        }
+        o->format = fmt == 81u ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+        o->img_type = VK_IMAGE_TYPE_2D, o->width = gs.width, o->height = gs.height, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = 4;
+        if (!create_image(vk, m, o)) { MRUN(p).mapped_unsupported++; return false; }
+        if (!(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { MRUN(p).mapped_unsupported++; return false; }   /* o frees its own image */
+        ms = calloc(1, sizeof *ms);
+        if (!ms) { MRUN(p).mapped_unsupported++; return false; }
+        if (!make_buf(vk, (VkDeviceSize)gs.width * gs.height * 4u, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &ms->stage, &ms->stage_mem, &ms->stage_map)) {
+            free(ms); MRUN(p).mapped_unsupported++; return false;
+        }
+        ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->format = o->format, ms->usage = o->usage;
+        ms->img = o->img, ms->img_mem = o->img_mem;   /* ownership moves to the surface */
+        o->img_mem = VK_NULL_HANDLE;
+        m->ms[m->nms++] = ms;
+        MRUN(p).mapped_created++;
+        LAGFX_LOG("arm64 mapped texture: mapping %u surface %ux%u row %llu first %u, description tag 0x%x format %u", (unsigned)mapping, gs.width, gs.height, (unsigned long long)gs.row_bytes, gs.first_offset, tag, fmt);
+    } else {
+        o->format = ms->format, o->usage = ms->usage, o->img = ms->img;
+        o->img_type = VK_IMAGE_TYPE_2D, o->width = ms->w, o->height = ms->h, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = 4;
+        MRUN(p).mapped_shared++;
+    }
+    ms->refs++;
+    o->ms = ms, o->mapping = (uint32_t)mapping;
+    o->kind = LAGFX_A64_TEXTURE, o->has_pages = false, o->length = 0, o->tex_mip_count = 1;
+    o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = (uint64_t)o->width * 4u;
+    return true;
+}
+
 static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
     uint32_t type = e[0] & 0xffu, size = e[0] >> 8;
     uint64_t at = (uint64_t)e[2] << 32 | e[1];
@@ -405,6 +553,8 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (o->linear && (!o->lin_buf || !o->lin_row || o->lin_row % o->bpp || o->lin_row / o->bpp < o->width || o->lin_off % o->bpp || o->lin_row > (1ull << 31))) goto bad_linear;
         if (!create_image(vk, m, o)) goto bad_linear;
         m->st.linear_made++;
+    } else if (type == 11) {   /* mapped texture over a guest display surface */
+        if (!mapped_make(p, m, vk, t, o, at, size)) goto bad;
     } else { if (m->quiet_kinds) { free(o); return NULL; } goto bad; }
     return o;
 bad_linear:
@@ -469,12 +619,15 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
 lagfx_a64_obj_t *lagfx_a64_res_object(lagfx_a64_rexec_t *x, uint32_t ref) {
     if (!x) return NULL;
     lagfx_a64_obj_t *o = obj_resolve(x->p, x->m, x->vk, x->t, ref, false);
-    if (o && !o->host_valid) {   /* first use outside the resource list: take the guest's bytes (never over a stale mark) */
-        if (!o->guest_stale) {
+    if (o && !o_hv(o)) {   /* first use outside the resource list: take the guest's bytes (never over a stale mark) */
+        bool ok = true;
+        if (o->ms) {
+            if (!o_stale(o)) { ok = ms_pull(x->p, x->m, x->cb, o->ms); if (ok) barrier(x->cb); }
+        } else if (!o->guest_stale) {
             guest_upload(x->p, x->m, x->t, o);
             if (o->kind == LAGFX_A64_TEXTURE) tex_record(x->cb, o, false), barrier(x->cb);
         }
-        o->host_valid = true;
+        if (ok) o_set_hv(o, true);   /* a surface that could not be read stays 'not valid': the next use tries again */
         if (o->linear) lin_pull_x(x, o);
     }
     return o;
@@ -496,6 +649,7 @@ lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const
     x->res = calloc(nres ? nres : 1, sizeof *x->res);
     if (!x->res) { lagfx_vk_cmdbuf_free(vk, x->cb); free(x); return NULL; }
     m->st.execs++;
+    m->epoch++;
     m->cur = x;
     m->quiet_kinds = true;
     /* pass 1: flag 1, upload where the host copy is not valid and the guest copy is not stale */
@@ -505,23 +659,27 @@ lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const
         lagfx_a64_obj_t *o = obj_resolve(p, m, vk, t, ref, true);
         if (!o) continue;
         x->res[x->nres].o = o, x->res[x->nres].flags = fl, x->nres++;
-        if (fl & 1u) o->guest_stale = false, o->host_valid = false;
+        if (fl & 1u) o_set_stale(o, false), o_set_hv(o, false);
         if (o->kind == LAGFX_A64_BUFFER) {   /* shared-mapping emulation: re-read every exec unless the GPU's result is newer */
             if (!o->guest_stale) o->host_valid = false; else m->st.stale_skips++;
         }
-        if (!o->host_valid) {
-            if (!o->guest_stale) {
-                guest_upload(p, m, t, o);
-                if (o->kind == LAGFX_A64_TEXTURE) tex_record(x->cb, o, false);
+        if (!o_hv(o)) {
+            bool ok = true;
+            if (!o_stale(o)) {
+                if (o->ms) ok = ms_pull(p, m, x->cb, o->ms);   /* unreadable surface (no descriptor yet ...): stays not valid, retried by the next exec */
+                else {
+                    guest_upload(p, m, t, o);
+                    if (o->kind == LAGFX_A64_TEXTURE) tex_record(x->cb, o, false);
+                }
             } else m->st.stale_skips++;
-            o->host_valid = true;
+            if (ok) o_set_hv(o, true);
         }
     }
     m->quiet_kinds = false;
     for (uint32_t i = 0; i < x->nres; i++) if (x->res[i].o->linear) lin_pull_x(x, x->res[i].o);   /* shared memory: the image takes what the buffer holds now */
     barrier(x->cb);
     /* pass 2: flag 2 -> the guest's copy is out of date from here on */
-    for (uint32_t i = 0; i < x->nres; i++) if (x->res[i].flags & 2u) x->res[i].o->guest_stale = true;
+    for (uint32_t i = 0; i < x->nres; i++) if (x->res[i].flags & 2u) o_set_stale(x->res[i].o, true);
     return x;
 }
 
@@ -739,6 +897,7 @@ static lagfx_a64_status_t exec_finish(lagfx_a64_rexec_t *x) {
     for (uint32_t i = 0; i < x->nres; i++) {
         lagfx_a64_obj_t *o = x->res[i].o;
         if (!(x->res[i].flags & 4u)) continue;
+        if (o->ms) { ms_finish_down(x->p, o->ms); continue; }   /* a surface's pixels go through the shell, not through the task */
         if (t && t->root_page_pfn && t == x->t) {
             if (o->linear) { lagfx_a64_obj_t *b = obj_find(x->m, o->task, o->lin_buf); if (b) guest_download(x->p, x->m, t, b), b->guest_stale = false; }   /* a linear texture's bytes are its buffer's pages */
             else guest_download(x->p, x->m, t, o);
@@ -768,6 +927,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
         lagfx_a64_obj_t *o = x->res[i].o;
         if ((x->res[i].flags & 4u) && o->kind == LAGFX_A64_TEXTURE && o->has_pages) tex_record(x->cb, o, true);
         if ((x->res[i].flags & 4u) && o->linear) lin_push_x(x, o);
+        if ((x->res[i].flags & 4u) && o->ms) ms_record_down(m, x->cb, o->ms);
     }
     barrier(x->cb);
     m->cur = NULL;   /* recording is over */
@@ -819,9 +979,11 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     if (!cb_begin(vk, &cb)) return 0;
     lagfx_a64_obj_t *sel[64];
     uint32_t ns = 0;
+    m->epoch++;
     for (uint32_t i = 0; i < n && ns < 64; i++)
         for (uint32_t k = 0; k < m->n; k++) {
             lagfx_a64_obj_t *o = m->objs[k];
+            if (o && o->task == task && o->ref == refs[i] && o->ms) { if (ms_record_down(m, cb, o->ms)) sel[ns++] = o; break; }
             if (o && o->task == task && o->ref == refs[i] && o->host_valid && o->linear) {
                 lagfx_a64_obj_t *b = obj_find(m, task, o->lin_buf);
                 if (b && b->has_pages && lin_xfer(cb, b, o, m, false)) sel[ns++] = b;
@@ -833,7 +995,7 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;   /* pending/failed: nothing is written to the guest */
     if (cb) lagfx_vk_cmdbuf_free(vk, cb);
     if (!ok) return 0;
-    for (uint32_t i = 0; i < ns; i++) guest_download(p, m, t, sel[i]), sel[i]->guest_stale = false;
+    for (uint32_t i = 0; i < ns; i++) { if (sel[i]->ms) ms_finish_down(p, sel[i]->ms); else guest_download(p, m, t, sel[i]), sel[i]->guest_stale = false; }
     return ns;
 }
 
@@ -957,10 +1119,10 @@ bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
             const uint8_t *e = a + 8 + 8u * i;
             lagfx_a64_obj_t *o = obj_find(m, task, lagfx_le32(e));
             if (!o) { m->st.inv_missing++; continue; }
-            if (e[6]) o->guest_stale = true;
-            if (e[7]) o->guest_stale = false;
-            if (e[4]) o->host_valid = false;
-            if (e[5]) o->host_valid = true;
+            if (e[6]) o_set_stale(o, true);
+            if (e[7]) o_set_stale(o, false);
+            if (e[4]) o_set_hv(o, false);
+            if (e[5]) o_set_hv(o, true);
             m->st.inv_objs++;
         }
         return true;

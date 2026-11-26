@@ -53,6 +53,48 @@ out:
     return st;
 }
 
+lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, uint8_t *buf, uint32_t w, uint32_t h, size_t stride,
+                                        bool to_guest, lagfx_guest_surface_xfer_stats_t *st) {
+    lagfx_guest_surface_xfer_stats_t zero = { 0, 0, 0 };
+    if (!st) st = &zero;
+    if (!shell || !shell->read_memory || (to_guest && !shell->write_memory) || !s || !buf || !w || !h || !s->npages || s->npages > 4096u || stride < (size_t)w * 4u) return LAGFX_ERR_INVALID_ARG;
+    if (w > s->width) w = s->width;
+    if (h > s->height) h = s->height;
+    uint32_t *pages = malloc((size_t)s->npages * 4u);
+    uint8_t *bad = calloc(s->npages, 1);   /* pages already counted as skipped */
+    if (!pages || !bad) { free(pages); free(bad); return LAGFX_ERR_OUT_OF_MEMORY; }
+    lagfx_status_t res = LAGFX_ERR_BACKEND;
+    if (!shell->read_memory(shell->opaque, s->page_list_gpa, (uint64_t)s->npages * 4u, pages)) goto out;
+    const uint64_t total = (uint64_t)s->npages << LAGFX_SURF_PAGE_SHIFT;
+    for (uint32_t y = 0; y < h; y++) {
+        uint64_t off = (uint64_t)s->first_offset + (uint64_t)y * s->row_bytes, n = (uint64_t)w * 4u;
+        uint8_t *p = buf + (size_t)y * stride;
+        while (n) {
+            uint64_t pg = off >> LAGFX_SURF_PAGE_SHIFT, o = off & 0x3fffu, c = 0x4000u - o;
+            if (c > n) c = n;
+            bool ok = off < total && off + c <= total && pg < s->npages;
+            uint32_t ent = ok ? lagfx_le32((const uint8_t *)&pages[pg]) : 0;
+            ok = ok && (ent & 1u);
+            if (ok) {
+                uint64_t gpa = ((uint64_t)(ent & ~1u) << 12) + o;
+                ok = to_guest ? shell->write_memory(shell->opaque, gpa, c, p) : shell->read_memory(shell->opaque, gpa, c, p);
+            }
+            if (ok) st->bytes += c;
+            else {
+                if (!to_guest) memset(p, 0, (size_t)c);
+                st->chunks_skipped++;
+                if (pg < s->npages && !bad[pg]) bad[pg] = 1, st->pages_skipped++;
+                else if (pg >= s->npages) st->pages_skipped++;
+            }
+            p += c; off += c; n -= c;
+        }
+    }
+    res = LAGFX_OK;
+out:
+    free(pages); free(bad);
+    return res;
+}
+
 #ifdef LAGFX_HAVE_VULKAN
 lagfx_status_t lagfx_vk_render_target_to_guest_surface(struct lagfx_vk_state *vk, lagfx_vk_render_target_t *rt,
                                                        const lagfx_shell_callbacks_t *shell, const uint8_t *desc, size_t desc_len) {
