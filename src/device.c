@@ -19,6 +19,7 @@
 #include "protocol/state.h"  /* lagfx_protocol_t typedef */
 #include "protocol/diag.h"
 #include "protocol/arm64_completion.h"
+#include "dispatchers/channel_compute_dispatcher.h"
 #include "vulkan/instance.h"
 #include "vulkan/iosurface.h"   /* white_fb teardown */
 #include "shaders/catalog.h"
@@ -425,12 +426,16 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
 
 size_t lagfx_device_poll_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
-    return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);
+    return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);   /* also resumes commands held behind a slow exec (no doorbell needed) */
 }
 
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
-    return lagfx_arm64_cq_pending((lagfx_protocol_t *)device->protocol_state);
+    lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
+    if (!lagfx_a64_exec_trylock(p)) return 1;   /* a drain / retire / teardown is running right now: keep the timer going */
+    size_t n = lagfx_arm64_cq_pending(p) + (p->a64_held_chan_mask ? 1u : 0u);   /* a held exec command also needs the shell's timer */
+    lagfx_a64_exec_unlock(p);
+    return n;
 }
 
 void lagfx_device_free(lagfx_device_t *device) {

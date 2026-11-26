@@ -1441,7 +1441,7 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-integ-unit.c') and vulkan
   ei_test = executable('arm64-exec-integ-unit',
     'arm64-exec-integ-unit.c',
     include_directories : [include_dir, internal_include_dir],
-    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
     build_by_default : true,
   )
   test('arm64 exec render+blit integration (lavapipe, validation)', ei_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)

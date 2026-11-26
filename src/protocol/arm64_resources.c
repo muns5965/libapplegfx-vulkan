@@ -376,8 +376,39 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         o->kind = LAGFX_A64_TEXTURE, o->length = (len + 0x3fffu) & ~0x3fffull;
         if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o->buf, &o->buf_mem, &o->map)) goto bad;
         if (!create_image(vk, m, o)) goto bad;
+    } else if (type == 8 || type == 9) {
+        /* linear texture without guest pages ({tag, size, ref, description}): a device image only (no guest copy, no write-back), enough for render targets
+         * and blits of the uncompressed formats of the table; 2D, one mip, one sample. A linear texture that cannot be mirrored is counted in
+         * stats.linear_unsupported (diagnostics) and Render then skips the pass (no_target). */
+        uint8_t d[512];
+        if (size < 12 + 20 || size > sizeof d || !lagfx_arm64_task_read(p, t, at, d, size)) goto bad_linear;
+        uint32_t tag = lagfx_le32(d), mtype, fmt, samples;
+        const uint8_t *desc = d + 12;
+        if (tag == 9 || tag == 0x37) {   /* over a buffer (Henge makeLinearTexture): {tag, size, ref, buffer ref, u64 offset, u64 row, description} */
+            if (size < 0x20 + 0x17) goto bad_linear;
+            o->linear = true, o->lin_buf = lagfx_le32(d + 12), o->lin_off = lagfx_le64(d + 16), o->lin_row = lagfx_le64(d + 24);
+            desc = d + 0x20;
+            if (tag == 0x37) { mtype = desc[0] & 0xfu, fmt = desc[1] | desc[2] << 8, o->width = lagfx_le32(desc + 7), o->height = lagfx_le32(desc + 11), samples = lagfx_le16(desc + 21); }
+            else             { mtype = desc[0] & 0xfu, fmt = desc[2] | desc[3] << 8, o->width = lagfx_le32(desc + 4), o->height = lagfx_le32(desc + 8), samples = lagfx_le16(desc + 18); }
+        } else if (tag == 0x34 || tag == 0x39) {
+            if (size < 12 + 0x17) goto bad_linear;
+            mtype = desc[0] & 0xfu, fmt = desc[1] | desc[2] << 8, o->width = lagfx_le32(desc + 7), o->height = lagfx_le32(desc + 11), samples = lagfx_le16(desc + 21);
+        } else if (tag == 0x14 || tag == 1) {
+            mtype = desc[0] & 0xfu, fmt = desc[2] | desc[3] << 8, o->width = lagfx_le32(desc + 4), o->height = lagfx_le32(desc + 8), samples = lagfx_le16(desc + 18);
+        } else goto bad_linear;
+        o->format = VK_FORMAT_UNDEFINED;
+        for (size_t i = 0; i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
+        if (mtype != 2 || samples > 1 || o->format == VK_FORMAT_UNDEFINED || !o->width || !o->height || o->width > 16384 || o->height > 16384) goto bad_linear;
+        o->img_type = VK_IMAGE_TYPE_2D, o->depth = 1, o->mips = 1, o->layers = 1, o->tex_mip_count = 1;
+        o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = o->linear ? o->lin_row : (uint64_t)o->width * o->bpp;
+        o->kind = LAGFX_A64_TEXTURE, o->has_pages = false, o->length = 0;
+        if (o->linear && (!o->lin_buf || !o->lin_row || o->lin_row % o->bpp || o->lin_row / o->bpp < o->width || o->lin_off % o->bpp || o->lin_row > (1ull << 31))) goto bad_linear;
+        if (!create_image(vk, m, o)) goto bad_linear;
+        m->st.linear_made++;
     } else { if (m->quiet_kinds) { free(o); return NULL; } goto bad; }
     return o;
+bad_linear:
+    m->st.linear_unsupported++;
 bad:
     m->st.bad_object++;
     if (!o->leak) obj_free(vk, o);
@@ -399,6 +430,8 @@ struct lagfx_a64_rexec {
     VkBuffer tmp_b[MAX_TMP]; VkDeviceMemory tmp_m[MAX_TMP]; uint32_t ntmp;
 };
 
+static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x) { return x ? x->cb : VK_NULL_HANDLE; }
 
 /* find or (re)create the object for ref in this task; a changed table entry replaces it (Apple: a reused ref is noticed) */
@@ -442,6 +475,7 @@ lagfx_a64_obj_t *lagfx_a64_res_object(lagfx_a64_rexec_t *x, uint32_t ref) {
             if (o->kind == LAGFX_A64_TEXTURE) tex_record(x->cb, o, false), barrier(x->cb);
         }
         o->host_valid = true;
+        if (o->linear) lin_pull_x(x, o);
     }
     return o;
 }
@@ -484,10 +518,58 @@ lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const
         }
     }
     m->quiet_kinds = false;
+    for (uint32_t i = 0; i < x->nres; i++) if (x->res[i].o->linear) lin_pull_x(x, x->res[i].o);   /* shared memory: the image takes what the buffer holds now */
     barrier(x->cb);
     /* pass 2: flag 2 -> the guest's copy is out of date from here on */
     for (uint32_t i = 0; i < x->nres; i++) if (x->res[i].flags & 2u) x->res[i].o->guest_stale = true;
     return x;
+}
+
+static lagfx_a64_obj_t *obj_find(mgr2_t *m, uint32_t task, uint32_t ref) {
+    for (uint32_t i = 0; i < m->n; i++) if (m->objs[i] && m->objs[i]->task == task && m->objs[i]->ref == ref) return m->objs[i];
+    return NULL;
+}
+
+/* ---- linear textures over a buffer (type 8/9, tags 9 / 0x37): an optimal-tiling VkImage whose bytes live in the backing buffer's guest-layout copy (offset,
+ * row pitch). The image is pulled from the buffer before it is read (render Load, blit source, begin of an exec) and pushed back after it was written (render pass,
+ * blit destination, flag 0x04), so Render, Blit and the guest pages (written through the BUFFER's pages) see one memory, as on Apple's shared mapping. ---- */
+
+static lagfx_a64_obj_t *lin_backing(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk, const lagfx_task_entry_t *t, const lagfx_a64_obj_t *o, bool create) {
+    lagfx_a64_obj_t *b = create ? obj_resolve(p, m, vk, t, o->lin_buf, false) : obj_find(m, o->task, o->lin_buf);
+    return b && b->kind == LAGFX_A64_BUFFER ? b : NULL;
+}
+
+static bool lin_region(const lagfx_a64_obj_t *o, const lagfx_a64_obj_t *b, VkBufferImageCopy *r) {
+    unsigned __int128 end = (unsigned __int128)o->lin_off + (unsigned __int128)o->lin_row * (o->height - 1) + (unsigned __int128)o->width * o->bpp;
+    if (end > b->length) return false;
+    memset(r, 0, sizeof *r);
+    r->bufferOffset = o->lin_off, r->bufferRowLength = (uint32_t)(o->lin_row / o->bpp);
+    r->imageSubresource = (VkImageSubresourceLayers){ VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 };
+    r->imageExtent = (VkExtent3D){ o->width, o->height, 1 };
+    return true;
+}
+
+/* to_image: buffer -> image (pull); else image -> buffer (push). false + counted if the backing buffer is missing / too small. */
+static bool lin_xfer(VkCommandBuffer cb, lagfx_a64_obj_t *b, lagfx_a64_obj_t *o, mgr2_t *m, bool to_image) {
+    VkBufferImageCopy r;
+    if (!b || !lin_region(o, b, &r)) { m->st.linear_unsupported++; return false; }
+    barrier(cb);
+    lagfx_translate_blit_cmd_buffer_image(cb, b->buf, o->img, &r, to_image);
+    barrier(cb);
+    return true;
+}
+static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!o->linear) return true;
+    lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
+    if (b && !b->host_valid) { if (!b->guest_stale) guest_upload(x->p, x->m, x->t, b); b->host_valid = true; }
+    return lin_xfer(x->cb, b, o, x->m, true);
+}
+static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!o->linear) return true;
+    lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
+    bool ok = lin_xfer(x->cb, b, o, x->m, false);
+    if (ok) b->host_valid = true;
+    return ok;
 }
 
 /* ---- blit commands (validation against the mirrored objects; the Vulkan recording is src/translate/blit_encoder.c) ---- */
@@ -523,7 +605,9 @@ static bool buf_tex_copy(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, lagfx_a64_obj
     VkBufferImageCopy r = { .bufferOffset = off, .bufferRowLength = (uint32_t)(row / t->bpp), .bufferImageHeight = bx->d > 1 ? (uint32_t)(img / row) : 0,
         .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, bx->level, bx->slice, 1 },
         .imageOffset = { (int32_t)bx->x, (int32_t)bx->y, (int32_t)bx->z }, .imageExtent = { (uint32_t)bx->w, (uint32_t)bx->h, (uint32_t)bx->d } };
+    if (!to_tex && !lin_pull_x(x, t)) return false;   /* a linear texture is read: take the buffer's current bytes first */
     lagfx_translate_blit_cmd_buffer_image(x->cb, b->buf, t->img, &r, to_tex);
+    if (to_tex) lin_push_x(x, t);                       /* ... written: back into the buffer (and so the guest pages of the buffer) */
     return true;
 }
 
@@ -566,7 +650,9 @@ static bool blit_303(lagfx_a64_rexec_t *x, const uint8_t *r) {
     VkImageCopy c = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, s.level, s.slice, 1 }, .srcOffset = { (int32_t)s.x, (int32_t)s.y, (int32_t)s.z },
                       .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, d.level, d.slice, 1 }, .dstOffset = { (int32_t)d.x, (int32_t)d.y, (int32_t)d.z },
                       .extent = { (uint32_t)s.w, (uint32_t)s.h, (uint32_t)s.d } };
+    if (!lin_pull_x(x, a)) return false;
     lagfx_translate_blit_cmd_image_image(x->cb, a->img, b->img, &c);
+    lin_push_x(x, b);
     return true;
 }
 
@@ -653,7 +739,10 @@ static lagfx_a64_status_t exec_finish(lagfx_a64_rexec_t *x) {
     for (uint32_t i = 0; i < x->nres; i++) {
         lagfx_a64_obj_t *o = x->res[i].o;
         if (!(x->res[i].flags & 4u)) continue;
-        if (t && t->root_page_pfn && t == x->t) guest_download(x->p, x->m, t, o);
+        if (t && t->root_page_pfn && t == x->t) {
+            if (o->linear) { lagfx_a64_obj_t *b = obj_find(x->m, o->task, o->lin_buf); if (b) guest_download(x->p, x->m, t, b), b->guest_stale = false; }   /* a linear texture's bytes are its buffer's pages */
+            else guest_download(x->p, x->m, t, o);
+        }
         o->guest_stale = false;
     }
     mgr2_t *m = x->m;
@@ -678,6 +767,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
     for (uint32_t i = 0; i < x->nres; i++) {   /* flag 4: bring the GPU's result back after this exec */
         lagfx_a64_obj_t *o = x->res[i].o;
         if ((x->res[i].flags & 4u) && o->kind == LAGFX_A64_TEXTURE && o->has_pages) tex_record(x->cb, o, true);
+        if ((x->res[i].flags & 4u) && o->linear) lin_push_x(x, o);
     }
     barrier(x->cb);
     m->cur = NULL;   /* recording is over */
@@ -732,6 +822,11 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     for (uint32_t i = 0; i < n && ns < 64; i++)
         for (uint32_t k = 0; k < m->n; k++) {
             lagfx_a64_obj_t *o = m->objs[k];
+            if (o && o->task == task && o->ref == refs[i] && o->host_valid && o->linear) {
+                lagfx_a64_obj_t *b = obj_find(m, task, o->lin_buf);
+                if (b && b->has_pages && lin_xfer(cb, b, o, m, false)) sel[ns++] = b;
+                break;
+            }
             if (o && o->task == task && o->ref == refs[i] && o->host_valid && o->has_pages) { sel[ns++] = o; if (o->kind == LAGFX_A64_TEXTURE) tex_record(cb, o, true); break; }
         }
     barrier(cb);
@@ -742,15 +837,12 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     return ns;
 }
 
-static lagfx_a64_obj_t *obj_find(mgr2_t *m, uint32_t task, uint32_t ref) {
-    for (uint32_t i = 0; i < m->n; i++) if (m->objs[i] && m->objs[i]->task == task && m->objs[i]->ref == ref) return m->objs[i];
-    return NULL;
-}
 
 /* ---- render targets and readback ---- */
 
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h) {
     if (!x || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return false;
+    if (o->linear && !lin_pull_x(x, o)) return false;   /* Load / blend reads the buffer's bytes: counted linear_unsupported when the backing buffer is unusable */
     if (!o->view) {
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
@@ -776,6 +868,7 @@ void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS } };
     vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    if (o->linear) lin_push_x(x, o);   /* the render result goes back into the buffer */
 }
 
 bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {

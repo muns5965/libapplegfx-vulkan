@@ -183,6 +183,7 @@ void lagfx_a64_exec_drop_task(lagfx_protocol_t *p, uint32_t task_id) {
 
 void lagfx_a64_exec_free(lagfx_protocol_t *p) {
     if (!p) return;
+    lagfx_a64_exec_lock(p);   /* no drain / poll while the exec state is torn down */
     a64_run_t *r = RUN(p);
     if (r) {
         r->vk = get_vk(p);
@@ -190,13 +191,14 @@ void lagfx_a64_exec_free(lagfx_protocol_t *p) {
     }
     bool gpu_busy = lagfx_a64_res_is_pending(p) && lagfx_a64_res_poll(p, 2000) == LAGFX_A64_PENDING;   /* one bounded wait; what is not done is leaked, never freed under the GPU */
     lagfx_a64_res_destroy(p);                 /* mirror: abandons an open exec, frees every object (needs the Vulkan device alive) */
-    if (!r) return;
+    if (!r) { lagfx_a64_exec_unlock(p); return; }
     if (gpu_busy) r->vk = NULL;               /* the Vulkan pipelines may still be in use: leak them */
     p->a64_exec = NULL;                       /* res busy state is gone: the table frees its objects at once */
     lagfx_a64_objects_free(r->objs);
     for (uint32_t i = 0; i < r->ndef; i++) { if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe); else destroy_obj_now(r, r->def[i].obj); }
     free(r->def);
     free(r);
+    lagfx_a64_exec_unlock(p);
 }
 
 void lagfx_a64_exec_object_counts(const lagfx_protocol_t *p, uint32_t *live, uint64_t *created, uint64_t *destroyed) {
@@ -238,7 +240,8 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     /* ONE exec context + ONE command buffer for Render and Blit segments; the resource-flag rules (0x01 / 0x02 uploads, stale guard) are applied inside */
     r->x = lagfx_a64_res_begin(p, task->id, res, nres);
     if (!r->x) {
-        if (lagfx_a64_res_is_pending(p)) {   /* the GPU is still on the previous exec and its resources must not be touched: this exec is NOT executed, so its stamp must not claim success */
+        if (lagfx_a64_res_is_pending(p)) {   /* NOT reachable through the compute drain (it holds exec commands in the ring while one is in flight, see
+                                              * channel_compute_dispatcher.c); only a direct caller or a FAULTed GPU gets here: this exec is not executed, so it must not claim success */
             CNT(p).busy_skipped++;
             lagfx_arm64_submit_mark_failed(lagfx_arm64_submit_current(p));
         } else CNT(p).no_vulkan++;
@@ -273,7 +276,9 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     if (n < LAGFX_RENDER_PASS_WIRE_SIZE || lagfx_parse_render_pass_descriptor(rec, n, &d) != 0) { CNT(p).bad_rec++; tag_unsup(p, 26); return; }
     if (d.color_attachment_count > 1u || d.has_depth || d.has_stencil) CNT(p).extra_attach_ignored++;
     /* the SAME mirror object a blit / sync / write-back of this exec resolves for this ref */
+    uint64_t lin0 = lagfx_a64_res_stats(p)->linear_unsupported;
     lagfx_a64_obj_t *t = R32(0x4c) ? lagfx_a64_res_object(r->x, d.colors[0].texture_ref) : NULL;   /* the parser compacts: only index 0 counts here */
+    if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
     if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; tag_partial(p, 26); return; }
     uint32_t load = d.colors[0].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
     VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
