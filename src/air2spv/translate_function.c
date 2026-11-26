@@ -2082,6 +2082,19 @@ static void emit_prologue(xlate_ctx_t *c) {
                     continue;
                 }
             }
+            /* [[point_coord]] is Vulkan's PointCoord builtin (a float2), not a varying. */
+            if (own && i < own->n && strcmp(own->key[i], "air.point_coord") == 0) {
+                uint32_t nt3 = 0;
+                const lagfx_air_type_t *t3 = lagfx_air_module_types(c->m, &nt3);
+                uint32_t at3 = c->arg_air_type_ids[i];
+                if (at3 < nt3 && t3[at3].kind == LAGFX_AIR_TYPE_VECTOR && t3[at3].num_op >= 2u && t3[at3].op[0] == 2u &&
+                    t3[at3].op[1] < nt3 && t3[t3[at3].op[1]].kind == LAGFX_AIR_TYPE_FLOAT) {
+                    uint32_t bops[] = { c->arg_input_var_ids[i], LAGFX_SPV_DECORATION_BUILTIN, 16u /* PointCoord */ };
+                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, bops, 3);
+                    loc--;
+                    continue;
+                }
+            }
             if (vso && own && i < own->n && own->key[i][0]) {
                 bool hit = false;
                 for (uint32_t k = 0; k < vso->n; k++)

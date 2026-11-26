@@ -8,7 +8,9 @@ leaves it undefined — point_coord, unused inputs)."""
 import re,subprocess,sys,glob,os
 rt=sys.argv[1]; idx=sys.argv[2]
 def iface(path):
-    t=subprocess.run(['spirv-dis',path],capture_output=True,text=True).stdout
+    pr=subprocess.run(['spirv-dis',path],capture_output=True,text=True)
+    if pr.returncode: print('spirv-dis FAILED',path); sys.exit(1)
+    t=pr.stdout
     loc={};bi={};types={};ptr={};vars_=[]
     for l in t.splitlines():
         m=re.match(r'\s*OpDecorate (%\S+) Location (\d+)',l)
@@ -42,7 +44,8 @@ for vs,fs in pairs:
     if k in seen: continue
     seen.add(k)
     vp=glob.glob(f'{rt}/{vs[0]}_*_vs.spv'); fp=glob.glob(f'{rt}/{fs[0]}_*_fs.spv')
-    if not vp or not fp: print('missing',k); continue
+    if not vp or not fp:
+        print('MISSING translated shader for pair',k); hard.append((k,['missing spv'])); continue
     v=iface(vp[0]); f=iface(fp[0]); n+=1
     vo=v['Output']; fi=f['Input']
     probs=[]

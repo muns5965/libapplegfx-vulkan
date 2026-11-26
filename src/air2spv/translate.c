@@ -164,7 +164,7 @@ static void md_iface_key(const lagfx_air_module_t *m, const lagfx_air_metadata_t
         const char *s = md_string(m, node->operands[j] - 1u);
         if (!s) continue;
         if (strcmp(s, "air.position") == 0 || strcmp(s, "air.point_size") == 0 ||
-            strcmp(s, "air.point_coord") == 0) { snprintf(out, cap, "%s", s); return; }
+            strcmp(s, "air.point_coord") == 0 || strcmp(s, "air.render_target") == 0) { snprintf(out, cap, "%s", s); return; }
         if (strcmp(s, "air.vertex_output") == 0 || strcmp(s, "air.fragment_input") == 0) { after_io = true; continue; }
         if (after_io) {
             if (strncmp(s, "air.", 4) != 0) snprintf(out, cap, "%s", s);
