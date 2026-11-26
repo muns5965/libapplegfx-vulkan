@@ -446,7 +446,7 @@ static int op_render_barrier_scope(lagfx_protocol_t *p,
  *   80 -> VK_FORMAT_B8G8R8A8_UNORM (MTLPixelFormatBGRA8Unorm) — high confidence
  *   70 -> VK_FORMAT_R8G8B8A8_UNORM (MTLPixelFormatRGBA8Unorm) — high confidence  
  *   252 -> VK_FORMAT_D32_SFLOAT (MTLPixelFormatDepth32Float) — high confidence
- *   25 -> VK_FORMAT_D16_UNORM (MTLPixelFormatDepth16Unorm) — medium confidence */
+ *   25 -> VK_FORMAT_R16_SFLOAT (MTLPixelFormatR16Float); Depth16Unorm is 250 -> VK_FORMAT_D16_UNORM (public Metal enum; this comment used to say 25 -> D16) */
 static uint32_t apple_format_to_vk(uint32_t fmt) {
 #ifdef LAGFX_HAVE_VULKAN
     return (uint32_t)lagfx_metal_pixel_format_to_vk(fmt);
