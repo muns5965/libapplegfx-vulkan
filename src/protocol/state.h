@@ -541,6 +541,17 @@ typedef struct lagfx_protocol {
         uint64_t exec_20, exec_43_45, unknown_cmds;
         uint64_t display_submits, display_submit_skipped_null, display_submit_ignored_index, display_submit_rendered;
         uint64_t irq_raised;
+        uint64_t ignored_known;          /* known-and-ignored commands (arm64 0x0a/0x0c): not "unknown" */
+        /* arm64 0x43/0x45 decode-only counters (src/protocol/arm64_exec_decode.c). Nothing is executed. */
+        struct {
+            uint64_t received, decoded, failed;                    /* decoded + failed == received */
+            uint64_t bad_size, read_failed, bad_seg, no_task;      /* causes of `failed` (an exec can count in several) */
+            uint64_t bufs, bytes_read, bytes_capped, seg_clamped, tail_bytes, truncated;
+            uint64_t seg_t[6], seg_other, seg_cont, seg_more;      /* seg_t[5] counts protection headers skipped, not segments */
+            uint64_t res, res_flag[3], res_flag_hi, obj_missing, obj_kind[32];
+            uint64_t inner, inner_bad, tag_hist[4][512], tag_over; /* by segment type 0,1,2,4 then tag; tag >= 512 in tag_over */
+            uint32_t tags_logged;
+        } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;
     } diag2;

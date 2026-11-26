@@ -57,19 +57,43 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
     if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; return; }
     if (t - p->diag2.last_stats_ns < 10ull * 1000000000ull) return;
     p->diag2.last_stats_ns = t;
-    char line[900];
+    char line[2400], tags[400];
+    const __typeof__(p->diag2.exec) *X = &p->diag2.exec;
+    {   /* up to 24 busiest inner tags as type:tag=count (cumulative) */
+        static const char tn[4] = {'0', '1', '2', '4'};
+        size_t o = 0; bool used[4][512] = {{false}};
+        tags[0] = 0;
+        for (int n = 0; n < 24; n++) {
+            int br = -1, bt = -1; uint64_t bc = 0;
+            for (int r = 0; r < 4; r++) for (int g = 0; g < 512; g++) if (!used[r][g] && X->tag_hist[r][g] > bc) bc = X->tag_hist[r][g], br = r, bt = g;
+            if (br < 0 || o + 24 >= sizeof tags) break;
+            used[br][bt] = true;
+            o += (size_t)snprintf(tags + o, sizeof tags - o, "%st%c:%d=%llu", n ? " " : "", tn[br], bt, (unsigned long long)bc);
+        }
+    }
     uint64_t age_cmd = p->diag2.last_cmd_ns ? (t - p->diag2.last_cmd_ns) / 1000000ull : 0;
     snprintf(line, sizeof line,
              "g7-gpu: t=+%llus mmio_reads=%llu mmio_writes=%llu root_commands=%llu compute_commands=%llu display_commands=%llu unknown_commands=%llu "
              "exec20=%llu exec43_45=%llu display_submits=%llu display_submit_no_object=%llu display_submit_index_ignored=%llu display_submit_rendered=%llu "
-             "irq_raised=%llu last_command_age_ms=%llu log_bytes=%llu log_write_errors=%llu",
+             "irq_raised=%llu last_command_age_ms=%llu log_bytes=%llu log_write_errors=%llu "
+             "ignored_known=%llu exec_received=%llu exec_decoded=%llu exec_decode_failed=%llu exec_bad_size=%llu exec_read_failed=%llu exec_bad_seg=%llu exec_no_task=%llu "
+             "exec_bufs=%llu exec_bytes=%llu exec_capped=%llu exec_clamped=%llu exec_tail_bytes=%llu seg_t0=%llu seg_t1=%llu seg_t2=%llu seg_t4=%llu seg_t5=%llu seg_other=%llu "
+             "seg_cont=%llu seg_more=%llu exec_res=%llu res_f1=%llu res_f2=%llu res_f4=%llu res_fhi=%llu res_noobj=%llu exec_inner=%llu exec_inner_bad=%llu tags[%s]",
              (unsigned long long)((t - p->diag2.t0_ns) / 1000000000ull), (unsigned long long)p->diag2.mmio_reads, (unsigned long long)p->diag2.mmio_writes,
              (unsigned long long)p->diag2.src_cmds[0], (unsigned long long)p->diag2.src_cmds[1], (unsigned long long)p->diag2.src_cmds[2],
              (unsigned long long)p->unknown_opcode_count, (unsigned long long)p->diag2.exec_20, (unsigned long long)p->diag2.exec_43_45,
              (unsigned long long)p->diag2.display_submits, (unsigned long long)p->diag2.display_submit_skipped_null,
              (unsigned long long)p->diag2.display_submit_ignored_index, (unsigned long long)p->diag2.display_submit_rendered,
              (unsigned long long)p->diag2.irq_raised, (unsigned long long)age_cmd,
-             (unsigned long long)lagfx_log_bytes_written(), (unsigned long long)lagfx_log_write_errors());
+             (unsigned long long)lagfx_log_bytes_written(), (unsigned long long)lagfx_log_write_errors(),
+             (unsigned long long)p->diag2.ignored_known, (unsigned long long)X->received, (unsigned long long)X->decoded, (unsigned long long)X->failed,
+             (unsigned long long)X->bad_size, (unsigned long long)X->read_failed, (unsigned long long)X->bad_seg, (unsigned long long)X->no_task,
+             (unsigned long long)X->bufs, (unsigned long long)X->bytes_read, (unsigned long long)X->bytes_capped, (unsigned long long)X->seg_clamped,
+             (unsigned long long)X->tail_bytes, (unsigned long long)X->seg_t[0], (unsigned long long)X->seg_t[1], (unsigned long long)X->seg_t[2],
+             (unsigned long long)X->seg_t[4], (unsigned long long)X->seg_t[5], (unsigned long long)X->seg_other, (unsigned long long)X->seg_cont,
+             (unsigned long long)X->seg_more, (unsigned long long)X->res, (unsigned long long)X->res_flag[0], (unsigned long long)X->res_flag[1],
+             (unsigned long long)X->res_flag[2], (unsigned long long)X->res_flag_hi, (unsigned long long)X->obj_missing, (unsigned long long)X->inner,
+             (unsigned long long)X->inner_bad, tags);
     fprintf(stderr, "%s\n", line);
     LAGFX_LOG("%s", line);
 }

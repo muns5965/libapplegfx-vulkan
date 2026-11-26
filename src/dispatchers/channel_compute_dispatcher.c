@@ -31,6 +31,7 @@
 #include "protocol/opcodes.h"
 #include "protocol/state.h"
 #include "protocol/diag.h"
+#include "protocol/arm64_exec_decode.h"
 #include "protocol/object_resolver.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
@@ -378,20 +379,9 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
 
         case 0x43: case 0x45:
             if (lagfx_proto_arm64(p)) {
-                /* ARM64 GPU exec {task, nres, nbuf} + nres*{ref,flags} + nbuf*{u64 off, u64 len}, args after the barrier slots (Apple pvg_metal.m). Decoded and counted only:
-                 * nothing is rendered yet, and the stamp is completed by the drain loop as for every command. The x86 exec_cmdbuf layout does not apply. */
-                static unsigned seen;
-                uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
-                unsigned k = seen++;
-                if (hdr->payload && hdr->payload_size >= skip + 12u) {
-                    uint32_t task = lagfx_le32(hdr->payload + skip), nres = lagfx_le32(hdr->payload + skip + 4), nbuf = lagfx_le32(hdr->payload + skip + 8);
-                    bool fits = nres <= 4096u && nbuf <= 64u && 12ull + 8ull * nres + 16ull * nbuf <= (uint64_t)(hdr->payload_size - skip);
-                    if (k < 16u || (k % 256u) == 0u)
-                        LAGFX_LOG("compute: 0x%02x (arm64) exec seen=%u ch=%u task=%u live=%d nres=%u nbuf=%u %s (decode only, not executed)",
-                                   hdr->opcode, k + 1u, (unsigned)p->current_chan_id, task, lagfx_protocol_find_task(p, task) != NULL, nres, nbuf, fits ? "ok" : "BAD-SIZE");
-                } else if (k < 16u) {
-                    LAGFX_WARN("compute: 0x%02x (arm64) payload too short (%u, skip %u)", hdr->opcode, (unsigned)hdr->payload_size, skip);
-                }
+                /* ARM64 GPU exec: the command buffers are read from the task's address space and their segments walked and counted, nothing
+                 * is rendered, and the stamp is completed by the drain loop as for every command (src/protocol/arm64_exec_decode.c). */
+                lagfx_arm64_exec_decode(p, hdr);
             } else {
                 LAGFX_WARN("compute dispatch: ch=%u unknown opcode 0x%04x stamp=0x%08x", (unsigned)p->current_chan_id, hdr->opcode, hdr->stamp);
                 p->unknown_opcode_count++;
@@ -403,6 +393,8 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             if (!lagfx_proto_arm64(p)) {
                 LAGFX_WARN("compute dispatch: ch=%u unknown opcode 0x%04x stamp=0x%08x", (unsigned)p->current_chan_id, hdr->opcode, hdr->stamp);
                 p->unknown_opcode_count++;
+            } else {
+                p->diag2.ignored_known++;
             }
             break;
 
