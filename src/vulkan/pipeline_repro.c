@@ -184,6 +184,9 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
     if (!bundle_dir) return LAGFX_ERR_INVALID_ARG;
     uint32_t flags = opts && opts->struct_size >= sizeof(uint32_t) * 2u ? opts->flags : 0u;
     rep_t rep = { 0 };
+#ifdef LAGFX_NO_PROCESS
+    flags &= ~LAGFX_PIPELINE_REPRO_ISOLATE;   /* no fork in this build: rows run in-process; the caller isolates by starting one process per row */
+#endif
     lagfx_status_t status = LAGFX_OK;
     lagfx_bundle_t b;
     char err[256] = "";

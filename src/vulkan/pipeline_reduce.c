@@ -104,6 +104,7 @@ static VkResult build_cand(VkDevice dev, const lagfx_pipeline_desc_t *dsrc, VkPi
     return r;
 }
 
+#ifndef LAGFX_NO_PROCESS /* Henge/Android runner: no process creation inside the library (fork); the app starts one process per row instead (--only) */
 /* the isolated child: its OWN instance / device / layout (fork happens before the parent creates any) */
 typedef struct { int32_t vk; double ms; } child_msg_t;
 static void child_run(const lagfx_reduce_target_t *t, const cand_t *c, const char *row, int fd) {
@@ -168,6 +169,13 @@ static int eval_isolated(const lagfx_reduce_cfg_t *cfg, const char *row, const c
     *vk = m.vk, *ms = m.ms;
     return m.vk == 0 ? LRS_BUILT : LRS_FAIL;
 }
+#else
+static int eval_isolated(const lagfx_reduce_cfg_t *cfg, const char *row, const cand_t *c, int32_t *vk, double *ms) {
+    (void)cfg; (void)row; (void)c; (void)ms;
+    *vk = -1;
+    return LRS_CRASH;   /* unreachable: pipeline_repro clears the ISOLATE flag in this build */
+}
+#endif
 
 /* ---------------------------------------------------------------- the ladder */
 #define NF 11
