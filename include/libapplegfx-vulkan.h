@@ -314,6 +314,11 @@ LAGFX_EXPORT lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *d
  * through the raise_interrupt callback) for as long as lagfx_device_pending_completions() is non-zero. Returns the number of stamps retired. */
 LAGFX_EXPORT size_t lagfx_device_poll_completions(lagfx_device_t *device);
 LAGFX_EXPORT size_t lagfx_device_pending_completions(lagfx_device_t *device);
+
+/* Display cause bits for MMIO +0x1014 (bit n = display n; the guest reads it and it clears). The shell sets them when it has an event for the guest's display
+ * interrupt (it also writes the shared page's pending word itself and raises the interrupt, which this does not do). Thread-safe: an atomic OR with release
+ * ordering, paired with the doorbell read's exchange-and-clear. */
+LAGFX_EXPORT void lagfx_device_signal_display(lagfx_device_t *device, uint32_t bits);
 /* Cheap, timer-callable: prints the periodic (10 s) GPU statistics line even while the guest is idle and makes no MMIO accesses. */
 LAGFX_EXPORT void lagfx_device_diag_tick(lagfx_device_t *device);
 /* Prints the cumulative g7-gpu-final statistics now (idempotent apart from the extra print; no teardown). For a host whose exit path never frees the device. */

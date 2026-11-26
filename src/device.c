@@ -12,6 +12,7 @@
  * libapplegfx without crashing.
  */
 
+#include <stdatomic.h>
 #include "device.h"
 #include "libapplegfx-vulkan.h"
 #include "doorbell.h"
@@ -438,6 +439,12 @@ void lagfx_device_diag_tick(lagfx_device_t *device) {
 void lagfx_device_diag_final(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return;
     lagfx_diag_final((lagfx_protocol_t *)device->protocol_state);
+}
+
+void lagfx_device_signal_display(lagfx_device_t *device, uint32_t bits) {
+    if (!bits || !lagfx_device_is_valid(device) || !device->protocol_state) return;
+    lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
+    atomic_fetch_or_explicit(&p->pending_displays_bitmask, bits, memory_order_release);
 }
 
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {

@@ -158,6 +158,14 @@ int main(void) {
     lagfx_mmio_write(dev, 0x1004, 0xcafebabeu);
     CHECK(1, "mmio_write does not crash");
 
+    /* Display cause bits: the shell signals, the guest's read of +0x1014 returns them once and clears (the stamp bitmask is separate). */
+    CHECK(lagfx_mmio_read(dev, 0x1014) == 0, "display cause bits start clear");
+    lagfx_device_signal_display(dev, 1u);
+    lagfx_device_signal_display(dev, 4u);
+    CHECK(lagfx_mmio_read(dev, 0x1014) == 5u, "signalled display bits are read back together");
+    CHECK(lagfx_mmio_read(dev, 0x1014) == 0, "the read cleared them");
+    lagfx_device_signal_display(NULL, 1u);   /* safe */
+
     /* Invalid device — should not crash. */
     lagfx_mmio_read(NULL, 0x1000);
     lagfx_mmio_write(NULL, 0x1000, 0);
