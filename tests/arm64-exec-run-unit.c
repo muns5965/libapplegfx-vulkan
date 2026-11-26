@@ -276,7 +276,7 @@ static void test_objects(void) {
 #ifdef LAGFX_HAVE_VULKAN
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
 static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt;
-static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks, fetch; } g_blend;
+static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks, fetch, fail; } g_blend;
 static VkShaderModule g_fs_fetch2, g_fetch2_unused; static VkDescriptorSetLayout g_fetch2_dsl; static VkPipelineLayout g_fetch2_pl;
 static VkShaderModule g_fs_fetch; static VkDescriptorSetLayout g_fetch_dsl; static VkPipelineLayout g_fetch_pl;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
@@ -341,6 +341,7 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
         out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
         for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     }
+    if (g_blend.fail) out->desc.fragment_shader = VK_NULL_HANDLE;   /* pipeline build refuses a missing stage */
     out->release = rel;
     return true;
 }
@@ -540,6 +541,22 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
     (void)name;
 }
 
+static void test_exec_fail_cache(void) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1); build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    g_blend.fail = 1;
+    static const double c[4] = { 0, 0, 1, 1 };
+    cb_reset(); cb_pass(REF_TEX, 2, c); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3); cb_draw(0, 3); cb_draw(0, 3);
+    exec(p, 1, cb_finish(), true);
+    assert(p->diag2.exec.pipe.pipe_build_failed == 1);        /* built (and failed) once, the other two draws hit the failure cache */
+    assert(p->diag2.exec.run.draws_skipped == 3 && p->diag2.exec.run.submit_failed == 0);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    g_blend.fail = 0;
+    puts("PASS: failed pipeline build is cached (one attempt for three draws)");
+}
+
 static void test_exec_fetch(void) {
     if (!g_dev->vk->have_local_read) {   /* LAGFX_VK_NO_LOCAL_READ=1 run: the draw is refused and counted, the clear survives */
         setenv("LAGFX_ARM64_EXEC", "1", 1);
@@ -648,6 +665,7 @@ int main(void) {
         test_exec_render();
         test_exec_blend();
         test_exec_mrt();
+        test_exec_fail_cache();
         test_exec_fetch();
         test_exec_no_resolver_and_pending();
         if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);

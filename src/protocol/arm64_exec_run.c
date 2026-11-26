@@ -361,6 +361,13 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
     return pp;
 }
 
+/* pl == VK_NULL_HANDLE records a failed build (looked up like a hit, returns NULL). */
+static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], uint32_t topo, VkPipeline pl, a64_run_t *r) {
+    if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
+    pp->ncache++;
+}
+
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
     for (uint32_t i = 0; i < pp->ncache; i++) if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && pp->cache[i].topo == topo) return pp->cache[i].pl;
@@ -386,13 +393,12 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
         p->diag2.exec.pipe.pipe_build_failed++;
         lagfx_a64_dump_spirv(p, d.vertex_spv, d.vertex_spv_bytes, d.fragment_spv, d.fragment_spv_bytes);   /* LAGFX_ARM64_DUMP=1 + dir: the failing modules, for offline spirv-val */
+        cache_put(pp, fmts, topo, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
         return VK_NULL_HANDLE;
     }
     p->diag2.exec.pipe.pipes_built++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
-    if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
-    pp->ncache++;
+    cache_put(pp, fmts, topo, pl, r);
     return pl;
 }
 
