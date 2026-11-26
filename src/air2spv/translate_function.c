@@ -872,6 +872,76 @@ static uint32_t vertex_output_type_spv_idx(xlate_ctx_t *c, uint32_t idx) {
     return emit_type_vec4_f(c);
 }
 
+
+/* ---- Stage interface variables are always 32-bit ------------------------
+ * A Metal half/half2/half4 varying, stage-in attribute or colour output is
+ * declared as a float32 Input/Output variable and converted (OpFConvert)
+ * inside the shader. 16-bit Input/Output variables need
+ * StorageInputOutput16 and, as the Adreno 840 dump showed, a VS/FS pair with
+ * nothing but half interfaces still fails vkCreateGraphicsPipelines; the
+ * 32-bit interface also keeps VS outputs and FS inputs type-compatible. */
+static bool iface_half_lanes(xlate_ctx_t *c, uint32_t air_ty, uint32_t *lanes) {
+    uint32_t n = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
+    if (air_ty >= n) return false;
+    if (ts[air_ty].kind == LAGFX_AIR_TYPE_HALF) { *lanes = 1u; return true; }
+    if (ts[air_ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[air_ty].num_op >= 2u &&
+        ts[air_ty].op[1] < n && ts[ts[air_ty].op[1]].kind == LAGFX_AIR_TYPE_HALF &&
+        ts[air_ty].op[0] >= 2u && ts[air_ty].op[0] <= 4u) {
+        *lanes = ts[air_ty].op[0];
+        return true;
+    }
+    return false;
+}
+
+static uint32_t iface_f32_type(xlate_ctx_t *c, uint32_t lanes) {
+    uint32_t f = emit_type_float32(c);
+    return lanes > 1u ? emit_type_vec(c, f, lanes) : f;
+}
+
+/* half value -> float32 value for an Output store (no-op for other types). */
+static uint32_t iface_widen(xlate_ctx_t *c, uint32_t air_ty, uint32_t val) {
+    uint32_t lanes;
+    if (!val || !iface_half_lanes(c, air_ty, &lanes)) return val;
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { iface_f32_type(c, lanes), id, val };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o, 3);
+    return id;
+}
+
+/* float32 value loaded from an Input -> half value (no-op for other types). */
+static uint32_t iface_narrow(xlate_ctx_t *c, uint32_t air_ty, uint32_t val) {
+    uint32_t lanes;
+    if (!val || !iface_half_lanes(c, air_ty, &lanes)) return val;
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { emit_air_type(c, air_ty), id, val };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o, 3);
+    return id;
+}
+
+/* Declared SPIR-V type of the interface VARIABLE for AIR type air_ty. */
+static uint32_t iface_var_type(xlate_ctx_t *c, uint32_t air_ty, uint32_t dflt) {
+    uint32_t lanes;
+    return iface_half_lanes(c, air_ty, &lanes) ? iface_f32_type(c, lanes) : dflt;
+}
+
+static uint32_t vertex_output_member_air(xlate_ctx_t *c, uint32_t idx) {
+    uint32_t n_types = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
+    uint32_t fn_ty = c->fn ? c->fn->type_index : LAGFX_AIR_TYPE_NONE;
+    if (fn_ty < n_types && ts[fn_ty].kind == LAGFX_AIR_TYPE_FUNCTION &&
+        ts[fn_ty].num_op >= 2u) {
+        uint32_t ret_ty = ts[fn_ty].op[1];
+        if (ret_ty < n_types &&
+            (ts[ret_ty].kind == LAGFX_AIR_TYPE_STRUCT_ANON ||
+             ts[ret_ty].kind == LAGFX_AIR_TYPE_STRUCT_NAMED)) {
+            uint32_t nf = ts[ret_ty].num_op > 1u ? ts[ret_ty].num_op - 1u : 0u;
+            if (idx < nf) return ts[ret_ty].op[1u + idx];
+        }
+    }
+    return LAGFX_AIR_TYPE_NONE;
+}
+
 /* Returns true if `air_type_idx` recursively references a type SPIR-V
  * can't represent without extra capabilities we don't want to declare
  * (i8 / i64 today). Used to filter module-constant pre-bind so we
@@ -2070,7 +2140,8 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
          * member type (float4/float2/...). Fed at RET; read by the fragment's
          * Location-k stage_in input. */
         for (uint32_t k = 0; k < c->num_vertex_outs; k++) {
-            uint32_t out_ty = vertex_output_type_spv_idx(c, k);
+            uint32_t out_ty = iface_var_type(c, vertex_output_member_air(c, k),
+                                             vertex_output_type_spv_idx(c, k));
             uint32_t id_ptr_out = lagfx_spv_builder_alloc_id(c->b);
             uint32_t op_pt[] = { id_ptr_out, LAGFX_SPV_STORAGE_OUTPUT, out_ty };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, op_pt, 3);
@@ -2091,7 +2162,8 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
             if (k == LAGFX_VARG_SKIP) continue;
             uint32_t elem_spv = (k == LAGFX_VARG_VID)
                                   ? emit_type_int_w(c, 32u, 0u)
-                                  : emit_air_type(c, c->arg_air_type_ids[i]);
+                                  : iface_var_type(c, c->arg_air_type_ids[i],
+                                        emit_air_type(c, c->arg_air_type_ids[i]));
             uint32_t ptr_id = lagfx_spv_builder_alloc_id(c->b);
             uint32_t pt_ops[] = { ptr_id, LAGFX_SPV_STORAGE_INPUT, elem_spv };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, pt_ops, 3);
@@ -2106,7 +2178,8 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
          * vec4. A struct return -> N targets (multi-plane YCbCr). */
         (void)id_v4f;
         for (uint32_t k = 0; k < c->num_color_outputs; k++) {
-            uint32_t out_ty = fragment_output_type_spv_idx(c, k);
+            uint32_t out_ty = iface_var_type(c, fragment_output_member_air_type(c, k),
+                                             fragment_output_type_spv_idx(c, k));
             uint32_t id_ptr_out = lagfx_spv_builder_alloc_id(c->b);
             uint32_t op_pt[] = { id_ptr_out, LAGFX_SPV_STORAGE_OUTPUT, out_ty };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, op_pt, 3);
@@ -2123,7 +2196,8 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                             ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
         for (uint32_t i = 0; i < n_fa; i++) {
             if (vertex_arg_kind(c, i) != LAGFX_VARG_ATTR) continue;
-            uint32_t elem_spv = emit_air_type(c, c->arg_air_type_ids[i]);
+            uint32_t elem_spv = iface_var_type(c, c->arg_air_type_ids[i],
+                                    emit_air_type(c, c->arg_air_type_ids[i]));
             uint32_t ptr_id = lagfx_spv_builder_alloc_id(c->b);
             uint32_t pt_ops[] = { ptr_id, LAGFX_SPV_STORAGE_INPUT, elem_spv };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, pt_ops, 3);
@@ -2316,10 +2390,13 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
             if (!c->arg_input_var_ids[i]) continue;
             uint32_t elem_spv = (k == LAGFX_VARG_VID)
                                   ? emit_type_int_w(c, 32u, 0u)
-                                  : emit_air_type(c, c->arg_air_type_ids[i]);
+                                  : iface_var_type(c, c->arg_air_type_ids[i],
+                                        emit_air_type(c, c->arg_air_type_ids[i]));
             uint32_t id_load = lagfx_spv_builder_alloc_id(c->b);
             uint32_t ops[] = { elem_spv, id_load, c->arg_input_var_ids[i] };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, ops, 3);
+            if (k != LAGFX_VARG_VID)
+                id_load = iface_narrow(c, c->arg_air_type_ids[i], id_load);
             c->arg_spv_ids[i] = id_load;
             bind_value_spv(c, c->arg_id_base + i, id_load);
         }
@@ -4421,6 +4498,7 @@ static void emit_inst_ret(xlate_ctx_t *c, const lagfx_air_inst_t *inst,
                 uint32_t mem_id = lagfx_spv_builder_alloc_id(c->b);
                 uint32_t op_ex[] = { mem_ty, mem_id, val_spv, k };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, op_ex, 4);
+                mem_id = iface_widen(c, vertex_output_member_air(c, k), mem_id);
                 uint32_t op_vst[] = { c->id_vertex_out_vars[k], mem_id };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_STORE, op_vst, 2);
             }
@@ -4454,6 +4532,7 @@ static void emit_inst_ret(xlate_ctx_t *c, const lagfx_air_inst_t *inst,
                 } else {
                     mem_id = emit_undef(c, mem_ty);
                 }
+                mem_id = iface_widen(c, fragment_output_member_air_type(c, k), mem_id);
                 uint32_t op_st[] = { c->id_color_vars[k], mem_id };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_STORE, op_st, 2);
             }
@@ -4487,6 +4566,7 @@ static void emit_inst_ret(xlate_ctx_t *c, const lagfx_air_inst_t *inst,
                     }
                 }
             }
+            val_spv = iface_widen(c, fragment_output_member_air_type(c, 0u), val_spv);
             uint32_t op_st[] = { c->id_color_var, val_spv };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_STORE, op_st, 2);
         }
