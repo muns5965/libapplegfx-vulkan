@@ -1553,6 +1553,18 @@ if fs.is_file(meson.current_source_dir() / 'arm64-tile-unit.c') and vulkan_dep.f
   test('arm64 tile shader pipeline + dispatch between render pass halves (lavapipe)', tile_unit_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# ARM64: tile-path and graphics-path storage-buffer gathers share one exec's 64 scratch slots (under / at / over the cap, reuse across execs) on lavapipe.
+if fs.is_file(meson.current_source_dir() / 'arm64-gather-mix-unit.c') and vulkan_dep.found()
+  gather_mix_test = executable('arm64-gather-mix-unit',
+    'arm64-gather-mix-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DLAGFX_TEST_FIXTURE_DIR="' + (meson.current_source_dir() / 'fixtures') + '"'],
+    build_by_default : true,
+  )
+  test('arm64 tile + graphics gathers share the exec scratch slots (lavapipe)', gather_mix_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # ARM64 depth/stencil state object (serialized tag 4) decoder: pure, synthetic records.
 if fs.is_file(meson.current_source_dir() / 'arm64-depth-stencil-unit.c')
   ds_test = executable('arm64-depth-stencil-unit',
