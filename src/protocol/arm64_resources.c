@@ -243,6 +243,7 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) {
         if (!busy && m->sw_fence && lagfx_vk_wait_bounded(vk, m->sw_fence, 0) != LAGFX_VK_WAIT_OK) busy = true;
     }
     if (!busy && vk) vkDeviceWaitIdle(vk->device);
+    if (!busy && vk && m->sw_fence) { vkDestroyFence(vk->device, m->sw_fence, NULL); if (m->sw_cb) lagfx_vk_cmdbuf_free(vk, m->sw_cb); m->sw_fence = VK_NULL_HANDLE, m->sw_cb = VK_NULL_HANDLE; }   /* an abandoned swap copy (its fence was waited for above) */
     for (uint32_t i = 0; i < m->n; i++) { if (vk && !busy) obj_free(vk, m->objs[i]); else if (!vk) free(m->objs[i]); }
     for (uint32_t i = 0; i < m->ndead; i++) { if (vk && !busy) obj_free(vk, m->dead[i]); else if (!vk) free(m->dead[i]); }
     free(m->dead);
