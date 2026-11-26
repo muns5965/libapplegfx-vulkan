@@ -215,8 +215,8 @@ void lagfx_spv_undef_analyze(const void *spv, size_t bytes, lagfx_spv_undef_repo
                 uint32_t pt = a.type_of[x[1]]; uint32_t sc = pt < b ? a.sclass[pt] : 0xffffffffu;
                 if (sc != SC_FUNCTION) { out->reach_store++; if (dbg) fprintf(stderr, "undef-report: OpStore ptr %%%u value %%%u\n", x[1], x[2]); }
             } break;
-            case OP_RETVALUE: if (wc >= 2 && m_of(&a, x[1])) out->reach_store++; break;
-            case OP_IMAGEWRITE: if (wc >= 4 && m_of(&a, x[3])) out->reach_store++; break;
+            case OP_RETVALUE: if (wc >= 2 && m_of(&a, x[1])) { out->reach_store++; if (dbg) fprintf(stderr, "undef-report: OpReturnValue value %%%u\n", x[1]); } break;
+            case OP_IMAGEWRITE: if (wc >= 4 && m_of(&a, x[3])) { out->reach_store++; if (dbg) fprintf(stderr, "undef-report: OpImageWrite texel %%%u\n", x[3]); } break;
             default: break;
         }
         i += wc;

@@ -21,6 +21,14 @@ int lagfx_spv_variant_strip_caps(const uint32_t *in, size_t words, uint32_t **ou
 /* (g) OpUndef of a composite type (vector / matrix / array / struct) -> OpConstantNull (hoisted to the module scope when it was inside a function). CHANGES MEANING: undefined -> zero. */
 int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
 
+/* (h) ONLY the struct- and pointer-typed OpUndef -> OpConstantNull (hoisted like (g)); vector / scalar OpUndef stay. CHANGES MEANING for a struct undef that is consumed (undefined -> zero). */
+int lagfx_spv_variant_undef_struct_ptr(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+/* (i) drops every OpUndef that nothing references (value-preserving; isolates "an unused OpUndef of a type the driver may dislike" from everything else). */
+int lagfx_spv_variant_drop_dead_undef(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+
+/* (j) ONLY the struct-typed OpUndef -> OpConstantNull (no pointer): (h) minus the pointer-typed ones. CHANGES MEANING for a consumed struct undef. */
+int lagfx_spv_variant_undef_struct(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+
 /* Minimal valid stage stubs ("main"; vertex writes gl_Position = (0,0,0,1) and has no inputs / outputs; fragment writes nothing). */
 extern const uint32_t lagfx_stub_vs_spv[67], lagfx_stub_fs_spv[32];
 
