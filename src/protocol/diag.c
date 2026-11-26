@@ -153,7 +153,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         char el[600];
         snprintf(el, sizeof el,
                  "g7-gpu-ext: draw[instanced=%llu base=%llu wide=%llu indirect=%llu indirect_bad=%llu zero=%llu] noop[hint=%llu fence=%llu barrier_partial=%llu] "
-                 "sampler[compare_ignored=%llu unnorm_ignored=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu]",
+                 "sampler[compare_ignored=%llu unnorm_applied=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu]",
                  (unsigned long long)R->ext_draw_instanced, (unsigned long long)R->ext_draw_base, (unsigned long long)R->ext_draw_wide, (unsigned long long)R->ext_draw_indirect,
                  (unsigned long long)R->ext_draw_indirect_bad, (unsigned long long)R->ext_draw_zero, (unsigned long long)R->ext_noop_hint, (unsigned long long)R->ext_noop_fence,
                  (unsigned long long)R->ext_barrier, (unsigned long long)R->ext_samp_compare, (unsigned long long)R->ext_samp_unnorm, (unsigned long long)R->ext_samp_mirror_clamp,

@@ -180,7 +180,7 @@ static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_en
     uint32_t sf = lagfx_a64_sampler_decode(d, size < sizeof d ? size : sizeof d, r->vk->have_sampler_anisotropy, r->vk->phys_props.limits.maxSamplerAnisotropy, &sm->ci);
     sm->mip = (sf & LAGFX_A64_SAMP_MIPMAPPED) != 0;
     if (sf & LAGFX_A64_SAMP_COMPARE_IGNORED) CNT(p).ext_samp_compare++;
-    if (sf & LAGFX_A64_SAMP_UNNORM_IGNORED) CNT(p).ext_samp_unnorm++;
+    if (sf & LAGFX_A64_SAMP_UNNORM_APPLIED) CNT(p).ext_samp_unnorm++;
     if (sf & LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX) CNT(p).ext_samp_mirror_clamp++;
     if (vkCreateSampler(r->vk->device, &sm->ci, NULL, &sm->s) != VK_SUCCESS) { free(sm); p->diag2.exec.pipe.sampler_failed++; return NULL; }
     p->diag2.exec.pipe.samplers++;

@@ -846,6 +846,29 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
     return true;
 }
 
+/* 319 (0x13f) fillBuffer:range:pattern4: {ref, location u64, length u64, pattern u32}, same layout as 306 with a 32-bit pattern (reference derivation:
+ * pvg-vulkan-wire ops/blit.rs). The pattern repeats from the range start in memory (little endian) order; the location must be a multiple of 4. The 4-aligned
+ * middle goes through vkCmdFillBuffer, a 1..3 byte tail from the first bytes of the pattern through a tiny staging copy. */
+static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
+    lagfx_a64_obj_t *b = lagfx_a64_res_object(x, lagfx_le32(r));
+    uint64_t loc = u64at(r, 4), n = u64at(r, 12);
+    uint32_t pat = lagfx_le32(r + 20);
+    if (!b || b->kind != LAGFX_A64_BUFFER || loc % 4u || loc > b->length || n > b->length - loc) return false;
+    if (!n) return true;
+    uint64_t mid = n & ~3ull, tail = n & 3ull;
+    if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
+    if (tail) {
+        if (x->ntmp >= MAX_TMP) return false;
+        uint8_t *mp; VkBuffer sb; VkDeviceMemory sm;
+        if (!make_buf(x->vk, 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &sb, &sm, &mp)) return false;
+        for (int i = 0; i < 4; i++) mp[i] = (uint8_t)(pat >> (8 * i));
+        x->tmp_b[x->ntmp] = sb, x->tmp_m[x->ntmp] = sm, x->ntmp++;
+        VkBufferCopy c = { 0, loc + mid, tail };
+        lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c);
+    }
+    return true;
+}
+
 /* Entry from src/handlers/compute/blit_inner_ops.c (arm64 mode only): opcode == the wire tag (0x12c == 300 ...), payload = after the 8-byte header.
  * Returns 1 if the command was executed (recorded), 0 if rejected. */
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *r, size_t pl) {
@@ -858,6 +881,7 @@ int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *r, size_
     case 302: need = 0x56; break;
     case 301: need = 0x20; break;
     case 306: need = 21; break;
+    case 319: need = 24; break;
     default: return 0;
     }
     bool ok = false;
@@ -867,9 +891,10 @@ int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *r, size_
         case 301: ok = blit_301(x, r); break;
         case 303: ok = blit_303(x, r); break;
         case 306: ok = blit_306(x, r); break;
+        case 319: ok = blit_319(x, r); break;
         }
     }
-    if (ok) { m->st.blit_done++, m->st.blit_tag[tag - 300]++; barrier(x->cb); }
+    if (ok) { m->st.blit_done++; if (tag - 300u < 16u) m->st.blit_tag[tag - 300]++; barrier(x->cb); }
     else m->st.blit_rejected++;
     return ok;
 }
@@ -884,7 +909,9 @@ void lagfx_a64_res_blit_segment(lagfx_a64_rexec_t *x, const uint8_t *body, uint3
         if (sz < 8 || sz > len - q) break;
         m->st.blit_seen++;
         if (tag == 300 || tag == 301 || tag == 302 || tag == 303 || tag == 306) lagfx_blit_inner_dispatch(x->p, tag, body + q + 8, sz - 8);
+        else if (tag == 319) lagfx_a64_blit_op(x->p, tag, body + q + 8, sz - 8);               /* fill buffer with a 32-bit pattern: no x86-era table entry, executed directly */
         else if ((tag >= 308 && tag <= 311) || tag == 314 || tag == 315) m->st.blit_noop++;   /* hints: Apple does nothing either */
+        else if (tag == 316 || tag == 317 || tag == 322 || tag == 323) m->st.blit_noop++;    /* blit fences (one in-order command buffer) and invalidate-compressed-texture (compressed textures are not mirrored) */
         else m->st.blit_unsupported++;                                                         /* 307 (generate mipmaps) and unknown tags */
         q += sz;
     }

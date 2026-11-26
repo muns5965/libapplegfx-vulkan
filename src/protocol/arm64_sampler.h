@@ -13,9 +13,10 @@
  *
  * Mapped: filters, mip filter, address modes, border colour (only when an axis clamps to the border colour; clamp to zero is transparent black), LOD clamps
  * (the FLT_MAX default becomes VK_LOD_CLAMP_NONE; a descriptor that is not mip mapped samples level 0 only), anisotropy (when the device enables the feature,
- * clamped to its limit). Not mapped (reported in the returned flags, the nearest plain state is used): the compare function (the translator emits no
- * depth-compare sampling, and a compare sampler used by a plain sample is invalid Vulkan), unnormalized coordinates (Vulkan only allows them with explicit-LOD
- * sampling, clamp addressing and no mips), lodAverage, and mirror clamp to edge (needs VK_KHR_sampler_mirror_clamp_to_edge: mirror repeat is used).
+ * clamped to its limit), unnormalized coordinates (with Vulkan's restrictions: equal filters, level 0 only, clamp addressing on S / T, no anisotropy; caveat:
+ * Vulkan formally allows such a sampler only with explicit-LOD sampling instructions and the translator emits implicit-LOD ones, which drivers in practice
+ * accept). Not mapped (reported in the returned flags): the compare function (the translator emits no depth-compare sampling, and a compare sampler used by a
+ * plain sample is invalid Vulkan), lodAverage, and mirror clamp to edge (needs VK_KHR_sampler_mirror_clamp_to_edge: mirror repeat is used).
  */
 #ifndef LAGFX_PROTOCOL_ARM64_SAMPLER_H
 #define LAGFX_PROTOCOL_ARM64_SAMPLER_H
@@ -29,7 +30,7 @@
 enum {
     LAGFX_A64_SAMP_MIPMAPPED          = 1u,   /* the descriptor is mip mapped (LOD clamps apply) */
     LAGFX_A64_SAMP_COMPARE_IGNORED    = 2u,   /* compare function != never was not mapped */
-    LAGFX_A64_SAMP_UNNORM_IGNORED     = 4u,   /* unnormalized coordinates were not mapped */
+    LAGFX_A64_SAMP_UNNORM_APPLIED     = 4u,   /* unnormalized coordinates: mapped with Vulkan's restrictions (equal filters, no mips, clamp addressing, no anisotropy) */
     LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX = 8u,  /* mirror clamp to edge was mapped to mirror repeat */
     LAGFX_A64_SAMP_ANISO_APPLIED      = 16u,
 };

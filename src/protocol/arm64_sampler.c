@@ -38,9 +38,19 @@ uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso,
         ci->anisotropyEnable = VK_TRUE, ci->maxAnisotropy = (float)aniso < max_aniso ? (float)aniso : max_aniso;
         flags |= LAGFX_A64_SAMP_ANISO_APPLIED;
     }
+    if (!(st & 0x80000000u)) {   /* unnormalized coordinates (seen on a real device: two of the six samplers of a capture): Vulkan's restrictions are applied to the state */
+        ci->unnormalizedCoordinates = VK_TRUE;
+        ci->magFilter = ci->minFilter;                                  /* the two filters must be equal */
+        ci->mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, ci->minLod = ci->maxLod = 0.f;
+        if (ci->addressModeU != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) ci->addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;   /* only the clamping modes exist */
+        if (ci->addressModeV != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) ci->addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci->anisotropyEnable = VK_FALSE, ci->maxAnisotropy = 0.f;
+        flags &= ~LAGFX_A64_SAMP_ANISO_APPLIED;
+        flags |= LAGFX_A64_SAMP_UNNORM_APPLIED;
+        mip = 0;                                                        /* no LOD at all: the clamps of a LOD sampler bind do not apply */
+    }
     if (mip) flags |= LAGFX_A64_SAMP_MIPMAPPED;
     if (cmp) flags |= LAGFX_A64_SAMP_COMPARE_IGNORED;
-    if (!(st & 0x80000000u)) flags |= LAGFX_A64_SAMP_UNNORM_IGNORED;
     if (am[0] == 1u || am[1] == 1u || am[2] == 1u) flags |= LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX;
     return flags;
 }

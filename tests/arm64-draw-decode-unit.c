@@ -95,7 +95,12 @@ static void test_sampler(void) {
     f = lagfx_a64_sampler_decode(b, 28, false, 16.f, &ci); assert(!ci.anisotropyEnable && !(f & LAGFX_A64_SAMP_ANISO_APPLIED));
     /* what is not mapped says so */
     samp(b, 0x84000080u, 0, 1e30f);     f = lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(f & LAGFX_A64_SAMP_COMPARE_IGNORED);
-    samp(b, 0x04000000u, 0, 1e30f);     f = lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(f & LAGFX_A64_SAMP_UNNORM_IGNORED);
+    /* unnormalized coordinates (real device samplers 0x04000000 / 0x04000005): Vulkan's restrictions are applied */
+    samp(b, 0x04000005u, 0, 1e30f);     f = lagfx_a64_sampler_decode(b, 28, true, 16.f, &ci);
+    assert((f & LAGFX_A64_SAMP_UNNORM_APPLIED) && ci.unnormalizedCoordinates && ci.minFilter == VK_FILTER_LINEAR && ci.magFilter == VK_FILTER_LINEAR && ci.maxLod == 0.f && !ci.anisotropyEnable);
+    samp(b, 0x06000201u, 0, 1e30f);     f = lagfx_a64_sampler_decode(b, 28, true, 16.f, &ci);   /* mip linear, S = repeat, min linear / mag nearest */
+    assert(ci.unnormalizedCoordinates && ci.minFilter == VK_FILTER_LINEAR && ci.magFilter == VK_FILTER_LINEAR && ci.mipmapMode == VK_SAMPLER_MIPMAP_MODE_NEAREST &&
+           ci.minLod == 0.f && ci.maxLod == 0.f && ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && !(f & LAGFX_A64_SAMP_MIPMAPPED));
     samp(b, 0x84000100u, 0, 1e30f);     f = lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(f & LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX && ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT);
     puts("PASS: serialized sampler fields (filters, address modes, border, LOD clamps, anisotropy, unmapped flags)");
 }

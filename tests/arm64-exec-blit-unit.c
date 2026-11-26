@@ -201,6 +201,22 @@ static void test_buffer_copy_and_fill(void) {
     memcpy(exp, a, sizeof exp); memset(exp, 0xAB, 0x20); memset(exp + 0x103, 0xCD, 10); memset(exp + PG - 3, 0xEF, 7); memset(exp + 0x2001, 0x42, 2);
     va_read((uint64_t)VPN_B << 14, got, sizeof got);
     CHECK(!memcmp(got, exp, sizeof got), "306 fill (aligned/unaligned/straddling/tiny/zero) exact, neighbours untouched");
+    /* 319 (0x13f) fill with a 32-bit pattern: repeats from the range start in little-endian byte order; a 1..3 byte tail takes the first pattern bytes; misaligned
+     * location / out-of-range are rejected; fences (316 / 317) and invalidate-compressed (322 / 323) are no-ops */
+    va_write((uint64_t)VPN_B << 14, a, sizeof a);
+    c.n = 0;
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x100); w64(q + 12, 0x13); q[20] = 0xef, q[21] = 0xcd, q[22] = 0xab, q[23] = 0x89; }   /* pattern 0x89abcdef, 19 bytes */
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x2002); w64(q + 12, 8); q[20] = 1; }                                                /* misaligned location: rejected */
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x3000); w64(q + 12, 0); q[20] = 1; }                                                /* zero length */
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x3000); w64(q + 12, 0x100000); q[20] = 1; }                                         /* out of range: rejected */
+    add(&c, 316, 4); add(&c, 317, 4); add(&c, 322, 4); add(&c, 323, 8);
+    uint64_t rej0 = S()->blit_rejected, noop0 = S()->blit_noop, uns0 = S()->blit_unsupported;
+    run(rf + 2, 1, &c);
+    memcpy(exp, a, sizeof exp);
+    for (uint32_t i = 0; i < 0x13; i++) exp[0x100 + i] = (uint8_t)(0x89abcdefu >> (8 * (i & 3)));
+    va_read((uint64_t)VPN_B << 14, got, sizeof got);
+    CHECK(!memcmp(got, exp, sizeof got), "319 fill with a 32-bit pattern exact (aligned middle + 3 byte tail), neighbours untouched");
+    CHECK(S()->blit_rejected == rej0 + 2 && S()->blit_noop == noop0 + 4 && S()->blit_unsupported == uns0, "319: misaligned / out-of-range rejected, fences + invalidate-compressed no-ops");
 }
 
 static void test_texture_roundtrip(void) {
