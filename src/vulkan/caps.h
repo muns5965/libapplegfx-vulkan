@@ -36,6 +36,10 @@ unsigned    lagfx_vk_caps_parse(const char *csv);                    /* "int64,i
 
 /* Mask of LAGFX_VK_CAP_BIT()s the SPIR-V module declares (OpCapability scan + version word). 0 for a module that is too short / has no magic number. */
 uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes);
+#include <stdbool.h>
+/* Fail-closed form: returns false when the module could not be analysed (bad magic, truncated, id outside the bound, bound too large, allocation failure,
+ * types nested too deep); *mask is then LAGFX_VK_CAP_ALL so a gate that ANDs it with the enabled set rejects the module. */
+bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask);
 
 /* Declares (OpCapability, plus OpExtension SPV_KHR_8bit_storage below SPIR-V 1.5) the 8/16-bit storage capabilities the module USES but does not declare, so a
  * device that has the feature accepts it. *spv is a malloc'd blob and may be replaced (realloc'd). Returns false only on allocation failure (blob unchanged). */

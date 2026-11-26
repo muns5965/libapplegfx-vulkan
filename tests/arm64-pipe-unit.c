@@ -717,6 +717,33 @@ static void test_missing_caps(void) {
             free(blob);
         }
     }
+    {   /* fail closed: modules that cannot be analysed must not be read as "needs nothing" */
+        uint32_t mk;
+        uint32_t bad_id[] = { 0x07230203u, 0x00010400u, 0, 4, 0, 0x00030016u, 9u, 16u };   /* type id 9 >= bound 4 */
+        assert(!lagfx_spv_required_caps_ex(bad_id, sizeof bad_id, &mk) && mk == LAGFX_VK_CAP_ALL);
+        uint32_t huge[] = { 0x07230203u, 0x00010400u, 0, 0x7fffffffu, 0 };
+        assert(!lagfx_spv_required_caps_ex(huge, sizeof huge, &mk) && mk == LAGFX_VK_CAP_ALL);
+        uint32_t trunc[] = { 0x07230203u, 0x00010400u, 0, 8, 0, 0x00050016u, 1u };   /* length 5 words, 2 present */
+        assert(!lagfx_spv_required_caps_ex(trunc, sizeof trunc, &mk) && mk == LAGFX_VK_CAP_ALL);
+        assert(!lagfx_spv_required_caps_ex(m, 7, &mk) && mk == LAGFX_VK_CAP_ALL);
+        /* half matrix behind a StorageBuffer pointer: reaches the 16-bit scalar through OpTypeMatrix */
+        uint32_t mx[] = { 0x07230203u, 0x00010200u, 0, 8, 0,
+            0x00030016u, 1u, 16u,        /* %1 half */
+            0x00040017u, 2u, 1u, 4u,     /* %2 half4 */
+            0x00040018u, 3u, 2u, 4u,     /* %3 matrix of %2 x4 */
+            0x0003001eu, 4u, 3u,         /* %4 struct { %3 } */
+            0x00040020u, 5u, 12u, 4u };  /* %5 = StorageBuffer ptr %4 */
+        assert(lagfx_spv_required_caps_ex(mx, sizeof mx, &mk) && (mk & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)));
+        /* declaring on SPIR-V 1.2 adds the capability and SPV_KHR_16bit_storage */
+        uint8_t *blob = malloc(sizeof mx); memcpy(blob, mx, sizeof mx); size_t bl = sizeof mx;
+        assert(lagfx_spv_declare_used_caps(&blob, &bl) && bl == sizeof mx + 8u + 28u);
+        const uint32_t *nw = (const uint32_t *)blob;
+        assert(nw[6] == 4433u && !memcmp(&nw[8], "SPV_KHR_16bit_storage", 21));
+        free(blob);
+        uint8_t *bb = malloc(sizeof bad_id); memcpy(bb, bad_id, sizeof bad_id); size_t bbl = sizeof bad_id;
+        assert(!lagfx_spv_declare_used_caps(&bb, &bbl));   /* unanalysable → translation fails instead of passing a blind module */
+        free(bb);
+    }
     assert(lagfx_spv_required_caps(m, 7) == 0 && lagfx_vk_caps_parse("int64,bogus,float16") == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)));
     struct lagfx_vk_state *vk = g_dev->vk;
     char line[512];

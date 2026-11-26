@@ -34,57 +34,68 @@ unsigned lagfx_vk_caps_parse(const char *csv) {
 #define SPV_MAXID 65536u
 typedef struct { uint8_t kind, width; uint32_t a, b; } spv_ty_t;   /* kind: 1 int 2 float 3 struct 4 array 5 pointer 6 vec; a = elem/pointee, b = storage class */
 
-static bool spv_reaches_narrow(const spv_ty_t *t, const uint32_t *w, const size_t *sm_at, uint32_t id, unsigned depth, uint32_t *w16, uint32_t *w8) {
-    if (id >= SPV_MAXID || depth > 8u) return false;
+static bool spv_reaches_narrow(const spv_ty_t *t, const uint32_t *w, const size_t *sm_at, uint32_t bound, uint32_t id, unsigned depth, uint32_t *w16, uint32_t *w8, bool *fail) {
+    if (id >= bound || depth > 16u) { *fail = true; return false; }   /* unanalysable → the caller fails closed */
     const spv_ty_t *x = &t[id];
     switch (x->kind) {
     case 1: case 2: if (x->width == 16) *w16 = 1; if (x->width == 8) *w8 = 1; return x->width == 16 || x->width == 8;
-    case 4: case 6: return spv_reaches_narrow(t, w, sm_at, x->a, depth + 1, w16, w8);
+    case 4: case 6: return spv_reaches_narrow(t, w, sm_at, bound, x->a, depth + 1, w16, w8, fail);
     case 3: {
         size_t at = sm_at[id];
         if (!at) return false;
         uint32_t len = w[at] >> 16;
         bool hit = false;
-        for (uint32_t k = 2; k < len; k++) hit |= spv_reaches_narrow(t, w, sm_at, w[at + k], depth + 1, w16, w8);
+        for (uint32_t k = 2; k < len; k++) hit |= spv_reaches_narrow(t, w, sm_at, bound, w[at + k], depth + 1, w16, w8, fail);
         return hit;
     }
     default: return false;
     }
 }
 
-static uint32_t spv_used_caps(const uint32_t *w, size_t n) {
+/* false = the module could not be analysed (allocation failure, id bound too large, ids outside the bound, truncated stream, types nested deeper than the
+ * limit): the caller must treat that as "needs everything", never as "needs nothing". */
+#define SPV_BOUND_LIMIT (1u << 22)
+static bool spv_used_caps(const uint32_t *w, size_t n, uint32_t *out) {
     uint32_t m = 0;
-    spv_ty_t *t = calloc(SPV_MAXID, sizeof *t);
-    size_t *at = calloc(SPV_MAXID, sizeof *at);
-    if (!t || !at) { free(t); free(at); return 0; }
+    *out = 0;
+    if (n < 5u) return false;
+    uint32_t bound = w[3];
+    if (!bound || bound > SPV_BOUND_LIMIT) return false;
+    spv_ty_t *t = calloc(bound, sizeof *t);
+    size_t *at = calloc(bound, sizeof *at);
+    if (!t || !at) { free(t); free(at); return false; }
+    bool fail = false;
     for (size_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
-        if (!len || i + len > n) break;
+        if (!len || i + len > n) { fail = true; break; }
+        bool ty = op == 21 || op == 22 || op == 23 || op == 24 || op == 28 || op == 29 || op == 30 || op == 32;
+        if (ty && (len < 2u || w[i + 1] >= bound)) { fail = true; break; }
         switch (op) {
-        case 21: if (len >= 4 && w[i + 1] < SPV_MAXID) {   /* OpTypeInt id width sign */
+        case 21: if (len >= 4) {   /* OpTypeInt id width sign */
                 t[w[i + 1]] = (spv_ty_t){ 1, (uint8_t)w[i + 2], 0, 0 };
                 if (w[i + 2] == 8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8);
                 if (w[i + 2] == 16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16);
                 if (w[i + 2] == 64) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64);
-            } break;
-        case 22: if (len >= 3 && w[i + 1] < SPV_MAXID) {   /* OpTypeFloat id width */
+            } else fail = true; break;
+        case 22: if (len >= 3) {   /* OpTypeFloat id width */
                 t[w[i + 1]] = (spv_ty_t){ 2, (uint8_t)w[i + 2], 0, 0 };
                 if (w[i + 2] == 16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16);
-            } break;
-        case 23: if (len >= 4 && w[i + 1] < SPV_MAXID) t[w[i + 1]] = (spv_ty_t){ 6, 0, w[i + 2], 0 }; break;   /* vector */
-        case 28: case 29: if (len >= 3 && w[i + 1] < SPV_MAXID) t[w[i + 1]] = (spv_ty_t){ 4, 0, w[i + 2], 0 }; break;   /* array / runtime array */
-        case 30: if (len >= 2 && w[i + 1] < SPV_MAXID) { t[w[i + 1]] = (spv_ty_t){ 3, 0, 0, 0 }; at[w[i + 1]] = i; } break;   /* struct */
-        case 32: if (len >= 4 && w[i + 1] < SPV_MAXID) t[w[i + 1]] = (spv_ty_t){ 5, 0, w[i + 3], w[i + 2] }; break;   /* pointer */
+            } else fail = true; break;
+        case 23: case 24: if (len >= 4) t[w[i + 1]] = (spv_ty_t){ 6, 0, w[i + 2], 0 }; else fail = true; break;   /* vector / matrix (column type) */
+        case 28: case 29: if (len >= 3) t[w[i + 1]] = (spv_ty_t){ 4, 0, w[i + 2], 0 }; else fail = true; break;   /* array / runtime array */
+        case 30: t[w[i + 1]] = (spv_ty_t){ 3, 0, 0, 0 }; at[w[i + 1]] = i; break;   /* struct */
+        case 32: if (len >= 4) t[w[i + 1]] = (spv_ty_t){ 5, 0, w[i + 3], w[i + 2] }; else fail = true; break;   /* pointer */
         default: break;
         }
+        if (fail) break;
         i += len;
     }
-    for (uint32_t id = 0; id < SPV_MAXID; id++) {
+    for (uint32_t id = 0; !fail && id < bound; id++) {
         if (t[id].kind != 5) continue;
         uint32_t w16 = 0, w8 = 0;
         uint32_t sc = t[id].b;
         if (sc == 12u || sc == 2u || sc == 9u || sc == 1u || sc == 3u) {   /* StorageBuffer, Uniform, PushConstant, Input, Output */
-            (void)spv_reaches_narrow(t, w, at, t[id].a, 0, &w16, &w8);
+            (void)spv_reaches_narrow(t, w, at, bound, t[id].a, 0, &w16, &w8, &fail);
             if (sc == 12u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8); }
             else if (sc == 2u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8); }
             else if (sc == 9u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8); }
@@ -92,14 +103,17 @@ static uint32_t spv_used_caps(const uint32_t *w, size_t n) {
         }
     }
     free(t); free(at);
-    return m;
+    if (fail) return false;
+    *out = m;
+    return true;
 }
 
-uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes) {
-    if (!spv || bytes < 20u || (bytes & 3u)) return 0;
+bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
+    *mask = LAGFX_VK_CAP_ALL;   /* until proven otherwise */
+    if (!spv || bytes < 20u || (bytes & 3u)) return false;
     const uint32_t *w = spv;
     size_t n = bytes / 4u;
-    if (w[0] != 0x07230203u) return 0;
+    if (w[0] != 0x07230203u) return false;
     uint32_t m = 0;
     if (w[1] > 0x00010300u) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
     for (size_t i = 5; i < n;) {
@@ -127,7 +141,15 @@ uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes) {
         }
         i += len;
     }
-    return m | spv_used_caps(w, n);
+    uint32_t used;
+    if (!spv_used_caps(w, n, &used)) return false;
+    *mask = m | used;
+    return true;
+}
+
+uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes) {
+    uint32_t m;
+    return lagfx_spv_required_caps_ex(spv, bytes, &m) ? m : 0;   /* legacy view: 0 = not analysable; the pipeline gate uses _ex and fails closed */
 }
 
 const char *lagfx_vk_caps_line(const struct lagfx_vk_state *vk, char *buf, size_t n) {
@@ -157,36 +179,39 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
         { LAGFX_VK_CAP_SB16, 4433, false }, { LAGFX_VK_CAP_UB16, 4434, false }, { LAGFX_VK_CAP_PC16, 4435, false }, { LAGFX_VK_CAP_IO16, 4436, false },
         { LAGFX_VK_CAP_SB8, 4448, true }, { LAGFX_VK_CAP_UB8, 4449, true }, { LAGFX_VK_CAP_PC8, 4450, true },
     };
-    uint32_t used = spv_used_caps(w, n);
+    uint32_t used;
+    if (!spv_used_caps(w, n, &used)) return false;   /* unanalysable: do not pretend the module needs nothing */
     /* what is ALREADY declared: scan OpCapability words directly */
-    uint32_t declared_ids[16]; unsigned nd = 0;
-    size_t after_caps = 5; bool has_ext8 = false;
+    uint32_t declared_ids[64]; unsigned nd = 0;
+    size_t after_caps = 5; bool has_ext8 = false, has_ext16 = false;
     for (size_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
         if (!len || i + len > n) break;
-        if (op == 17u) { if (nd < 16u) declared_ids[nd++] = w[i + 1]; after_caps = i + len; }
-        else if (op == 10u) { if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_8bit_storage", 20)) has_ext8 = true; }
+        if (op == 17u) { if (nd >= 64u) return false; declared_ids[nd++] = w[i + 1]; after_caps = i + len; }
+        else if (op == 10u) { if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_8bit_storage", 20)) has_ext8 = true; if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_16bit_storage", 21)) has_ext16 = true; }
         else if (op != 10u) break;   /* capabilities and extensions come first; the first other instruction ends the preamble */
         i += len;
     }
-    uint32_t add[8]; unsigned na = 0; bool need8 = false;
+    uint32_t add[8]; unsigned na = 0; bool need8 = false, need16 = false;
     for (unsigned j = 0; j < sizeof k / sizeof k[0]; j++) {
         if (!(used & LAGFX_VK_CAP_BIT(k[j].cap))) continue;
         bool dup = false;
         for (unsigned d = 0; d < nd; d++) if (declared_ids[d] == k[j].id) dup = true;
         if (dup) continue;
         add[na++] = k[j].id;
-        if (k[j].is8) need8 = true;
+        if (k[j].is8) need8 = true; else need16 = true;
     }
     bool ext = need8 && !has_ext8 && w[1] < 0x00010500u;
-    if (!na && !ext) return true;
-    size_t extra = (size_t)na * 2u + (ext ? 7u : 0u);
+    bool ext16 = need16 && !has_ext16 && w[1] < 0x00010300u;   /* 16-bit storage is core from SPIR-V 1.3 */
+    if (!na && !ext && !ext16) return true;
+    size_t extra = (size_t)na * 2u + (ext ? 7u : 0u) + (ext16 ? 7u : 0u);
     uint32_t *nw = malloc((n + extra) * 4u);
     if (!nw) return false;
     memcpy(nw, w, after_caps * 4u);
     size_t o = after_caps;
     for (unsigned a = 0; a < na; a++) { nw[o++] = (2u << 16) | 17u; nw[o++] = add[a]; }
     if (ext) { nw[o++] = (7u << 16) | 10u; char name[24] = "SPV_KHR_8bit_storage"; memcpy(&nw[o], name, 24); o += 6; }
+    if (ext16) { nw[o++] = (7u << 16) | 10u; char name[24] = "SPV_KHR_16bit_storage"; memcpy(&nw[o], name, 24); o += 6; }
     memcpy(nw + o, w + after_caps, (n - after_caps) * 4u);
     free(*spv);
     *spv = (uint8_t *)nw;

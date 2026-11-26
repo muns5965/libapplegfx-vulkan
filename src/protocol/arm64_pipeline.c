@@ -253,7 +253,10 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     memset(&vkeys, 0, sizeof vkeys);
     if (!translate(p, vf, NULL, &vkeys, &vspv, &vsz, vab, &nvab) || !translate(p, ff, &vkeys, NULL, &fspv, &fsz, fab, &nfab)) goto done;
     {   /* device-capability gate: a module that declares a capability the device was not created with must not reach vkCreateShaderModule / a pipeline */
-        uint32_t need = lagfx_spv_required_caps(vspv, vsz) | lagfx_spv_required_caps(fspv, fsz);
+        uint32_t nv, nf;
+        bool okv = lagfx_spv_required_caps_ex(vspv, vsz, &nv), okf = lagfx_spv_required_caps_ex(fspv, fsz, &nf);
+        if (!okv || !okf) { CNTP(p).rf_missing_cap++; LAGFX_WARN("arm64 pipeline %u: shader module could not be analysed for capabilities; pipeline not built", ref); goto done; }
+        uint32_t need = nv | nf;
         uint32_t miss = need & ~vk->caps_enabled;
         if (miss) {
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT; c++) if (miss & LAGFX_VK_CAP_BIT(c)) CNTP(p).stub_missing_cap[c]++;
