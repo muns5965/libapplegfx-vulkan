@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "storage8", "storage16", "varptr_sb", "varptr", "spirv14" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14" };
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -85,8 +85,10 @@ static uint32_t spv_used_caps(const uint32_t *w, size_t n) {
         uint32_t sc = t[id].b;
         if (sc == 12u || sc == 2u || sc == 9u || sc == 1u || sc == 3u) {   /* StorageBuffer, Uniform, PushConstant, Input, Output */
             (void)spv_reaches_narrow(t, w, at, t[id].a, 0, &w16, &w8);
-            if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16);
-            if (w8 && sc != 1u && sc != 3u) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8);
+            if (sc == 12u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8); }
+            else if (sc == 2u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8); }
+            else if (sc == 9u) { if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); if (w8) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8); }
+            else if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
         }
     }
     free(t); free(at);
@@ -109,8 +111,13 @@ uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes) {
             case 22: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16); break;
             case 39: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8); break;
             case 9:  m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16); break;
-            case 4448: case 4449: case 4450: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8); break;
-            case 4433: case 4434: case 4435: case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16); break;
+            case 4448: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8); break;
+            case 4449: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8); break;
+            case 4450: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8); break;
+            case 4433: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16); break;
+            case 4434: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16); break;
+            case 4435: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); break;
+            case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16); break;
             case 4441: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB); break;
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
             default: break;
@@ -138,4 +145,51 @@ void lagfx_vk_caps_inject_missing(struct lagfx_vk_state *vk, uint32_t mask) {
     if (!vk) return;
     vk->caps_enabled &= ~mask;
     vk->caps_missing |= mask & LAGFX_VK_CAP_ALL;
+}
+
+/* ---- declaring what a module uses ----------------------------------------------------------------------------------------------------------------- */
+bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
+    if (!spv || !*spv || !bytes || *bytes < 20u || (*bytes & 3u)) return true;
+    const uint32_t *w = (const uint32_t *)*spv;
+    size_t n = *bytes / 4u;
+    if (w[0] != 0x07230203u) return true;
+    static const struct { unsigned cap; uint32_t id; bool is8; } k[] = {
+        { LAGFX_VK_CAP_SB16, 4433, false }, { LAGFX_VK_CAP_UB16, 4434, false }, { LAGFX_VK_CAP_PC16, 4435, false }, { LAGFX_VK_CAP_IO16, 4436, false },
+        { LAGFX_VK_CAP_SB8, 4448, true }, { LAGFX_VK_CAP_UB8, 4449, true }, { LAGFX_VK_CAP_PC8, 4450, true },
+    };
+    uint32_t used = spv_used_caps(w, n);
+    /* what is ALREADY declared: scan OpCapability words directly */
+    uint32_t declared_ids[16]; unsigned nd = 0;
+    size_t after_caps = 5; bool has_ext8 = false;
+    for (size_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
+        if (!len || i + len > n) break;
+        if (op == 17u) { if (nd < 16u) declared_ids[nd++] = w[i + 1]; after_caps = i + len; }
+        else if (op == 10u) { if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_8bit_storage", 20)) has_ext8 = true; }
+        else if (op != 10u) break;   /* capabilities and extensions come first; the first other instruction ends the preamble */
+        i += len;
+    }
+    uint32_t add[8]; unsigned na = 0; bool need8 = false;
+    for (unsigned j = 0; j < sizeof k / sizeof k[0]; j++) {
+        if (!(used & LAGFX_VK_CAP_BIT(k[j].cap))) continue;
+        bool dup = false;
+        for (unsigned d = 0; d < nd; d++) if (declared_ids[d] == k[j].id) dup = true;
+        if (dup) continue;
+        add[na++] = k[j].id;
+        if (k[j].is8) need8 = true;
+    }
+    bool ext = need8 && !has_ext8 && w[1] < 0x00010500u;
+    if (!na && !ext) return true;
+    size_t extra = (size_t)na * 2u + (ext ? 7u : 0u);
+    uint32_t *nw = malloc((n + extra) * 4u);
+    if (!nw) return false;
+    memcpy(nw, w, after_caps * 4u);
+    size_t o = after_caps;
+    for (unsigned a = 0; a < na; a++) { nw[o++] = (2u << 16) | 17u; nw[o++] = add[a]; }
+    if (ext) { nw[o++] = (7u << 16) | 10u; char name[24] = "SPV_KHR_8bit_storage"; memcpy(&nw[o], name, 24); o += 6; }
+    memcpy(nw + o, w + after_caps, (n - after_caps) * 4u);
+    free(*spv);
+    *spv = (uint8_t *)nw;
+    *bytes = (n + extra) * 4u;
+    return true;
 }

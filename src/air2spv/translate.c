@@ -20,6 +20,7 @@
 #include "translate_function.h"
 
 #include "common/log.h"
+#include "vulkan/caps.h"
 
 #include <stdbool.h>
 #include <stdlib.h>
@@ -249,7 +250,11 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
                                                                     have_own ? &own : NULL,
                                                                     have_own ? vs_out : NULL,
                                                                     out_blob, out_size_bytes);
-            if (bst == LAGFX_OK) return LAGFX_OK;
+            if (bst == LAGFX_OK) {
+                /* the translator does not always declare the 8/16-bit storage capabilities it relies on: add them so a device that has the feature accepts the module */
+                if (!lagfx_spv_declare_used_caps(out_blob, out_size_bytes)) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; return LAGFX_ERR_OUT_OF_MEMORY; }
+                return LAGFX_OK;
+            }
             LAGFX_WARN("air2spv: translate_function failed (st=%d); falling back",
                        (int)bst);
             if (*out_blob) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; }

@@ -549,8 +549,13 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe2.features.shaderInt16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16);
     if (probe12.shaderInt8) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8);
     if (probe12.shaderFloat16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16);
-    if (probe12.storageBuffer8BitAccess && probe12.uniformAndStorageBuffer8BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8);
-    if (probe11.storageBuffer16BitAccess && probe11.uniformAndStorageBuffer16BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16);
+    if (probe12.storageBuffer8BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8);
+    if (probe12.uniformAndStorageBuffer8BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8);
+    if (probe12.storagePushConstant8) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8);
+    if (probe11.storageBuffer16BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16);
+    if (probe11.uniformAndStorageBuffer16BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16);
+    if (probe11.storagePushConstant16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16);
+    if (probe11.storageInputOutput16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
     if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
@@ -562,8 +567,13 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
     feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
-    feat12.storageBuffer8BitAccess = feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8)) ? VK_TRUE : VK_FALSE;
-    feat11.storageBuffer16BitAccess = feat11.uniformAndStorageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16)) ? VK_TRUE : VK_FALSE;
+    feat12.storageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8)) ? VK_TRUE : VK_FALSE;
+    feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)) ? VK_TRUE : VK_FALSE;
+    feat12.storagePushConstant8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8)) ? VK_TRUE : VK_FALSE;
+    feat11.storageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)) ? VK_TRUE : VK_FALSE;
+    feat11.uniformAndStorageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16)) ? VK_TRUE : VK_FALSE;
+    feat11.storagePushConstant16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16)) ? VK_TRUE : VK_FALSE;
+    feat11.storageInputOutput16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16)) ? VK_TRUE : VK_FALSE;
     feat11.variablePointers = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR)) ? VK_TRUE : VK_FALSE;
     feat11.variablePointersStorageBuffer = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB)) ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceFeatures2 feat2 = {

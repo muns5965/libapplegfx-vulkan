@@ -15,8 +15,14 @@
 
 enum {
     LAGFX_VK_CAP_INT64 = 0, LAGFX_VK_CAP_INT16, LAGFX_VK_CAP_INT8, LAGFX_VK_CAP_FLOAT16,
-    LAGFX_VK_CAP_STORAGE8,       /* StorageBuffer8BitAccess / UniformAndStorageBuffer8BitAccess / StoragePushConstant8 */
-    LAGFX_VK_CAP_STORAGE16,      /* StorageBuffer16BitAccess / UniformAndStorageBuffer16BitAccess / StoragePushConstant16 / StorageInputOutput16 */
+    /* Each Vulkan feature on its own (they are separate device features; a driver may have one without the others): */
+    LAGFX_VK_CAP_SB8,            /* StorageBuffer8BitAccess            <- storageBuffer8BitAccess */
+    LAGFX_VK_CAP_UB8,            /* UniformAndStorageBuffer8BitAccess  <- uniformAndStorageBuffer8BitAccess */
+    LAGFX_VK_CAP_PC8,            /* StoragePushConstant8               <- storagePushConstant8 */
+    LAGFX_VK_CAP_SB16,           /* StorageBuffer16BitAccess           <- storageBuffer16BitAccess */
+    LAGFX_VK_CAP_UB16,           /* UniformAndStorageBuffer16BitAccess <- uniformAndStorageBuffer16BitAccess */
+    LAGFX_VK_CAP_PC16,           /* StoragePushConstant16              <- storagePushConstant16 */
+    LAGFX_VK_CAP_IO16,           /* StorageInputOutput16               <- storageInputOutput16 */
     LAGFX_VK_CAP_VARPTR_SB,      /* VariablePointersStorageBuffer */
     LAGFX_VK_CAP_VARPTR,         /* VariablePointers */
     LAGFX_VK_CAP_SPIRV14,        /* module version > 1.3 */
@@ -30,5 +36,10 @@ unsigned    lagfx_vk_caps_parse(const char *csv);                    /* "int64,i
 
 /* Mask of LAGFX_VK_CAP_BIT()s the SPIR-V module declares (OpCapability scan + version word). 0 for a module that is too short / has no magic number. */
 uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes);
+
+/* Declares (OpCapability, plus OpExtension SPV_KHR_8bit_storage below SPIR-V 1.5) the 8/16-bit storage capabilities the module USES but does not declare, so a
+ * device that has the feature accepts it. *spv is a malloc'd blob and may be replaced (realloc'd). Returns false only on allocation failure (blob unchanged). */
+#include <stdbool.h>
+bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes);
 
 #endif

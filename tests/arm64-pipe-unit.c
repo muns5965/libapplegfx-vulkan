@@ -692,7 +692,7 @@ static void test_missing_caps(void) {
     /* pure: the OpCapability / version scan */
     uint32_t m[] = { 0x07230203u, 0x00010400u, 0, 8, 0, 0x00020011u, 1u, 0x00020011u, 11u, 0x00020011u, 39u, 0x00020011u, 4448u, 0x00020011u, 4441u, 0x0004000fu, 0, 1, 0x6e69616du };
     uint32_t need = lagfx_spv_required_caps(m, sizeof m);
-    assert(need == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14)));
+    assert(need == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14)));
     {   /* capabilities inferred from USE, with none declared: a half Input variable and a StorageBuffer with a uchar member */
         /* encoding: OpTypeFloat (22) len 3, OpTypeInt (21) len 4, OpTypePointer (32) len 4, OpTypeStruct (30) len 3 */
         uint32_t a[] = { 0x07230203u, 0x00010400u, 0, 8, 0,
@@ -700,14 +700,22 @@ static void test_missing_caps(void) {
             0x00040020u, 2u, 1u, 1u };                /* %2 = Input ptr %1 */
         uint32_t need_io = lagfx_spv_required_caps(a, sizeof a);
         assert(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16));
-        assert(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16));
+        assert(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16) && !(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)));
         uint32_t b[] = { 0x07230203u, 0x00010400u, 0, 8, 0,
             0x00040015u, 1u, 8u, 0u,                  /* %1 uchar */
             0x0003001eu, 2u, 1u,                      /* %2 struct { %1 } */
             0x00040020u, 3u, 12u, 2u };               /* %3 = StorageBuffer ptr %2 */
         uint32_t need_sb = lagfx_spv_required_caps(b, sizeof b);
-        assert(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8));
-        assert(!(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16)));
+        assert(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8));
+        assert(!(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)) && !(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)));
+        {   /* declare what is used: the module gets OpCapability StorageBuffer8BitAccess (4448) + OpExtension SPV_KHR_8bit_storage below SPIR-V 1.5; a second call changes nothing */
+            uint8_t *blob = malloc(sizeof b); memcpy(blob, b, sizeof b); size_t bl = sizeof b;
+            assert(lagfx_spv_declare_used_caps(&blob, &bl) && bl == sizeof b + 8u + 28u);
+            const uint32_t *nw = (const uint32_t *)blob;
+            assert(nw[5] == ((2u << 16) | 17u) && nw[6] == 4448u && (nw[7] & 0xffffu) == 10u && !memcmp(&nw[8], "SPV_KHR_8bit_storage", 20));
+            size_t bl2 = bl; assert(lagfx_spv_declare_used_caps(&blob, &bl2) && bl2 == bl);
+            free(blob);
+        }
     }
     assert(lagfx_spv_required_caps(m, 7) == 0 && lagfx_vk_caps_parse("int64,bogus,float16") == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)));
     struct lagfx_vk_state *vk = g_dev->vk;
