@@ -183,6 +183,20 @@ bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void 
         for (uint32_t k = 0; k < out->nrefs; k++) if (out->refs[k] == v) { seen = true; break; }
         if (!seen) out->refs[out->nrefs++] = v;
     }
+    /* The root entry (the first entry after the header; for a render pipeline tag 1 = vertex function ref, tag 2 = fragment function ref) names the two stage functions
+     * exactly. The token scan above also hits unrelated fields (tag 0 = 31, a vertex format 29, an offset 32 ...); once such a number is a function object in the task
+     * (run 20261126-231501: object 31 became a fragment function after it had been a texture) the scan listed it first and the resolver took it as the fragment function.
+     * The root's refs go first, vertex then fragment; the scanned tokens stay behind them as the fallback for shapes the root does not describe. */
+    if (out->tag == 0xeu) {
+        uint32_t rv[4]; uint8_t rh[4];
+        if (entry_fields(blob, limit, 16u, 4u, rv, rh, NULL) && rh[1] && rh[2] && rv[1] && rv[2] && rv[1] != rv[2] && (!is_fn || (is_fn(ctx, rv[1]) && is_fn(ctx, rv[2])))) {
+            uint32_t tmp[LAGFX_A64_PDESC_MAX_REFS], n = 0;
+            tmp[n++] = rv[1]; tmp[n++] = rv[2];
+            for (uint32_t k = 0; k < out->nrefs && n < LAGFX_A64_PDESC_MAX_REFS; k++) if (out->refs[k] != rv[1] && out->refs[k] != rv[2]) tmp[n++] = out->refs[k];
+            memcpy(out->refs, tmp, n * sizeof tmp[0]);
+            out->nrefs = n;
+        }
+    }
     if (!decode_vertex_desc(blob, limit, out)) {   /* not the serialized-descriptor shape: the legacy byte scan */
     out->nattrs = 0, out->stride = 0;
     /* vertex attributes: `01 04 <fmt> 02 04 <off> 03 04 <bufidx>` (object_resolver.c lagfx_parse_pso_vertex_attrs, same plausibility limits) */
