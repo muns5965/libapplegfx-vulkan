@@ -219,6 +219,7 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
     uint32_t nth[6] = { 0, 0, 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
     for (size_t t = 0; t < nt; t++) {
         if (tmp[t].set != 0u) continue;
+        if (t && tmp[t - 1].set == 0u && tmp[t - 1].binding == tmp[t].binding) continue;   /* byte-buffer views of one buffer alias its binding (translator): ONE descriptor and ONE Metal argument, not one per view */
         if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
             int why = lagfx_a64_fbfetch_check(st, have_local_read, tmp[t].binding, *n_bind);
             if (why != LAGFX_A64_FBF_OK) { if (fbf_why) *fbf_why = why; return LAGFX_A64_MAP_FBFETCH; }
@@ -333,8 +334,8 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     if (keys_out && !lagfx_air_stage_keys(m, true, keys_out)) memset(keys_out, 0, sizeof *keys_out);   /* vertex: its output keys, for the paired fragment */
     lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys */
     if (st == LAGFX_OK && *spv) {
-        *nab = lagfx_air_arg_bindings(m, ab, 16);
-        if (*nab > 16u) *nab = 16u;
+        *nab = lagfx_air_arg_bindings(m, ab, LAGFX_A64_MAX_ARGS);
+        if (*nab > LAGFX_A64_MAX_ARGS) *nab = LAGFX_A64_MAX_ARGS;
     }
     lagfx_air_module_free(m);
     if (st != LAGFX_OK || !*spv || !*sz) { free(*spv); *spv = NULL; CNTP(p).rf_translate++; return false; }
@@ -347,7 +348,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     bool ok = false;
     uint8_t *blob = NULL, *vspv = NULL, *fspv = NULL;
     size_t vsz = 0, fsz = 0, nvab = 0, nfab = 0;
-    lagfx_air_arg_binding_t vab[16], fab[16];
+    lagfx_air_arg_binding_t vab[LAGFX_A64_MAX_ARGS], fab[LAGFX_A64_MAX_ARGS];
     lib_t libs[LAGFX_A64_PDESC_MAX_REFS];
     uint32_t nlib = 0;
     pres_t *r = NULL;

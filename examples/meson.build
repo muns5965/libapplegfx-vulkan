@@ -96,3 +96,13 @@ executable('dump-draws',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# render-replay — real Metal shaders of an arm64 dump rendered with synthetic resources on lavapipe, read back and compared with a CPU model (examples/render-replay.c).
+if vulkan_dep.found()
+  executable('render-replay',
+    'render-replay.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    build_by_default : true,
+  )
+endif

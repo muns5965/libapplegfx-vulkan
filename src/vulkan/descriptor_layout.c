@@ -70,7 +70,8 @@ lagfx_build_pipeline_layout_from_spv(VkDevice device,
                 .binding = refl[i].binding,
                 .descriptorType = vt,
                 .descriptorCount = 1u,
-                .stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                .stageFlags = vt == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ? VK_SHADER_STAGE_FRAGMENT_BIT   /* VUID-VkDescriptorSetLayoutBinding-descriptorType-01510 */
+                                                                       : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
                 .pImmutableSamplers = NULL,
             };
         }
