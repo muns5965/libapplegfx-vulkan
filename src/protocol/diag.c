@@ -175,7 +175,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  "g7-gpu-run: execs=%llu passes=%llu draws=%llu draws_skipped=%llu submits=%llu submit_failed=%llu submit_pending=%llu seg_render=%llu seg_unsupported=%llu no_vulkan=%llu "
                  "bad_rec=%llu no_pass=%llu no_target=%llu no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu multi_attach=%llu indep_mismatch=%llu "
                  "load_uninit_cleared=%llu pipeline_unresolved=%llu obj_unsupported=%llu tag_over=%llu "
-                 "mapped_created=%llu mapped_shared=%llu mapped_uploaded=%llu mapped_written_back=%llu mapped_unsupported=%llu mapped_no_desc=%llu mapped_bytes_up=%llu mapped_bytes_down=%llu mapped_pages_skipped=%llu swap_events=%llu swap_flushed=%llu swap_deferred=%llu "
+                 "mapped_created=%llu mapped_shared=%llu mapped_uploaded=%llu mapped_written_back=%llu mapped_unsupported=%llu mapped_no_desc=%llu mapped_bytes_up=%llu mapped_bytes_down=%llu mapped_pages_skipped=%llu swap_events=%llu swap_flushed=%llu swap_deferred=%llu swap_failed=%llu swap_dropped=%llu mapped_remapped=%llu "
                  "tags(done/partial/unsupported)[%s]",
                  (unsigned long long)R->execs, (unsigned long long)R->passes, (unsigned long long)R->draws, (unsigned long long)R->draws_skipped,
                  (unsigned long long)R->submits, (unsigned long long)R->submit_failed, (unsigned long long)R->submit_pending, (unsigned long long)R->seg_render, (unsigned long long)R->seg_unsupported,
@@ -185,7 +185,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->pipeline_unresolved, (unsigned long long)R->obj_unsupported, (unsigned long long)R->tag_over,
                  (unsigned long long)R->mapped_created, (unsigned long long)R->mapped_shared, (unsigned long long)R->mapped_uploaded, (unsigned long long)R->mapped_written_back,
                  (unsigned long long)R->mapped_unsupported, (unsigned long long)R->mapped_no_desc, (unsigned long long)R->mapped_bytes_up, (unsigned long long)R->mapped_bytes_down,
-                 (unsigned long long)R->mapped_pages_skipped, (unsigned long long)R->swap_events, (unsigned long long)R->swap_flushed, (unsigned long long)R->swap_deferred, tg);
+                 (unsigned long long)R->mapped_pages_skipped, (unsigned long long)R->swap_events, (unsigned long long)R->swap_flushed, (unsigned long long)R->swap_deferred, (unsigned long long)R->swap_failed, (unsigned long long)R->swap_dropped, (unsigned long long)R->mapped_remapped, tg);
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
         if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set) {

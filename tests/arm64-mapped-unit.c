@@ -75,6 +75,7 @@ static void mkdesc(uint8_t *d, uint32_t list_gpa, uint32_t fourcc, uint64_t row,
     memcpy(d, &l, 4); memcpy(d + 4, &fourcc, 4); memcpy(d + 0x18, &alloc, 8); memcpy(d + 0x20, &w, 8); memcpy(d + 0x28, &h, 8); memcpy(d + 0x30, &row, 8);
     d[0x3e] = 2; memcpy(d + 0x60, &first, 4);
 }
+static uint64_t g_remap_list;   /* nonzero: MAP_OK / MAP_HALF are served with this page list (the guest re-mapped the surface) */
 static bool get_desc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len) {
     (void)o; g_get_calls++;
     uint8_t d[0x70];
@@ -87,6 +88,7 @@ static bool get_desc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len
     case MAP_BADGEOM: mkdesc(d, PFN_LIST << 14, 0x42475241u, 0x20000u, SFIRST); break;                 /* row pitch beyond Henge's bound */
     default: return false;
     }
+    if (g_remap_list && (id == MAP_OK || id == MAP_HALF)) { uint32_t l = (uint32_t)(g_remap_list >> 12) | 1u; memcpy(d, &l, 4); }
     if (cap < sizeof d) return false;
     memcpy(out, d, sizeof d); *len = sizeof d;
     return true;
@@ -473,6 +475,50 @@ int main(void) {
       unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
       assert(lagfx_a64_res_display_swap(p) == 0); }
     printf("PASS: MAPPED_WRITEBACK=swap: two execs owe, ONE display swap pays, an empty swap writes nothing, off = no-op\n");
+
+    /* (3e) swap-mode safety: last exec wins; RGhA; re-mapped surface dropped; unreadable descriptor keeps the debt; synchronize pays it once. */
+    setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      surf_fill(SENT);
+      run_exec(p, 36, REF_M1, 2, green, false, res, 1, true);
+      run_exec(p, 37, REF_M1, 2, blue, false, res, 1, true);
+      assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == 0xff0000ffu); }   /* BGRA: blue is 0xff0000ff */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint64_t wbx = CNT(p).mapped_written_back, dr = CNT(p).swap_dropped, rm = CNT(p).mapped_remapped;
+      surf_fill(SENT);
+      run_exec(p, 38, REF_M1, 2, green, false, res, 1, true);
+      g_remap_list = (uint64_t)PFN_LIST << 14;   /* same list: identity unchanged -> NOT a remap */
+      assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == GREEN);
+      surf_fill(SENT);
+      run_exec(p, 39, REF_M1, 2, green, false, res, 1, true);
+      g_remap_list = (uint64_t)PFN_LIST2 << 14;  /* the guest re-mapped the surface onto another page list */
+      assert(lagfx_a64_res_display_swap(p) == 0);
+      g_remap_list = 0;
+      assert(*surf_px(32, 40) == 0xabababab && CNT(p).swap_dropped == dr + 1 && CNT(p).mapped_remapped == rm + 1 && CNT(p).mapped_written_back == wbx + 1);
+      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab); }   /* dropped, not retried */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint64_t fa = CNT(p).swap_failed;
+      surf_fill(SENT);
+      run_exec(p, 40, REF_M1, 2, green, false, res, 1, true);
+      g_dev->desc.shell.get_surface_desc = NULL;
+      assert(lagfx_a64_res_display_swap(p) == 0 && CNT(p).swap_failed == fa + 1 && *surf_px(32, 40) == 0xabababab);
+      g_dev->desc.shell.get_surface_desc = get_desc;
+      assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == GREEN);   /* still owed: paid by the next swap */
+      surf_fill(SENT);
+      run_exec(p, 41, REF_M1, 2, blue, false, res, 1, true);
+      synchronize(p, 42, REF_M1);
+      assert(*surf_px(32, 40) == 0xff0000ffu);
+      surf_fill(SENT);
+      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab); }   /* synchronize paid it: no second copy */
+    { static const double col[4] = { 0.5, 0.25, 1, 1 };
+      static const uint8_t clear8[8] = { 0x00, 0x38, 0x00, 0x34, 0x00, 0x3c, 0x00, 0x3c };
+      const uint32_t res[1][2] = { { REF_M9, 2 } };
+      memset(surf_page(0), SENT, 4u << 14);
+      run_exec(p, 43, REF_M9, 2, col, false, res, 1, true);
+      assert(((const uint8_t *)half_px(0, 0))[0] == SENT);
+      assert(lagfx_a64_res_display_swap(p) == 1 && !memcmp(half_px(0, 0), clear8, 8) && !memcmp(half_px(63, 79), clear8, 8)); }
+    unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+    printf("PASS: MAPPED_WRITEBACK=swap safety: last exec wins, re-mapped surface dropped (not retried), unreadable descriptor keeps the debt, synchronize pays once, RGhA exact\n");
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);

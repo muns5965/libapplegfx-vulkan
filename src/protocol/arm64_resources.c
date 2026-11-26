@@ -66,9 +66,11 @@ typedef struct { lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; 
     lagfx_a64_obj_t **dead; uint32_t ndead, capdead;   /* replaced / forgotten / dropped while an exec was recording or in flight: freed after its fence signalled */
     bool quiet_kinds;            /* begin(): refs of the resource list that are not buffers/textures (pipelines...) are not 'bad objects' */
     struct lagfx_a64_msurf **ms; uint32_t nms;   /* shared surface images of type 11 mapped textures, newest last (not owning: an entry leaves when its last object is freed) */
+    VkCommandBuffer sw_cb; VkFence sw_fence; struct lagfx_a64_msurf *sw_sel[256]; uint32_t sw_n;   /* a display-swap write-back whose GPU copy has not been seen finished: its images / staging buffers are in use */
     uint64_t epoch;              /* bumped by every exec begin / sync: a mapped surface is uploaded / read back at most once per epoch */
 } mgr2_t;
 #define MRUN(p) ((p)->diag2.exec.run)
+#define BUSY(m) ((m)->cur || (m)->pending || (m)->sw_fence)
 #define MAX_MS 256u
 
 /* One guest display surface (mapping id) mirrored as ONE device image + a host-visible staging buffer in the guest's pixel layout (tight rows, w * h * 4 bytes).
@@ -79,8 +81,9 @@ typedef struct lagfx_a64_msurf {
     VkFormat format; VkImageUsageFlags usage;
     VkImage img; VkDeviceMemory img_mem;
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
-    bool host_valid, guest_stale, down_pending, owed;
+    bool host_valid, guest_stale, down_pending, owed, id_set;
     uint64_t up_epoch, down_epoch;
+    uint64_t id_pl, id_alloc; uint32_t id_first, id_np;   /* which guest pages the mirror was last taken from (the descriptor has no generation): a different page list = the guest re-mapped it */
 } msurf_t;
 
 static mgr2_t *mgr_get(lagfx_protocol_t *p, bool create) {
@@ -233,9 +236,10 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) {
     if (!p || !p->a64_res) return;
     mgr2_t *m = p->a64_res;
     struct lagfx_vk_state *vk = vk_of(p);
-    bool busy = m->pending != NULL;
+    bool busy = m->pending != NULL || m->sw_fence != VK_NULL_HANDLE;
     if (busy && vk) {   /* give an unfinished exec one bounded chance; else leak its objects rather than free what the GPU may still use */
-        if (pending_wait(vk, m)) busy = false;
+        if (!m->pending || pending_wait(vk, m)) busy = false;
+        if (!busy && m->sw_fence && lagfx_vk_wait_bounded(vk, m->sw_fence, 0) != LAGFX_VK_WAIT_OK) busy = true;
     }
     if (!busy && vk) vkDeviceWaitIdle(vk->device);
     for (uint32_t i = 0; i < m->n; i++) { if (vk && !busy) obj_free(vk, m->objs[i]); else if (!vk) free(m->objs[i]); }
@@ -257,7 +261,7 @@ const lagfx_a64_stats_t *lagfx_a64_res_stats(lagfx_protocol_t *p) {
  * a submission whose fence has not signalled, so they are parked and destroyed only after that fence signalled (exec_finish / destroy). */
 static void obj_release(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (!o) return;
-    if (m->cur || m->pending) {
+    if (BUSY(m)) {
         if (m->ndead == m->capdead) {
             uint32_t nc = m->capdead ? m->capdead * 2u : 16u;
             lagfx_a64_obj_t **n = realloc(m->dead, nc * sizeof *n);
@@ -272,7 +276,7 @@ static void obj_release(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o
     m->st.destroyed++;
 }
 static void dead_flush(mgr2_t *m, struct lagfx_vk_state *vk) {
-    if (m->cur || m->pending) return;
+    if (BUSY(m)) return;
     for (uint32_t i = 0; i < m->ndead; i++) { obj_free(vk, m->dead[i]); m->st.destroyed++; }
     m->ndead = 0;
 }
@@ -425,6 +429,8 @@ static bool ms_pull(lagfx_protocol_t *p, mgr2_t *m, VkCommandBuffer cb, msurf_t 
     VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { ms->w, ms->h, 1 } };
     lagfx_translate_blit_cmd_buffer_image(cb, ms->stage, ms->img, &r, true);
     ms->up_epoch = m->epoch;
+    ms->id_pl = gs.page_list_gpa, ms->id_alloc = gs.alloc, ms->id_first = gs.first_offset, ms->id_np = gs.npages, ms->id_set = true;
+    ms->owed = false;   /* the guest's newer pixels replace whatever the GPU owed */
     return true;
 }
 
@@ -440,18 +446,22 @@ static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms) {
     return true;
 }
 
-/* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted) */
-static void ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
-    if (!ms->down_pending) return;
+/* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted).
+ * Returns 1 written, 0 not written (descriptor unreadable / transfer failed: retryable), -1 the guest re-mapped the surface since the pixels were taken (dropped). */
+static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
+    if (!ms->down_pending) return 0;
     ms->down_pending = false;
     lagfx_guest_surface_t gs;
-    if (!ms_desc(p, ms->mapping, &gs)) return;
-    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return; }
+    if (!ms_desc(p, ms->mapping, &gs)) return 0;
+    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return -1; }
+    if (ms->id_set && (gs.page_list_gpa != ms->id_pl || gs.alloc != ms->id_alloc || gs.first_offset != ms->id_first || gs.npages != ms->id_np)) { MRUN(p).mapped_remapped++; return -1; }
     lagfx_guest_surface_xfer_stats_t st;
     memset(&st, 0, sizeof st);
-    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return; }
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return 0; }
     MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
     ms->guest_stale = false;
+    ms->owed = false;   /* whoever paid it (flag 4, synchronize, swap): the guest is current */
+    return 1;
 }
 
 /* Builds o as a type 11 object over {u64 mapping, u32 tag, u32 size, u32 ref, description}. False (counted, o still freeable) if it cannot be. */
@@ -693,7 +703,7 @@ lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const
     if (!vk || !t || !t->root_page_pfn || (nres && !res)) return NULL;
     mgr2_t *m = mgr_get(p, true);
     if (!m || m->cur) return NULL;   /* one exec at a time */
-    if (m->pending && lagfx_a64_res_poll(p, 0) == LAGFX_A64_PENDING) { m->st.busy_skipped++; return NULL; }
+    if ((m->pending || m->sw_fence) && lagfx_a64_res_poll(p, 0) == LAGFX_A64_PENDING) { m->st.busy_skipped++; return NULL; }
     dead_flush(m, vk);   /* GPU still on the last one: never touch its resources */
     lagfx_a64_rexec_t *x = calloc(1, sizeof *x);
     if (!x) return NULL;
@@ -987,6 +997,7 @@ static lagfx_a64_status_t exec_finish(lagfx_a64_rexec_t *x) {
     const lagfx_task_entry_t *t = lagfx_protocol_find_task(x->p, x->t->id);   /* the task may have been torn down while the GPU worked: then there is nowhere to write */
     for (uint32_t i = 0; i < x->nres; i++) {
         lagfx_a64_obj_t *o = x->res[i].o;
+        if (o->ms && (x->res[i].flags & 2u) && mapped_wb_on_swap() && !(x->res[i].flags & 4u)) { if (o->ms->host_valid) o->ms->owed = true; continue; }   /* the GPU is done: the surface is now owed to the guest, paid at the next display command */
         if (o->ms && (x->res[i].flags & 2u) && mapped_wb_on_render()) { ms_finish_down(x->p, o->ms); continue; }
         if (!(x->res[i].flags & 4u)) continue;
         if (o->ms) { ms_finish_down(x->p, o->ms); continue; }   /* a surface's pixels go through the shell, not through the task */
@@ -1021,7 +1032,6 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
         if ((x->res[i].flags & 4u) && o->linear) lin_push_x(x, o);
         if ((x->res[i].flags & 4u) && o->ms) ms_record_down(m, x->cb, o->ms);
         else if ((x->res[i].flags & 2u) && o->ms && mapped_wb_on_render()) ms_record_down(m, x->cb, o->ms);
-        else if ((x->res[i].flags & 2u) && o->ms && mapped_wb_on_swap()) o->ms->owed = true;   /* paid at the next display command */
     }
     barrier(x->cb);
     m->cur = NULL;   /* recording is over */
@@ -1048,9 +1058,11 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
 
 static bool pending_wait(struct lagfx_vk_state *vk, mgr2_t *m) { return m->pending->fence && lagfx_vk_wait_bounded(vk, m->pending->fence, 0) == LAGFX_VK_WAIT_OK; }
 
+static lagfx_a64_status_t swap_poll(lagfx_protocol_t *p, mgr2_t *m, uint32_t wait_ms);
 lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms) {
     mgr2_t *m = p ? p->a64_res : NULL;
     lagfx_a64_rexec_t *x = m ? m->pending : NULL;
+    if (m && !x && m->sw_fence) return swap_poll(p, m, wait_ms);
     if (!x) return LAGFX_A64_DONE;
     lagfx_vk_wait_result_t r = fence_wait(x->vk, x->fence, wait_ms);
     if (r == LAGFX_VK_WAIT_OK) return exec_finish(x);
@@ -1062,13 +1074,13 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms) {
     return LAGFX_A64_FAILED;
 }
 
-bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { mgr2_t *m = p ? p->a64_res : NULL; return m && m->pending; }
+bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { mgr2_t *m = p ? p->a64_res : NULL; return m && (m->pending || m->sw_fence); }
 
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) {
     mgr2_t *m = p ? p->a64_res : NULL;
     struct lagfx_vk_state *vk = vk_of(p);
     lagfx_task_entry_t *t = p ? lagfx_protocol_find_task(p, task) : NULL;
-    if (!m || !vk || !t || !refs || m->cur || m->pending) return 0;
+    if (!m || !vk || !t || !refs || BUSY(m)) return 0;
     VkCommandBuffer cb;
     if (!cb_begin(vk, &cb)) return 0;
     lagfx_a64_obj_t *sel[64];
@@ -1094,17 +1106,43 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
 }
 
 
+/* The swap copy's fence signalled: pay the surfaces it carried. Only a surface actually written leaves the debt (swap_flushed); a re-mapped one is dropped
+ * (swap_dropped); an unreadable one stays owed (swap_failed) for the next display command. */
+static void swap_done(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *vk) {
+    for (uint32_t i = 0; i < m->sw_n; i++) {
+        int r = ms_finish_down(p, m->sw_sel[i]);
+        if (r > 0) m->sw_sel[i]->owed = false, MRUN(p).swap_flushed++;
+        else if (r < 0) m->sw_sel[i]->owed = false, MRUN(p).swap_dropped++;
+        else MRUN(p).swap_failed++;
+    }
+    vkDestroyFence(vk->device, m->sw_fence, NULL);
+    lagfx_vk_cmdbuf_free(vk, m->sw_cb);
+    m->sw_fence = VK_NULL_HANDLE, m->sw_cb = VK_NULL_HANDLE, m->sw_n = 0;
+    dead_flush(m, vk);
+}
+static lagfx_a64_status_t swap_poll(lagfx_protocol_t *p, mgr2_t *m, uint32_t wait_ms) {
+    struct lagfx_vk_state *vk = vk_of(p);
+    if (!m->sw_fence || !vk) return LAGFX_A64_DONE;
+    lagfx_vk_wait_result_t r = fence_wait(vk, m->sw_fence, wait_ms);
+    if (r == LAGFX_VK_WAIT_OK) { swap_done(p, m, vk); return LAGFX_A64_DONE; }
+    return r == LAGFX_VK_WAIT_TIMEOUT ? LAGFX_A64_PENDING : LAGFX_A64_FAILED;   /* FAILED: device lost; everything stays parked (leaked) */
+}
+
 /* A display command is about to reach the shell: write every owed mapped surface to the guest first (one copy per surface, however many execs drew into it).
- * Returns the number written. Nothing is written (surfaces stay owed) while an exec is recording / in flight or the GPU wait does not complete. */
+ * Returns the number written now. An exec in flight is waited for (bounded, LAGFX_GPU_WAIT_MS); if the GPU is still not done the surfaces stay owed
+ * (swap_deferred) and the next display command pays them: the command itself is still forwarded (the shell owns it), so a late frame shows one swap later. A swap copy
+ * that times out is parked in the manager (sw_*) like a pending exec: nothing it touches is freed or reused until its fence signalled. */
 uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) {
     mgr2_t *m = p ? p->a64_res : NULL;
     if (!m || !mapped_wb_on_swap()) return 0;
     MRUN(p).swap_events++;
+    struct lagfx_vk_state *vk = vk_of(p);
+    if (!vk || m->cur) { for (uint32_t i = 0; i < m->nms; i++) if (m->ms[i] && m->ms[i]->owed) MRUN(p).swap_deferred++; return 0; }
+    if (m->pending || m->sw_fence) lagfx_a64_res_poll(p, (uint32_t)(wait_ns() / 1000000ull));   /* bounded (LAGFX_GPU_WAIT_MS); 0 would be a status poll only */
     uint32_t nowed = 0;
     for (uint32_t i = 0; i < m->nms; i++) if (m->ms[i] && m->ms[i]->owed) nowed++;
     if (!nowed) return 0;
-    struct lagfx_vk_state *vk = vk_of(p);
-    if (!vk || m->cur || m->pending) { MRUN(p).swap_deferred += nowed; return 0; }
+    if (m->pending || m->sw_fence) { MRUN(p).swap_deferred += nowed; return 0; }
     VkCommandBuffer cb;
     if (!cb_begin(vk, &cb)) { MRUN(p).swap_deferred += nowed; return 0; }
     msurf_t *sel[MAX_MS];
@@ -1116,12 +1154,15 @@ uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) {
         if (ms_record_down(m, cb, ms)) sel[ns++] = ms; else ms->owed = false;   /* nothing meaningful on the GPU: not owed */
     }
     barrier(cb);
-    bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;
-    if (cb) lagfx_vk_cmdbuf_free(vk, cb);
-    if (!ok) { for (uint32_t i = 0; i < ns; i++) sel[i]->down_pending = false; MRUN(p).swap_deferred += ns; return 0; }
-    for (uint32_t i = 0; i < ns; i++) { ms_finish_down(p, sel[i]); sel[i]->owed = false; }
-    MRUN(p).swap_flushed += ns;
-    return ns;
+    VkFence f = VK_NULL_HANDLE;
+    bool sub = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_fence(vk, m, cb, &f);
+    if (!sub) { for (uint32_t i = 0; i < ns; i++) sel[i]->down_pending = false; lagfx_vk_cmdbuf_free(vk, cb); MRUN(p).swap_deferred += ns; return 0; }
+    memcpy(m->sw_sel, sel, ns * sizeof *sel);
+    m->sw_n = ns, m->sw_cb = cb, m->sw_fence = f;
+    uint64_t f0 = MRUN(p).swap_flushed;
+    swap_poll(p, m, (uint32_t)(wait_ns() / 1000000ull));   /* done: paid now; timeout: stays parked (sw_fence set) and is finished by the next poll / swap */
+    if (m->sw_fence) MRUN(p).swap_deferred += ns;
+    return (uint32_t)(MRUN(p).swap_flushed - f0);
 }
 
 /* ---- render targets and readback ---- */
@@ -1200,7 +1241,7 @@ bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, vo
     mgr2_t *m = p ? p->a64_res : NULL;
     struct lagfx_vk_state *vk = vk_of(p);
     lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
-    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || m->cur || m->pending) return false;
+    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || BUSY(m)) return false;
     size_t need = (size_t)o->width * o->height * o->bpp;
     if (!dst || dst_size < need) return false;
     VkBuffer b; VkDeviceMemory bm; uint8_t *mp;
@@ -1238,7 +1279,7 @@ void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task) {
         if (m->objs[i] && m->objs[i]->task == task) { obj_release(m, vk, m->objs[i]); m->objs[i] = NULL; }
 }
 
-bool lagfx_a64_res_busy(lagfx_protocol_t *p) { mgr2_t *m = p ? p->a64_res : NULL; return m && (m->cur || m->pending); }
+bool lagfx_a64_res_busy(lagfx_protocol_t *p) { mgr2_t *m = p ? p->a64_res : NULL; return m && BUSY(m); }
 
 void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *live, uint64_t *created, uint64_t *destroyed) {
     mgr2_t *m = p ? p->a64_res : NULL;
