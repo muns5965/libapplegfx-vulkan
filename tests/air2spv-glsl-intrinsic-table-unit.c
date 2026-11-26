@@ -245,6 +245,11 @@ int main(void) {
     check("air.sqrt.v3f16", 1, 31, 1, 0);
     check("air.clamp.v3f16", 1, 43, 3, 0);
     check("air.fabs.v2f16", 1, 4, 1, 0);
+    /* Boundary: a name that merely starts with a table prefix is not that intrinsic (air.fast.sin must not catch air.fast.sinx, air.fast_exp must not catch air.fast_expm1). */
+    check("air.fast.sinx.f32", 0, 0, 0, 0);
+    check("air.fast_expm1.f32", 0, 0, 0, 0);
+    check("air.fast_sqrtx.f32", 0, 0, 0, 0);
+    check("air.fast.sin.f32", 1, 13, 1, 0);
     printf("%s air2spv-glsl-intrinsic-table-unit (%zu rows, %d with dump evidence)\n", bad ? "FAIL" : "PASS", sizeof(rows) / sizeof(rows[0]), nreal);
     return bad ? 1 : 0;
 }

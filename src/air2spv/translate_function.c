@@ -3931,6 +3931,8 @@ bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_ins
         size_t pl = strlen(intrinsic_table[i].prefix);
         if (pl <= best_len && best != (size_t)-1) continue;
         if (strncmp(fn_name, intrinsic_table[i].prefix, pl) != 0) continue;
+        /* the name must end at the prefix or continue with the type suffix ('.'): air.fast.sinx.f32 is not air.fast.sin */
+        if (pl > 0 && intrinsic_table[i].prefix[pl - 1] != '.' && fn_name[pl] != '\0' && fn_name[pl] != '.') continue;
         if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
         best = i; best_len = pl;
     }
