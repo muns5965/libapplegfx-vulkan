@@ -1055,6 +1055,23 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-fragment-stagein-unit.c')
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Fragment stage linker: VS output / FS input type mismatch, missing VS output, unlinked, disabled.
+if fs.is_file(meson.current_source_dir() / 'air2spv-stage-link-unit.c')
+  air2spv_sl_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    air2spv_sl_deps += [vulkan_dep]
+  endif
+  air2spv_sl_test = executable('air2spv-stage-link-unit',
+    'air2spv-stage-link-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : air2spv_sl_deps,
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv stage linker (unit)', air2spv_sl_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # air.sample_texture_2d -> real OpImageSampleImplicitLod lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-unit.c')
   air2spv_txs_deps = [libapplegfx_vulkan_dep]

@@ -67,6 +67,9 @@ lagfx_air2spv_translate_module(const lagfx_air_module_t *m,
  * Returns false when the module has no usable entry-point metadata. */
 bool lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys_t *out);
 
+/* Process-wide stage-linker counters (fragment modules translated with a typed vs_out). */
+void lagfx_air2spv_link_totals(lagfx_stage_link_totals_t *out);
+
 /* Like lagfx_air2spv_translate_module; for a FRAGMENT module `vs_out` (the
  * paired vertex module's output keys) drives the stage-in Locations. */
 lagfx_status_t

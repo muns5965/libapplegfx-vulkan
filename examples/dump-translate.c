@@ -99,5 +99,7 @@ int main(int argc, char **argv) {
     { lagfx_undef_totals_t t; lagfx_air2spv_undef_totals(&t);
       printf("undef summary: %llu modules, %llu with a possibly-undefined value in control flow (%llu control sinks), %llu undef values used, %llu stores of possibly-undefined values, %llu rejected (fail closed)\n",
              (unsigned long long)t.modules, (unsigned long long)t.modules_ctl, (unsigned long long)t.reach_ctl, (unsigned long long)t.undef_used, (unsigned long long)t.reach_store, (unsigned long long)t.rejected); }
+    { lagfx_stage_link_totals_t l; lagfx_air2spv_link_totals(&l);
+      printf("stage_link: %llu mismatch fixed, %llu missing zeroed, %llu unlinked\n", (unsigned long long)l.mismatch_fixed, (unsigned long long)l.missing_zeroed, (unsigned long long)l.unlinked); }
     printf("translated %d functions, %d failed\n", ok, bad); return bad ? 1 : 0;
 }
