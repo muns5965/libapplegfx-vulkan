@@ -56,7 +56,7 @@ int main(void) {
     assert(file_lines(path, "g7-draw: new") == 4 && file_lines(path, "g7-draw-summary") == 1);
     assert(file_lines(path, "reason=unbound_tex(tex slot=2 stage=fragment vkb=3 ref=17)") == 1 && file_lines(path, "n=41") == 1 && file_lines(path, "n=1000") == 1);
     assert(file_lines(path, "pso=7 vs=ab12cd34 fs=99887766") == 3 && file_lines(path, "rt0=1170x2532 fmt=37") == 3 && file_lines(path, "reason=no_pipeline(none_set)") == 1);
-    assert(file_lines(path, "draws=1043 ok=1000 no_pipeline=1 unbound_tex=42") == 1);
+    assert(file_lines(path, "draws=1043(+1043) ok=1000(+1000) no_pipeline=1(+1) unbound_tex=42(+42)") == 1 && file_lines(path, "table_overflow_draws=0 suppressed_lines=0 multi_reason=0(+0)") == 1);
 
     /* idle: nothing new -> no new tuple lines and no summary */
     assert(lagfx_draw_diag_flush(p, false) == 0);
@@ -73,7 +73,9 @@ int main(void) {
     for (int k = 0; k < 40; k++) lagfx_draw_diag_flush(p, false);
     assert(file_lines(path, "g7-draw: new") <= (long)LAGFX_DRAW_DIAG_TABLE);
     assert(file_lines(path, "g7-draw: new") == (long)LAGFX_DRAW_DIAG_TABLE);   /* all kept tuples reached the log, no more */
-    assert(file_lines(path, "overflow=0") < file_lines(path, "g7-draw-summary"));
+    assert(file_lines(path, "table_overflow_draws=0 ") < file_lines(path, "g7-draw-summary"));
+    assert(file_lines(path, "g7-draw: new") == file_lines(path, "ms last="));   /* every tuple line carries first/last ms */
+    assert(file_lines(path, "first=") >= (long)LAGFX_DRAW_DIAG_TABLE);
     assert(lagfx_draw_diag_flush(p, true) >= 1 && file_lines(path, "g7-draw-summary: final") == 1);
     free(p->draw_diag); p->draw_diag = NULL; free(p);
 
@@ -90,6 +92,29 @@ int main(void) {
     for (int k = 0; k < 10; k++) { lagfx_draw_ev_t x = ev(77, LAGFX_DD_OK); x.rt_h = (uint32_t)k; lagfx_draw_diag_record(d2, &x); lagfx_draw_diag_flush(q, true); }
     assert(lagfx_draw_diag_lines(d2) <= LAGFX_DRAW_DIAG_MAX_LINES);
     lagfx_draw_diag_free(q); free(q);
+
+    /* delta since the previous summary, multi_reason + top pairs, explicit zero / non-zero overflow and suppression */
+    {
+        lagfx_protocol_t *r = calloc(1, sizeof *r);
+        struct lagfx_draw_diag *d3 = lagfx_draw_diag_get(r);
+        long s0 = file_lines(path, "g7-draw-summary");
+        lagfx_draw_ev_t x = ev(31, LAGFX_DD_OTHER); x.why = "no_target";
+        x.chg = (1u << 9);                          for (int i = 0; i < 5; i++) lagfx_draw_diag_record(d3, &x);   /* single counter: not multi */
+        x.chg = (1u << 9) | (1u << 20);             for (int i = 0; i < 4; i++) lagfx_draw_diag_record(d3, &x);   /* pair 9+20 */
+        x.chg = (1u << 3) | (1u << 6) | (1u << 7);  lagfx_draw_diag_record(d3, &x);                               /* three pairs, 1 multi draw */
+        lagfx_draw_diag_flush(r, false);
+        assert(file_lines(path, "draws=10(+10)") == 1 && file_lines(path, "multi_reason=5(+5)") == 1);
+        assert(file_lines(path, "multi_pairs[no_target+zero_draw=4 ub_buf+ub_tex=1 ub_buf+ub_view=1]") == 1);   /* top 3 by count, ties in first-seen order */
+        x.chg = 0; lagfx_draw_diag_record(d3, &x); lagfx_draw_diag_record(d3, &x);
+        lagfx_draw_diag_flush(r, false);
+        assert(file_lines(path, "draws=12(+2)") == 1 && file_lines(path, "multi_reason=5(+0)") == 1);
+        assert(file_lines(path, "g7-draw-summary") - s0 == 2);
+        /* table overflow reported with its count */
+        for (uint32_t i = 0; i < LAGFX_DRAW_DIAG_TABLE + 7; i++) { lagfx_draw_ev_t y = ev(9000 + i, LAGFX_DD_OK); lagfx_draw_diag_record(d3, &y); }
+        lagfx_draw_diag_flush(r, true);
+        assert(file_lines(path, "table_overflow_draws=8 ") == 1);   /* 1 existing tuple leaves 127 slots; 135 new tuples -> 8 do not fit */
+        lagfx_draw_diag_free(r); free(r);
+    }
 
     unlink(path);
     puts("draw-diag-unit: ok");

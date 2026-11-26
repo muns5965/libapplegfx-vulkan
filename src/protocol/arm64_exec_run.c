@@ -1095,6 +1095,7 @@ static void cap_fill(a64_run_t *r, const cap_dinfo_t *di, lagfx_a64_cap_draw_in_
 /* Per-draw diagnostics (draw_diag.h): counters before / after one draw classify its outcome; the event goes into the bounded table, nothing is formatted here. */
 enum { DD_C_DRAWS, DD_C_SKIPPED, DD_C_NOPIPE, DD_C_UB_BUF, DD_C_UB_IN, DD_C_UB_SI, DD_C_UB_TEX, DD_C_UB_VIEW, DD_C_UB_SAMP, DD_C_NOTGT, DD_C_NOVB, DD_C_NOIB, DD_C_PRIM, DD_C_INDBAD, DD_C_UNAL, DD_C_FB, DD_C_DFAIL,
        DD_C_NOSIZE, DD_C_FBF, DD_C_UNNORM, DD_C_ZERO, DD_C_BADREC, DD_C_TILE, DD_C_N };
+_Static_assert(DD_C_N == LAGFX_DD_NCTR, "draw_diag.c ctr_name[] must match the DD_C_* enum");
 static void dd_counters(lagfx_protocol_t *p, uint64_t *v) {
     const __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
     v[DD_C_DRAWS] = CNT(p).draws, v[DD_C_SKIPPED] = CNT(p).draws_skipped, v[DD_C_NOPIPE] = CNT(p).no_pipeline, v[DD_C_UB_BUF] = Q->desc_unbound_why[0], v[DD_C_UB_IN] = Q->desc_unbound_why[1],
@@ -1123,6 +1124,7 @@ static void dd_report(a64_run_t *r, lagfx_protocol_t *p, struct lagfx_draw_diag 
         ev.reason = LAGFX_DD_OTHER, ev.why = "unclassified";
         for (unsigned i = 0; i < sizeof nm / sizeof *nm; i++) if (CH(nm[i].c)) { ev.why = nm[i].n; break; }
     }
+    for (unsigned i = 2; i < DD_C_N; i++) if (CH(i)) ev.chg |= 1u << i;   /* every skip counter that moved (draws / skipped excluded) */
 #undef CH
     lagfx_draw_diag_record(dd, &ev);
 }

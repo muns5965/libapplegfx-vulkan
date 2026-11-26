@@ -6,6 +6,8 @@
  * Events are deduplicated into a small fixed table by (pso, vs, fs, reason, binding, target) with a counter. Recording takes a tiny spin lock for a table lookup and
  * does no formatting, no logging and no I/O; lines are formatted and written by lagfx_draw_diag_flush(), called from the periodic statistics path
  * (lagfx_diag_stats, every 10 s, and at teardown). Output is capped: at most LAGFX_DRAW_DIAG_MAX_LINES lines in total, LAGFX_DRAW_DIAG_PER_FLUSH new lines per flush.
+ * Each tuple carries first-seen / last-seen time (ms since the diagnostics object was created, CLOCK_MONOTONIC). The summary reports cumulative counts with the delta since the
+ * previous summary, the table overflow, the lines suppressed by the cap, and multi_reason (draws where more than one skip counter changed, with the top 3 counter pairs).
  * Environment: G7_DRAW_DIAG=0 disables it (default on, capped). Disabled = one NULL check per draw, nothing allocated.
  */
 #ifndef LAGFX_PROTOCOL_DRAW_DIAG_H
@@ -35,7 +37,12 @@ typedef struct {
     int16_t  slot;                 /* Metal slot, -1 unknown */
     uint32_t vkb, bref;            /* Vulkan binding, guest object ref of the unbound thing (0 unknown) */
     uint32_t rt_w, rt_h, rt_fmt;   /* colour attachment 0 size and Vulkan format (0 = no target) */
+    uint32_t chg;                  /* bit i = skip counter i (LAGFX_DD_CTR_NAMES order) changed during this draw; not part of the tuple; draw/skipped totals excluded by the caller */
 } lagfx_draw_ev_t;
+
+/* Skip-counter names, indexed by the bit number in lagfx_draw_ev_t.chg. Keep in step with the DD_C_* enum in arm64_exec_run.c. */
+#define LAGFX_DD_NCTR 23u
+#define LAGFX_DD_PAIRS 16u   /* distinct counter pairs tracked for multi_reason; further pairs only add to multi_reason itself */
 
 /* The per-device state, created on first use; NULL when disabled (G7_DRAW_DIAG=0) or out of memory. */
 struct lagfx_draw_diag *lagfx_draw_diag_get(lagfx_protocol_t *p);
