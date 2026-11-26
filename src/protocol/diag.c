@@ -162,6 +162,15 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             LAGFX_LOG("%s", line);
         }
     }
+    if (p->a64cq) {   /* stall triage, lock-free: completions == commands plus an old last poll means an idle guest, not a stuck queue */
+        uint64_t lp = __atomic_load_n(&p->diag2.last_poll_ns, __ATOMIC_RELAXED);
+        snprintf(line, sizeof line, "g7-gpu-idle: last_poll_age_ms=%llu last_cmd_age_ms=%llu held_chan_mask=0x%x held_exec_mask=0x%x drain_depth=%u display_cause_pending=0x%x stamp_pending=0x%x",
+                 (unsigned long long)(lp && t > lp ? (t - lp) / 1000000ull : 0), (unsigned long long)age_cmd,
+                 (unsigned)lagfx_arm64_held_channels(p), (unsigned)p->a64_held_chan_mask, (unsigned)p->a64_drain_depth,
+                 (unsigned)atomic_load_explicit(&p->pending_displays_bitmask, memory_order_relaxed), (unsigned)atomic_load_explicit(&p->pending_stamps_bitmask, memory_order_relaxed));
+        fprintf(stderr, "%s\n", line);
+        LAGFX_LOG("%s", line);
+    }
     if (X->run.execs) {   /* ARM64 render exec extensions (draw variants, sampler fidelity, misaligned buffer binds, no-op tags) */
         const __typeof__(X->run) *R = &X->run;
         char el[1400];
