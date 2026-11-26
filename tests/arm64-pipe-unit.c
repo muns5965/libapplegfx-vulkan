@@ -623,6 +623,40 @@ static void test_dump(void) {
 }
 
 #ifdef LAGFX_HAVE_VULKAN
+/* The pipeline (type 7) and its functions (type 6) are reached ONLY through tag 116 and the resolver: the resource list holds the render target and nothing else.
+ * Capture must still produce pso + library files and the obj / pso / fn index lines. */
+static void test_dump_via_resolver(void) {
+    if (!g_dev->vk || !g_dev->vk->initialized) return;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    setenv("LAGFX_ARM64_DUMP", "1", 1);
+    mkdtemp_dir();
+    setenv("LAGFX_ARM64_DUMP_DIR", g_dir, 1);
+    lagfx_a64_dump_reset();
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1); build_objects();
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TRI); cb_draw(3, 0, 3);
+    uint32_t len = cb_finish();
+    uint32_t w[3 + 2 + 4], n = 0;
+    w[n++] = 1; w[n++] = 1; w[n++] = 1; w[n++] = REF_TEX; w[n++] = 0;
+    uint64_t off = VA_CMD, l = len;
+    memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
+    submit(p, 0x43, 0, w, n);
+    assert(RUNC(p).draws == 1 && PIPE(p).resolved == 1);                       /* the draw happened: the pipeline resolved although no resource list named it */
+    assert(PIPE(p).dump_objects >= 2 && PIPE(p).dump_files >= 2);
+    char f[300];
+    assert(dir_has(g_dir, "pso_1_3_", f, sizeof f) && dir_has(g_dir, "lib_", f, sizeof f));
+    char *idx = read_all(g_dir, "index.txt");
+    assert(idx && strstr(idx, "obj task=1 ref=3 type=7") && strstr(idx, "pso task=1 ref=3 function_refs=[5,6]") && strstr(idx, "fn task=1 ref=5") && strstr(idx, "truncated=0"));
+    free(idx);
+    uint64_t before = PIPE(p).dump_objects;                                     /* the same pipeline again: the seen set keeps it to one capture */
+    submit(p, 0x43, 0, w, n);
+    assert(PIPE(p).dump_objects == before);
+    lagfx_a64_exec_free(p); pfree(p);
+    unsetenv("LAGFX_ARM64_DUMP_DIR"); unsetenv("LAGFX_ARM64_DUMP"); unsetenv("LAGFX_ARM64_EXEC");
+    lagfx_a64_dump_reset();
+    puts("PASS: capture of a pipeline + functions reached only through the resolver (tag 116), not the resource list");
+}
+
 /* Device-capability gate (vulkan/caps.h): a translated module that declares a capability the device was not created with is not built; the draw is skipped. The
  * 'feature missing' seam lagfx_vk_caps_inject_missing marks capabilities as missing on the lavapipe device (which reports everything). */
 static void test_missing_caps(void) {
@@ -687,6 +721,7 @@ int main(void) {
     test_dump();
 #ifdef LAGFX_HAVE_VULKAN
     if (g_dev->vk && g_dev->vk->initialized) {
+        test_dump_via_resolver();
         test_resolver_triangle_and_topology();
         test_textured_draw();
         test_invalidation();

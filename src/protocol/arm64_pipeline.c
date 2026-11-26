@@ -4,6 +4,7 @@
 #include "arm64_pipeline.h"
 #include "arm64_objects.h"
 #include "arm64_exec_decode.h"
+#include "arm64_dump.h"
 #include "../common/le.h"
 #include "../common/log.h"
 
@@ -103,6 +104,7 @@ uint8_t *lagfx_a64_read_function_lib(lagfx_protocol_t *p, const lagfx_task_entry
     uint32_t e[3];
     uint8_t h[20];
     if (!lagfx_a64_objects_read_entry(p, task, ref, e) || (e[0] & 0xffu) != LAGFX_A64_OBJ_FUNCTION) return NULL;
+    lagfx_a64_dump_touch_object(p, task, ref, e);   /* a function object read through a pipeline (tag 116) that no resource list named */
     if (!lagfx_arm64_task_read(p, task, (uint64_t)e[2] << 32 | e[1], h, sizeof h)) return NULL;   /* {u64 off, u32 len, u32 tag, u32 size} (makeFunction) */
     uint64_t va = lagfx_le64(h);
     uint32_t len = lagfx_le32(h + 8);

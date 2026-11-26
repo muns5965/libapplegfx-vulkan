@@ -6,6 +6,7 @@
 #include "arm64_pipeline.h"
 #include "../common/le.h"
 #include "../common/log.h"
+#include "../device.h"
 #include "../air2spirv/metallib_extract.h"
 
 #include <errno.h>
@@ -210,13 +211,52 @@ static void dump_object(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uin
     free(b);
 }
 
+void lagfx_a64_dump_touch_object(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t e[3]) {
+    if (!p || !task || !e || !ref || !lagfx_a64_dump_enabled()) return;
+    uint32_t type = e[0] & 0xffu;
+    if (type == LAGFX_A64_OBJ_SERIALIZED || type == LAGFX_A64_OBJ_FUNCTION) dump_object(p, task, ref, e);
+}
+
+/* type 11 (mapped texture) of the resource list: {u64 mapping, u32 tag, u32 size, u32 ref, description}; one index line + the first 128 bytes, once per entry */
+static void dump_mapped(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t e[3]) {
+    uint32_t k[8] = { task->id, ref, e[0], e[1], e[2], (uint32_t)task->root_page_pfn, 11, 0 };
+    if (!seen_add(lagfx_a64_hash64(k, sizeof k))) return;
+    open_dir();
+    if (G.logged >= LOG_OBJ_MAX) { p->diag2.exec.pipe.dump_skipped_cap++; return; }
+    G.logged++;
+    p->diag2.exec.pipe.dump_objects++;
+    uint32_t full = e[0] >> 8, n = full < 128u ? full : 128u;
+    uint8_t b[128];
+    memset(b, 0, sizeof b);
+    if (!full || !lagfx_arm64_task_read(p, task, (uint64_t)e[2] << 32 | e[1], b, n)) {
+        LAGFX_LOG("arm64-dump mapped task=%u ref=%u size=%u: unreadable", task->id, ref, full);
+        index_line("mapped task=%u ref=%u unreadable=1 full_size=%u", task->id, ref, full);
+        return;
+    }
+    uint64_t mapping = n >= 8 ? lagfx_le64(b) : 0;
+    uint32_t tag = n >= 12 ? lagfx_le32(b + 8) : 0, dsz = n >= 16 ? lagfx_le32(b + 12) : 0;
+    char surf[160], hx[3 * 128 + 16];
+    snprintf(surf, sizeof surf, "surface=unknown fourcc=unknown row=unknown first=unknown");
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    uint8_t d[256];
+    size_t dl = 0;
+    memset(d, 0, sizeof d);
+    if (dev && dev->desc.shell.get_surface_desc && mapping <= 0xffffffffull && dev->desc.shell.get_surface_desc(dev->desc.shell.opaque, (uint32_t)mapping, d, sizeof d, &dl) && dl >= 0x64 && dl <= sizeof d)
+        snprintf(surf, sizeof surf, "surface=%llux%llu fourcc=%08x row=%llu first=%u", (unsigned long long)lagfx_le64(d + 0x20), (unsigned long long)lagfx_le64(d + 0x28),
+                 lagfx_le32(d + 4), (unsigned long long)lagfx_le64(d + 0x30), lagfx_le32(d + 0x60));
+    hexn(hx, sizeof hx, b, n);
+    LAGFX_LOG("arm64-dump mapped task=%u ref=%u mapping=%llu tag=0x%x desc_size=%u %s first128=%s", task->id, ref, (unsigned long long)mapping, tag, dsz, surf, hx);
+    index_line("mapped task=%u ref=%u mapping=%llu tag=0x%x desc_size=%u %s first128=%s", task->id, ref, (unsigned long long)mapping, tag, dsz, surf, hx);
+}
+
 void lagfx_a64_dump_resources(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint8_t *res, uint32_t nres) {
     if (!p || !task || !res || !lagfx_a64_dump_enabled()) return;
     memset(&G.vb, 0, sizeof G.vb), memset(&G.fb, 0, sizeof G.fb), memset(G.tex, 0, sizeof G.tex), memset(G.samp, 0, sizeof G.samp);
     G.pipe_ref = 0;
     for (uint32_t i = 0; i < nres; i++) {
         uint32_t ref = lagfx_le32(res + 8u * i), e[3];
-        if (ref && lagfx_a64_objects_read_entry(p, task, ref, e)) dump_object(p, task, ref, e);
+        if (!ref || !lagfx_a64_objects_read_entry(p, task, ref, e)) continue;
+        if ((e[0] & 0xffu) == 11u) dump_mapped(p, task, ref, e); else dump_object(p, task, ref, e);
     }
 }
 

@@ -7,6 +7,7 @@
 #include "arm64_exec_decode.h"
 #include "arm64_resources.h"
 #include "arm64_completion.h"
+#include "arm64_dump.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -196,6 +197,7 @@ static void *make_pipeline(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_e
 }
 
 static void *obj_create_inner(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
+    lagfx_a64_dump_touch_object(p, t, ref, e);   /* LAGFX_ARM64_DUMP=1: a pipeline / sampler first read here is captured even if no resource list named it */
     if ((e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) {   /* by the payload's own tag: 3 = sampler; anything else goes to the pipeline resolver, which rejects what it cannot execute */
         uint8_t tg[4];
         if ((e[0] >> 8) >= 4u && lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], tg, 4) && lagfx_le32(tg) == 3u) return make_sampler(r, p, t, e);

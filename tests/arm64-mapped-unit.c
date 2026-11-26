@@ -23,6 +23,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include "protocol/arm64_dump.h"
 
 extern uint64_t lagfx_vk_validation_msg_count;
 
@@ -379,6 +382,19 @@ int main(void) {
       run_exec(p, 13, REF_M6, 2, green, true, res, 1, true);
       assert(cell(1) == 13 && CNT(p).mapped_no_desc > nodesc && CNT(p).mapped_written_back == wb); }
     printf("PASS: unreadable page list counted, no write-back, no crash\n");
+
+    /* capture (LAGFX_ARM64_DUMP): a type-11 object of the resource list gets a `mapped` index line with the surface geometry from the shell */
+    { char dir[64]; snprintf(dir, sizeof dir, "/tmp/lagfx-mapped-XXXXXX"); assert(mkdtemp(dir));
+      setenv("LAGFX_ARM64_DUMP", "1", 1); setenv("LAGFX_ARM64_DUMP_DIR", dir, 1); lagfx_a64_dump_reset();
+      const uint32_t res[2][2] = { { REF_M1, 0 }, { REF_M4, 0 } };
+      run_exec(p, 14, REF_M1, 1, green, false, res, 2, true);
+      lagfx_a64_dump_reset();
+      char path[128], buf[8192]; snprintf(path, sizeof path, "%s/index.txt", dir);
+      FILE *f = fopen(path, "rb"); assert(f); size_t n = fread(buf, 1, sizeof buf - 1, f); buf[n] = 0; fclose(f);
+      assert(strstr(buf, "mapped task=1 ref=10 mapping=7 tag=0x39 desc_size=56 surface=64x80 fourcc=42475241 row=320 first=256 first128="));
+      assert(strstr(buf, "mapped task=1 ref=13 mapping=99 tag=0x39 desc_size=56 surface=unknown"));   /* the shell does not know this id */
+      unsetenv("LAGFX_ARM64_DUMP"); unsetenv("LAGFX_ARM64_DUMP_DIR"); }
+    printf("PASS: capture writes a `mapped` index line per type-11 resource (mapping, tag, desc_size, surface geometry)\n");
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
