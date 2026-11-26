@@ -27,6 +27,14 @@
 #define LAGFX_A64_PDESC_MAX_ATTRS 8u
 #define LAGFX_A64_FRAG_BINDING_BASE 16u          /* fragment-stage SPIR-V bindings are offset by this (same as the x86 draw path) */
 
+#define LAGFX_A64_FBF_BINDING_BASE 24u           /* the translator's input-attachment bindings: 24 + colour attachment index (before the fragment offset above) */
+
+/* Why a framebuffer-fetch (input attachment) binding cannot be built; LAGFX_A64_FBF_OK = it can. Pure: shared by the resolver and tools/dump-bindings. */
+enum { LAGFX_A64_FBF_OK = 0, LAGFX_A64_FBF_VERTEX_STAGE, LAGFX_A64_FBF_NO_LOCAL_READ, LAGFX_A64_FBF_BINDING_RANGE, LAGFX_A64_FBF_TOO_MANY, LAGFX_A64_FBF_REASONS };
+/* spv_binding = the binding in the module AS RESOLVED (a fragment module has been offset by LAGFX_A64_FRAG_BINDING_BASE already); n_bind = bindings taken so far. */
+int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t spv_binding, uint32_t n_bind);
+const char *lagfx_a64_fbfetch_reason_name(int reason);
+
 typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;
 
 /* Colour attachment 0 of the serialized descriptor (record `00 04 <idx 0>` followed by `kk 04 <u32>` tokens, keys in MTLRenderPipelineColorAttachmentDescriptor

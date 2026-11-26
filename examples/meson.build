@@ -80,3 +80,11 @@ executable('dump-translate',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# dump-bindings — per PSO of an arm64 dump: bindings per stage and why the resolver would stub a framebuffer-fetch pipeline.
+executable('dump-bindings',
+  'dump-bindings.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

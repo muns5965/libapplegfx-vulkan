@@ -603,7 +603,7 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (prim == 0u && r->pipe->src.no_point_size) { p->diag2.exec.pipe.point_no_size++; CNT(p).draws_skipped++; return false; }   /* Metal needs [[point_size]] too */
     if (!r->vk->have_local_read)   /* a pipeline that reads the attachments cannot run without the device feature */
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
-            if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++; CNT(p).draws_skipped++; return false; }
+            if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
     VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
     for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) fmts[i] = r->rts[i]->format;
     uint32_t alt = 0;   /* an unnormalized-coordinates sampler in a fragment sampler slot of this pipeline: only explicit-LOD sampling is valid, so the LOD 0 variant of the fragment shader */

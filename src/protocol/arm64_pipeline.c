@@ -90,6 +90,20 @@ static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o
     }
 }
 
+int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t spv_binding, uint32_t n_bind) {
+    if (stage == 0) return LAGFX_A64_FBF_VERTEX_STAGE;
+    if (!have_local_read) return LAGFX_A64_FBF_NO_LOCAL_READ;
+    /* fragment modules are offset by LAGFX_A64_FRAG_BINDING_BASE before reflection, so attachment n sits at BASE + 24 + n (the first bug: the unshifted 24..27 never matched) */
+    uint32_t lo = LAGFX_A64_FRAG_BINDING_BASE + LAGFX_A64_FBF_BINDING_BASE;
+    if (spv_binding < lo || spv_binding > lo + 3u) return LAGFX_A64_FBF_BINDING_RANGE;
+    if (n_bind >= 48u) return LAGFX_A64_FBF_TOO_MANY;   /* = LAGFX_A64_MAX_BINDINGS (kept literal: that macro lives in the exec header) */
+    return LAGFX_A64_FBF_OK;
+}
+const char *lagfx_a64_fbfetch_reason_name(int reason) {
+    static const char *const n[LAGFX_A64_FBF_REASONS] = { "ok", "vertex_stage", "no_local_read", "binding_range", "too_many_bindings" };
+    return reason >= 0 && reason < LAGFX_A64_FBF_REASONS ? n[reason] : "?";
+}
+
 bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void *ctx, uint32_t ref), void *ctx, lagfx_a64_pdesc_t *out) {
     if (!blob || !out || n < 16u) return false;
     memset(out, 0, sizeof *out);
@@ -377,9 +391,15 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         for (size_t t = 0; t < nt; t++) {
             if (tmp[t].set != 0u) continue;
             if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
-                if (st == 0 || !vk->have_local_read || tmp[t].binding < 24u || tmp[t].binding > 27u || out->n_bind >= LAGFX_A64_MAX_BINDINGS) { CNTP(p).stub_fbfetch++; goto done; }
+                int why = lagfx_a64_fbfetch_check(st, vk->have_local_read, tmp[t].binding, out->n_bind);
+                if (why != LAGFX_A64_FBF_OK) {
+                    CNTP(p).stub_fbfetch++;
+                    if (CNTP(p).stub_fbfetch_why[why]++ == 0)
+                        LAGFX_LOG("arm64 pipeline %u: framebuffer-fetch pipeline not built (%s): stage=%d binding=%u n_bind=%u local_read=%d", ref, lagfx_a64_fbfetch_reason_name(why), st, tmp[t].binding, out->n_bind, (int)vk->have_local_read);
+                    goto done;
+                }
                 out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding, out->bind[out->n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT;
-                out->bind[out->n_bind].stage = 1, out->bind[out->n_bind].metal_index = (int16_t)(tmp[t].binding - 24u);
+                out->bind[out->n_bind].stage = 1, out->bind[out->n_bind].metal_index = (int16_t)(tmp[t].binding - LAGFX_A64_FRAG_BINDING_BASE - LAGFX_A64_FBF_BINDING_BASE);
                 out->n_bind++, CNTP(p).fbfetch_pipes++;
                 continue;
             }

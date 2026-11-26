@@ -36,7 +36,7 @@ bool lagfx_a64_exec_enabled(const lagfx_protocol_t *p);
 /* What a pipeline resolver hands back for a pipeline object (guest object type 7, serialized render pipeline). The Apple serialized
  * descriptor is not decoded by this module: the resolver turns it into ready shader modules + layout. desc.color_format is overwritten
  * with the pass's format when the VkPipeline is built. */
-#define LAGFX_A64_MAX_BINDINGS 24u
+#define LAGFX_A64_MAX_BINDINGS 48u
 enum { LAGFX_A64_BIND_IMAGE = 1, LAGFX_A64_BIND_SAMPLER = 2, LAGFX_A64_BIND_BUFFER = 3, LAGFX_A64_BIND_INPUT = 4, LAGFX_A64_BIND_STORAGE_IMAGE = 5 };   /* = lagfx_spv_binding_kind_t */
 typedef struct {
     lagfx_pipeline_desc_t desc;
