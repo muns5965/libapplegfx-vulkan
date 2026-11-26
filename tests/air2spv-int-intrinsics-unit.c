@@ -91,6 +91,9 @@ static const want_op_t o_umul1[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_SPV
 static const want_op_t o_smul1[] = { {LAGFX_SPV_OP_SMUL_EXTENDED, 1}, {LAGFX_SPV_OP_UMUL_EXTENDED, 0}, {0, 0} };
 static const want_op_t o_both_mul[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_SPV_OP_SMUL_EXTENDED, 1}, {0, 0} };
 
+/* abs.s.i8 + abs.s.i32 -> SAbs; abs.u.i16 is an OpCopyObject (no GLSL instruction) */
+static const want_glsl_t g_abs[] = { {LAGFX_SPV_GLSL_SABS, 2}, {0, 0} };
+
 static const case_t cases[] = {
     { "int_bitcount_fragment.air.bc", g_bits, o_bits },
     /* the fixtures executed by the lavapipe test must at least be spirv-val clean */
@@ -107,6 +110,8 @@ static const case_t cases[] = {
     { "rt_subsat_s_fragment.air.bc", g_none, o_none },
     { "rt_sat64a_fragment.air.bc", g_none, o_both_mul },
     { "rt_sat64b_fragment.air.bc", g_none, o_umul1 },
+    { "rt_abs_fragment.air.bc", g_abs, o_none },
+    { "rt_minmax_fragment.air.bc", g_none, o_none },
     { "int_minmax_fragment.air.bc", g_minmax, o_none },
 };
 

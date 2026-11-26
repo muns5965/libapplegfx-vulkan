@@ -153,6 +153,18 @@ static void arith_ref(int x, int y, float o[4]) {
 ARITH_REF(ref_mulhi_u, ref_mulhi, 0) ARITH_REF(ref_mulhi_s, ref_mulhi, 1)
 ARITH_REF(ref_addsat_u, ref_addsat, 0) ARITH_REF(ref_addsat_s, ref_addsat, 1)
 ARITH_REF(ref_subsat_u, ref_subsat, 0) ARITH_REF(ref_subsat_s, ref_subsat, 1)
+static void ref_abs(int x, int y, float o[4]) {   /* abs.u = identity; abs.s = |x| as an unsigned bit pattern (MIN stays MIN) */
+    int64_t s8 = sx(gen_in(y, 8), 8), s32 = sx(gen_in(x, 32), 32);
+    uint32_t r32 = (uint32_t)(s32 < 0 ? -s32 : s32);
+    o[0] = (float)gen_in(x, 16); o[1] = (float)(uint8_t)(s8 < 0 ? -s8 : s8); o[2] = (float)(r32 >> 16); o[3] = (float)(r32 & 0xffffu);
+}
+static void ref_minmax(int x, int y, float o[4]) {   /* GLSL.std.450 SMin/UMax/UClamp/SClamp via air.{min,max,clamp}.{s,u}.<ty> */
+    uint64_t a8 = gen_in(x, 8), b8 = gen_in(y, 8), a16 = gen_in(x, 16), b16 = gen_in(y, 16), a32 = gen_in(x, 32), b32 = gen_in(y, 32);
+    int64_t smin16 = sx(a16, 16) < sx(b16, 16) ? sx(a16, 16) : sx(b16, 16), smax16 = sx(a16, 16) > sx(b16, 16) ? sx(a16, 16) : sx(b16, 16);
+    uint64_t lo = a32 < b32 ? a32 : b32, hi = a32 > b32 ? a32 : b32, x32 = a32 ^ b32, c32 = x32 < lo ? lo : x32 > hi ? hi : x32;
+    int64_t x16 = sx(a16 ^ b16, 16), c16 = x16 < smin16 ? smin16 : x16 > smax16 ? smax16 : x16;
+    o[0] = (float)wmask((uint64_t)smin16, 16); o[1] = (float)(a8 > b8 ? a8 : b8); o[2] = (float)((c32 >> 16) ^ (c32 & 0xffffu)); o[3] = (float)wmask((uint64_t)c16, 16);
+}
 static void ref_sat64a(int x, int y, float o[4]) {
     uint64_t a = gen_in(x, 64), b = gen_in(y, 64);
     o[0] = fold64(ref_mulhi(a, b, 64, 0)); o[1] = fold64(ref_mulhi(a, b, 64, 1)); o[2] = fold64(ref_addsat(a, b, 64, 0)); o[3] = fold64(ref_addsat(a, b, 64, 1));
@@ -179,6 +191,8 @@ static const case_t cases[] = {
     { "rt_subsat_s_fragment.air.bc",   65, 65, ref_subsat_s },
     { "rt_sat64a_fragment.air.bc",     65, 65, ref_sat64a },
     { "rt_sat64b_fragment.air.bc",     65, 65, ref_sat64b },
+    { "rt_abs_fragment.air.bc",        65, 65, ref_abs },
+    { "rt_minmax_fragment.air.bc",     65, 65, ref_minmax },
 };
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;

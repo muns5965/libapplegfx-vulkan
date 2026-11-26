@@ -4185,7 +4185,7 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     p = dot + 1;
     char sign = 0;
     if ((p[0] == 's' || p[0] == 'u') && p[1] == '.') { sign = p[0]; p += 2; }
-    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS, K_MUL_HI, K_ADD_SAT, K_SUB_SAT } k = K_NONE;
+    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS, K_MUL_HI, K_ADD_SAT, K_SUB_SAT, K_ABS_U } k = K_NONE;
     uint32_t nargs = 0;
     if (!sign && !strcmp(op, "clz")) { k = K_CLZ; nargs = 1u; }
     else if (!sign && !strcmp(op, "ctz")) { k = K_CTZ; nargs = 1u; }
@@ -4194,6 +4194,7 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     else if (sign && !strcmp(op, "mul_hi")) { k = K_MUL_HI; nargs = 2u; }
     else if (sign && !strcmp(op, "add_sat")) { k = K_ADD_SAT; nargs = 2u; }
     else if (sign && !strcmp(op, "sub_sat")) { k = K_SUB_SAT; nargs = 2u; }
+    else if (sign == 'u' && !strcmp(op, "abs")) { k = K_ABS_U; nargs = 1u; }   /* abs of an unsigned value is the value; abs.s is a GLSL row */
     if (k == K_NONE) return false;
     ix_t x;
     if (!ix_shape(c, result_ty_air, &x)) return false;
@@ -4214,6 +4215,7 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     case K_MUL_HI:       ix_mul_hi(&x, sign == 's', arg[0], arg[1], res); break;
     case K_ADD_SAT:      ix_add_sub_sat(&x, sign == 's', true, arg[0], arg[1], res); break;
     case K_SUB_SAT:      ix_add_sub_sat(&x, sign == 's', false, arg[0], arg[1], res); break;
+    case K_ABS_U:        ix_1(c, 83 /* OpCopyObject */, x.ty, res, arg[0]); break;
     default: return false;
     }
     bind_value_spv(c, result_value_id, res);
