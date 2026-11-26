@@ -55,6 +55,8 @@ int main(void) {
     PIN(LAGFX_SPV_GLSL_NORMALIZE, 69, "GLSLstd450Normalize");
     PIN(LAGFX_SPV_GLSL_REFLECT, 71, "GLSLstd450Reflect");
     PIN(LAGFX_SPV_GLSL_REFRACT, 72, "GLSLstd450Refract");
-    printf("%s spv-glsl-std450-numbers-unit (47 enumerators)\n", bad ? "FAIL" : "PASS");
+    PIN(LAGFX_SPV_GLSL_FIND_ILSB, 73, "GLSLstd450FindILsb");
+    PIN(LAGFX_SPV_GLSL_FIND_UMSB, 75, "GLSLstd450FindUMsb");
+    printf("%s spv-glsl-std450-numbers-unit (49 enumerators)\n", bad ? "FAIL" : "PASS");
     return bad ? 1 : 0;
 }

@@ -21,9 +21,11 @@
 static int bad;
 #define EXPECT(cond, ...) do { if (!(cond)) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); bad++; } } while (0)
 
-/* opcodes not (yet) in spv_builder.h, pinned against the SPIR-V spec numbers */
-enum { OPX_UMUL_EXTENDED = 151, OPX_SMUL_EXTENDED = 152, OPX_BITFIELD_INSERT = 201, OPX_BITFIELD_SEXTRACT = 202, OPX_BITFIELD_UEXTRACT = 203,
-       OPX_BIT_REVERSE = 204, OPX_BIT_COUNT = 205 };
+/* SPIR-V core opcode numbers (spec), pinned against the builder's names */
+_Static_assert(LAGFX_SPV_OP_UMUL_EXTENDED == 151 && LAGFX_SPV_OP_SMUL_EXTENDED == 152, "OpUMulExtended/OpSMulExtended");
+_Static_assert(LAGFX_SPV_OP_BIT_FIELD_INSERT == 201 && LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT == 202 && LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT == 203, "OpBitField*");
+_Static_assert(LAGFX_SPV_OP_BIT_REVERSE == 204 && LAGFX_SPV_OP_BIT_COUNT == 205, "OpBitReverse/OpBitCount");
+_Static_assert(LAGFX_SPV_GLSL_FIND_ILSB == 73 && LAGFX_SPV_GLSL_FIND_UMSB == 75, "FindILsb/FindUMsb");
 
 typedef struct { uint32_t glsl; int n; } want_glsl_t;
 typedef struct { uint32_t op; int n; } want_op_t;
@@ -78,8 +80,20 @@ static int spirv_val(const uint8_t *spv, size_t sz) {
 
 static const want_glsl_t g_minmax[] = { {39, 2}, {38, 2}, {42, 2}, {41, 2}, {45, 1}, {44, 2}, {5, 2}, {0, 0} };
 static const want_op_t   o_none[]   = { {0, 0} };
+static const want_glsl_t g_none[]   = { {0, 0} };
+
+/* clz: i32 1 + i16 1 + i8 1 + i64 2 (halves) + v2i32 1 + v2i64 2 = 8 FindUMsb; ctz the same with FindILsb; popcount i32/i16/i64/v2i32 = 4; reverse_bits i32/i8/i64/v2i32 = 4 */
+static const want_glsl_t g_bits[] = { {LAGFX_SPV_GLSL_FIND_UMSB, 8}, {LAGFX_SPV_GLSL_FIND_ILSB, 8}, {0, 0} };
+static const want_op_t   o_bits[] = { {LAGFX_SPV_OP_BIT_COUNT, 4}, {LAGFX_SPV_OP_BIT_REVERSE, 4}, {0, 0} };
 
 static const case_t cases[] = {
+    { "int_bitcount_fragment.air.bc", g_bits, o_bits },
+    /* the fixtures executed by the lavapipe test must at least be spirv-val clean */
+    { "rt_bits32_fragment.air.bc", g_none, o_none },
+    { "rt_bitsnarrow_fragment.air.bc", g_none, o_none },
+    { "rt_bitsnarrow2_fragment.air.bc", g_none, o_none },
+    { "rt_bits64_fragment.air.bc", g_none, o_none },
+    { "rt_bitsvec_fragment.air.bc", g_none, o_none },
     { "int_minmax_fragment.air.bc", g_minmax, o_none },
 };
 

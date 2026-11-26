@@ -144,6 +144,13 @@ enum {
     LAGFX_SPV_OP_FUNORD_GREATER_EQUAL   = 191,   /* OpFUnordGreaterThanEqual (§3.32.15) */
     LAGFX_SPV_OP_ANY                    = 154,   /* OpAny: any lane of vNbool */
     LAGFX_SPV_OP_ALL                    = 155,   /* OpAll: all lanes of vNbool */
+    LAGFX_SPV_OP_UMUL_EXTENDED          = 151,   /* OpUMulExtended: {low, high} unsigned product */
+    LAGFX_SPV_OP_SMUL_EXTENDED          = 152,   /* OpSMulExtended: {low, high} signed product */
+    LAGFX_SPV_OP_BIT_FIELD_INSERT       = 201,   /* OpBitFieldInsert */
+    LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT    = 202,   /* OpBitFieldSExtract */
+    LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT    = 203,   /* OpBitFieldUExtract */
+    LAGFX_SPV_OP_BIT_REVERSE            = 204,   /* OpBitReverse */
+    LAGFX_SPV_OP_BIT_COUNT              = 205,   /* OpBitCount */
     LAGFX_SPV_OP_DPDX                   = 207,   /* OpDPdx (fragment derivative) */
     LAGFX_SPV_OP_DPDY                   = 208,   /* OpDPdy */
     LAGFX_SPV_OP_FWIDTH                 = 209,   /* OpFwidth */
@@ -318,6 +325,8 @@ enum {
     LAGFX_SPV_GLSL_FMIX                 = 46,
     LAGFX_SPV_GLSL_STEP                 = 48,
     LAGFX_SPV_GLSL_SMOOTH_STEP          = 49,
+    LAGFX_SPV_GLSL_FIND_ILSB            = 73,   /* GLSLstd450FindILsb */
+    LAGFX_SPV_GLSL_FIND_UMSB            = 75,   /* GLSLstd450FindUMsb */
     LAGFX_SPV_GLSL_LENGTH               = 66,
     LAGFX_SPV_GLSL_DISTANCE             = 67,
     LAGFX_SPV_GLSL_CROSS                = 68,

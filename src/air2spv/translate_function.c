@@ -4015,6 +4015,160 @@ static uint32_t cs_shuffle(xlate_ctx_t *c, uint32_t air_ty, uint32_t val, uint32
     return r;
 }
 
+/* ===================================================================
+ * Integer intrinsics that are not a single GLSL.std.450 row (census X11)
+ *
+ * Names (MIT project vertex-language/air, intrinsic.go @3d277d16858a; none occurs in the device dumps of runs 231501 / 230109):
+ *   air.<op>.<ty>            clz (x, i1 flag), ctz (x, i1 flag), popcount (x), reverse_bits (x)
+ *   air.<op>.{s,u}.<ty>      mul_hi, add_sat, sub_sat, extract_bits (x, offset, bits), insert_bits (x, y, offset, bits), abs (u form only here; abs.s is a GLSL row)
+ * <ty> = i8 / i16 / i32 / i64 or a vector of them. The result has the type of the first operand. All SPIR-V integer types are emitted unsigned (see emit_air_type), so
+ * the signed forms pick their SIGNED instruction (SConvert, SLessThan, ...) explicitly.
+ * Semantics follow the Metal Shading Language spec (integer functions): clz/ctz of 0 = the bit width; popcount / reverse_bits are plain; the saturating ops clamp to
+ * the type's range; mul_hi is the upper half of the double-width product; extract_bits/insert_bits are the bit-field operations with offset/bits scalars.
+ * Anything with a width outside {8,16,32,64}, or an operand/shape the code does not understand, returns false and takes the typed-undef fallback.
+ * =================================================================== */
+typedef struct { xlate_ctx_t *c; uint32_t lanes, w, ty; } ix_t;
+
+static uint32_t ix_vec_of(xlate_ctx_t *c, uint32_t scalar, uint32_t lanes) { return lanes > 1u ? emit_type_vec(c, scalar, lanes) : scalar; }
+static uint32_t ix_uty(ix_t *x, uint32_t w) { return ix_vec_of(x->c, emit_type_int_w(x->c, w, 0u), x->lanes); }
+static uint32_t ix_bty(ix_t *x) { return ix_vec_of(x->c, emit_type_bool(x->c), x->lanes); }
+
+/* integer constant of width w (value masked to w bits), splatted to the operand's lane count */
+static uint32_t ix_const(ix_t *x, uint32_t w, uint64_t v) {
+    xlate_ctx_t *c = x->c;
+    if (w < 64u) v &= ((uint64_t)1 << w) - 1u;
+    uint32_t sty = emit_type_int_w(c, w, 0u);
+    uint32_t sid = cache_lookup_const(c, 1, sty, v);
+    if (!sid) {
+        sid = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[4] = { sty, sid, (uint32_t)v, (uint32_t)(v >> 32) };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, w == 64u ? 4u : 3u);
+        cache_store_const(c, 1, sty, v, sid);
+    }
+    if (x->lanes <= 1u) return sid;
+    uint32_t vt = emit_type_vec(c, sty, x->lanes);
+    uint32_t cid = cache_lookup_const(c, 3, vt, sid);
+    if (cid) return cid;
+    cid = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[6] = { vt, cid, sid, sid, sid, sid };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT_COMPOSITE, o, 2u + x->lanes);
+    cache_store_const(c, 3, vt, sid, cid);
+    return cid;
+}
+
+/* emit [ty, id, args...] for `op`; `into` != 0 forces the result id, else a fresh one. Returns the result id. */
+static uint32_t ix_e(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t into, const uint32_t *args, uint32_t n) {
+    uint32_t id = into ? into : lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[8] = { ty, id };
+    for (uint32_t i = 0; i < n && i < 6u; i++) o[2 + i] = args[i];
+    lagfx_spv_builder_emit_op(c->b, op, o, 2u + n);
+    return id;
+}
+static uint32_t ix_2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t into, uint32_t a, uint32_t b) { uint32_t g[] = { a, b }; return ix_e(c, op, ty, into, g, 2u); }
+static uint32_t ix_1(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t into, uint32_t a) { uint32_t g[] = { a }; return ix_e(c, op, ty, into, g, 1u); }
+static uint32_t ix_3(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t into, uint32_t a, uint32_t b, uint32_t d) { uint32_t g[] = { a, b, d }; return ix_e(c, op, ty, into, g, 3u); }
+static uint32_t ix_glsl1(xlate_ctx_t *c, uint32_t ty, uint32_t into, uint32_t inst, uint32_t a) { uint32_t g[] = { c->id_glsl, inst, a }; return ix_e(c, LAGFX_SPV_OP_EXT_INST, ty, into, g, 3u); }
+
+/* clz of a 32-bit value (type u32 / vNu32): FindUMsb gives the bit index of the highest set bit, -1 for 0, so 31 - msb = clz with clz(0) = 32. */
+static uint32_t ix_clz32(ix_t *x, uint32_t v, uint32_t into) {
+    xlate_ctx_t *c = x->c; uint32_t t32 = ix_uty(x, 32u);
+    uint32_t msb = ix_glsl1(c, t32, 0u, LAGFX_SPV_GLSL_FIND_UMSB, v);
+    return ix_2(c, LAGFX_SPV_OP_ISUB, t32, into, ix_const(x, 32u, 31u), msb);
+}
+/* ctz of a 32-bit value: FindILsb gives the index of the lowest set bit, -1 for 0; the zero case is selected to 32. */
+static uint32_t ix_ctz32(ix_t *x, uint32_t v, uint32_t into) {
+    xlate_ctx_t *c = x->c; uint32_t t32 = ix_uty(x, 32u);
+    uint32_t lsb = ix_glsl1(c, t32, 0u, LAGFX_SPV_GLSL_FIND_ILSB, v);
+    uint32_t z = ix_2(c, LAGFX_SPV_OP_IEQUAL, ix_bty(x), 0u, v, ix_const(x, 32u, 0u));
+    return ix_3(c, LAGFX_SPV_OP_SELECT, t32, into, z, ix_const(x, 32u, 32u), lsb);
+}
+
+/* clz / ctz of any width in {8,16,32,64}. 8/16: zero-extend to 32 and take the 32-bit result off by (32 - w) (clz) / unchanged (ctz, with the zero case = w). 64: two halves. */
+static uint32_t ix_count_zeros(ix_t *x, bool leading, uint32_t v, uint32_t res) {
+    xlate_ctx_t *c = x->c; uint32_t w = x->w, t32 = ix_uty(x, 32u);
+    if (w == 32u) return leading ? ix_clz32(x, v, res) : ix_ctz32(x, v, res);
+    if (w < 32u) {
+        uint32_t u = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v);
+        uint32_t r;
+        if (leading) {
+            r = ix_clz32(x, u, 0u);
+            r = ix_2(c, LAGFX_SPV_OP_ISUB, t32, 0u, r, ix_const(x, 32u, 32u - w));   /* clz32(0) - (32 - w) = w */
+        } else {
+            /* ctz32 would give 32 for 0; the width-w answer is w: select on the zero test of the narrow value */
+            uint32_t lsb = ix_glsl1(c, t32, 0u, LAGFX_SPV_GLSL_FIND_ILSB, u);
+            uint32_t z = ix_2(c, LAGFX_SPV_OP_IEQUAL, ix_bty(x), 0u, u, ix_const(x, 32u, 0u));
+            r = ix_3(c, LAGFX_SPV_OP_SELECT, t32, 0u, z, ix_const(x, 32u, w), lsb);
+        }
+        return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, r);
+    }
+    /* w == 64 */
+    uint32_t t64 = x->ty;
+    uint32_t lo = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v);
+    uint32_t hi = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, t64, 0u, v, ix_const(x, 64u, 32u)));
+    uint32_t first = leading ? hi : lo, second = leading ? lo : hi;      /* the half examined first */
+    uint32_t c1 = leading ? ix_clz32(x, first, 0u) : ix_ctz32(x, first, 0u);
+    uint32_t c2 = leading ? ix_clz32(x, second, 0u) : ix_ctz32(x, second, 0u);
+    uint32_t z1 = ix_2(c, LAGFX_SPV_OP_IEQUAL, ix_bty(x), 0u, first, ix_const(x, 32u, 0u));
+    uint32_t sum = ix_2(c, LAGFX_SPV_OP_IADD, t32, 0u, c2, ix_const(x, 32u, 32u));
+    uint32_t r = ix_3(c, LAGFX_SPV_OP_SELECT, t32, 0u, z1, sum, c1);   /* first half empty: 32 + count(second), else count(first) */
+    return ix_1(c, LAGFX_SPV_OP_UCONVERT, t64, res, r);
+}
+
+static bool ix_shape(xlate_ctx_t *c, uint32_t air_ty, ix_t *x) {
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    if (air_ty >= nt) return false;
+    uint32_t lanes = 1u, elem = air_ty;
+    if (ts[air_ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[air_ty].num_op >= 2u) { lanes = ts[air_ty].op[0]; elem = ts[air_ty].op[1]; }
+    if (elem >= nt || lanes < 1u || lanes > 4u || ts[elem].kind != LAGFX_AIR_TYPE_INTEGER) return false;
+    uint32_t w = ts[elem].num_op >= 1u ? ts[elem].op[0] : 32u;
+    if (w != 8u && w != 16u && w != 32u && w != 64u) return false;
+    x->c = c; x->lanes = lanes; x->w = w; x->ty = emit_air_type(c, air_ty);
+    return true;
+}
+
+/* Lower one of the integer intrinsics above. Returns true when handled (result bound). */
+static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_inst_t *inst, uint32_t callee_slot_idx,
+                        uint32_t result_value_id, uint32_t result_ty_air, uint32_t next_val_id) {
+    if (strncmp(fn_name, "air.", 4u) != 0 || result_value_id == 0u || result_ty_air == LAGFX_AIR_TYPE_NONE) return false;
+    const char *p = fn_name + 4;
+    const char *dot = strchr(p, '.');
+    if (!dot || (size_t)(dot - p) >= 16u) return false;
+    char op[16]; memcpy(op, p, (size_t)(dot - p)); op[dot - p] = 0;
+    p = dot + 1;
+    char sign = 0;
+    if ((p[0] == 's' || p[0] == 'u') && p[1] == '.') { sign = p[0]; p += 2; }
+    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS } k = K_NONE;
+    uint32_t nargs = 0;
+    if (!sign && !strcmp(op, "clz")) { k = K_CLZ; nargs = 1u; }
+    else if (!sign && !strcmp(op, "ctz")) { k = K_CTZ; nargs = 1u; }
+    else if (!sign && !strcmp(op, "popcount")) { k = K_POPCOUNT; nargs = 1u; }
+    else if (!sign && !strcmp(op, "reverse_bits")) { k = K_REVERSE_BITS; nargs = 1u; }
+    if (k == K_NONE) return false;
+    ix_t x;
+    if (!ix_shape(c, result_ty_air, &x)) return false;
+    uint32_t a0 = callee_slot_idx + 1u;
+    if (inst->num_ops < a0 + nargs) return false;   /* an extra trailing operand (the i1 flag of clz/ctz) is never read */
+    uint32_t arg[4] = { 0 };
+    for (uint32_t i = 0; i < nargs; i++)
+        arg[i] = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[a0 + i], next_val_id), x.ty);
+    uint32_t res = resolve_value_spv(c, result_value_id);
+    if (!res) res = lagfx_spv_builder_alloc_id(c->b);
+    switch (k) {
+    case K_CLZ:          /* the i1 operand says whether clz(0) is poison; the defined answer (= bit width) is valid either way */
+        ix_count_zeros(&x, true, arg[0], res); break;
+    case K_CTZ:
+        ix_count_zeros(&x, false, arg[0], res); break;
+    case K_POPCOUNT:     ix_1(c, LAGFX_SPV_OP_BIT_COUNT, x.ty, res, arg[0]); break;
+    case K_REVERSE_BITS: ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, x.ty, res, arg[0]); break;
+    default: return false;
+    }
+    bind_value_spv(c, result_value_id, res);
+    set_result_air_type(c, result_value_id, result_ty_air);
+    LAGFX_TRACE("call: integer intrinsic '%s' lowered (value-id %u)", fn_name, result_value_id);
+    return true;
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -4888,6 +5042,10 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             return;
         }
     }
+
+    /* === integer intrinsics without a GLSL.std.450 row (clz / ctz / popcount / reverse_bits / ...): see ix_try_emit === */
+    if (!glsl_inst && ix_try_emit(c, fn_name, inst, callee_slot_idx, result_value_id, result_ty_air, next_val_id))
+        return;
 
     /* === Registered UberShader helper → OpFunctionCall ===============
      * The callee is a real (non-proto) function in the SAME metallib that
