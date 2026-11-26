@@ -622,6 +622,35 @@ static void test_dump(void) {
     puts("PASS: capture: decode-only (no exec, no Vulkan), full payload files + index, caps/.TRUNCATED, no overwrite/symlink, bad dir, with exec");
 }
 
+/* DECODE-ONLY (LAGFX_ARM64_EXEC unset): the resource list holds the render target only; the pipeline is named by tag 116 in the Render segment. The walk of the
+ * segment must still capture the pipeline and the functions it names. */
+static void test_dump_decode_only_tag116(void) {
+    unsetenv("LAGFX_ARM64_EXEC");
+    setenv("LAGFX_ARM64_DUMP", "1", 1);
+    mkdtemp_dir();
+    setenv("LAGFX_ARM64_DUMP_DIR", g_dir, 1);
+    lagfx_a64_dump_reset();
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1); build_objects();
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TRI); cb_draw(3, 0, 3);
+    uint32_t len = cb_finish();
+    uint32_t w[3 + 2 + 4], n = 0;
+    w[n++] = 1; w[n++] = 1; w[n++] = 1; w[n++] = REF_TEX; w[n++] = 0;
+    uint64_t off = VA_CMD, l = len;
+    memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
+    submit(p, 0x43, 0, w, n);
+    assert(p->a64_exec == NULL && RUNC(p).execs == 0);                       /* nothing executed, no resolver ran */
+    char f[300];
+    assert(dir_has(g_dir, "pso_1_3_", f, sizeof f) && dir_has(g_dir, "lib_", f, sizeof f));
+    char *idx = read_all(g_dir, "index.txt");
+    assert(idx && strstr(idx, "obj task=1 ref=3 type=7") && strstr(idx, "pso task=1 ref=3 function_refs=[5,6]") && strstr(idx, "fn task=1 ref=5"));
+    free(idx);
+    pfree(p);
+    unsetenv("LAGFX_ARM64_DUMP_DIR"); unsetenv("LAGFX_ARM64_DUMP");
+    lagfx_a64_dump_reset();
+    puts("PASS: decode-only capture of a pipeline + functions named only by tag 116 (EXEC unset)");
+}
+
 #ifdef LAGFX_HAVE_VULKAN
 /* The pipeline (type 7) and its functions (type 6) are reached ONLY through tag 116 and the resolver: the resource list holds the render target and nothing else.
  * Capture must still produce pso + library files and the obj / pso / fn index lines. */
@@ -719,6 +748,7 @@ int main(void) {
     g_have_fix = load_fixtures();
     if (!g_have_fix) { puts("SKIP: fixtures (triangle.metallib, guest_viewporttondc_vert, login_texturecopy_frag) missing"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_dump();
+    test_dump_decode_only_tag116();
 #ifdef LAGFX_HAVE_VULKAN
     if (g_dev->vk && g_dev->vk->initialized) {
         test_dump_via_resolver();

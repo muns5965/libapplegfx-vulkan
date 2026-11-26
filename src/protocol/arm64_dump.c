@@ -295,6 +295,13 @@ static void print_maps(char *dst, size_t cap, const char *name, const uint32_t *
     if (o + 2 < cap) dst[o++] = ']', dst[o] = 0;
 }
 
+/* decode-only capture: the pipeline / sampler a Render segment names by ref (tags 116, 112, 113, 128) is captured when the segment is walked, whether or not
+ * anything executes (the resolver hooks only run with LAGFX_ARM64_EXEC=1). Same seen set and caps as the resource-list objects; a pipeline brings its functions. */
+static void touch_ref(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref) {
+    uint32_t e[3];
+    if (ref && lagfx_a64_objects_read_entry(p, task, ref, e)) lagfx_a64_dump_touch_object(p, task, ref, e);
+}
+
 void lagfx_a64_dump_segment(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint8_t *buf, uint32_t avail, const lagfx_exec_seg_t *s) {
     if (!p || !task || !buf || !s || !lagfx_a64_dump_enabled() || s->type != 0u) return;
     uint64_t pos = s->prot_skipped ? 24u : 8u;
@@ -308,7 +315,7 @@ void lagfx_a64_dump_segment(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
         q += sz;
         switch (tag) {
         case 26: memset(&G.vb, 0, sizeof G.vb), memset(&G.fb, 0, sizeof G.fb), memset(G.tex, 0, sizeof G.tex), memset(G.samp, 0, sizeof G.samp), G.pipe_ref = 0; break;
-        case 116: if (n >= 4) G.pipe_ref = lagfx_le32(r); break;
+        case 116: if (n >= 4) { G.pipe_ref = lagfx_le32(r); touch_ref(p, task, G.pipe_ref); } break;
         case 125: case 110: {
             if (n < 8) break;
             uint32_t idx = lagfx_le32(r), cnt = lagfx_le32(r + 4);
@@ -326,7 +333,14 @@ void lagfx_a64_dump_segment(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
             if (n < 8) break;
             uint32_t idx = lagfx_le32(r), cnt = lagfx_le32(r + 4);
             if (cnt > 128u || n < 8u + 4ull * cnt) break;
-            for (uint32_t i = 0; i < cnt && idx + i < MAXB; i++) { if (tag == 114) G.tex[idx + i] = lagfx_le32(r + 8 + i * 4); else G.samp[idx + i] = lagfx_le32(r + 8 + i * 4); }
+            for (uint32_t i = 0; i < cnt && idx + i < MAXB; i++) { if (tag == 114) G.tex[idx + i] = lagfx_le32(r + 8 + i * 4); else { G.samp[idx + i] = lagfx_le32(r + 8 + i * 4); touch_ref(p, task, G.samp[idx + i]); } }
+            break;
+        }
+        case 113: case 128: {   /* more sampler / texture tables with the same {index, count, refs} shape: only the type 7 objects among them are captured */
+            if (n < 8) break;
+            uint32_t cnt = lagfx_le32(r + 4);
+            if (cnt > 32u || n < 8u + 4ull * cnt) break;
+            for (uint32_t i = 0; i < cnt; i++) touch_ref(p, task, lagfx_le32(r + 8 + i * 4));
             break;
         }
         case 0: case 1: case 2: case 3: case 6: case 7: case 8: case 9:
