@@ -11,8 +11,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define MAXB 48u   /* = LAGFX_A64_MAX_BINDINGS */
-typedef struct { uint32_t ref; char file[96]; } fnent_t;
+#define MAXB LAGFX_A64_MAX_BINDINGS
+typedef struct { uint32_t task, ref; char file[96]; } fnent_t;
 static fnent_t g_fn[512]; static int g_nfn;
 
 static uint8_t *slurp(const char *p, size_t *n) {
@@ -33,17 +33,17 @@ int main(int argc, char **argv) {
     static char line[8192]; int npso = 0, nstub = 0, nfetch = 0;
     static char psos[512][8192]; int np = 0;
     while (fgets(line, sizeof line, f)) {
-        unsigned ref; char file[96];
+        unsigned ref, ftask = 0; char file[96];
         if (!strncmp(line, "fn ", 3) && sscanf(strstr(line, " ref=") + 5, "%u", &ref) == 1 && strstr(line, " file=") && g_nfn < 512) {
             sscanf(strstr(line, " file=") + 6, "%95s", file);
-            g_fn[g_nfn].ref = ref; snprintf(g_fn[g_nfn].file, sizeof g_fn[g_nfn].file, "%s", file); g_nfn++;
+            sscanf(line + 3, "task=%u", &ftask); g_fn[g_nfn].task = ftask; g_fn[g_nfn].ref = ref; snprintf(g_fn[g_nfn].file, sizeof g_fn[g_nfn].file, "%s", file); g_nfn++;
         } else if (!strncmp(line, "pso ", 4) && np < 512) snprintf(psos[np++], sizeof psos[0], "%s", line);
     }
     fclose(f);
     for (int i = 0; i < np; i++) {
-        unsigned task, ref, a, b;
+        unsigned task = 0, ref, a, b;
         char *pr = strstr(psos[i], " ref="), *fr = strstr(psos[i], "function_refs=[");
-        if (!pr || !fr || sscanf(psos[i] + 8, "task=%u", &task) < 0) continue;
+        if (!pr || !fr || sscanf(psos[i] + 4, "task=%u", &task) != 1) continue;
         ref = (unsigned)atoi(pr + 5);
         if (sscanf(fr + 15, "%u,%u", &a, &b) != 2) continue;
         unsigned refs[2] = { a, b };
@@ -51,7 +51,7 @@ int main(int argc, char **argv) {
         memset(libs, 0, sizeof libs);
         for (int q = 0; q < 2; q++) {
             const char *file = NULL;
-            for (int k = 0; k < g_nfn; k++) if (g_fn[k].ref == refs[q]) { file = g_fn[k].file; break; }   /* task is not distinguished: refs repeat across tasks only rarely */
+            for (int k = 0; k < g_nfn; k++) if (g_fn[k].ref == refs[q] && g_fn[k].task == task) { file = g_fn[k].file; break; }
             if (!file) continue;
             snprintf(path, sizeof path, "%s/%s", argv[1], file);
             lib_t *l = &libs[nl]; l->lib = slurp(path, &l->len);
@@ -75,11 +75,12 @@ int main(int argc, char **argv) {
         printf("%s + %s\n", vf->name, ff->name);
         uint32_t n_bind = 0; int verdict = 0;
         for (int st = 0; st < 2; st++) {
-            lagfx_spv_binding_t tmp[64]; size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, 64);
+            lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT]; size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, LAGFX_A64_MAX_REFLECT);
+            if (nt >= LAGFX_A64_MAX_REFLECT) { printf("  %s: reflection hit the %u-binding cap: bindings stub\n", st ? "fragment" : "vertex", LAGFX_A64_MAX_REFLECT); if (!verdict) verdict = 98; }
             printf("  %s: %zu bindings (limit %u total):", st ? "fragment" : "vertex", nt, MAXB);
-            for (size_t t = 0; t < nt && t < 64; t++) printf(" %u/%s%u", tmp[t].set, kname((int)tmp[t].kind), tmp[t].binding);
+            for (size_t t = 0; t < nt && t < nt; t++) printf(" %u/%s%u", tmp[t].set, kname((int)tmp[t].kind), tmp[t].binding);
             printf("\n");
-            for (size_t t = 0; t < nt && t < 64; t++) {
+            for (size_t t = 0; t < nt && t < nt; t++) {
                 if (tmp[t].set == 0u && tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {
                     int why = lagfx_a64_fbfetch_check(st, local_read, tmp[t].binding, n_bind);
                     printf("  input attachment at binding %u: %s\n", tmp[t].binding, why ? lagfx_a64_fbfetch_reason_name(why) : "ok");

@@ -96,7 +96,7 @@ int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t spv_bindin
     /* fragment modules are offset by LAGFX_A64_FRAG_BINDING_BASE before reflection, so attachment n sits at BASE + 24 + n (the first bug: the unshifted 24..27 never matched) */
     uint32_t lo = LAGFX_A64_FRAG_BINDING_BASE + LAGFX_A64_FBF_BINDING_BASE;
     if (spv_binding < lo || spv_binding > lo + 3u) return LAGFX_A64_FBF_BINDING_RANGE;
-    if (n_bind >= 48u) return LAGFX_A64_FBF_TOO_MANY;   /* = LAGFX_A64_MAX_BINDINGS (kept literal: that macro lives in the exec header) */
+    if (n_bind >= LAGFX_A64_MAX_BINDINGS) return LAGFX_A64_FBF_TOO_MANY;   /* = LAGFX_A64_MAX_BINDINGS (kept literal: that macro lives in the exec header) */
     return LAGFX_A64_FBF_OK;
 }
 const char *lagfx_a64_fbfetch_reason_name(int reason) {
@@ -381,8 +381,8 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
      * metadata. By kind, not by position: the translator emits an extra sampler binding for an inline `constexpr sampler` that has no argument; such a sampler
      * gets metal_index -1 = the default sampler. */
     for (int st = 0; st < 2; st++) {
-        lagfx_spv_binding_t tmp[32];
-        size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, 32);
+        lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT];
+        size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, LAGFX_A64_MAX_REFLECT);
         if (nt > 32u) nt = 32u;
         for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
         const lagfx_air_arg_binding_t *ab = st ? fab : vab;

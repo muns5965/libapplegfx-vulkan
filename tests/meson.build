@@ -1572,3 +1572,12 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-res-unit.c') and vulkan_d
   )
   test('arm64 exec storage images + vertex textures + unnormalized samplers (unit, lavapipe)', ex_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
+
+# Pure regression test: framebuffer-fetch binding range (fragment offset) and the shared binding limits.
+if fs.is_file(meson.current_source_dir() / 'arm64-fbfetch-check-unit.c')
+  fbf_check_test = executable('arm64-fbfetch-check-unit', 'arm64-fbfetch-check-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true)
+  test('arm64 framebuffer-fetch binding check', fbf_check_test)
+endif

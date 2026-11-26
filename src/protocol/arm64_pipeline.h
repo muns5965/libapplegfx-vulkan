@@ -25,6 +25,7 @@
 #define LAGFX_A64_LIB_MAX         (4u << 20)     /* metallib bytes read per function object */
 #define LAGFX_A64_PDESC_MAX_REFS  16u
 #define LAGFX_A64_PDESC_MAX_ATTRS 8u
+#include "arm64_limits.h"
 #define LAGFX_A64_FRAG_BINDING_BASE 16u          /* fragment-stage SPIR-V bindings are offset by this (same as the x86 draw path) */
 
 #define LAGFX_A64_FBF_BINDING_BASE 24u           /* the translator's input-attachment bindings: 24 + colour attachment index (before the fragment offset above) */
