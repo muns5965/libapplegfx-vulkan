@@ -2,6 +2,7 @@
  * libapplegfx-vulkan — command diagnostics. See diag.h. Logging and counters only.
  */
 #include "diag.h"
+#include "draw_diag.h"
 #include "state.h"
 #include "arm64_completion.h"
 #include "arm64_resources.h"
@@ -284,4 +285,5 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         fprintf(stderr, "%s\n", gl);
         LAGFX_LOG("%s", gl);
     }
+    lagfx_draw_diag_flush(p, final);   /* per-draw tuples seen since the last statistics (bounded; formats and logs outside the draw path) */
 }

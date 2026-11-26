@@ -12,6 +12,7 @@
 #include "arm64_tile.h"
 #include "arm64_completion.h"
 #include "arm64_dump.h"
+#include "draw_diag.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -97,6 +98,7 @@ typedef struct {
     lagfx_a64_rexec_t *x;            /* the exec being recorded (mirror context), NULL outside an exec */
     lagfx_a64_cap_t *cap; bool cap_pass;   /* render replay capture (LAGFX_ARM64_DUMP_DATA=1): the exec's recorder (owned by the mirror's finish hook once the exec ended) and an open captured pass */
     uint32_t fsref[A64_MAX_FSAMP], vsref[A64_MAX_FSAMP];   /* object refs of the bound fragment / vertex samplers (capture only) */
+    struct { uint8_t bkind, stage; int16_t slot; uint32_t vkb, ref; } ddm;   /* the binding that stopped the current draw (draw_diag.h); reset per draw, written on failure paths only */
     uint32_t exec_draw;              /* draw records seen in this exec so far (log context of an unresolved texture) */
     bool pass_open;                  /* a tag 26 was seen and the segment chain has not ended it */
     bool last_fetch;                 /* the previous draw of this pass read input attachments (framebuffer fetch) */
@@ -541,6 +543,7 @@ static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, ui
     if (mi_s < 0 || (uint32_t)mi_s >= A64_MAX_FB) none.dg.why = TEXWHY_SLOT_RANGE;
     else mm = &(stage ? r->fmiss : r->vmiss)[mi_s];
     unsigned why = (unsigned)mm->dg.why < LAGFX_A64_TEXWHY_COUNT ? (unsigned)mm->dg.why : 0u;
+    r->ddm.bkind = 1, r->ddm.stage = (uint8_t)stage, r->ddm.slot = mi_s, r->ddm.vkb = pp->src.bind[bind_i].binding, r->ddm.ref = mm->ref;
     __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
     Q->desc_tex_why[why]++;
     for (unsigned k = 0; k < Q->desc_tex_nseen[why]; k++) {
@@ -579,6 +582,7 @@ static void buf_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, ui
         why = b ? 6u : m->why == 0 ? 2u : m->why == 1 ? 3u : 4u;             /* 6: bound, but the offset is past the buffer's end */
         if (why == 6u) type = LAGFX_A64_OBJ_BUFFER;
     }
+    r->ddm.bkind = 2, r->ddm.stage = (uint8_t)st, r->ddm.slot = mi_s, r->ddm.vkb = s->bind[bind_i].binding, r->ddm.ref = ref;
     __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
     Q->desc_buf_why[why]++;
     for (unsigned k = 0; k < Q->desc_buf_nseen[why]; k++) if (Q->desc_buf_seen[why][k].ref == ref && Q->desc_buf_seen[why][k].slot == mi && Q->desc_buf_seen[why][k].stage == st) return;
@@ -606,6 +610,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     VkDescriptorImageInfo ii[LAGFX_A64_MAX_BINDINGS];
     VkWriteDescriptorSet w[LAGFX_A64_MAX_BINDINGS];
     uint64_t key = 1469598103934665603ull ^ pp->h.gen;
+#define DDM(k) (r->ddm.bkind = (k), r->ddm.stage = (uint8_t)st, r->ddm.slot = mi_s, r->ddm.vkb = s->bind[i].binding, r->ddm.ref = 0)
 #define MIX(v) key = (key ^ (uint64_t)(v)) * 1099511628211ull
     for (uint32_t i = 0; i < s->n_bind; i++) {
         int16_t mi_s = s->bind[i].metal_index;
@@ -630,13 +635,13 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             MIX(b->gen), MIX(off), MIX((uint64_t)(uintptr_t)dbuf), MIX(doff);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_INPUT) {   /* framebuffer fetch: colour attachment mi of the open pass */
             lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
-            if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; return false; }
+            if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; DDM(3); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x1f0u);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_STORAGE_IMAGE) {   /* texture2d<T, access::write>: the mirror texture itself, GENERAL layout */
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
-            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[2]++; return false; }
+            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[2]++; DDM(3); return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* writing an attachment being rendered */
@@ -654,9 +659,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
             /* A linear texture (a buffer's bytes seen as an image): the mirror image is a copy that begin_pass (outside the pass) re-pulls whenever the backing buffer changed.
              * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
-            if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; return false; }
+            if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
             VkImageView v = lagfx_a64_res_sample_view(r->x, t);
-            if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; return false; }
+            if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
             MIX(t->gen);
@@ -664,13 +669,14 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? (st ? r->fsamp[mi] : r->vsamp[mi]) : NULL;
             VkSampler *vvt = st ? r->fvar : r->vvar;
             VkSampler vs = sm ? (vvt[mi] ? vvt[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
-            if (!vs) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[5]++; return false; }
+            if (!vs) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[5]++; DDM(3); return false; }
             ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];
             MIX(sm ? sm->h.gen : 0xd5u), MIX((uint64_t)(uintptr_t)vs);
         }
     }
 #undef MIX
+#undef DDM
     VkDescriptorSet ds = r->last_ds_key == key ? r->last_ds : VK_NULL_HANDLE;
     if (!ds) {
         VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = r->dpool, .descriptorSetCount = 1, .pSetLayouts = &s->dsl };
@@ -1086,7 +1092,48 @@ static void cap_fill(a64_run_t *r, const cap_dinfo_t *di, lagfx_a64_cap_draw_in_
     }
 }
 
+/* Per-draw diagnostics (draw_diag.h): counters before / after one draw classify its outcome; the event goes into the bounded table, nothing is formatted here. */
+enum { DD_C_DRAWS, DD_C_SKIPPED, DD_C_NOPIPE, DD_C_UB_BUF, DD_C_UB_IN, DD_C_UB_SI, DD_C_UB_TEX, DD_C_UB_VIEW, DD_C_UB_SAMP, DD_C_NOTGT, DD_C_NOVB, DD_C_NOIB, DD_C_PRIM, DD_C_INDBAD, DD_C_UNAL, DD_C_FB, DD_C_DFAIL,
+       DD_C_NOSIZE, DD_C_FBF, DD_C_UNNORM, DD_C_ZERO, DD_C_BADREC, DD_C_TILE, DD_C_N };
+static void dd_counters(lagfx_protocol_t *p, uint64_t *v) {
+    const __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
+    v[DD_C_DRAWS] = CNT(p).draws, v[DD_C_SKIPPED] = CNT(p).draws_skipped, v[DD_C_NOPIPE] = CNT(p).no_pipeline, v[DD_C_UB_BUF] = Q->desc_unbound_why[0], v[DD_C_UB_IN] = Q->desc_unbound_why[1],
+    v[DD_C_UB_SI] = Q->desc_unbound_why[2], v[DD_C_UB_TEX] = Q->desc_unbound_why[3], v[DD_C_UB_VIEW] = Q->desc_unbound_why[4], v[DD_C_UB_SAMP] = Q->desc_unbound_why[5], v[DD_C_NOTGT] = CNT(p).no_target,
+    v[DD_C_NOVB] = CNT(p).no_vertex_buf, v[DD_C_NOIB] = CNT(p).no_index_buf, v[DD_C_PRIM] = CNT(p).prim_unsupported, v[DD_C_INDBAD] = CNT(p).ext_draw_indirect_bad, v[DD_C_UNAL] = Q->desc_unaligned,
+    v[DD_C_FB] = Q->desc_feedback, v[DD_C_DFAIL] = Q->desc_failed, v[DD_C_NOSIZE] = Q->point_no_size, v[DD_C_FBF] = Q->stub_fbfetch, v[DD_C_UNNORM] = CNT(p).ext_unnorm_skipped, v[DD_C_ZERO] = CNT(p).ext_draw_zero,
+    v[DD_C_BADREC] = CNT(p).bad_rec, v[DD_C_TILE] = p->diag2.exec.tile.draws_ignored;
+}
+static void dd_report(a64_run_t *r, lagfx_protocol_t *p, struct lagfx_draw_diag *dd, const uint64_t *b) {
+    uint64_t a[DD_C_N]; dd_counters(p, a);
+    lagfx_draw_ev_t ev; memset(&ev, 0, sizeof ev);
+    ev.task = r->task ? r->task->id : 0, ev.draw = r->exec_draw, ev.pass = CNT(p).passes, ev.slot = -1;
+    if (r->pipe) ev.pso = r->pipe->ref, ev.vs = (uint32_t)(r->pipe->src.vs_hash >> 32), ev.fs = (uint32_t)(r->pipe->src.fs_hash >> 32);
+    if (r->rts[0]) ev.rt_w = r->rts[0]->width, ev.rt_h = r->rts[0]->height, ev.rt_fmt = (uint32_t)r->rts[0]->format;
+#define CH(i) (a[i] != b[i])
+    if (CH(DD_C_DRAWS)) ev.reason = LAGFX_DD_OK;
+    else if (CH(DD_C_NOPIPE)) ev.reason = LAGFX_DD_NO_PIPELINE, ev.why = !r->pipe_set ? "none_set" : r->pipe_failed ? "unresolved" : "vk_build_or_bind";
+    else if (CH(DD_C_UB_BUF) || CH(DD_C_UB_TEX) || CH(DD_C_UB_VIEW) || CH(DD_C_UB_IN) || CH(DD_C_UB_SI) || CH(DD_C_UB_SAMP)) {
+        ev.reason = CH(DD_C_UB_BUF) ? LAGFX_DD_UNBOUND_BUF : (CH(DD_C_UB_SAMP) && !CH(DD_C_UB_TEX) && !CH(DD_C_UB_VIEW)) ? LAGFX_DD_OTHER : LAGFX_DD_UNBOUND_TEX;
+        if (ev.reason == LAGFX_DD_OTHER) ev.why = "unbound_sampler";
+        ev.bkind = r->ddm.bkind, ev.stage = r->ddm.stage, ev.slot = r->ddm.slot, ev.vkb = r->ddm.vkb, ev.bref = r->ddm.ref;
+    } else {
+        static const struct { int c; const char *n; } nm[] = { { DD_C_NOTGT, "no_target" }, { DD_C_NOVB, "no_vertex_buf" }, { DD_C_NOIB, "no_index_buf" }, { DD_C_PRIM, "prim_unsupported" }, { DD_C_INDBAD, "indirect_bad" },
+            { DD_C_UNAL, "desc_unaligned" }, { DD_C_FB, "desc_feedback" }, { DD_C_DFAIL, "desc_failed" }, { DD_C_NOSIZE, "point_no_size" }, { DD_C_FBF, "stub_fbfetch" }, { DD_C_UNNORM, "unnorm_skipped" },
+            { DD_C_ZERO, "zero_draw" }, { DD_C_BADREC, "bad_rec" }, { DD_C_TILE, "tile_pipeline" } };
+        ev.reason = LAGFX_DD_OTHER, ev.why = "unclassified";
+        for (unsigned i = 0; i < sizeof nm / sizeof *nm; i++) if (CH(nm[i].c)) { ev.why = nm[i].n; break; }
+    }
+#undef CH
+    lagfx_draw_diag_record(dd, &ev);
+}
+
+static void draw_cmd_dd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n);
+static void draw_cmd_plain(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n);
 static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+    if (lagfx_draw_diag_get(p)) { draw_cmd_dd(r, p, tag, rec, n); return; }   /* disabled (G7_DRAW_DIAG=0): this one load and branch is all that runs */
+    draw_cmd_plain(r, p, tag, rec, n);
+}
+static void draw_cmd_plain(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
     if (!r->cap) { draw_cmd_inner(r, p, tag, rec, n, NULL); return; }
     bool sel = false;
     uint32_t dn = lagfx_a64_cap_draw_enter(r->cap, r->pipe ? r->pipe->ref : 0u, &sel);
@@ -1104,6 +1151,13 @@ static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint
     if (CNT(p).draws != d0) lagfx_a64_cap_draw(r->cap, dn, NULL, in);
     else if (CNT(p).draws_skipped != s0) lagfx_a64_cap_draw(r->cap, dn, cap_skip_reason(r, p, c0), in);
     free(in);
+}
+
+static void draw_cmd_dd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+    uint64_t b[DD_C_N]; dd_counters(p, b);
+    memset(&r->ddm, 0, sizeof r->ddm), r->ddm.slot = -1;
+    draw_cmd_plain(r, p, tag, rec, n);
+    dd_report(r, p, lagfx_draw_diag_get(p), b);
 }
 
 /* Tile records (arm64_tile.c). A dispatch cannot run inside a dynamic-rendering instance: tile_suspend ends it (attachments -> GENERAL), the compute dispatch is

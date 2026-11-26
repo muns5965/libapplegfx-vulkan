@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "draw_diag.h"
 #include "state.h"
 #include "arm64_completion.h"
 #include "arm64_exec_run.h"
@@ -42,6 +43,7 @@ void lagfx_protocol_free(lagfx_protocol_t *p) {
     lagfx_arm64_cq_shutdown(p, 0);   /* normally already done by lagfx_device_free while Vulkan is alive */
     lagfx_a64_exec_free(p);   /* ARM64 exec objects + resource mirror, before the Vulkan device goes (device.c frees the protocol first) */
     free(p->scratch_exec_heap);
+    lagfx_draw_diag_free(p);
     memset(p, 0, sizeof(*p));
     free(p);
 }

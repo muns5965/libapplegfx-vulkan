@@ -1326,6 +1326,16 @@ if fs.is_file(meson.current_source_dir() / 'diag-unit.c')
   test('command diagnostics (unit)', diag_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'draw-diag-unit.c')
+  draw_diag_test = executable('draw-diag-unit',
+    'draw-diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : diag_deps,
+    build_by_default : true,
+  )
+  test('bounded per-draw diagnostics (unit)', draw_diag_test)
+endif
+
 # Vertex float-plausibility scorer: text/poison score ~0, real floats ~100.
 if fs.is_file(meson.current_source_dir() / 'vtx-plausibility-unit.c') and vulkan_dep.found()
   vtx_plaus_test = executable('vtx-plausibility-unit',

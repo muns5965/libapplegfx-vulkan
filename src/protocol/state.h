@@ -672,6 +672,8 @@ typedef struct lagfx_protocol {
     /* ARM64 render execution state (object table + per-exec recording), NULL unless LAGFX_ARM64_EXEC=1 in arm64 mode. Owned by
      * src/protocol/arm64_exec_run.c; freed in lagfx_protocol_free / reset. */
     void *a64_exec;
+    /* bounded per-draw diagnostics (src/protocol/draw_diag.c); NULL until the first draw, or when G7_DRAW_DIAG=0 (draw_diag_init then stays true) */
+    struct lagfx_draw_diag *draw_diag; bool draw_diag_init;
     /* ARM64 exec resource mirror (src/protocol/arm64_resources.c); NULL until the first LAGFX_ARM64_EXEC=1 exec. Freed by
      * lagfx_protocol_free / lagfx_protocol_reset through lagfx_a64_res_destroy. */
     void     *a64_res;

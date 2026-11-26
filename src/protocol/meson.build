@@ -24,6 +24,7 @@ lagfx_sources += files(
   'arm64_sampler.c',      # ARM64 serialized sampler (tag 3) -> VkSamplerCreateInfo
   'arm64_draw_decode.c',  # ARM64 render draw record decoder (tags 0-11, 0x10, 0x11)
   'arm64_exec_run.c',     # ARM64 Render segment execution on Vulkan (LAGFX_ARM64_EXEC=1)
+  'draw_diag.c',    # bounded per-draw diagnostics (G7_DRAW_DIAG)
   'diag.c',         # command diagnostics (logging + counters only)
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write
    'object_resolver.c',  # Phase B object ID resolver for metallib lookup
