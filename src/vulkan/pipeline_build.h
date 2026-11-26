@@ -96,6 +96,14 @@ typedef struct {
     VkFormat         ds_depth_format, ds_stencil_format;
     uint8_t          dyn_state, no_color;
     const lagfx_pipeline_diag_t *diag;   /* OPTIONAL, failure bundle only (see lagfx_pipeline_diag_t) */
+    /* DIAGNOSTIC-ONLY hooks of the -13 matrix (src/vulkan/pipeline_matrix.c). Zero / NULL = nothing changes: no production caller sets them and a pipeline built with them zero is
+     * exactly the one built before they existed.
+     *   diag_gpci_pnext: structs appended to the pNext chain of the VkGraphicsPipelineCreateInfo after VkPipelineRenderingCreateInfo (VkRenderingAttachmentLocationInfo /
+     *                    VkRenderingInputAttachmentIndexInfo).
+     *   diag_render_pass (a VkRenderPass handle) != 0: build against that legacy render pass / subpass (no VkPipelineRenderingCreateInfo is chained). */
+    const void      *diag_gpci_pnext;
+    uint64_t         diag_render_pass;
+    uint32_t         diag_subpass;
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
@@ -116,6 +124,9 @@ typedef struct {
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline);
+
+/* While on, THIS thread's failing lagfx_pipeline_build() calls log nothing, write no bundle and start no matrix (the matrix / repro rebuild failing pipelines on purpose). */
+void lagfx_pipeline_build_quiet(int on);
 
 /* VkResult of the calling thread's last vkCreateGraphicsPipelines inside lagfx_pipeline_build() (lagfx_pipeline_build itself only returns LAGFX_ERR_BACKEND). */
 int32_t lagfx_pipeline_build_last_result(void);
