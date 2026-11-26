@@ -3,6 +3,7 @@
  */
 #include "arm64_exec_decode.h"
 #include "arm64_exec_run.h"
+#include "arm64_dump.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -192,6 +193,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     if (logit && nres > 12u) sb_add(&sb, " +%u", nres - 12u);
     sb_add(&sb, " ]");
 
+    if (t && t->root_page_pfn && lagfx_a64_dump_enabled()) lagfx_a64_dump_resources(p, t, res, nres);   /* LAGFX_ARM64_DUMP=1: bounded capture, independent of execution */
     if (run && t && t->root_page_pfn) lagfx_a64_exec_begin(p, t, res, nres);
 
     /* buffers */
@@ -247,6 +249,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             if (logit) sb_add(&sb, " b%u[off=0x%llx len=%llu SHORT-HEADER]", b, (unsigned long long)off, (unsigned long long)blen);
             continue;
         }
+        if (t && t->root_page_pfn && !s.bad_inner && lagfx_a64_dump_enabled()) lagfx_a64_dump_segment(p, t, scratch, want, &s);
         if (run && t && t->root_page_pfn && !s.bad_inner) lagfx_a64_exec_segment(p, t, scratch, want, blen, &s);
         if (s.prot_skipped) E->seg_t[5]++;
         if (s.type == 0 || s.type == 1 || s.type == 2 || s.type == 4) E->seg_t[s.type]++; else E->seg_other++;

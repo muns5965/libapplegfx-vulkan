@@ -14,9 +14,9 @@
  *   116 pipeline   -> a VkPipeline built (and cached per colour format) from what the pipeline resolver returns for the object
  *   125 vertex bufs / 126 vertex buffer offset -> vkCmdBindVertexBuffers at draw time (one stream, see lagfx_a64_pipeline_src_t)
  *   130 viewport / 117 scissor -> the draw region of lagfx_vk_cmd_set_region
- *   1 draw arrays, 7 draw indexed (triangle lists only; the pipeline builder has a fixed topology)
- *   110/111/114/112 fragment buffers/offset/textures/samplers -> recorded and counted as "partial": not bound (the pipeline layouts the
- *       existing builder produces for stage-in pipelines have no descriptor sets)
+ *   1 draw arrays, 7 draw indexed (point/line/line strip/triangle/triangle strip: one VkPipeline per (colour format, topology), built lazily at draw)
+ *   110/111/114/112 fragment buffers/offset/textures/samplers -> bound through one descriptor set per draw when the pipeline's layout has resources
+ *       (arm64_pipeline.c produces the layout); vertex textures/samplers (tags 129/127) are not executed
  *   30,34,35,36 pre-pass descriptors -> counted as partial; 32,33 and every other tag -> counted as unsupported.
  * Objects (buffers, 2D colour textures, pipelines) come from the (task, ref) table of arm64_objects.h.
  */
@@ -36,8 +36,17 @@ bool lagfx_a64_exec_enabled(const lagfx_protocol_t *p);
 /* What a pipeline resolver hands back for a pipeline object (guest object type 7, serialized render pipeline). The Apple serialized
  * descriptor is not decoded by this module: the resolver turns it into ready shader modules + layout. desc.color_format is overwritten
  * with the pass's format when the VkPipeline is built. */
+#define LAGFX_A64_MAX_BINDINGS 24u
+enum { LAGFX_A64_BIND_IMAGE = 1, LAGFX_A64_BIND_SAMPLER = 2, LAGFX_A64_BIND_BUFFER = 3 };   /* = lagfx_spv_binding_kind_t */
 typedef struct {
     lagfx_pipeline_desc_t desc;
+    /* Resources of set 0 (all zero = the pipeline has none: desc.layout is the empty layout). Each: the Vulkan binding, its kind, the stage whose Metal
+     * table feeds it (0 vertex buffers table = tag 125, 1 fragment tables = tags 110/114/112) and the Metal index into that table. */
+    VkDescriptorSetLayout dsl;
+    uint32_t n_bind;
+    struct { uint8_t binding, kind, stage; int16_t metal_index; } bind[LAGFX_A64_MAX_BINDINGS];
+    bool no_point_size;             /* the vertex shader does not write PointSize: a point-list draw is invalid in Vulkan (VUID-...-topology-08773) and is skipped */
+    uint64_t blob_hash;             /* hash of the serialized payload this was resolved from (0 = unknown): a changed payload under an unchanged entry replaces the pipeline */
     uint32_t vertex_buffer_index;   /* the Metal vertex buffer slot that feeds Vulkan binding 0 (lagfx_pipeline_build has one stream) */
     void (*release)(void *user);    /* optional, called when the pipeline object dies (shader modules etc. belong to the resolver) */
     void *user;
@@ -73,6 +82,9 @@ void lagfx_a64_exec_free(lagfx_protocol_t *p);
 
 /* Number of objects the table holds / has created / has destroyed (for tests and diagnostics). */
 void lagfx_a64_exec_object_counts(const lagfx_protocol_t *p, uint32_t *live, uint64_t *created, uint64_t *destroyed);
+
+/* Number of objects / VkPipelines / descriptor sets parked for deferred release (test and diagnostics aid). */
+uint32_t lagfx_a64_exec_deferred_count(const lagfx_protocol_t *p);
 
 /* Reads a texture object's pixels back (linear, width*4 bytes per row for the 4-byte formats). Test and debug aid. */
 bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, void *dst, size_t dst_size,

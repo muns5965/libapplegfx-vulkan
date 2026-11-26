@@ -1,0 +1,325 @@
+/*
+ * libapplegfx-vulkan — ARM64 pipeline-state resolver. See arm64_pipeline.h.
+ */
+#include "arm64_pipeline.h"
+#include "arm64_objects.h"
+#include "arm64_exec_decode.h"
+#include "../common/le.h"
+#include "../common/log.h"
+
+#include <stdlib.h>
+#include <string.h>
+
+/* ---- pure decode ---- */
+
+uint64_t lagfx_a64_hash64(const void *data, size_t n) {
+    const uint8_t *b = data;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void *ctx, uint32_t ref), void *ctx, lagfx_a64_pdesc_t *out) {
+    if (!blob || !out || n < 16u) return false;
+    memset(out, 0, sizeof *out);
+    out->tag = lagfx_le32(blob), out->size = lagfx_le32(blob + 4), out->ref = lagfx_le32(blob + 8), out->length = lagfx_le32(blob + 12);
+    uint32_t limit = out->length && 16ull + out->length <= n ? 16u + out->length : n;   /* the body the header declares, else what we have */
+
+    /* function refs: `04 <u32>` tokens (x86 object_resolver.c scans `04 XX`; ARM64 object numbers are not limited to a byte) naming a function object */
+    for (uint32_t i = 16u; i + 5u <= limit && out->nrefs < LAGFX_A64_PDESC_MAX_REFS; i++) {
+        if (blob[i] != 0x04u) continue;
+        uint32_t v = lagfx_le32(blob + i + 1u);
+        if (!v || (is_fn && !is_fn(ctx, v))) continue;
+        bool seen = false;
+        for (uint32_t k = 0; k < out->nrefs; k++) if (out->refs[k] == v) { seen = true; break; }
+        if (!seen) out->refs[out->nrefs++] = v;
+    }
+    /* vertex attributes: `01 04 <fmt> 02 04 <off> 03 04 <bufidx>` (object_resolver.c lagfx_parse_pso_vertex_attrs, same plausibility limits) */
+    for (uint32_t i = 16u; i + 18u <= limit; i++) {
+        if (blob[i] != 0x01u || blob[i + 1u] != 0x04u || blob[i + 6u] != 0x02u || blob[i + 7u] != 0x04u || blob[i + 12u] != 0x03u || blob[i + 13u] != 0x04u) continue;
+        uint32_t fmt = lagfx_le32(blob + i + 2u), off = lagfx_le32(blob + i + 8u), bid = lagfx_le32(blob + i + 14u);
+        if (fmt == 0u || fmt > 64u || off > 240u || bid > 30u) continue;
+        uint32_t k = 0;
+        for (; k < out->nattrs; k++) if (out->attrs[k].off == off && out->attrs[k].bufidx == bid) break;
+        if (k < out->nattrs) continue;
+        if (out->nattrs < LAGFX_A64_PDESC_MAX_ATTRS) out->attrs[out->nattrs++] = (lagfx_a64_vattr_t){ fmt, off, bid };
+        i += 17u;
+    }
+    for (uint32_t a = 1; a < out->nattrs; a++) {
+        lagfx_a64_vattr_t t = out->attrs[a];
+        uint32_t j = a;
+        while (j > 0u && out->attrs[j - 1u].off > t.off) { out->attrs[j] = out->attrs[j - 1u]; j--; }
+        out->attrs[j] = t;
+    }
+    /* stride: the most repeated plausible `04 <v> 02|01` value (object_resolver.c lagfx_parse_pso_vertex_stride) */
+    uint32_t cand[64], hits[64], nc = 0;
+    for (uint32_t i = 16u; i + 6u <= limit;) {
+        if (blob[i] != 0x04u) { i++; continue; }
+        uint32_t val = lagfx_le32(blob + i + 1u);
+        uint8_t tag = blob[i + 5u];
+        if ((tag == 0x02u || tag == 0x01u) && val >= 8u && val <= 256u && (val & 3u) == 0u) {
+            uint32_t k = 0;
+            for (; k < nc; k++) if (cand[k] == val) { hits[k]++; break; }
+            if (k == nc && nc < 64u) cand[nc] = val, hits[nc] = 1u, nc++;
+        }
+        i += 6u;
+    }
+    uint32_t best = 0, bestn = 0;
+    for (uint32_t k = 0; k < nc; k++) if (hits[k] > bestn || (hits[k] == bestn && cand[k] > best)) best = cand[k], bestn = hits[k];
+    out->stride = best;
+    return true;
+}
+
+/* ---- guest reads ---- */
+
+uint8_t *lagfx_a64_read_payload(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint32_t entry[3], uint32_t *len, uint32_t *full_size) {
+    uint32_t size = entry[0] >> 8;
+    if (full_size) *full_size = size;
+    if (!size) return NULL;
+    uint32_t n = size > LAGFX_A64_PIPE_MAX_BLOB ? LAGFX_A64_PIPE_MAX_BLOB : size;
+    uint8_t *b = malloc(n);
+    if (!b) return NULL;
+    if (!lagfx_arm64_task_read(p, task, (uint64_t)entry[2] << 32 | entry[1], b, n)) { free(b); return NULL; }
+    if (len) *len = n;
+    return b;
+}
+
+bool lagfx_a64_payload_hash(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint32_t entry[3], uint64_t *hash) {
+    uint32_t n = 0;
+    uint8_t *b = lagfx_a64_read_payload(p, task, entry, &n, NULL);
+    if (!b) return false;
+    *hash = lagfx_a64_hash64(b, n);
+    free(b);
+    return true;
+}
+
+bool lagfx_a64_is_function_ref(void *ctx, uint32_t ref) {
+    lagfx_a64_fnctx_t *c = ctx;
+    uint32_t e[3];
+    return lagfx_a64_objects_read_entry(c->p, c->task, ref, e) && (e[0] & 0xffu) == LAGFX_A64_OBJ_FUNCTION;
+}
+
+uint8_t *lagfx_a64_read_function_lib(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t *lib_len, uint64_t *lib_va) {
+    uint32_t e[3];
+    uint8_t h[20];
+    if (!lagfx_a64_objects_read_entry(p, task, ref, e) || (e[0] & 0xffu) != LAGFX_A64_OBJ_FUNCTION) return NULL;
+    if (!lagfx_arm64_task_read(p, task, (uint64_t)e[2] << 32 | e[1], h, sizeof h)) return NULL;   /* {u64 off, u32 len, u32 tag, u32 size} (makeFunction) */
+    uint64_t va = lagfx_le64(h);
+    uint32_t len = lagfx_le32(h + 8);
+    if (!len || len > LAGFX_A64_LIB_MAX) return NULL;
+    uint8_t *b = malloc(len);
+    if (!b) return NULL;
+    if (!lagfx_arm64_task_read(p, task, va, b, len)) { free(b); return NULL; }
+    if (lib_len) *lib_len = len;
+    if (lib_va) *lib_va = va;
+    return b;
+}
+
+/* ---- the resolver (Vulkan) ---- */
+
+#ifndef LAGFX_HAVE_VULKAN
+bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t entry[3], lagfx_a64_pipeline_src_t *out) {
+    (void)ctx; (void)p; (void)task; (void)ref; (void)entry; (void)out;
+    return false;
+}
+#else
+
+#include "../device.h"
+#include "../vulkan/instance.h"
+#include "../vulkan/descriptor_layout.h"
+#include "../air/bitcode_reader.h"
+#include "../air2spv/translate.h"
+#include "../air2spv/spv_reflect.h"
+#include "../air2spirv/metallib_extract.h"
+#include <vulkan/vulkan.h>
+
+#define CNTP(p) ((p)->diag2.exec.pipe)
+
+typedef struct {
+    VkDevice dev;
+    VkShaderModule vs, fs;
+    VkDescriptorSetLayout dsl;
+    VkPipelineLayout pl;
+    char vname[64], fname[64];
+} pres_t;
+
+static void pres_release(void *u) {
+    pres_t *r = u;
+    if (!r) return;
+    if (r->pl) vkDestroyPipelineLayout(r->dev, r->pl, NULL);
+    if (r->dsl) vkDestroyDescriptorSetLayout(r->dev, r->dsl, NULL);
+    if (r->vs) vkDestroyShaderModule(r->dev, r->vs, NULL);
+    if (r->fs) vkDestroyShaderModule(r->dev, r->fs, NULL);
+    free(r);
+}
+
+/* The first OpEntryPoint's name (so the module is used under the name the translator gave it). */
+static bool spv_entry_name(const uint8_t *spv, size_t n, char *out, size_t cap) {
+    if (n < 20u || (n & 3u)) return false;
+    for (size_t w = 5; w * 4u + 4u <= n;) {
+        uint32_t ins = lagfx_le32(spv + w * 4u), op = ins & 0xffffu, wc = ins >> 16;
+        if (!wc || (w + wc) * 4u > n) return false;
+        if (op == 15u && wc >= 4u) {   /* OpEntryPoint model id name... */
+            size_t room = (size_t)(wc - 3u) * 4u;
+            const char *s = (const char *)spv + (w + 3u) * 4u;
+            size_t l = strnlen(s, room);
+            if (l >= cap || l == room) return false;
+            memcpy(out, s, l + 1u);
+            return true;
+        }
+        w += wc;
+    }
+    return false;
+}
+
+/* True if the SPIR-V decorates a variable BuiltIn PointSize. */
+static bool spv_writes_point_size(const uint8_t *spv, size_t n) {
+    if (n < 20u || (n & 3u)) return false;
+    for (size_t w = 5; w * 4u + 4u <= n;) {
+        uint32_t ins = lagfx_le32(spv + w * 4u), op = ins & 0xffffu, wc = ins >> 16;
+        if (!wc || (w + wc) * 4u > n) return false;
+        if (op == 71u && wc >= 4u && lagfx_le32(spv + (w + 2u) * 4u) == 11u && lagfx_le32(spv + (w + 3u) * 4u) == 1u) return true;   /* OpDecorate id BuiltIn PointSize */
+        w += wc;
+    }
+    return false;
+}
+
+typedef struct {
+    uint8_t *lib; uint32_t len;
+    lagfx_metallib_function_t fn[8]; size_t nfn;
+} lib_t;
+
+/* Translates one function (AIR bitcode) with the in-process air2spv translator; also returns its Metal resource map. */
+static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, uint8_t **spv, size_t *sz, lagfx_air_arg_binding_t *ab, size_t *nab) {
+    lagfx_air_module_t *m = NULL;
+    *nab = 0;
+    if (lagfx_air_module_open(f->bitcode, f->bitcode_len, &m) != LAGFX_OK || !m) { CNTP(p).rf_module++; return false; }
+    lagfx_status_t st = lagfx_air2spv_translate_module(m, spv, sz);
+    if (st == LAGFX_OK && *spv) {
+        *nab = lagfx_air_arg_bindings(m, ab, 16);
+        if (*nab > 16u) *nab = 16u;
+    }
+    lagfx_air_module_free(m);
+    if (st != LAGFX_OK || !*spv || !*sz) { free(*spv); *spv = NULL; CNTP(p).rf_translate++; return false; }
+    CNTP(p).xlate_air2spv++;
+    return true;
+}
+
+bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t entry[3], lagfx_a64_pipeline_src_t *out) {
+    (void)ctx; (void)ref;
+    bool ok = false;
+    uint8_t *blob = NULL, *vspv = NULL, *fspv = NULL;
+    size_t vsz = 0, fsz = 0, nvab = 0, nfab = 0;
+    lagfx_air_arg_binding_t vab[16], fab[16];
+    lib_t libs[LAGFX_A64_PDESC_MAX_REFS];
+    uint32_t nlib = 0;
+    pres_t *r = NULL;
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    struct lagfx_vk_state *vk = dev ? dev->vk : NULL;
+    CNTP(p).resolve_failed++;   /* turned back into resolved on success */
+    if (!vk || !vk->initialized || vk->device == VK_NULL_HANDLE) { CNTP(p).rf_no_vulkan++; return false; }
+
+    uint32_t blen = 0, full = 0;
+    blob = lagfx_a64_read_payload(p, task, entry, &blen, &full);
+    lagfx_a64_pdesc_t d;
+    lagfx_a64_fnctx_t fc = { p, task };
+    if (!blob || blen < 16u || full > LAGFX_A64_PIPE_MAX_BLOB) { CNTP(p).rf_no_blob++; goto done; }
+    if (!lagfx_a64_pdesc_decode(blob, blen, lagfx_a64_is_function_ref, &fc, &d)) { CNTP(p).rf_no_blob++; goto done; }
+    if (d.tag != 0xeu) { CNTP(p).rf_bad_tag++; goto done; }   /* 0x33 tile pipelines are not executed */
+    if (!d.nrefs) { CNTP(p).rf_no_refs++; goto done; }
+
+    const lagfx_metallib_function_t *vf = NULL, *ff = NULL;
+    for (uint32_t i = 0; i < d.nrefs && (!vf || !ff); i++) {
+        lib_t *l = &libs[nlib];
+        memset(l, 0, sizeof *l);
+        l->lib = lagfx_a64_read_function_lib(p, task, d.refs[i], &l->len, NULL);
+        if (!l->lib) continue;
+        nlib++;
+        if (lagfx_metallib_extract_functions(l->lib, l->len, l->fn, 8, &l->nfn) != LAGFX_OK) continue;
+        for (size_t k = 0; k < l->nfn && k < 8; k++) {
+            if (!l->fn[k].bitcode || !l->fn[k].bitcode_len) continue;
+            if (!vf && l->fn[k].stage == LAGFX_METALLIB_STAGE_VERTEX) vf = &l->fn[k];
+            if (!ff && l->fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT) ff = &l->fn[k];
+        }
+    }
+    if (!nlib) { CNTP(p).rf_no_lib++; goto done; }
+    if (!vf || !ff) { CNTP(p).rf_no_stage++; goto done; }
+    if (!translate(p, vf, &vspv, &vsz, vab, &nvab) || !translate(p, ff, &fspv, &fsz, fab, &nfab)) goto done;
+
+    /* vertex layout: one Vulkan stream (the builder's limit), fed by the Metal buffer slot the attributes name */
+    memset(out, 0, sizeof *out);
+    lagfx_spv_vertex_input_t vin[8];
+    size_t nvi = lagfx_spv_reflect_vertex_inputs(vspv, vsz, vin, 8);
+    if (nvi > 8u) nvi = 8u;
+    for (size_t v = 0; v < nvi; v++) out->desc.vtx_in_loc[v] = (uint8_t)vin[v].location, out->desc.vtx_in_comp[v] = (uint8_t)vin[v].components;
+    out->desc.n_vtx_inputs = (uint8_t)nvi;
+    if (nvi && d.nattrs) {
+        for (uint32_t a = 1; a < d.nattrs; a++) if (d.attrs[a].bufidx != d.attrs[0].bufidx) { CNTP(p).rf_multi_stream++; goto done; }
+        out->vertex_buffer_index = d.attrs[0].bufidx;
+        out->desc.n_pso_attrs = (uint8_t)d.nattrs;
+        for (uint32_t a = 0; a < d.nattrs; a++) out->desc.pso_attr_fmt[a] = d.attrs[a].fmt, out->desc.pso_attr_off[a] = d.attrs[a].off;
+        out->desc.vtx_stride = d.stride;
+    }
+
+    /* descriptor bindings: fragment bindings move to a disjoint range (as the x86 draw path does), then the merged set-0 layout */
+    lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+    const uint8_t *blobs[2] = { vspv, fspv };
+    const size_t lens[2] = { vsz, fsz };
+    r = calloc(1, sizeof *r);
+    if (!r) goto done;
+    r->dev = vk->device;
+    if (lagfx_build_pipeline_layout_from_spv(vk->device, blobs, lens, 2, &r->dsl, &r->pl) != LAGFX_OK) { CNTP(p).rf_layout++; goto done; }
+    /* Per stage: the reflected bindings in binding order, each matched to the n-th Metal argument of its KIND (buffer / texture / sampler) from Apple's arg
+     * metadata. By kind, not by position: the translator emits an extra sampler binding for an inline `constexpr sampler` that has no argument; such a sampler
+     * gets metal_index -1 = the default sampler. */
+    for (int st = 0; st < 2; st++) {
+        lagfx_spv_binding_t tmp[32];
+        size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, 32);
+        if (nt > 32u) nt = 32u;
+        for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
+        const lagfx_air_arg_binding_t *ab = st ? fab : vab;
+        size_t nab = st ? nfab : nvab;
+        uint32_t nth[4] = { 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
+        for (size_t t = 0; t < nt; t++) {
+            if (tmp[t].set != 0u) continue;
+            if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER) { CNTP(p).rf_bindings++; goto done; }
+            if (out->n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) { CNTP(p).rf_bindings++; goto done; }
+            if (st == 0 && tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER) { CNTP(p).rf_vertex_res++; goto done; }   /* tags 129/127 are not executed */
+            uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE ? 2 : 3;
+            uint32_t n = nth[tmp[t].kind]++, seen = 0;
+            int midx = -1;
+            for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && seen++ == n) { midx = ab[k].metal_index; break; }
+            if (midx > 31 || (midx < 0 && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER)) { CNTP(p).rf_bindings++; goto done; }   /* a buffer/texture nobody can feed */
+            out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding;
+            out->bind[out->n_bind].kind = (uint8_t)tmp[t].kind;
+            out->bind[out->n_bind].stage = (uint8_t)st;
+            out->bind[out->n_bind].metal_index = (int16_t)midx;
+            out->n_bind++;
+        }
+    }
+    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    ci.codeSize = vsz, ci.pCode = (const uint32_t *)vspv;
+    if (vkCreateShaderModule(vk->device, &ci, NULL, &r->vs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
+    ci.codeSize = fsz, ci.pCode = (const uint32_t *)fspv;
+    if (vkCreateShaderModule(vk->device, &ci, NULL, &r->fs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
+    if (!spv_entry_name(vspv, vsz, r->vname, sizeof r->vname)) strcpy(r->vname, "main");
+    if (!spv_entry_name(fspv, fsz, r->fname, sizeof r->fname)) strcpy(r->fname, "main");
+
+    out->desc.vertex_shader = r->vs, out->desc.fragment_shader = r->fs;
+    out->desc.vertex_entry_point = r->vname, out->desc.fragment_entry_point = r->fname;
+    out->desc.layout = r->pl ? r->pl : vk->empty_layout;
+    out->dsl = r->dsl;
+    out->no_point_size = !spv_writes_point_size(vspv, vsz);
+    out->blob_hash = lagfx_a64_hash64(blob, blen);
+    out->release = pres_release, out->user = r;
+    CNTP(p).stub_blend++, CNTP(p).stub_depth_stencil++, CNTP(p).stub_color_format_from_pass++, CNTP(p).stub_raster_state++;
+    CNTP(p).resolve_failed--, CNTP(p).resolved++;
+    ok = true;
+    r = NULL;   /* owned by out now */
+done:
+    pres_release(r);
+    free(blob); free(vspv); free(fspv);
+    for (uint32_t i = 0; i < nlib; i++) free(libs[i].lib);
+    return ok;
+}
+#endif /* LAGFX_HAVE_VULKAN */

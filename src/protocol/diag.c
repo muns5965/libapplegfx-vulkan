@@ -134,4 +134,21 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
     }
+    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects) {   /* ARM64 pipeline resolver / descriptor binding / capture */
+        const __typeof__(X->pipe) *Q = &X->pipe;
+#define U(f) (unsigned long long)Q->f
+        char pl[1400];
+        snprintf(pl, sizeof pl,
+                 "g7-gpu-pipe: resolved=%llu failed=%llu[no_blob=%llu bad_tag=%llu no_refs=%llu no_lib=%llu no_stage=%llu module=%llu translate=%llu layout=%llu multi_stream=%llu vertex_res=%llu bindings=%llu no_vk=%llu] "
+                 "xlate[air2spv=%llu] stubs[blend=%llu depth_stencil=%llu color_fmt_from_pass=%llu raster=%llu vertex_tex=%llu] built=%llu build_failed=%llu replaced=%llu topo[%llu %llu %llu %llu %llu] "
+                 "desc[sets=%llu unbound=%llu unaligned=%llu feedback=%llu failed=%llu] point_no_size=%llu samplers=%llu/%llu dump[objs=%llu bytes=%llu files=%llu dropped=%llu truncated=%llu draws=%llu table_full=%llu]",
+                 U(resolved), U(resolve_failed), U(rf_no_blob), U(rf_bad_tag), U(rf_no_refs), U(rf_no_lib), U(rf_no_stage), U(rf_module), U(rf_translate), U(rf_layout), U(rf_multi_stream), U(rf_vertex_res),
+                 U(rf_bindings), U(rf_no_vulkan), U(xlate_air2spv), U(stub_blend), U(stub_depth_stencil), U(stub_color_format_from_pass), U(stub_raster_state), U(stub_vertex_textures),
+                 U(pipes_built), U(pipe_build_failed), U(pipe_replaced), U(topo[0]), U(topo[1]), U(topo[2]), U(topo[3]), U(topo[4]),
+                 U(desc_sets), U(desc_unbound), U(desc_unaligned), U(desc_feedback), U(desc_failed), U(point_no_size), U(samplers), U(sampler_failed),
+                 U(dump_objects), U(dump_bytes), U(dump_files), U(dump_skipped_cap), U(dump_truncated), U(dump_draws), U(dump_table_full));
+#undef U
+        fprintf(stderr, "%s\n", pl);
+        LAGFX_LOG("%s", pl);
+    }
 }

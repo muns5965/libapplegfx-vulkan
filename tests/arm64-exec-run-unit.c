@@ -300,7 +300,7 @@ static void test_exec_render(void) {
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
     assert(R->execs == 1 && R->passes == 1 && R->draws == 1 && R->submits == 1 && R->submit_failed == 0 && R->submit_pending == 0);
     assert(R->tag_done[26] == 1 && R->tag_done[116] == 1 && R->tag_done[125] == 1 && R->tag_done[130] == 1 && R->tag_done[1] == 1);
-    assert(R->tag_partial[114] == 1 && R->tag_unsup[99] == 1);
+    assert(R->tag_done[114] == 1 && R->tag_unsup[99] == 1);                   /* fragment textures: bound now (count 0 here) */
     assert(p->diag2.exec.decoded == 1 && p->diag2.exec.failed == 0);                /* decode bookkeeping unchanged by execution */
     assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h) && w == RT_W && h == RT_H);
     assert(px(img, 8, 8) == RED);                                                   /* inside the triangle */

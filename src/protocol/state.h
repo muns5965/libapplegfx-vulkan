@@ -560,6 +560,16 @@ typedef struct lagfx_protocol {
                 uint64_t tag_done[512], tag_partial[512], tag_unsup[512];   /* by inner tag; partial = recorded but not applied to Vulkan */
                 uint64_t tag_over;                                   /* tags >= 512, any outcome */
             } run;
+            /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */
+            struct {
+                uint64_t resolved, resolve_failed;
+                uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
+                uint64_t xlate_air2spv;
+                uint64_t stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
+                uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
+                uint64_t desc_sets, desc_unbound, desc_unaligned, desc_feedback, desc_failed, samplers, sampler_failed, point_no_size;
+                uint64_t dump_objects, dump_bytes, dump_files, dump_skipped_cap, dump_truncated, dump_draws, dump_table_full;
+            } pipe;
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;

@@ -34,7 +34,7 @@ typedef struct lagfx_a64_obj_ops {
 typedef struct lagfx_a64_objects lagfx_a64_objects_t;
 
 typedef struct {
-    uint64_t created, destroyed, recreated, failed, hits, read_failed;
+    uint64_t created, destroyed, recreated, failed, hits, read_failed, invalidated;
     uint32_t live;                 /* nodes currently held (including remembered failures) */
 } lagfx_a64_obj_stats_t;
 
@@ -45,6 +45,12 @@ void lagfx_a64_objects_free(lagfx_a64_objects_t *t);
 /* The object for (task, ref), creating it on first reference. NULL for ref 0, an unreadable list, an empty slot, or an object that could
  * not be built. If out_entry is non-NULL it receives the 12-byte entry whenever the entry could be read. */
 void *lagfx_a64_objects_get(lagfx_a64_objects_t *t, lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t out_entry[3]);
+
+/* Reads the 12-byte entry of (task, ref) from the guest's list (same bounds as get). False when the list is unset / out of range / unreadable. */
+bool lagfx_a64_objects_read_entry(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t out[3]);
+/* Destroys the object of (task, ref) and forgets its entry, so the next get() builds a NEW object (a new generation) even though the guest's 12-byte entry
+ * is unchanged. For callers that notice the guest rewrote the payload the entry points at. False if nothing is held for that key. */
+bool lagfx_a64_objects_invalidate(lagfx_a64_objects_t *t, uint32_t task_id, uint32_t ref);
 
 /* Task teardown: destroys every object of the task. Returns how many nodes were dropped. */
 uint32_t lagfx_a64_objects_drop_task(lagfx_a64_objects_t *t, uint32_t task_id);

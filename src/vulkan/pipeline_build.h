@@ -17,6 +17,7 @@ typedef void *VkDevice;
 typedef void *VkShaderModule;
 typedef void *VkPipeline;
 typedef void *VkPipelineLayout;
+typedef void *VkDescriptorSetLayout;
 typedef int   VkFormat;
 #endif
 
@@ -52,6 +53,8 @@ typedef struct {
     uint32_t         pso_attr_fmt[8];
     uint32_t         pso_attr_off[8];
     uint8_t          n_pso_attrs;
+    /* Primitive topology as VkPrimitiveTopology + 1; 0 = default (TRIANGLE_LIST), so every existing caller is unchanged. */
+    uint8_t          topology_plus1;
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
