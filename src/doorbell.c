@@ -313,6 +313,14 @@ uint32_t doorbell_handle_read(void *protocol_state, uint64_t offset) {
             ? atomic_exchange_explicit(&p->pending_displays_bitmask,
                                        0u, memory_order_acquire)
             : 0u;
+        if (p) {
+            atomic_fetch_add_explicit(&p->db_reads, 1u, memory_order_relaxed);
+            if (mask) {
+                atomic_fetch_add_explicit(&p->db_nonzero, 1u, memory_order_relaxed);
+                for (int b = 0; b < 4; b++)
+                    if (mask & (1u << b)) atomic_fetch_add_explicit(&p->db_bit[b], 1u, memory_order_relaxed);
+            }
+        }
         LAGFX_TRACE("doorbell: read off=0x1014 display_bitmask → 0x%x (cleared)", mask);
         return mask;
     }

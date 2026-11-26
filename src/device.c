@@ -445,6 +445,9 @@ void lagfx_device_signal_display(lagfx_device_t *device, uint32_t bits) {
     if (!bits || !lagfx_device_is_valid(device) || !device->protocol_state) return;
     lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
     atomic_fetch_or_explicit(&p->pending_displays_bitmask, bits, memory_order_release);
+    atomic_fetch_add_explicit(&p->sig_total, 1u, memory_order_relaxed);
+    for (int b = 0; b < 4; b++)
+        if (bits & (1u << b)) atomic_fetch_add_explicit(&p->sig_bit[b], 1u, memory_order_relaxed);
 }
 
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {

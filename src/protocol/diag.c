@@ -135,12 +135,15 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
              (unsigned long long)X->inner_bad, tags);
     fprintf(stderr, "%s\n", line);
     LAGFX_LOG("%s", line);
-    if (p->diag2.disp.op_setpage || p->diag2.disp.op_ack || p->diag2.disp.op_swap) {   /* arm64 display ops, stage by stage (display_submit_rendered is the legacy vchan path only) */
+    #define DBC(f) ((unsigned long long)atomic_load_explicit(&p->f, memory_order_relaxed))
+    if (p->diag2.disp.op_setpage || p->diag2.disp.op_ack || p->diag2.disp.op_swap || DBC(db_reads) || DBC(sig_total)) {   /* also when the guest only polls the doorbell */   /* arm64 display ops, stage by stage (display_submit_rendered is the legacy vchan path only) */
         const __typeof__(p->diag2.disp) *D = &p->diag2.disp;
-        snprintf(line, sizeof line, "g7-gpu-display: op_setpage=%llu op_ack=%llu op_swap=%llu swap_short=%llu surface_resolved=%llu surface_unresolved=%llu gpu_content=%llu written_back=%llu gpu_unwritten=%llu handed_to_shell=%llu not_handed=%llu swap_events=%llu",
+        snprintf(line, sizeof line, "g7-gpu-display: op_setpage=%llu op_ack=%llu op_swap=%llu swap_short=%llu surface_resolved=%llu surface_unresolved=%llu gpu_content=%llu written_back=%llu gpu_unwritten=%llu handed_to_shell=%llu not_handed=%llu swap_events=%llu db_reads=%llu db_nonzero=%llu db_bit0=%llu db_bit1=%llu db_bit2=%llu db_bit3=%llu sig_total=%llu sig_bit0=%llu sig_bit1=%llu sig_bit2=%llu sig_bit3=%llu",
                  (unsigned long long)D->op_setpage, (unsigned long long)D->op_ack, (unsigned long long)D->op_swap, (unsigned long long)D->swap_short, (unsigned long long)D->surface_resolved,
                  (unsigned long long)D->surface_unresolved, (unsigned long long)D->gpu_content, (unsigned long long)D->written_back, (unsigned long long)D->gpu_unwritten,
-                 (unsigned long long)D->handed_to_shell, (unsigned long long)D->not_handed, (unsigned long long)X->run.swap_events);
+                 (unsigned long long)D->handed_to_shell, (unsigned long long)D->not_handed, (unsigned long long)X->run.swap_events,
+                 DBC(db_reads), DBC(db_nonzero), DBC(db_bit[0]), DBC(db_bit[1]), DBC(db_bit[2]), DBC(db_bit[3]),
+                 DBC(sig_total), DBC(sig_bit[0]), DBC(sig_bit[1]), DBC(sig_bit[2]), DBC(sig_bit[3]));
         fprintf(stderr, "%s\n", line);
         LAGFX_LOG("%s", line);
     }
