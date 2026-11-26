@@ -20,6 +20,7 @@
  */
 
 #include "translate_function.h"
+#include "translate.h"
 #include "spv_builder.h"
 #include "common/log.h"
 
@@ -135,6 +136,24 @@ typedef struct {
 /* ===================================================================
  * Context
  * =================================================================== */
+
+/* Compute (air.kernel) support: SPIR-V builtin Input variables a kernel reads, in cs_var[] order; and the Metal thread-position attribute a kernel
+ * argument stands for (identified by the argument's "air.*" metadata key). */
+enum { CSV_WORKGROUP_ID, CSV_NUM_WORKGROUPS, CSV_LOCAL_ID, CSV_GLOBAL_ID, CSV_LOCAL_INDEX, CSV_SG_LANE, CSV_SG_SIZE, CSV_COUNT };
+typedef enum {
+    CSA_NONE = 0,
+    CSA_TG_POS,            /* threadgroup_position_in_grid      -> WorkgroupId            */
+    CSA_TGS_PER_GRID,      /* threadgroups_per_grid             -> NumWorkgroups          */
+    CSA_THREAD_IN_TG,      /* thread_position_in_threadgroup    -> LocalInvocationId      */
+    CSA_THREAD_IN_GRID,    /* thread_position_in_grid           -> GlobalInvocationId     */
+    CSA_TG_SIZE,           /* threads_per_threadgroup           -> WorkgroupSize          */
+    CSA_THREADS_PER_GRID,  /* threads_per_grid                  -> NumWorkgroups * WorkgroupSize */
+    CSA_INDEX_IN_TG,       /* thread_index_in_threadgroup       -> LocalInvocationIndex   */
+    CSA_LANE,              /* thread_index_in_simdgroup         -> SubgroupLocalInvocationId */
+    CSA_SIMD_INDEX,        /* simdgroup_index_in_threadgroup    -> LocalInvocationIndex / SubgroupSize */
+    CSA_SIMDS_PER_TG,      /* simdgroups_per_threadgroup        -> ceil(WorkgroupSize.xyz product / SubgroupSize) */
+    CSA_THREADS_PER_SIMD,  /* threads_per_simdgroup             -> SubgroupSize           */
+} lagfx_cs_arg_kind_t;
 
 typedef struct {
     lagfx_spv_builder_t      *b;
@@ -296,6 +315,21 @@ typedef struct {
     uint32_t                  arg_rt_var[LAGFX_MAX_VERTEX_ARGS];
     uint8_t                   arg_rt_idx[LAGFX_MAX_VERTEX_ARGS];
     uint32_t                  id_subpass_t, id_subpass_ptr, id_subpass_zero;
+    /* Compute stage. arg_cs_kind[i]: the thread-position attribute argument i stands for (lagfx_cs_arg_kind_t); arg_is_imageblock[i]: an `air.imageblock` argument
+     * (a tile function's implicit imageblock; has no SPIR-V object). Builtin Input variables are created on first use (cs_input_var) and the OpEntryPoint is written
+     * when the body is done, so its interface list is complete. LocalSize is not fixed in AIR (Metal picks it at dispatch): the workgroup size is the
+     * BuiltIn WorkgroupSize composite of three SpecId 0/1/2 spec constants (default 1,1,1), which the pipeline sets from the dispatch. */
+    uint8_t                   arg_cs_kind[LAGFX_MAX_VERTEX_ARGS];
+    uint8_t                   arg_is_imageblock[LAGFX_MAX_VERTEX_ARGS];
+    uint32_t                  cs_var[CSV_COUNT];
+    uint32_t                  cs_ptr_in_u32, cs_ptr_in_v3;
+    uint32_t                  cs_wgsize_comp[3];     /* the three OpSpecConstant ids */
+    uint32_t                  cs_wgsize;             /* OpSpecConstantComposite v3uint (BuiltIn WorkgroupSize) */
+    uint32_t                  cs_iface[96];
+    uint32_t                  cs_n_iface;
+    uint8_t                   cs_cap_gnu, cs_cap_shuffle;
+    uint32_t                  cs_stimg_t, cs_stimg_ptr;      /* OpTypeImage 2D Rgba16f storage + its UniformConstant pointer */
+    uint32_t                  cs_stimg_var[8];               /* imageblock render-target k -> storage image variable */
     /* Effective-pointee override for a nonstruct `device T*` buffer arg
      * whose body accesses UNANIMOUSLY reinterpret it as a different element
      * type. Metal code like `device uchar *raw` GEP'd with
@@ -1806,6 +1840,273 @@ static bool input_var_is_dup(const xlate_ctx_t *c, uint32_t i) {
     return false;
 }
 
+/* ===================================================================
+ * Compute stage (air.kernel): compute kernels and tile functions
+ *
+ * Mapping (Metal -> Vulkan/SPIR-V):
+ *   thread-position attributes   -> BuiltIn Input variables (see lagfx_cs_arg_kind_t); [[threads_per_threadgroup]] is the WorkgroupSize constant
+ *   threadgroup size             -> BuiltIn WorkgroupSize = composite of SpecId 0/1/2 spec constants (AIR does not fix it; the dispatch does)
+ *   air.get_simdgroup_size       -> BuiltIn SubgroupSize        (OpCapability GroupNonUniform)
+ *   thread_index_in_simdgroup    -> BuiltIn SubgroupLocalInvocationId
+ *   air.simd_shuffle*            -> OpGroupNonUniformShuffle (+ select), Subgroup scope (OpCapability GroupNonUniformShuffle)
+ *   air.wg.barrier               -> OpControlBarrier Workgroup/Workgroup, AcquireRelease | WorkgroupMemory (| UniformMemory / ImageMemory per the flags)
+ *   air.store/load.implicit_imageblock -> OpImageWrite / OpImageRead of a Rgba16f storage image, set 0 binding CS_IMAGEBLOCK_BINDING + render-target index.
+ *                                   A tile function is run as an ordinary dispatch over the WHOLE attachment with one workgroup per tile (tile size == workgroup
+ *                                   size, as for a Metal tile dispatch): an imageblock coordinate is tile-local, so WorkgroupId * WorkgroupSize is added to make it
+ *                                   an attachment coordinate.
+ * Metal's simdgroup is 32 lanes wide; this maps it to the device subgroup, so a kernel that bakes the width in (a 32-wide lane -> pixel mapping) is only
+ * correct on a device whose subgroup size is 32 (the dispatcher must pick/require that size).
+ * =================================================================== */
+#define CS_IMAGEBLOCK_BINDING 40u
+
+static lagfx_cs_arg_kind_t cs_arg_kind_from_key(const char *k) {
+    static const struct { const char *key; lagfx_cs_arg_kind_t kind; } t[] = {
+        { "air.threadgroup_position_in_grid",   CSA_TG_POS },
+        { "air.threadgroups_per_grid",          CSA_TGS_PER_GRID },
+        { "air.thread_position_in_threadgroup", CSA_THREAD_IN_TG },
+        { "air.thread_position_in_grid",        CSA_THREAD_IN_GRID },
+        { "air.threads_per_threadgroup",        CSA_TG_SIZE },
+        { "air.threads_per_grid",               CSA_THREADS_PER_GRID },
+        { "air.thread_index_in_threadgroup",    CSA_INDEX_IN_TG },
+        { "air.thread_index_in_simdgroup",      CSA_LANE },
+        { "air.simdgroup_index_in_threadgroup", CSA_SIMD_INDEX },
+        { "air.simdgroups_per_threadgroup",     CSA_SIMDS_PER_TG },
+        { "air.threads_per_simdgroup",          CSA_THREADS_PER_SIMD },
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) if (!strcmp(k, t[i].key)) return t[i].kind;
+    return CSA_NONE;
+}
+
+static void cs_iface_add(xlate_ctx_t *c, uint32_t id) {
+    if (!id) return;
+    for (uint32_t i = 0; i < c->cs_n_iface; i++) if (c->cs_iface[i] == id) return;
+    if (c->cs_n_iface < sizeof c->cs_iface / sizeof c->cs_iface[0]) c->cs_iface[c->cs_n_iface++] = id;
+}
+
+static void cs_cap(xlate_ctx_t *c, bool shuffle) {
+    uint32_t cap61[] = { 61u /* GroupNonUniform */ };
+    if (!c->cs_cap_gnu) { c->cs_cap_gnu = 1u; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap61, 1); }
+    uint32_t cap64[] = { 65u /* GroupNonUniformShuffle */ };
+    if (shuffle && !c->cs_cap_shuffle) { c->cs_cap_shuffle = 1u; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap64, 1); }
+}
+
+/* The Input variable for builtin `csv`, created on first use. */
+static uint32_t cs_input_var(xlate_ctx_t *c, int csv) {
+    if (c->cs_var[csv]) return c->cs_var[csv];
+    static const uint32_t builtin[CSV_COUNT] = { 26u /* WorkgroupId */, 24u /* NumWorkgroups */, 27u /* LocalInvocationId */, 28u /* GlobalInvocationId */,
+                                                 29u /* LocalInvocationIndex */, 41u /* SubgroupLocalInvocationId */, 36u /* SubgroupSize */ };
+    bool vec3 = csv <= CSV_GLOBAL_ID;
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t ty = vec3 ? emit_type_vec(c, u32, 3u) : u32;
+    uint32_t *pp = vec3 ? &c->cs_ptr_in_v3 : &c->cs_ptr_in_u32;
+    if (!*pp) {
+        *pp = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t po[] = { *pp, LAGFX_SPV_STORAGE_INPUT, ty };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+    }
+    uint32_t v = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t vo[] = { *pp, v, LAGFX_SPV_STORAGE_INPUT };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
+    uint32_t d[] = { v, LAGFX_SPV_DECORATION_BUILTIN, builtin[csv] };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d, 3);
+    if (csv == CSV_SG_LANE || csv == CSV_SG_SIZE) cs_cap(c, false);
+    cs_iface_add(c, v);
+    c->cs_var[csv] = v;
+    return v;
+}
+
+static uint32_t cs_load(xlate_ctx_t *c, int csv) {
+    uint32_t v = cs_input_var(c, csv);
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t ty = csv <= CSV_GLOBAL_ID ? emit_type_vec(c, u32, 3u) : u32;
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { ty, id, v };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, o, 3);
+    return id;
+}
+
+/* Generic binary / unary core ops on 32-bit unsigned scalars. */
+static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uint32_t b) {
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { ty, id, a, b };
+    lagfx_spv_builder_emit_op(c->b, op, o, 4);
+    return id;
+}
+
+/* Convert a 32-bit-unsigned scalar/vector `src` (scalar, or v3 when src_v3) to the AIR integer type `arg_ty` (scalar or vector of width 8/16/32/64). */
+static uint32_t cs_to_air_int(xlate_ctx_t *c, uint32_t src, bool src_v3, uint32_t arg_ty) {
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    if (arg_ty >= nt) return src;
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t lanes = 1u, elem = arg_ty;
+    if (ts[arg_ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[arg_ty].num_op >= 2u) { lanes = ts[arg_ty].op[0]; elem = ts[arg_ty].op[1]; }
+    if (elem >= nt || ts[elem].kind != LAGFX_AIR_TYPE_INTEGER) return src;
+    uint32_t w = ts[elem].num_op >= 1u ? ts[elem].op[0] : 32u;
+    uint32_t v = src;
+    if (src_v3 && lanes == 1u) {
+        v = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[] = { u32, v, src, 0u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, o, 4);
+    } else if (src_v3 && lanes == 2u) {
+        v = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[] = { emit_type_vec(c, u32, 2u), v, src, src, 0u, 1u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VECTOR_SHUFFLE, o, 6);
+    } else if (!src_v3 && lanes > 1u) {   /* scalar source into a vector argument: splat */
+        uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[8] = { emit_type_vec(c, u32, lanes), id };
+        for (uint32_t k = 0; k < lanes && k < 4u; k++) o[2u + k] = src;
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 2u + (lanes < 4u ? lanes : 4u));
+        v = id;
+    }
+    if (w != 32u) {
+        uint32_t target = emit_air_type(c, arg_ty);
+        uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[] = { target, id, v };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_UCONVERT, o, 3);
+        v = id;
+    }
+    return v;
+}
+
+/* The value of a thread-position attribute argument, in the argument's own AIR type. */
+static uint32_t cs_arg_value(xlate_ctx_t *c, uint32_t i) {
+    lagfx_cs_arg_kind_t k = (lagfx_cs_arg_kind_t)c->arg_cs_kind[i];
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t v3 = emit_type_vec(c, u32, 3u);
+    uint32_t aty = c->arg_air_type_ids[i];
+    switch (k) {
+    case CSA_TG_POS:         return cs_to_air_int(c, cs_load(c, CSV_WORKGROUP_ID), true, aty);
+    case CSA_TGS_PER_GRID:   return cs_to_air_int(c, cs_load(c, CSV_NUM_WORKGROUPS), true, aty);
+    case CSA_THREAD_IN_TG:   return cs_to_air_int(c, cs_load(c, CSV_LOCAL_ID), true, aty);
+    case CSA_THREAD_IN_GRID: return cs_to_air_int(c, cs_load(c, CSV_GLOBAL_ID), true, aty);
+    case CSA_TG_SIZE:        return cs_to_air_int(c, c->cs_wgsize, true, aty);
+    case CSA_THREADS_PER_GRID: {
+        uint32_t id = cs_op2(c, LAGFX_SPV_OP_IMUL, v3, cs_load(c, CSV_NUM_WORKGROUPS), c->cs_wgsize);
+        return cs_to_air_int(c, id, true, aty);
+    }
+    case CSA_INDEX_IN_TG:    return cs_to_air_int(c, cs_load(c, CSV_LOCAL_INDEX), false, aty);
+    case CSA_LANE:           return cs_to_air_int(c, cs_load(c, CSV_SG_LANE), false, aty);
+    case CSA_THREADS_PER_SIMD: return cs_to_air_int(c, cs_load(c, CSV_SG_SIZE), false, aty);
+    case CSA_SIMD_INDEX:     /* subgroups are formed from consecutive LocalInvocationIndex values */
+        return cs_to_air_int(c, cs_op2(c, 134u /* OpUDiv */, u32, cs_load(c, CSV_LOCAL_INDEX), cs_load(c, CSV_SG_SIZE)), false, aty);
+    case CSA_SIMDS_PER_TG: {
+        uint32_t n = 0u;
+        for (uint32_t q = 0; q < 3u; q++) {
+            uint32_t e = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t eo[] = { u32, e, c->cs_wgsize, q };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, eo, 4);
+            n = q ? cs_op2(c, LAGFX_SPV_OP_IMUL, u32, n, e) : e;
+        }
+        uint32_t sz = cs_load(c, CSV_SG_SIZE);
+        uint32_t one = emit_const_uint32(c, 1u);
+        uint32_t num = cs_op2(c, LAGFX_SPV_OP_IADD, u32, n, cs_op2(c, LAGFX_SPV_OP_ISUB, u32, sz, one));
+        return cs_to_air_int(c, cs_op2(c, 134u /* OpUDiv */, u32, num, sz), false, aty);
+    }
+    default: return 0u;
+    }
+}
+
+/* Compute prologue: classify the arguments, create the resource variables and the workgroup-size constants. (The OpEntryPoint is written last.) */
+static void cs_prologue(xlate_ctx_t *c) {
+    uint32_t n = c->num_args < LAGFX_MAX_VERTEX_ARGS ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
+    const lagfx_stage_keys_t *keys = c->iface_own_in;
+    for (uint32_t i = 0; i < n; i++) {
+        const char *k = (keys && i < keys->n) ? keys->key[i] : "";
+        if (!strcmp(k, "air.imageblock")) { c->arg_is_imageblock[i] = 1u; continue; }
+        c->arg_cs_kind[i] = (uint8_t)cs_arg_kind_from_key(k);
+        if (c->arg_cs_kind[i]) continue;
+        int rk = frag_resource_kind(c, i);
+        if (rk == 3 && !block_struct_handleable(c, buffer_arg_struct_ty(c, i))) continue;
+        if (rk != 0) { c->arg_resource_var[i] = lagfx_spv_builder_alloc_id(c->b); c->arg_resource_kind[i] = (uint8_t)rk; }
+    }
+    if (needs_default_sampler(c)) c->id_default_sampler_var = lagfx_spv_builder_alloc_id(c->b);
+
+    /* WorkgroupSize = (SpecId 0, 1, 2); default 1x1x1 */
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t v3 = emit_type_vec(c, u32, 3u);
+    for (uint32_t q = 0; q < 3u; q++) {
+        c->cs_wgsize_comp[q] = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o[] = { u32, c->cs_wgsize_comp[q], 1u };
+        lagfx_spv_builder_emit_op(c->b, 50u /* OpSpecConstant */, o, 3);
+        uint32_t d[] = { c->cs_wgsize_comp[q], 1u /* SpecId */, q };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d, 3);
+    }
+    c->cs_wgsize = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t co[] = { v3, c->cs_wgsize, c->cs_wgsize_comp[0], c->cs_wgsize_comp[1], c->cs_wgsize_comp[2] };
+    lagfx_spv_builder_emit_op(c->b, 51u /* OpSpecConstantComposite */, co, 5);
+    uint32_t wd[] = { c->cs_wgsize, LAGFX_SPV_DECORATION_BUILTIN, 25u /* WorkgroupSize */ };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, wd, 3);
+
+    /* Resource bindings: set 0, sequential in argument order (the order lagfx_air_arg_bindings reports); byte-buffer views alias their buffer's binding. */
+    uint32_t binding = 0u;
+    for (uint32_t i = 0; i < n; i++) {
+        if (!c->arg_resource_var[i]) continue;
+        cs_iface_add(c, c->arg_resource_var[i]);
+        uint32_t d1[] = { c->arg_resource_var[i], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+        uint32_t d2[] = { c->arg_resource_var[i], LAGFX_SPV_DECORATION_BINDING, binding };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+        for (uint32_t v = 0; v < c->n_bytebuf_views; v++) {
+            if (c->bytebuf_view[v].arg != i) continue;
+            cs_iface_add(c, c->bytebuf_view[v].var_id);
+            uint32_t vd1[] = { c->bytebuf_view[v].var_id, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vd1, 3);
+            uint32_t vd2[] = { c->bytebuf_view[v].var_id, LAGFX_SPV_DECORATION_BINDING, binding };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vd2, 3);
+        }
+        binding++;
+    }
+    if (c->id_default_sampler_var) {
+        cs_iface_add(c, c->id_default_sampler_var);
+        uint32_t d1[] = { c->id_default_sampler_var, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+        uint32_t d2[] = { c->id_default_sampler_var, LAGFX_SPV_DECORATION_BINDING, binding++ };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+    }
+}
+
+/* Tile origin: a Metal tile is one threadgroup, so imageblock coordinates are relative to WorkgroupId * WorkgroupSize; the attachment-wide dispatch needs them
+ * absolute. Returns uint2(coord + origin). */
+static uint32_t cs_tile_coord(xlate_ctx_t *c, uint32_t coord_u2) {
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t v3 = emit_type_vec(c, u32, 3u), v2 = emit_type_vec(c, u32, 2u);
+    uint32_t origin3 = cs_op2(c, LAGFX_SPV_OP_IMUL, v3, cs_load(c, CSV_WORKGROUP_ID), c->cs_wgsize);
+    uint32_t origin2 = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t so[] = { v2, origin2, origin3, origin3, 0u, 1u };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VECTOR_SHUFFLE, so, 6);
+    return cs_op2(c, LAGFX_SPV_OP_IADD, v2, coord_u2, origin2);
+}
+
+static void cs_emit_entry_point(xlate_ctx_t *c) {
+    uint32_t prefix[] = { LAGFX_SPV_EXECUTION_MODEL_GLCOMPUTE, c->id_main };
+    lagfx_spv_builder_emit_op_string(c->b, LAGFX_SPV_OP_ENTRY_POINT, prefix, 2, "main", c->cs_iface, c->cs_n_iface);
+}
+
+/* The Rgba16f storage image backing imageblock render target `rt` (created on first use). */
+static uint32_t cs_imageblock_image(xlate_ctx_t *c, uint32_t rt) {
+    if (rt >= 8u) rt = 7u;
+    if (c->cs_stimg_var[rt]) return c->cs_stimg_var[rt];
+    if (!c->cs_stimg_t) {
+        c->cs_stimg_t = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t io[] = { c->cs_stimg_t, emit_type_float32(c), 1u /* 2D */, 0u, 0u, 0u, 2u /* Sampled=2: storage */, 2u /* Rgba16f */ };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, io, 8);
+        c->cs_stimg_ptr = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t po[] = { c->cs_stimg_ptr, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT, c->cs_stimg_t };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+    }
+    uint32_t v = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t vo[] = { c->cs_stimg_ptr, v, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
+    uint32_t d1[] = { v, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+    uint32_t d2[] = { v, LAGFX_SPV_DECORATION_BINDING, CS_IMAGEBLOCK_BINDING + rt };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+    cs_iface_add(c, v);
+    c->cs_stimg_var[rt] = v;
+    return v;
+}
+
 static void emit_prologue(xlate_ctx_t *c) {
     /* 1. OpCapability Shader + Int64 (LLVM/AIR uses i64 for GEP
      *    indices, lifetime sizes, etc.; lavapipe supports shaderInt64
@@ -1953,6 +2254,8 @@ static void emit_prologue(xlate_ctx_t *c) {
                                 LAGFX_SPV_DECORATION_LOCATION, k };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
         }
+    } else if (c->stage == LAGFX_XLATE_STAGE_COMPUTE) {
+        cs_prologue(c);
     } else /* fragment */ {
         /* One Output variable per colour render target (1 for a bare
          * float/float4 return, N for a struct-of-members multi-target). */
@@ -2283,6 +2586,8 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 3);
         }
         emit_arg_resource_vars(c, n_va);
+    } else if (c->stage == LAGFX_XLATE_STAGE_COMPUTE) {
+        emit_arg_resource_vars(c, c->num_args < LAGFX_MAX_VERTEX_ARGS ? c->num_args : LAGFX_MAX_VERTEX_ARGS);
     } else /* fragment */ {
         /* One Output OpVariable per render target, each typed to its actual
          * member/return type (float / float2 / float4), not a hardcoded
@@ -2538,6 +2843,15 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                 id_load = iface_narrow(c, c->arg_air_type_ids[i], id_load);
             c->arg_spv_ids[i] = id_load;
             bind_value_spv(c, c->arg_id_base + i, id_load);
+        }
+        if (c->stage == LAGFX_XLATE_STAGE_COMPUTE) {   /* thread-position attribute arguments */
+            for (uint32_t i = 0; i < n_va; i++) {
+                if (!c->arg_cs_kind[i]) continue;
+                uint32_t v = cs_arg_value(c, i);
+                if (!v) continue;
+                c->arg_spv_ids[i] = v;
+                bind_value_spv(c, c->arg_id_base + i, v);
+            }
         }
         for (uint32_t i = 0; i < n_va; i++) {   /* framebuffer fetch: read the attachment's current value at this pixel */
             if (!c->arg_rt_var[i]) continue;
@@ -3222,6 +3536,72 @@ static uint32_t sample_colour_for_struct(xlate_ctx_t *c, uint32_t rgba_f32, uint
     return id;
 }
 
+/* True when the type suffix of an AIR intrinsic name (what follows the matched prefix, e.g. "f16", "v3f16", "f32", "v4f32") is a FLOAT type. The integer
+ * forms of the same operations carry a signedness letter ("air.clamp.s.i32", "air.clamp.u.v2i16"), never one of these. */
+static bool intrinsic_suffix_is_float(const char *suffix) {
+    const char *q = suffix;
+    if (*q == 'v') { q++; while (*q >= '0' && *q <= '9') q++; }
+    return q[0] == 'f' && q[1] >= '0' && q[1] <= '9';
+}
+
+/* Carrier for a subgroup op: Vulkan only lets 8/16/64-bit values through the group ops with shaderSubgroupExtendedTypes, so 16-bit floats and 8/16-bit ints are
+ * widened to 32 bits around the op (exact for every non-NaN value). Returns false for a type with no carrier (64-bit, bool, struct...). */
+typedef struct { uint32_t carrier_ty; uint32_t elem_air; uint32_t lanes; bool widen; bool is_float; } cs_carrier_t;
+
+static bool cs_carrier_for(xlate_ctx_t *c, uint32_t air_ty, cs_carrier_t *k) {
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    if (air_ty >= nt) return false;
+    uint32_t lanes = 1u, elem = air_ty;
+    if (ts[air_ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[air_ty].num_op >= 2u) { lanes = ts[air_ty].op[0]; elem = ts[air_ty].op[1]; }
+    if (elem >= nt || lanes < 1u || lanes > 4u) return false;
+    k->elem_air = elem; k->lanes = lanes; k->widen = false; k->is_float = false;
+    uint32_t sc;
+    switch (ts[elem].kind) {
+    case LAGFX_AIR_TYPE_FLOAT: sc = emit_type_float32(c); k->is_float = true; break;
+    case LAGFX_AIR_TYPE_HALF:  sc = emit_type_float32(c); k->is_float = true; k->widen = true; break;
+    case LAGFX_AIR_TYPE_INTEGER: {
+        uint32_t w = ts[elem].num_op >= 1u ? ts[elem].op[0] : 32u;
+        if (w != 8u && w != 16u && w != 32u) return false;
+        sc = emit_type_int_w(c, 32u, 0u); k->widen = (w != 32u); break;
+    }
+    default: return false;
+    }
+    k->carrier_ty = lanes > 1u ? emit_type_vec(c, sc, lanes) : sc;
+    return true;
+}
+
+static uint32_t cs_conv(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t v) {
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { ty, id, v };
+    lagfx_spv_builder_emit_op(c->b, op, o, 3);
+    return id;
+}
+
+/* Metal ushort/uint index operand -> u32. */
+static uint32_t cs_index_u32(xlate_ctx_t *c, uint32_t value_id) {
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t v = resolve_or_undef(c, value_id, u32);
+    uint32_t at = value_air_type_idx(c, value_id);
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    if (at < nt && ts[at].kind == LAGFX_AIR_TYPE_INTEGER && ts[at].num_op >= 1u && ts[at].op[0] != 32u && ts[at].op[0] != 1u)
+        v = cs_conv(c, LAGFX_SPV_OP_UCONVERT, u32, v);
+    return v;
+}
+
+/* Subgroup shuffle of `val` (AIR type `air_ty`) from lane `idx` (u32). */
+static uint32_t cs_shuffle(xlate_ctx_t *c, uint32_t air_ty, uint32_t val, uint32_t idx, const cs_carrier_t *k) {
+    uint32_t sub = emit_const_uint32(c, 3u /* Subgroup */);
+    uint32_t v = val;
+    if (k->widen) v = cs_conv(c, k->is_float ? LAGFX_SPV_OP_F_CONVERT : LAGFX_SPV_OP_UCONVERT, k->carrier_ty, v);
+    uint32_t r = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { k->carrier_ty, r, sub, v, idx };
+    lagfx_spv_builder_emit_op(c->b, 345u /* OpGroupNonUniformShuffle */, o, 5);
+    if (k->widen) r = cs_conv(c, k->is_float ? LAGFX_SPV_OP_F_CONVERT : LAGFX_SPV_OP_UCONVERT, emit_air_type(c, air_ty), r);
+    return r;
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -3308,11 +3688,42 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
      * Apple uses air.fast.<x> and air.<x> interchangeably; we match by
      * string prefix so "air.fast.sqrt.f32" matches the Sqrt row.
      * Reference: paravirt-re/library/air_intrinsic_spec docs. */
+    enum { IXF_FLOATSFX = 0x80, IXF_3WAY = 0x40, IXF_NARGS = 0x3f };
     static const struct {
         const char *prefix;
         uint32_t    glsl_inst;
         uint8_t     num_args;
     } intrinsic_table[] = {
+        /* fmax3/fmin3(a,b,c) = max(max(a,b),c): BEFORE the two-operand air.fast_fmax / air.fast_fmin rows, whose prefix also matches
+         * "air.fast_fmax3." and would silently drop the third operand. IXF_3WAY = chained lowering in the emitter. */
+        {"air.fast_fmax3.",    LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+        {"air.fast_fmin3.",    LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+        {"air.precise_fmax3.", LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+        {"air.precise_fmin3.", LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+        {"air.fmax3.",         LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+        {"air.fmin3.",         LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+        /* Plain (non fast_/precise_) float math: Metal emits these for half operands and for precise math, e.g. air.fmax.f16 / air.clamp.v3f16 / air.fabs.v2f16.
+         * IXF_FLOATSFX: only when the type suffix is a float type (f16/f32/vNf16/vNf32) -- the integer forms are air.max.s.i32 / air.clamp.u.i32. */
+        {"air.fmax.",          LAGFX_SPV_GLSL_FMAX,         2 | IXF_FLOATSFX},
+        {"air.fmin.",          LAGFX_SPV_GLSL_FMIN,         2 | IXF_FLOATSFX},
+        {"air.clamp.",         LAGFX_SPV_GLSL_FCLAMP,       3 | IXF_FLOATSFX},
+        {"air.fabs.",          LAGFX_SPV_GLSL_FABS,         1 | IXF_FLOATSFX},
+        {"air.sqrt.",          LAGFX_SPV_GLSL_SQRT,         1 | IXF_FLOATSFX},
+        {"air.rsqrt.",         LAGFX_SPV_GLSL_INVERSE_SQRT, 1 | IXF_FLOATSFX},
+        {"air.fract.",         LAGFX_SPV_GLSL_FRACT,        1 | IXF_FLOATSFX},
+        {"air.floor.",         LAGFX_SPV_GLSL_FLOOR,        1 | IXF_FLOATSFX},
+        {"air.ceil.",          LAGFX_SPV_GLSL_CEIL,         1 | IXF_FLOATSFX},
+        {"air.trunc.",         LAGFX_SPV_GLSL_TRUNC,        1 | IXF_FLOATSFX},
+        {"air.exp.",           LAGFX_SPV_GLSL_EXP,          1 | IXF_FLOATSFX},
+        {"air.exp2.",          LAGFX_SPV_GLSL_EXP2,         1 | IXF_FLOATSFX},
+        {"air.log.",           LAGFX_SPV_GLSL_LOG,          1 | IXF_FLOATSFX},
+        {"air.log2.",          LAGFX_SPV_GLSL_LOG2,         1 | IXF_FLOATSFX},
+        {"air.sin.",           LAGFX_SPV_GLSL_SIN,          1 | IXF_FLOATSFX},
+        {"air.cos.",           LAGFX_SPV_GLSL_COS,          1 | IXF_FLOATSFX},
+        /* powr(x,y) (x >= 0) = pow(x,y); fast_powr likewise (the dump has air.fast_powr.f32 / .v4f32 and air.powr.f16: all three used to be OpUndef). */
+        {"air.powr.",          LAGFX_SPV_GLSL_POW,          2 | IXF_FLOATSFX},
+        {"air.fast_powr.",     LAGFX_SPV_GLSL_POW,          2},
+        {"air.precise_powr.",  LAGFX_SPV_GLSL_POW,          2},
         /* Unary intrinsics (num_args=1) */
         {"air.fast.sqrt",      LAGFX_SPV_GLSL_SQRT,         1},
         {"air.fast.rsqrt",     LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
@@ -3435,7 +3846,9 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
 
     uint32_t glsl_inst = 0u;
     for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
-        if (strncmp(fn_name, intrinsic_table[i].prefix, strlen(intrinsic_table[i].prefix)) == 0) {
+        size_t pl = strlen(intrinsic_table[i].prefix);
+        if (strncmp(fn_name, intrinsic_table[i].prefix, pl) == 0) {
+            if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
             glsl_inst = intrinsic_table[i].glsl_inst;
             break;
         }
@@ -3731,6 +4144,189 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         }
     }
 
+    /* === air.unpack.unorm4x8.<vty>(i32) -> GLSL UnpackUnorm4x8 (+ FConvert to the half result) ===
+     * unpack_unorm4x8_to_half(uint): four 8-bit unorm channels, byte 0 = x. GLSL.std.450 UnpackUnorm4x8 (64) is the same
+     * definition and yields float4; a half4 result is narrowed with OpFConvert. */
+    if (strncmp(fn_name, "air.unpack.unorm4x8.", 20u) == 0 && result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE &&
+        inst->num_ops > callee_slot_idx + 1u) {
+        uint32_t rty = emit_air_type(c, result_ty_air);
+        uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+        uint32_t a = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[callee_slot_idx + 1u], next_val_id), u32);
+        uint32_t f4 = emit_type_vec4_f(c);
+        uint32_t res = resolve_value_spv(c, result_value_id);
+        if (!res) res = lagfx_spv_builder_alloc_id(c->b);
+        if (rty == f4) {
+            uint32_t o[] = { f4, res, c->id_glsl, 64u /* UnpackUnorm4x8 */, a };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5);
+        } else {
+            uint32_t t = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t o[] = { f4, t, c->id_glsl, 64u, a };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5);
+            uint32_t cv[] = { rty, res, t };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, cv, 3);
+        }
+        bind_value_spv(c, result_value_id, res);
+        set_result_air_type(c, result_value_id, result_ty_air);
+        set_value_spv_type(c, result_value_id, rty);
+        return;
+    }
+
+    /* === Compute-stage intrinsics (air.kernel): simd-group queries / shuffles, threadgroup barrier, imageblock access === */
+    if (c->stage == LAGFX_XLATE_STAGE_COMPUTE) {
+        uint32_t a0 = callee_slot_idx + 1u;     /* first argument slot */
+        uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+        #define CS_ARG(k) resolve_relative((uint32_t)inst->ops[a0 + (k)], next_val_id)
+
+        /* air.get_simdgroup_size.i16 -> SubgroupSize */
+        if (strncmp(fn_name, "air.get_simdgroup_size.", 23u) == 0 && result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE) {
+            uint32_t r = cs_to_air_int(c, cs_load(c, CSV_SG_SIZE), false, result_ty_air);
+            bind_value_spv(c, result_value_id, r);
+            set_result_air_type(c, result_value_id, result_ty_air);
+            return;
+        }
+
+        /* air.simd_shuffle{,_down,_up,_xor}.<ty>(value, lane|delta|mask): every lane computes its source lane and reads it with OpGroupNonUniformShuffle. */
+        {
+            static const struct { const char *pfx; int kind; } sh[] = {
+                { "air.simd_shuffle.", 0 }, { "air.simd_shuffle_down.", 1 }, { "air.simd_shuffle_up.", 2 }, { "air.simd_shuffle_xor.", 3 } };
+            for (size_t q = 0; q < sizeof sh / sizeof sh[0]; q++) {
+                if (strncmp(fn_name, sh[q].pfx, strlen(sh[q].pfx)) != 0) continue;
+                cs_carrier_t k;
+                if (result_value_id == 0u || result_ty_air == LAGFX_AIR_TYPE_NONE || inst->num_ops < a0 + 2u || !cs_carrier_for(c, result_ty_air, &k)) break;
+                uint32_t val = resolve_or_undef(c, CS_ARG(0), emit_air_type(c, result_ty_air));
+                uint32_t arg = cs_index_u32(c, CS_ARG(1));
+                cs_cap(c, true);
+                uint32_t lane = cs_load(c, CSV_SG_LANE), idx;
+                switch (sh[q].kind) {
+                case 1:  idx = cs_op2(c, LAGFX_SPV_OP_IADD, u32, lane, arg); break;
+                case 2:  idx = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, arg); break;
+                case 3:  idx = cs_op2(c, LAGFX_SPV_OP_BITWISE_XOR, u32, lane, arg); break;
+                default: idx = arg; break;
+                }
+                uint32_t r = cs_shuffle(c, result_ty_air, val, idx, &k);
+                bind_value_spv(c, result_value_id, r);
+                set_result_air_type(c, result_value_id, result_ty_air);
+                return;
+            }
+        }
+
+        /* air.simd_shuffle_and_fill_{down,up}.<ty>(data, filling_data, delta, modulo): the simdgroup is split into vectors of `modulo` lanes; within one vector
+         * down gives lane r the data of r+delta and, past the end, filling_data of r+delta-modulo; up gives lane r the data of r-delta and, below 0, filling_data of
+         * r-delta+modulo. Both shuffles run in every lane (they are collective); a select keeps the right one. */
+        if ((strncmp(fn_name, "air.simd_shuffle_and_fill_down.", 31u) == 0 || strncmp(fn_name, "air.simd_shuffle_and_fill_up.", 29u) == 0)) {
+            bool down = fn_name[26] == 'd';
+            cs_carrier_t k;
+            if (result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE && inst->num_ops >= a0 + 4u && cs_carrier_for(c, result_ty_air, &k)) {
+                uint32_t rty = emit_air_type(c, result_ty_air);
+                uint32_t data = resolve_or_undef(c, CS_ARG(0), rty), fill = resolve_or_undef(c, CS_ARG(1), rty);
+                uint32_t delta = cs_index_u32(c, CS_ARG(2)), mod = cs_index_u32(c, CS_ARG(3));
+                cs_cap(c, true);
+                uint32_t lane = cs_load(c, CSV_SG_LANE);
+                uint32_t rem = cs_op2(c, LAGFX_SPV_OP_UMOD, u32, lane, mod);
+                uint32_t base = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, rem);
+                uint32_t boolt = emit_type_bool(c);
+                uint32_t cond, ia, ib;
+                if (down) {
+                    uint32_t r = cs_op2(c, LAGFX_SPV_OP_IADD, u32, rem, delta);          /* rem + delta */
+                    cond = cs_op2(c, LAGFX_SPV_OP_ULESS_THAN, boolt, r, mod);            /* stays inside the vector -> data */
+                    uint32_t src_a = cs_op2(c, LAGFX_SPV_OP_IADD, u32, base, r);
+                    uint32_t src_b = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, src_a, mod);
+                    uint32_t sa = lagfx_spv_builder_alloc_id(c->b), sb = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { u32, sa, cond, src_a, lane }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+                    { uint32_t o[] = { u32, sb, cond, lane, src_b }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+                    ia = sa; ib = sb;
+                } else {
+                    cond = cs_op2(c, LAGFX_SPV_OP_UGREATER_EQUAL, boolt, rem, delta);    /* r-delta >= 0 -> data */
+                    uint32_t src_a = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, delta);
+                    uint32_t src_b = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, cs_op2(c, LAGFX_SPV_OP_IADD, u32, lane, mod), delta);
+                    uint32_t sa = lagfx_spv_builder_alloc_id(c->b), sb = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { u32, sa, cond, src_a, lane }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+                    { uint32_t o[] = { u32, sb, cond, lane, src_b }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+                    ia = sa; ib = sb;
+                }
+                uint32_t from_data = cs_shuffle(c, result_ty_air, data, ia, &k);
+                uint32_t from_fill = cs_shuffle(c, result_ty_air, fill, ib, &k);
+                uint32_t res = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t o[] = { rty, res, cond, from_data, from_fill };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5);
+                bind_value_spv(c, result_value_id, res);
+                set_result_air_type(c, result_value_id, result_ty_air);
+                return;
+            }
+        }
+
+        /* air.wg.barrier(mem_flags, scope) / air.simdgroup.barrier(mem_flags): OpControlBarrier. mem_flags bits: 1 device, 2 threadgroup, 4 texture. */
+        {
+            bool wg = strncmp(fn_name, "air.wg.barrier", 14u) == 0, sg = strncmp(fn_name, "air.simdgroup.barrier", 21u) == 0;
+            if ((wg || sg) && result_value_id == 0u) {
+                int32_t flags = 2;   /* threadgroup, when the flag is not a literal */
+                if (inst->num_ops >= a0 + 1u) (void)resolve_value_lit_i32(c, CS_ARG(0), &flags);
+                uint32_t sem = 0x8u /* AcquireRelease */;
+                if (flags & 2) sem |= 0x100u;   /* WorkgroupMemory */
+                if (flags & 1) sem |= 0x40u;    /* UniformMemory (device buffers) */
+                if (flags & 4) sem |= 0x800u;   /* ImageMemory */
+                if (!(flags & 7)) sem = 0u;     /* mem_none: execution barrier only */
+                uint32_t exec = emit_const_uint32(c, wg ? 2u /* Workgroup */ : 3u /* Subgroup */);
+                uint32_t mem = emit_const_uint32(c, wg ? ((flags & 1) ? 1u /* Device */ : 2u) : 3u);
+                uint32_t semc = emit_const_uint32(c, sem);
+                if (sg) cs_cap(c, false);
+                uint32_t o[] = { exec, mem, semc };
+                lagfx_spv_builder_emit_op(c->b, 224u /* OpControlBarrier */, o, 3);
+                return;
+            }
+        }
+
+        /* air.store.implicit_imageblock.<ty>(value, rt, coord, sample, ?) -> OpImageWrite;  air.load.implicit_imageblock.<ty>(rt, coord, sample, ?) -> OpImageRead. */
+        if (strncmp(fn_name, "air.store.implicit_imageblock.", 30u) == 0 && result_value_id == 0u && inst->num_ops >= a0 + 3u) {
+            int32_t rt = 0; (void)resolve_value_lit_i32(c, CS_ARG(1), &rt);
+            uint32_t img_var = cs_imageblock_image(c, (uint32_t)(rt < 0 ? 0 : rt));
+            uint32_t v4f = emit_type_vec4_f(c);
+            uint32_t vid = CS_ARG(0);
+            uint32_t val = resolve_or_undef(c, vid, v4f);
+            uint32_t vat = value_air_type_idx(c, vid);
+            uint32_t nt = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+            if (vat < nt && ts[vat].kind == LAGFX_AIR_TYPE_VECTOR && ts[vat].num_op >= 2u && ts[vat].op[1] < nt && ts[ts[vat].op[1]].kind == LAGFX_AIR_TYPE_HALF)
+                val = cs_conv(c, LAGFX_SPV_OP_F_CONVERT, v4f, val);
+            uint32_t cid = CS_ARG(2);
+            uint32_t uv2 = emit_type_vec(c, u32, 2u);
+            uint32_t coord = resolve_or_undef(c, cid, uv2);
+            uint32_t cat = value_air_type_idx(c, cid);
+            if (cat < nt && ts[cat].kind == LAGFX_AIR_TYPE_VECTOR && ts[cat].num_op >= 2u && ts[cat].op[1] < nt && ts[ts[cat].op[1]].kind == LAGFX_AIR_TYPE_INTEGER &&
+                ts[ts[cat].op[1]].num_op >= 1u && ts[ts[cat].op[1]].op[0] != 32u)
+                coord = cs_conv(c, LAGFX_SPV_OP_UCONVERT, uv2, coord);
+            coord = cs_tile_coord(c, coord);
+            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, c->cs_stimg_t, img_var);
+            uint32_t o[] = { img, coord, val };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_WRITE, o, 3);
+            return;
+        }
+        if (strncmp(fn_name, "air.load.implicit_imageblock.", 29u) == 0 && result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE && inst->num_ops >= a0 + 2u) {
+            int32_t rt = 0; (void)resolve_value_lit_i32(c, CS_ARG(0), &rt);
+            uint32_t img_var = cs_imageblock_image(c, (uint32_t)(rt < 0 ? 0 : rt));
+            uint32_t v4f = emit_type_vec4_f(c);
+            uint32_t cid = CS_ARG(1);
+            uint32_t uv2 = emit_type_vec(c, u32, 2u);
+            uint32_t coord = resolve_or_undef(c, cid, uv2);
+            uint32_t cat = value_air_type_idx(c, cid);
+            uint32_t nt = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+            if (cat < nt && ts[cat].kind == LAGFX_AIR_TYPE_VECTOR && ts[cat].num_op >= 2u && ts[cat].op[1] < nt && ts[ts[cat].op[1]].kind == LAGFX_AIR_TYPE_INTEGER &&
+                ts[ts[cat].op[1]].num_op >= 1u && ts[ts[cat].op[1]].op[0] != 32u)
+                coord = cs_conv(c, LAGFX_SPV_OP_UCONVERT, uv2, coord);
+            coord = cs_tile_coord(c, coord);
+            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, c->cs_stimg_t, img_var);
+            uint32_t rgba = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t o[] = { v4f, rgba, img, coord };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_READ, o, 4);
+            uint32_t rty = emit_air_type(c, result_ty_air);
+            uint32_t res = rgba;
+            if (rty != v4f) res = cs_conv(c, LAGFX_SPV_OP_F_CONVERT, rty, rgba);
+            bind_value_spv(c, result_value_id, res);
+            set_result_air_type(c, result_value_id, result_ty_air);
+            return;
+        }
+        #undef CS_ARG
+    }
+
     /* === air.sample_texture_2d.<vty> → OpImageSampleImplicitLod ===
      * `tex.sample(s, uv)` lowers to
      *   air.sample_texture_2d.v4f32(tex_ptr, samp_ptr, uv, <opts...>)
@@ -3860,9 +4456,20 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             }
             if (tex_var) {
                 uint32_t ivec2 = emit_type_vec(c, emit_type_int_w(c, 32u, 0u), 2u);
-                uint32_t coord = resolve_or_undef(c,
-                    resolve_relative((uint32_t)inst->ops[coord_slot], next_val_id),
-                    ivec2);
+                uint32_t coord_id = resolve_relative((uint32_t)inst->ops[coord_slot], next_val_id);
+                uint32_t coord = resolve_or_undef(c, coord_id, ivec2);
+                {   /* tex.read(ushort2 xy): a 16-bit coordinate vector is widened -- image coordinates are 32-bit */
+                    uint32_t cat = value_air_type_idx(c, coord_id), nt = 0;
+                    const lagfx_air_type_t *cts = lagfx_air_module_types(c->m, &nt);
+                    if (cat < nt && cts[cat].kind == LAGFX_AIR_TYPE_VECTOR && cts[cat].num_op >= 2u && cts[cat].op[1] < nt &&
+                        cts[cts[cat].op[1]].kind == LAGFX_AIR_TYPE_INTEGER && cts[cts[cat].op[1]].num_op >= 1u &&
+                        (cts[cts[cat].op[1]].op[0] == 16u || cts[cts[cat].op[1]].op[0] == 8u)) {
+                        uint32_t wid = lagfx_spv_builder_alloc_id(c->b);
+                        uint32_t o[] = { ivec2, wid, coord };
+                        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_UCONVERT, o, 3);
+                        coord = wid;
+                    }
+                }
                 uint32_t img_t = emit_type_image2d_f(c);
                 uint32_t v4f   = emit_type_vec4_f(c);
                 uint32_t img_val = lagfx_spv_builder_alloc_id(c->b);
@@ -4016,9 +4623,13 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
 
     /* Find the table entry to get num_args. */
     uint32_t entry_num_args = 0u;
+    bool entry_3way = false;
     for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
-        if (strncmp(fn_name, intrinsic_table[i].prefix, strlen(intrinsic_table[i].prefix)) == 0) {
-            entry_num_args = intrinsic_table[i].num_args;
+        size_t pl = strlen(intrinsic_table[i].prefix);
+        if (strncmp(fn_name, intrinsic_table[i].prefix, pl) == 0) {
+            if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
+            entry_num_args = intrinsic_table[i].num_args & IXF_NARGS;
+            entry_3way = (intrinsic_table[i].num_args & IXF_3WAY) != 0;
             break;
         }
     }
@@ -4061,6 +4672,13 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         uint32_t arg_id  = resolve_relative(arg_rel, next_val_id);
         uint32_t arg_spv = resolve_or_undef(c, arg_id, result_spv_type);
         ops[n_ops++] = arg_spv;
+    }
+    if (entry_3way && n_ops == 7u) {
+        /* fmax3/fmin3(a,b,c) = op(op(a,b),c): the first ExtInst takes (a,b) into a fresh id, the second folds in c. */
+        uint32_t tmp = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t o1[] = { result_spv_type, tmp, c->id_glsl, glsl_inst, ops[4], ops[5] };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o1, 6);
+        ops[4] = tmp; ops[5] = ops[6]; n_ops = 6u;
     }
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, ops, n_ops);
 
@@ -4989,6 +5607,20 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
  *
  * SPIR-V op: OpFNegate (§3.32.2) — core SPIR-V unary float negation
  */
+/* FUNC_CODE_INST_FREEZE (raw record code 58): `freeze x` is x itself for every defined value (the translator never produces poison it must pin), so the result
+ * aliases its operand -- value, AIR type and SPIR-V type. Dropping it left the result id unbound and every later use of it undefined. */
+static void emit_inst_freeze(xlate_ctx_t *c, const lagfx_air_inst_t *inst, uint32_t result_value_id, uint32_t next_val_id) {
+    if (inst->num_ops < 1u || result_value_id == 0u) return;
+    uint32_t src_id = resolve_relative((uint32_t)inst->ops[0], next_val_id);
+    uint32_t v = resolve_value_spv(c, src_id);
+    if (!v) return;
+    bind_value_spv(c, result_value_id, v);
+    uint32_t at = value_air_type_idx(c, src_id);
+    if (at != LAGFX_AIR_TYPE_NONE) set_result_air_type(c, result_value_id, at);
+    uint32_t st = get_value_spv_type(c, src_id);
+    if (st) set_value_spv_type(c, result_value_id, st);
+}
+
 static void emit_inst_unop(xlate_ctx_t *c, uint32_t inst_idx,
                             const lagfx_air_inst_t *inst,
                             uint32_t result_value_id, uint32_t next_val_id) {
@@ -5810,6 +6442,7 @@ static void emit_block_body(xlate_ctx_t *c, uint32_t first, uint32_t last_excl,
             case LAGFX_AIR_INST_INSERTVAL: emit_inst_insertval(c, i, inst, result_value_id, next_val_id); break;
             case LAGFX_AIR_INST_BINOP:     emit_inst_binop(c, i, inst, result_value_id, next_val_id); break;
             case LAGFX_AIR_INST_UNOP:      emit_inst_unop(c, i, inst, result_value_id, next_val_id); break;
+            case LAGFX_AIR_INST_UNKNOWN:   if (inst->raw_code == 58u) emit_inst_freeze(c, inst, result_value_id, next_val_id); break;
             case LAGFX_AIR_INST_CMP:       emit_inst_cmp(c, i, inst, result_value_id, next_val_id); break;
             case LAGFX_AIR_INST_CMP2:      emit_inst_cmp2(c, i, inst, result_value_id, next_val_id); break;
             case LAGFX_AIR_INST_SELECT:
@@ -6565,6 +7198,7 @@ static void dispatch_emit_block(xlate_ctx_t *c, const lagfx_bb_t *bbs,
                 case LAGFX_AIR_INST_INSERTVAL: emit_inst_insertval(c, i, inst, result_value_id, next_val_id); break;
                 case LAGFX_AIR_INST_BINOP:     emit_inst_binop(c, i, inst, result_value_id, next_val_id); break;
                 case LAGFX_AIR_INST_UNOP:      emit_inst_unop(c, i, inst, result_value_id, next_val_id); break;
+                case LAGFX_AIR_INST_UNKNOWN:   if (inst->raw_code == 58u) emit_inst_freeze(c, inst, result_value_id, next_val_id); break;
                 case LAGFX_AIR_INST_CMP:       emit_inst_cmp(c, i, inst, result_value_id, next_val_id); break;
                 case LAGFX_AIR_INST_CMP2:      emit_inst_cmp2(c, i, inst, result_value_id, next_val_id); break;
                 case LAGFX_AIR_INST_SELECT:
@@ -6976,6 +7610,9 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
                 break;
             case LAGFX_AIR_INST_UNOP:
                 emit_inst_unop(c, i, inst, result_value_id, next_val_id);
+                break;
+            case LAGFX_AIR_INST_UNKNOWN:
+                if (inst->raw_code == 58u) emit_inst_freeze(c, inst, result_value_id, next_val_id);
                 break;
             case LAGFX_AIR_INST_CMP:
                 emit_inst_cmp(c, i, inst, result_value_id, next_val_id);
@@ -8090,6 +8727,8 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     c.stage = stage;
     c.iface_own_in = own_in;
     c.iface_vs_out = vs_out;
+    lagfx_stage_keys_t own_kernel;
+    if (stage == LAGFX_XLATE_STAGE_COMPUTE && !own_in && lagfx_air_stage_keys(m, false, &own_kernel)) c.iface_own_in = &own_kernel;
 
     lagfx_status_t st = xlate_ctx_init_fn(&c, fn_idx);
     if (st != LAGFX_OK) goto fail;
@@ -8148,6 +8787,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
 
     st = translate_body(&c);
     if (st != LAGFX_OK) goto fail;
+    if (c.stage == LAGFX_XLATE_STAGE_COMPUTE) cs_emit_entry_point(&c);   /* after the body: the interface list now holds every builtin / image variable it used */
 
     *out_blob = lagfx_spv_builder_finish(c.b, out_size_bytes);
     if (!*out_blob) goto oom;

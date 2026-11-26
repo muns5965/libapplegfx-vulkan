@@ -569,6 +569,15 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
+    {   /* simd-group (subgroup) operations a compute shader may use: Metal's simd_* intrinsics map to GroupNonUniform*; the device must offer them in the COMPUTE stage */
+        VkPhysicalDeviceVulkan11Properties sgp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES };
+        VkPhysicalDeviceProperties2 pp2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sgp };
+        vkGetPhysicalDeviceProperties2(s->phys_device, &pp2);
+        if ((sgp.subgroupSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT) && (sgp.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT)) {
+            caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP);
+            if (sgp.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE);
+        }
+    }
     caps_en &= ~caps_off;
     if (!spirv14_core && have_spirv14_ext && (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14))) {
         wanted_dev_exts[wanted_dev_n++] = "VK_KHR_spirv_1_4";

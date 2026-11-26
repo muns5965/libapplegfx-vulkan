@@ -48,6 +48,7 @@ extern "C" {
 typedef enum {
     LAGFX_XLATE_STAGE_VERTEX   = 0,
     LAGFX_XLATE_STAGE_FRAGMENT = 1,
+    LAGFX_XLATE_STAGE_COMPUTE  = 2,   /* GLCompute: air.kernel (compute kernel or tile function) */
 } lagfx_xlate_stage_t;
 
 /* Translate the body of `m->functions[fn_idx]` into a SPIR-V module.

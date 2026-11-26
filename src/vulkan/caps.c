@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle" };
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -134,6 +134,9 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
             case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16); break;
             case 4441: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB); break;
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
+            case 61: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP); break;                                        /* GroupNonUniform */
+            case 65: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE); break; /* GroupNonUniformShuffle */
+            case 66: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE); break; /* GroupNonUniformShuffleRelative */
             default: break;
             }
         } else if (op != 17u && i > 5u && op >= 71u) {   /* capabilities come first in a module: past the first decoration / type / function we are done */

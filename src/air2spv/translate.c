@@ -24,11 +24,13 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <stdio.h>
 
 typedef enum {
     LAGFX_TRANS_STAGE_UNKNOWN  = 0,
     LAGFX_TRANS_STAGE_VERTEX   = 1,
     LAGFX_TRANS_STAGE_FRAGMENT = 2,
+    LAGFX_TRANS_STAGE_COMPUTE  = 3,   /* air.kernel: a compute kernel or a tile function */
 } lagfx_translate_stage_t;
 
 static lagfx_translate_stage_t discover_stage(const lagfx_air_module_t *m) {
@@ -42,7 +44,7 @@ static lagfx_translate_stage_t discover_stage(const lagfx_air_module_t *m) {
      * the MVP — the named-node's existence is enough. */
     if (lagfx_air_module_named_metadata(m, "air.vertex"))   return LAGFX_TRANS_STAGE_VERTEX;
     if (lagfx_air_module_named_metadata(m, "air.fragment")) return LAGFX_TRANS_STAGE_FRAGMENT;
-    if (lagfx_air_module_named_metadata(m, "air.kernel"))   return LAGFX_TRANS_STAGE_UNKNOWN;  /* compute, not supported yet */
+    if (lagfx_air_module_named_metadata(m, "air.kernel"))   return LAGFX_TRANS_STAGE_COMPUTE;
     return LAGFX_TRANS_STAGE_UNKNOWN;
 }
 
@@ -107,6 +109,7 @@ lagfx_air_arg_bindings(const lagfx_air_module_t *m,
     if (!m || !out || max == 0u) return 0u;
     const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
     if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.kernel");
     if (!named || named->num_operands < 1u) return 0u;
     /* Entry-point node: NAMED_NODE ops are raw IDs. */
     const lagfx_air_metadata_t *ep = md_record(m, named->operands[0]);
@@ -178,12 +181,25 @@ static void md_iface_key(const lagfx_air_module_t *m, const lagfx_air_metadata_t
     }
 }
 
+/* Key of one kernel argument: the first "air.*" tag of its metadata NODE -- "air.buffer", "air.texture", "air.imageblock", or the thread-position
+ * builtin ("air.threadgroup_position_in_grid", "air.thread_index_in_simdgroup", ...). The leading i32 is the argument index, not a tag. */
+static void md_kernel_key(const lagfx_air_module_t *m, const lagfx_air_metadata_t *node, char *out, size_t cap) {
+    out[0] = 0;
+    for (uint32_t j = 0; j < node->num_operands; j++) {
+        if (node->operands[j] == 0u) continue;
+        const char *s = md_string(m, node->operands[j] - 1u);
+        if (s && strncmp(s, "air.", 4) == 0) { snprintf(out, cap, "%s", s); return; }
+    }
+}
+
 bool
 lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys_t *out) {
     if (!m || !out) return false;
     memset(out, 0, sizeof *out);
     const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
     if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
+    bool kernel = false;
+    if (!named) { named = lagfx_air_module_named_metadata(m, "air.kernel"); kernel = named != NULL; }
     if (!named || named->num_operands < 1u) return false;
     const lagfx_air_metadata_t *ep = md_record(m, named->operands[0]);
     if (!ep || ep->kind != LAGFX_AIR_MD_NODE || ep->num_operands < 3u) return false;
@@ -193,8 +209,10 @@ lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys
     if (!list || list->kind != LAGFX_AIR_MD_NODE) return false;
     for (uint32_t a = 0; a < list->num_operands && out->n < LAGFX_STAGE_KEYS_MAX; a++) {
         const lagfx_air_metadata_t *e = list->operands[a] ? md_record(m, list->operands[a] - 1u) : NULL;
-        if (e && e->kind == LAGFX_AIR_MD_NODE)
-            md_iface_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN);
+        if (e && e->kind == LAGFX_AIR_MD_NODE) {
+            if (kernel) md_kernel_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN);
+            else        md_iface_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN);
+        }
         out->n++;
     }
     return true;
@@ -244,16 +262,17 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
             body_fn = i; break;
         }
         if (body_fn != (uint32_t)-1 && stage != LAGFX_TRANS_STAGE_UNKNOWN) {
-            lagfx_xlate_stage_t xs = (stage == LAGFX_TRANS_STAGE_VERTEX)
-                                       ? LAGFX_XLATE_STAGE_VERTEX
-                                       : LAGFX_XLATE_STAGE_FRAGMENT;
+            lagfx_xlate_stage_t xs = (stage == LAGFX_TRANS_STAGE_VERTEX)   ? LAGFX_XLATE_STAGE_VERTEX
+                                   : (stage == LAGFX_TRANS_STAGE_COMPUTE) ? LAGFX_XLATE_STAGE_COMPUTE
+                                                                           : LAGFX_XLATE_STAGE_FRAGMENT;
             LAGFX_TRACE("air2spv: translating fn[%u]", body_fn);
             lagfx_stage_keys_t own;
-            bool have_own = (xs == LAGFX_XLATE_STAGE_FRAGMENT) && vs_out &&
-                            lagfx_air_stage_keys(m, false, &own);
+            bool have_own = (xs == LAGFX_XLATE_STAGE_COMPUTE)
+                              ? lagfx_air_stage_keys(m, false, &own)   /* a kernel's builtin arguments are identified by these keys */
+                              : ((xs == LAGFX_XLATE_STAGE_FRAGMENT) && vs_out && lagfx_air_stage_keys(m, false, &own));
             lagfx_status_t bst = lagfx_air2spv_translate_function_ex(m, body_fn, xs,
                                                                     have_own ? &own : NULL,
-                                                                    have_own ? vs_out : NULL,
+                                                                    (have_own && xs != LAGFX_XLATE_STAGE_COMPUTE) ? vs_out : NULL,
                                                                     out_blob, out_size_bytes);
             if (bst == LAGFX_OK) {
                 /* the translator does not always declare the 8/16-bit storage capabilities it relies on: add them so a device that has the feature accepts the module */
@@ -275,8 +294,12 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
             LAGFX_TRACE("air2spv: detected fragment stage; emitting reference RenderTarget output");
             rc = lagfx_air2spv_emit_render_target_stub(out_blob, out_size_bytes);
             break;
+        case LAGFX_TRANS_STAGE_COMPUTE:
+            /* No reference stub exists for a kernel: a failed body translation is a failed translation (never a shader that silently does nothing). */
+            LAGFX_LOG("air2spv: compute kernel translation failed");
+            return LAGFX_ERR_PROTOCOL;
         default:
-            LAGFX_LOG("air2spv: could not discover entry-point stage (no air.vertex / air.fragment NAMED_NODE)");
+            LAGFX_LOG("air2spv: could not discover entry-point stage (no air.vertex / air.fragment / air.kernel NAMED_NODE)");
             return LAGFX_ERR_PROTOCOL;
     }
 

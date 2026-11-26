@@ -1,1 +1,1 @@
-c5114484c9521c2e tile_simd_blur_15
+# "<lib hash> <function>" per line: shaders allowed to fail translation. Currently none (tile_simd_blur_15, the former entry, is translated as a compute kernel).
