@@ -112,7 +112,7 @@ int main(void) {
         /* table overflow reported with its count */
         for (uint32_t i = 0; i < LAGFX_DRAW_DIAG_TABLE + 7; i++) { lagfx_draw_ev_t y = ev(9000 + i, LAGFX_DD_OK); lagfx_draw_diag_record(d3, &y); }
         lagfx_draw_diag_flush(r, true);
-        assert(file_lines(path, "table_overflow_draws=8 ") == 1);   /* 1 existing tuple leaves 127 slots; 135 new tuples -> 8 do not fit */
+        assert(file_lines(path, "draws=147(+135) ok=135(+135) no_pipeline=0(+0) unbound_tex=0(+0) unbound_buf=0(+0) other=12(+0) distinct=128/128 table_overflow_draws=8 ") == 1);   /* 1 existing tuple leaves 127 slots; 135 new tuples -> 8 do not fit */
         lagfx_draw_diag_free(r); free(r);
     }
 
