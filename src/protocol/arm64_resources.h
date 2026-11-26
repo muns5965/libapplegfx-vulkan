@@ -78,6 +78,7 @@ enum { LAGFX_A64_BUFFER = 1, LAGFX_A64_TEXTURE = 2 };
 struct lagfx_a64_obj {
     uint32_t task, ref, entry[3];
     int      kind;
+    uint64_t gen;                       /* unique per creation (a replaced object is a new one): cache keys of the Render executor include it */
     bool     leak;                      /* creation hit a GPU timeout: never freed */
     bool     host_valid, guest_stale;
     bool     has_pages;                 /* vpage != 0 */
@@ -98,6 +99,8 @@ VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x);
  * texture cannot be a colour target (3D, no attachment usage). target_end records COLOR_ATTACHMENT_OPTIMAL -> GENERAL (attachment write -> transfer / shader
  * read+write), so a following Blit (or a later Render pass) in the same command buffer sees it. */
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h);
+/* The 2D layer-0 level-0 view of a sampled texture (GENERAL layout, usable as SAMPLED_IMAGE in the shaders); VK_NULL_HANDLE if the format cannot be sampled / 3D. */
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* The task entry's mirror object (NULL if never created); no side effects. For tests / diagnostics. */
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref);

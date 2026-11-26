@@ -117,7 +117,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     /* Input assembly */
     VkPipelineInputAssemblyStateCreateInfo ia = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO,
-        .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+        .topology = desc->topology_plus1 ? (VkPrimitiveTopology)(desc->topology_plus1 - 1u) : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
     };
 
     /* Viewport with the Metal→Vulkan Y-FLIP (negative height, origin at

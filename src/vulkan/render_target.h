@@ -76,6 +76,13 @@ lagfx_status_t lagfx_vk_render_target_create(struct lagfx_vk_state *vk,
                                              VkFormat format,
                                              lagfx_vk_render_target_t *out);
 
+/* Same, plus VK_IMAGE_USAGE_SAMPLED_BIT (ARM64 exec: a texture the guest renders to AND samples). */
+lagfx_status_t lagfx_vk_render_target_create_sampled(struct lagfx_vk_state *vk,
+                                                     uint32_t width,
+                                                     uint32_t height,
+                                                     VkFormat format,
+                                                     lagfx_vk_render_target_t *out);
+
 /* Wrap an existing VkImage+view+memory into a render target struct without
  * allocating new resources. The caller retains ownership of the Vulkan
  * objects — destroy does NOT free them. Use this to share the pipeline's

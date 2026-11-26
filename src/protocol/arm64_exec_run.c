@@ -3,6 +3,8 @@
  */
 #include "arm64_exec_run.h"
 #include "arm64_objects.h"
+#include "arm64_pipeline.h"
+#include "arm64_exec_decode.h"
 #include "arm64_resources.h"
 #include "arm64_completion.h"
 #include "../device.h"
@@ -25,6 +27,7 @@ uint32_t lagfx_a64_exec_poll(lagfx_protocol_t *p) { (void)p; return 0; }
 bool lagfx_a64_exec_render_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return false; }
 void lagfx_a64_exec_drop_task(lagfx_protocol_t *p, uint32_t task_id) { (void)p; (void)task_id; }
 void lagfx_a64_exec_free(lagfx_protocol_t *p) { (void)p; }
+uint32_t lagfx_a64_exec_deferred_count(const lagfx_protocol_t *p) { (void)p; return 0; }
 void lagfx_a64_exec_object_counts(const lagfx_protocol_t *p, uint32_t *live, uint64_t *created, uint64_t *destroyed) {
     (void)p; if (live) *live = 0; if (created) *created = 0; if (destroyed) *destroyed = 0;
 }
@@ -43,17 +46,24 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include <vulkan/vulkan.h>
 
 #define A64_MAX_VB    31u
+#define A64_MAX_FB    32u
+#define A64_MAX_FSAMP 16u
+#define A64_PIPE_CACHE 8u
 
-enum { K_PIPE = 3 };
+enum { K_PIPE = 3, K_SAMP = 4 };
 
-typedef struct { uint32_t kind; } objhdr_t;
+/* gen: unique per creation (a replaced (task, ref) is a new object with a new gen); every cache key below includes it. Mirror buffers/textures carry their own gen. */
+typedef struct { uint32_t kind; uint64_t gen; } objhdr_t;
+typedef struct { objhdr_t h; VkSampler s; } a64_samp_t;
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    VkPipeline pipe; VkFormat fmt;   /* built for the colour format of the pass that set it; rebuilt when that changes */
+    struct { VkPipeline pl; VkFormat fmt; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour format, topology), owned by THIS object only */
+    uint32_t ncache;
+    uint32_t ref;
 } a64_pipe_t;
 
-typedef struct { int kind; void *obj; VkPipeline pipe; } deferred_t;   /* kind 0 = whole object, 1 = a VkPipeline */
+typedef struct { int kind; void *obj; VkPipeline pipe; VkDescriptorSet ds; } deferred_t;   /* kind 0 = whole object, 1 = a VkPipeline, 2 = a descriptor set */
 
 /* Buffers, textures and the exec's command buffer / fence / write-backs belong to the resource mirror (arm64_resources.c): ONE exec context and ONE
  * command buffer per exec. This module keeps only what is Render specific: the (task, ref) table of pipeline objects and the open pass. */
@@ -71,6 +81,12 @@ typedef struct {
     bool dispatching, consumed;      /* inside lagfx_render_inner_dispatch for a tag of this module */
     lagfx_translate_render_state_t rs;   /* the existing render encoder: begin / bind / draw / end of the open pass */
     struct { lagfx_a64_obj_t *b; uint64_t off; } vb[A64_MAX_VB];
+    struct { lagfx_a64_obj_t *b; uint64_t off; } fb[A64_MAX_FB];   /* fragment buffers (tags 110/111) */
+    lagfx_a64_obj_t *ftex[A64_MAX_FB];                             /* fragment textures (114): mirror textures, GENERAL layout */
+    a64_samp_t *fsamp[A64_MAX_FSAMP];                              /* fragment samplers (112) */
+    VkPipeline bound_vk;                                           /* the VkPipeline bound in the open pass */
+    VkSampler defsamp; VkDescriptorPool dpool; VkDescriptorSet last_ds; uint64_t last_ds_key;   /* descriptor sets: one per draw, reused while the binding key is unchanged */
+    uint64_t gen_ctr; VkDeviceSize min_sb_align;
     lagfx_draw_region_t region;
     deferred_t *def; uint32_t ndef, capdef;
 } a64_run_t;
@@ -100,9 +116,13 @@ static void destroy_obj_now(a64_run_t *r, void *obj) {
     objhdr_t *h = obj;
     if (h->kind == K_PIPE) {
         a64_pipe_t *pp = obj;
-        destroy_pipeline_vk(r->vk, pp->pipe);
+        for (uint32_t i = 0; i < pp->ncache; i++) destroy_pipeline_vk(r->vk, pp->cache[i].pl);
         if (pp->src.release) pp->src.release(pp->src.user);
         free(pp);
+    } else if (h->kind == K_SAMP) {
+        a64_samp_t *sm = obj;
+        if (r->vk && sm->s) vkDestroySampler(r->vk->device, sm->s, NULL);
+        free(sm);
     } else free(obj);
 }
 static void defer(a64_run_t *r, int kind, void *obj, VkPipeline pl) {
@@ -112,7 +132,7 @@ static void defer(a64_run_t *r, int kind, void *obj, VkPipeline pl) {
         if (!n) return;   /* cannot park it: leaking one object is the safe choice (freeing under a recording command buffer is not) */
         r->def = n, r->capdef = nc;
     }
-    r->def[r->ndef++] = (deferred_t){ kind, obj, pl };
+    r->def[r->ndef++] = (deferred_t){ kind, obj, pl, VK_NULL_HANDLE };
 }
 static void obj_destroy_cb(void *ctx, void *obj) {
     a64_run_t *r = ctx;
@@ -122,27 +142,73 @@ static void obj_destroy_cb(void *ctx, void *obj) {
 static void flush_deferred(a64_run_t *r) {
     if (lagfx_a64_res_busy(r->p)) return;
     for (uint32_t i = 0; i < r->ndef; i++) {
-        if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe); else destroy_obj_now(r, r->def[i].obj);
+        if (r->def[i].kind == 2) { if (r->vk && r->dpool) vkFreeDescriptorSets(r->vk->device, r->dpool, 1, &r->def[i].ds); }
+        else if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe);
+        else destroy_obj_now(r, r->def[i].obj);
     }
     r->ndef = 0;
+    r->last_ds = VK_NULL_HANDLE, r->last_ds_key = 0;
 }
 
 /* ---- object creation: only pipelines live in this table; buffers and textures are the mirror's (arm64_resources.c) ---- */
+
+/* Serialized sampler (tag 3): {tag, size, ref, bits u64, lod min f32, lod max f32} -> VkSampler (pvg_metal.m makeSerialized). Compare function, unnormalized
+ * coordinates, anisotropy and "mirror clamp to edge" are not mapped (the nearest plain mode is used). */
+static VkSamplerAddressMode vk_addr(uint32_t m) {
+    switch (m) {
+    case 2: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    case 1: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
+    default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    }
+}
+static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, const uint32_t e[3]) {
+    uint8_t d[32];
+    uint32_t size = e[0] >> 8;
+    if (!r->vk || size < 20u || !lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], d, size < sizeof d ? size : sizeof d)) { CNT(p).obj_unsupported++; return NULL; }
+    uint64_t bits = lagfx_le64(d + 12);
+    uint32_t lo = size >= 24u ? lagfx_le32(d + 20) : 0, hi = size >= 28u ? lagfx_le32(d + 24) : 0;
+    float lod_min, lod_max;
+    memcpy(&lod_min, &lo, 4), memcpy(&lod_max, &hi, 4);
+    if (!(lod_max > lod_min) || lod_max > 32.f) lod_min = 0.f, lod_max = 32.f;
+    uint32_t bc = (uint32_t)(bits >> 20) & 15u, mip = (uint32_t)(bits >> 24) & 3u;
+    VkSamplerCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        .minFilter = (bits & 3u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .magFilter = ((bits >> 2) & 3u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+        .mipmapMode = mip == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = vk_addr((uint32_t)(bits >> 8) & 15u), .addressModeV = vk_addr((uint32_t)(bits >> 12) & 15u), .addressModeW = vk_addr((uint32_t)(bits >> 16) & 15u),
+        .minLod = mip ? lod_min : 0.f, .maxLod = mip ? lod_max : 0.25f,
+        .borderColor = bc == 2u ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : bc == 1u ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
+    a64_samp_t *sm = calloc(1, sizeof *sm);
+    if (!sm) return NULL;
+    sm->h.kind = K_SAMP;
+    if (vkCreateSampler(r->vk->device, &ci, NULL, &sm->s) != VK_SUCCESS) { free(sm); p->diag2.exec.pipe.sampler_failed++; return NULL; }
+    p->diag2.exec.pipe.samplers++;
+    return sm;
+}
 
 static void *make_pipeline(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
     if (!r->resolver) { CNT(p).pipeline_unresolved++; return NULL; }
     a64_pipe_t *pp = calloc(1, sizeof *pp);
     if (!pp) return NULL;
-    pp->h.kind = K_PIPE;
+    pp->h.kind = K_PIPE, pp->ref = ref;
     if (!r->resolver(r->resolver_ctx, p, t, ref, e, &pp->src)) { CNT(p).pipeline_unresolved++; free(pp); return NULL; }
     return pp;
 }
 
-static void *obj_create_cb(void *ctx, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
-    a64_run_t *r = ctx;
-    if ((e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) return make_pipeline(r, p, t, ref, e);
+static void *obj_create_inner(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
+    if ((e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) {   /* by the payload's own tag: 3 = sampler; anything else goes to the pipeline resolver, which rejects what it cannot execute */
+        uint8_t tg[4];
+        if ((e[0] >> 8) >= 4u && lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], tg, 4) && lagfx_le32(tg) == 3u) return make_sampler(r, p, t, e);
+        return make_pipeline(r, p, t, ref, e);
+    }
     CNT(p).obj_unsupported++;
     return NULL;
+}
+static void *obj_create_cb(void *ctx, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
+    a64_run_t *r = ctx;
+    void *o = obj_create_inner(r, p, t, ref, e);
+    if (o) ((objhdr_t *)o)->gen = ++r->gen_ctr;
+    return o;
 }
 
 static a64_run_t *run_get(lagfx_protocol_t *p, bool create) {
@@ -153,16 +219,19 @@ static a64_run_t *run_get(lagfx_protocol_t *p, bool create) {
     lagfx_a64_obj_ops_t ops = { r, obj_create_cb, obj_destroy_cb };
     r->objs = lagfx_a64_objects_new(&ops);
     if (!r->objs) { free(r); return NULL; }
+    r->resolver = lagfx_a64_pipeline_resolve;   /* the default resolver of ARM64 mode (arm64_pipeline.c); lagfx_a64_exec_set_pipeline_resolver overrides it */
     p->a64_exec = r;
     return r;
 }
 
-static a64_pipe_t *get_pipe(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref) {
+static void *get_kind(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, uint32_t kind) {
     void *o = lagfx_a64_objects_get(r->objs, p, t, ref, NULL);
-    return (o && ((objhdr_t *)o)->kind == K_PIPE) ? o : NULL;
+    return (o && ((objhdr_t *)o)->kind == kind) ? o : NULL;
 }
+static a64_pipe_t *get_pipe(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref) { return get_kind(r, p, t, ref, K_PIPE); }
 
 static void pass_end(a64_run_t *r);
+static void reset_frag_tables(a64_run_t *r);
 
 /* ---- API: configuration and lifetime ---- */
 
@@ -195,7 +264,15 @@ void lagfx_a64_exec_free(lagfx_protocol_t *p) {
     if (gpu_busy) r->vk = NULL;               /* the Vulkan pipelines may still be in use: leak them */
     p->a64_exec = NULL;                       /* res busy state is gone: the table frees its objects at once */
     lagfx_a64_objects_free(r->objs);
-    for (uint32_t i = 0; i < r->ndef; i++) { if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe); else destroy_obj_now(r, r->def[i].obj); }
+    for (uint32_t i = 0; i < r->ndef; i++) {
+        if (r->def[i].kind == 2) { if (r->vk && r->dpool) vkFreeDescriptorSets(r->vk->device, r->dpool, 1, &r->def[i].ds); }
+        else if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe);
+        else destroy_obj_now(r, r->def[i].obj);
+    }
+    if (r->vk) {   /* gpu_busy leaves r->vk NULL: with work in flight these are leaked, never destroyed under the GPU */
+        if (r->dpool) vkDestroyDescriptorPool(r->vk->device, r->dpool, NULL);
+        if (r->defsamp) vkDestroySampler(r->vk->device, r->defsamp, NULL);
+    }
     free(r->def);
     free(r);
     lagfx_a64_exec_unlock(p);
@@ -211,6 +288,8 @@ void lagfx_a64_exec_object_counts(const lagfx_protocol_t *p, uint32_t *live, uin
     if (created) *created = st.created + mc;
     if (destroyed) *destroyed = st.destroyed + md;
 }
+
+uint32_t lagfx_a64_exec_deferred_count(const lagfx_protocol_t *p) { a64_run_t *r = p ? RUN(p) : NULL; return r ? r->ndef : 0; }
 
 bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, void *dst, size_t dst_size, uint32_t *width, uint32_t *height) {
     return p && task && lagfx_a64_res_readback(p, task->id, ref, dst, dst_size, width, height);
@@ -236,6 +315,8 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     r->task = task;
     memset(r->vb, 0, sizeof r->vb);
     memset(&r->region, 0, sizeof r->region);
+    reset_frag_tables(r);
+    r->last_ds = VK_NULL_HANDLE, r->bound_vk = VK_NULL_HANDLE;
     if (!task || (nres && !res)) return false;
     /* ONE exec context + ONE command buffer for Render and Blit segments; the resource-flag rules (0x01 / 0x02 uploads, stale guard) are applied inside */
     r->x = lagfx_a64_res_begin(p, task->id, res, nres);
@@ -247,6 +328,148 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
         } else CNT(p).no_vulkan++;
         return false;
     }
+    /* the resource list's pipeline / sampler objects (serialized, type 7) are resolved here, as before: the mirror only owns buffers and textures */
+    for (uint32_t i = 0; i < nres; i++) {
+        uint32_t ref = lagfx_le32(res + 8u * i), e[3];
+        if (lagfx_a64_objects_read_entry(p, task, ref, e) && (e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) (void)lagfx_a64_objects_get(r->objs, p, task, ref, NULL);
+    }
+    return true;
+}
+
+/* ---- pipeline / descriptor support (draw time) ---- */
+
+static void reset_frag_tables(a64_run_t *r) {
+    memset(r->fb, 0, sizeof r->fb), memset(r->ftex, 0, sizeof r->ftex), memset(r->fsamp, 0, sizeof r->fsamp);
+}
+
+/* The guest rewrote the serialized payload under an unchanged object entry: the pipeline built from the old bytes is stale. The (task, ref) object is replaced
+ * (a new generation); the old one and its VkPipelines are released through the deferred list (never under a recording or still-running command buffer). */
+static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t ref) {
+    a64_pipe_t *pp = get_pipe(r, p, r->task, ref);
+    uint32_t e[3];
+    uint64_t h;
+    if (pp && pp->src.blob_hash && lagfx_a64_objects_read_entry(p, r->task, ref, e) && lagfx_a64_payload_hash(p, r->task, e, &h) && h != pp->src.blob_hash) {
+        lagfx_a64_objects_invalidate(r->objs, r->task->id, ref);
+        p->diag2.exec.pipe.pipe_replaced++;
+        pp = get_pipe(r, p, r->task, ref);
+    }
+    return pp;
+}
+
+/* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
+static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, VkFormat fmt, uint32_t topo) {
+    for (uint32_t i = 0; i < pp->ncache; i++) if (pp->cache[i].fmt == fmt && pp->cache[i].topo == topo) return pp->cache[i].pl;
+    lagfx_pipeline_desc_t d = pp->src.desc;
+    d.color_format = fmt;
+    d.topology_plus1 = (uint8_t)(topo + 1u);
+    VkPipeline pl = VK_NULL_HANDLE;
+    if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) { p->diag2.exec.pipe.pipe_build_failed++; return VK_NULL_HANDLE; }
+    p->diag2.exec.pipe.pipes_built++;
+    if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
+    if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
+    pp->cache[pp->ncache].pl = pl, pp->cache[pp->ncache].fmt = fmt, pp->cache[pp->ncache].topo = (uint8_t)topo;
+    pp->ncache++;
+    return pl;
+}
+
+static VkSampler default_sampler(a64_run_t *r) {
+    if (!r->defsamp) {
+        VkSamplerCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_LINEAR, .minFilter = VK_FILTER_LINEAR,
+            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+        if (vkCreateSampler(r->vk->device, &ci, NULL, &r->defsamp) != VK_SUCCESS) r->defsamp = VK_NULL_HANDLE;
+    }
+    return r->defsamp;
+}
+
+static bool descriptor_pool(a64_run_t *r) {
+    if (r->dpool) return true;
+    VkDescriptorPoolSize sz[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 } };
+    VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 512, .poolSizeCount = 3, .pPoolSizes = sz };
+    if (vkCreateDescriptorPool(r->vk->device, &ci, NULL, &r->dpool) != VK_SUCCESS) { r->dpool = VK_NULL_HANDLE; return false; }
+    VkPhysicalDeviceProperties pr;
+    vkGetPhysicalDeviceProperties(r->vk->phys_device, &pr);
+    r->min_sb_align = pr.limits.minStorageBufferOffsetAlignment ? pr.limits.minStorageBufferOffsetAlignment : 1;
+    return true;
+}
+
+/* Fills and binds the set-0 descriptor set of the pipeline from the Metal tables recorded by tags 125/126/110/111/114/112. Anything unbound / misaligned /
+ * a feedback loop skips the draw (counted): Metal leaves those undefined. The key (pipeline gen, then per binding the object gen and offset) lets consecutive
+ * draws share one set; a replaced object has a new gen, so a stale set is never reused. Mirror textures stay in GENERAL layout (valid for sampling), so no
+ * layout change is recorded inside the pass. A set is parked in the deferred list and freed only once no recorded / running work can use it. */
+static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) {
+    const lagfx_a64_pipeline_src_t *s = &pp->src;
+    if (!s->n_bind) return true;
+    if (!descriptor_pool(r)) { p->diag2.exec.pipe.desc_failed++; return false; }
+    VkDescriptorBufferInfo bi[LAGFX_A64_MAX_BINDINGS];
+    VkDescriptorImageInfo ii[LAGFX_A64_MAX_BINDINGS];
+    VkWriteDescriptorSet w[LAGFX_A64_MAX_BINDINGS];
+    uint64_t key = 1469598103934665603ull ^ pp->h.gen;
+#define MIX(v) key = (key ^ (uint64_t)(v)) * 1099511628211ull
+    for (uint32_t i = 0; i < s->n_bind; i++) {
+        int16_t mi_s = s->bind[i].metal_index;
+        uint32_t mi = (uint32_t)mi_s, st = s->bind[i].stage;
+        memset(&w[i], 0, sizeof w[i]);
+        w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, w[i].dstBinding = s->bind[i].binding, w[i].descriptorCount = 1;
+        MIX(s->bind[i].binding);
+        if (s->bind[i].kind == LAGFX_A64_BIND_BUFFER) {
+            lagfx_a64_obj_t *b = mi_s < 0 ? NULL : st ? (mi < A64_MAX_FB ? r->fb[mi].b : NULL) : (mi < A64_MAX_VB ? r->vb[mi].b : NULL);
+            uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
+            if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (off % r->min_sb_align) { p->diag2.exec.pipe.desc_unaligned++; return false; }
+            bi[i] = (VkDescriptorBufferInfo){ b->buf, off, b->length - off };
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, w[i].pBufferInfo = &bi[i];
+            MIX(b->gen), MIX(off);
+        } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
+            lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
+            if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (t == r->rt) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling the attachment being rendered */
+            VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_sample_view(r->x, t);   /* a linear texture needs a buffer pull recorded outside a pass: not sampled */
+            if (!v) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
+            MIX(t->gen);
+        } else {
+            a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? r->fsamp[mi] : NULL;
+            VkSampler vs = sm ? sm->s : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one */
+            if (!vs) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];
+            MIX(sm ? sm->h.gen : 0xd5u);
+        }
+    }
+#undef MIX
+    VkDescriptorSet ds = r->last_ds_key == key ? r->last_ds : VK_NULL_HANDLE;
+    if (!ds) {
+        VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = r->dpool, .descriptorSetCount = 1, .pSetLayouts = &s->dsl };
+        if (vkAllocateDescriptorSets(r->vk->device, &ai, &ds) != VK_SUCCESS) { p->diag2.exec.pipe.desc_failed++; return false; }
+        for (uint32_t i = 0; i < s->n_bind; i++) w[i].dstSet = ds;
+        vkUpdateDescriptorSets(r->vk->device, s->n_bind, w, 0, NULL);
+        if (r->ndef == r->capdef) {
+            uint32_t nc = r->capdef ? r->capdef * 2u : 64u;
+            deferred_t *d2 = realloc(r->def, nc * sizeof *d2);
+            if (!d2) { vkFreeDescriptorSets(r->vk->device, r->dpool, 1, &ds); p->diag2.exec.pipe.desc_failed++; return false; }
+            r->def = d2, r->capdef = nc;
+        }
+        r->def[r->ndef++] = (deferred_t){ 2, NULL, VK_NULL_HANDLE, ds };   /* freed once nothing recorded or running can use it */
+        r->last_ds = ds, r->last_ds_key = key;
+        p->diag2.exec.pipe.desc_sets++;
+    }
+    vkCmdBindDescriptorSets(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_BIND_POINT_GRAPHICS, s->desc.layout, 0, 1, &ds, 0, NULL);
+    return true;
+}
+
+/* Everything a draw needs besides the vertex buffer: the VkPipeline of this primitive type (Metal 0 point, 1 line, 2 line strip, 3 triangle, 4 triangle strip =
+ * the VkPrimitiveTopology values) bound in the open pass, and the descriptor set. False = draw skipped (counted). */
+static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
+    if (prim > 4u) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; return false; }
+    if (prim == 0u && r->pipe->src.no_point_size) { p->diag2.exec.pipe.point_no_size++; CNT(p).draws_skipped++; return false; }   /* Metal needs [[point_size]] too */
+    VkPipeline vp = pipeline_for(r, p, r->pipe, r->rt->format, prim);
+    if (!vp) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
+    if (r->bound_vk != vp) {
+        if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
+        r->bound_vk = vp;
+    }
+    if (!bind_descriptors(r, p, r->pipe)) { CNT(p).draws_skipped++; return false; }
     return true;
 }
 
@@ -256,7 +479,7 @@ static void pass_end(a64_run_t *r) {
         lagfx_a64_res_target_end(r->x, r->rt);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
     }
     r->pass_open = r->rendering = false;
-    r->rt = NULL, r->pipe = NULL, r->pipe_set = false;
+    r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->bound_vk = VK_NULL_HANDLE;
 }
 
 #define R32(o) lagfx_le32(rec + (o))
@@ -272,6 +495,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     r->pass_open = true;                        /* even without a usable target: the following tags belong to this pass */
     memset(r->vb, 0, sizeof r->vb);
     memset(&r->region, 0, sizeof r->region);
+    reset_frag_tables(r);
     lagfx_render_pass_full_desc_t d;
     if (n < LAGFX_RENDER_PASS_WIRE_SIZE || lagfx_parse_render_pass_descriptor(rec, n, &d) != 0) { CNT(p).bad_rec++; tag_unsup(p, 26); return; }
     if (d.color_attachment_count > 1u || d.has_depth || d.has_stencil) CNT(p).extra_attach_ignored++;
@@ -299,22 +523,10 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
 
 static void set_pipeline(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, uint32_t n) {
     if (n < 4u) { CNT(p).bad_rec++; tag_unsup(p, 116); return; }
-    a64_pipe_t *pp = get_pipe(r, p, r->task, R32(0));
+    a64_pipe_t *pp = pipeline_current(r, p, R32(0));
     r->pipe_set = false, r->pipe = NULL;     /* Apple: Metal crashes on a missing pipeline, and on drawing without one */
     if (!pp) { tag_partial(p, 116); return; }
-    if (r->rt) {
-        VkFormat f = r->rt->format;
-        if (!pp->pipe || pp->fmt != f) {
-            if (pp->pipe) defer(r, 1, NULL, pp->pipe);   /* an earlier draw (this exec or a pending one) may use it */
-            pp->pipe = VK_NULL_HANDLE;
-            lagfx_pipeline_desc_t d = pp->src.desc;
-            d.color_format = f;
-            if (lagfx_pipeline_build(r->vk->device, &d, &pp->pipe) != LAGFX_OK) pp->pipe = VK_NULL_HANDLE;
-            pp->fmt = f;
-        }
-        if (!pp->pipe || lagfx_translate_render_bind_vk_pipeline(&r->rs, pp->pipe, pp->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++; tag_partial(p, 116); return; }
-    }
-    r->pipe = pp, r->pipe_set = true;
+    r->pipe = pp, r->pipe_set = true;        /* the VkPipeline is built and bound at the draw (it depends on the primitive type) */
     tag_done(p, 116);
 }
 
@@ -324,7 +536,8 @@ static bool draw_ready(a64_run_t *r, lagfx_protocol_t *p) {
     return true;
 }
 
-static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p) {
+static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
+    if (!prepare_pipeline(r, p, prim)) return false;
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
     lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region);   /* existing viewport/scissor helper of draw_record.c (Y-flip, clamping) */
     if (r->pipe->src.desc.n_vtx_inputs) {
@@ -344,24 +557,38 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         uint32_t index = R32(0), count = R32(4);
         if (count > A64_MAX_VB || (uint64_t)n < 8u + 12ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
-        if (tag == 110) { tag_partial(p, tag); break; }
         for (uint32_t i = 0; i < count && index + i < A64_MAX_VB; i++) {
-            lagfx_a64_obj_t *vb = lagfx_a64_res_object(r->x, R32(8 + i * 12));
-            r->vb[index + i].b = vb && vb->kind == LAGFX_A64_BUFFER ? vb : NULL;
-            r->vb[index + i].off = lagfx_le64(rec + 12 + i * 12);
+            lagfx_a64_obj_t *b = lagfx_a64_res_object(r->x, R32(8 + i * 12));
+            if (b && b->kind != LAGFX_A64_BUFFER) b = NULL;
+            uint64_t off = lagfx_le64(rec + 12 + i * 12);
+            if (tag == 125) r->vb[index + i].b = b, r->vb[index + i].off = off;
+            else if (index + i < A64_MAX_FB) r->fb[index + i].b = b, r->fb[index + i].off = off;
         }
         tag_done(p, tag);
         break;
     }
     case 126: case 111:                      /* {index, offset u64} */
         if (n < 12u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
-        if (tag == 126) {
+        {
             uint32_t idx = R32(0);
-            if (idx < A64_MAX_VB) r->vb[idx].off = lagfx_le64(rec + 4);
+            if (tag == 126 && idx < A64_MAX_VB) r->vb[idx].off = lagfx_le64(rec + 4);
+            if (tag == 111 && idx < A64_MAX_FB) r->fb[idx].off = lagfx_le64(rec + 4);
             tag_done(p, tag);
-        } else tag_partial(p, tag);
+        }
         break;
-    case 114: case 112: tag_partial(p, tag); break;   /* fragment textures / samplers: recorded by the guest, not bound (no descriptor sets) */
+    case 114: case 112: {                    /* {index, count}, refs: fragment textures / samplers */
+        if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        uint32_t index = R32(0), count = R32(4), lim = tag == 114 ? A64_MAX_FB : A64_MAX_FSAMP;
+        if (count > lim || (uint64_t)n < 8u + 4ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        for (uint32_t i = 0; i < count && index + i < lim; i++) {
+            if (tag == 114) {   /* only textures the mirror already holds (the exec's resource list): creating + uploading one now would record copies inside the pass */
+                lagfx_a64_obj_t *t = lagfx_a64_res_lookup(p, r->task->id, R32(8 + i * 4));
+                r->ftex[index + i] = t && t->kind == LAGFX_A64_TEXTURE ? t : NULL;
+            } else r->fsamp[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP);
+        }
+        tag_done(p, tag);
+        break;
+    }
     case 117:                                /* MTLScissorRect: x, y, width, height as u64 */
         if (n < 32u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         r->region.sc_x = (uint32_t)lagfx_le64(rec), r->region.sc_y = (uint32_t)lagfx_le64(rec + 8);
@@ -379,8 +606,8 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
     case 1: {                                /* {primitive u32, start u16, count u16} (Apple) */
         if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         if (!draw_ready(r, p)) { tag_partial(p, tag); break; }
-        if (R32(0) != 3u || !R16(6)) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; tag_partial(p, tag); break; }
-        if (!bind_for_draw(r, p)) { tag_partial(p, tag); break; }
+        if (R32(0) > 4u || !R16(6)) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; tag_partial(p, tag); break; }
+        if (!bind_for_draw(r, p, R32(0))) { tag_partial(p, tag); break; }
         if (lagfx_translate_render_draw(&r->rs, R16(6), 1, R16(4), 0) != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); break; }
         CNT(p).draws++;
         tag_done(p, tag);
@@ -389,12 +616,12 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
     case 7: {                                /* {primitive u16, index type u16, ref u32, count u16, offset u16} (Apple) */
         if (n < 12u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         if (!draw_ready(r, p)) { tag_partial(p, tag); break; }
-        if (R16(0) != 3u || !R16(8)) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; tag_partial(p, tag); break; }
+        if (R16(0) > 4u || !R16(8)) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; tag_partial(p, tag); break; }
         uint32_t itype = R16(2), count = R16(8), off = R16(10);
         uint32_t isz = itype == 1u ? 4u : 2u;
         lagfx_a64_obj_t *ib = lagfx_a64_res_object(r->x, R32(4));
         if (itype > 1u || !ib || ib->kind != LAGFX_A64_BUFFER || (uint64_t)off + (uint64_t)count * isz > ib->length) { CNT(p).no_index_buf++; CNT(p).draws_skipped++; tag_partial(p, tag); break; }
-        if (!bind_for_draw(r, p)) { tag_partial(p, tag); break; }
+        if (!bind_for_draw(r, p, R16(0))) { tag_partial(p, tag); break; }
         lagfx_translate_render_bind_index_buffer(&r->rs, ib->buf, off, itype == 1u ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
         if (lagfx_translate_render_draw_indexed(&r->rs, count, 1, 0, 0, 0) != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); break; }
         CNT(p).draws++;

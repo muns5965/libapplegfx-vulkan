@@ -16,6 +16,13 @@ int main(void) {
 #include "vulkan/pipeline_build.h"
 #include <vulkan/vulkan.h>
 
+/* The vertex-stage-input SPIR-V pair of arm64-exec-run-unit (glslangValidator -V: pos vec2 at location 0 -> gl_Position, constant red). */
+#define k_vs_spv k_vs_vin_spv
+#define k_fs_spv k_fs_vin_spv
+#include "arm64-exec-run-shaders.h"
+#undef k_vs_spv
+#undef k_fs_spv
+
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -34,14 +41,6 @@ void lagfx_trace_impl(const char *fmt, ...) { (void)fmt; }
 #define ASSERT_GOTO(cond, msg) do { if (!(cond)) { \
     fprintf(stderr, "FAIL: %s\n", msg); rc = 1; goto out; } } while (0)
 
-static int llc_available(void) {
-    /* Same candidates as find_llc_binary() in src/air2spirv/shader_translate.c (macOS Homebrew pin, then Linux LLVM 20). */
-    static const char *c[] = { "/opt/homebrew/opt/llvm@20/bin/llc", "/opt/homebrew/opt/llvm/bin/llc",
-                               "/usr/lib/llvm-20/bin/llc", "/usr/bin/llc", NULL };
-    for (int i = 0; c[i]; i++) if (access(c[i], X_OK) == 0) return 1;
-    return 0;
-}
-
 /* Forward declarations */
 static int test_invalid_device_handle(void);
 static int test_mismatched_formats(void);
@@ -52,6 +51,7 @@ static int test_missing_shader_modules(void);
 static int test_validation_layers_and_vuids(void);
 static int test_build_from_triangle(void);
 static int test_build_no_dynamic_rendering(void);
+static int test_build_topologies(void);
 
 int main(void) {
     fprintf(stdout, "pipeline_build_test: starting\n");
@@ -75,12 +75,6 @@ int main(void) {
     if (test_missing_shader_modules() != 0) { _exit(1); }
     fprintf(stdout, "pipeline_build_test: missing shader modules test passed\n");
     
-    /* Smoke tests need llc. Skip with meson SKIP code if absent. */
-    if (!llc_available()) {
-        fprintf(stderr, "pipeline_build_test: llc not available; smoke tests skipped (negative tests passed)\n");
-        _exit(77);
-    }
-    
     /* Validation layers test - checks VK_LAYER_KHRONOS_validation availability */
     int ret = test_validation_layers_and_vuids();
     if (ret == 1) {
@@ -90,7 +84,7 @@ int main(void) {
         fprintf(stdout, "pipeline_build_test: validation layers test passed\n");
     }
     
-    /* Full path smoke test - may skip at runtime if no Vulkan ICD or shader translation fails */
+    /* Real smoke tests: they use the SPIR-V fixtures (no llc needed); a SKIP is only reported when Vulkan / lavapipe is genuinely absent (probed at runtime). */
     int skipped = 0;
     ret = test_build_from_triangle();
     if (ret == 1) {
@@ -102,17 +96,29 @@ int main(void) {
         skipped++;   /* the triangle smoke is a stub that always skips: say so instead of calling it a pass */
     }
     
-    /* No-dynamic-rendering test - skips if VK_KHR_dynamic_rendering present */
+    ret = test_build_topologies();
+    if (ret == 1) {
+        fprintf(stderr, "pipeline_build_test: topology test failed\n");
+        _exit(1);
+    } else if (ret == 0) {
+        fprintf(stdout, "pipeline_build_test: topology test passed\n");
+    } else {
+        skipped++;
+    }
+
+    /* No-dynamic-rendering test */
     ret = test_build_no_dynamic_rendering();
     if (ret == 1) {
         fprintf(stderr, "pipeline_build_test: no-dynamic-rendering test failed\n");
         _exit(1);
-    } else if (ret != 0) {
+    } else if (ret == 0) {
+        fprintf(stdout, "pipeline_build_test: no-dynamic-rendering test passed\n");
+    } else {
         skipped++;
     }
 
     if (skipped) {
-        fprintf(stdout, "pipeline_build_test: negative tests passed; %d smoke test(s) SKIPPED (stubs, no triangle pipeline was built)\n", skipped);
+        fprintf(stdout, "pipeline_build_test: negative tests passed; %d smoke test(s) SKIPPED (no usable Vulkan CPU device, see messages above)\n", skipped);
         fflush(stdout);
         _exit(77);
     }
@@ -474,16 +480,170 @@ static int test_missing_shader_modules(void) {
     return 0;
 }
 
-static int test_build_from_triangle(void) {
-    /* On Mac dev boxes without lavapipe, skip this test gracefully. */
-    fprintf(stderr, "pipeline_build_test: skipping triangle smoke (requires Linux + lavapipe)\n");
-    return 77;
+/* ---- a Vulkan instance + lavapipe device with the validation layer and a messenger, shared by the smoke tests ---- */
+typedef struct {
+    VkInstance inst; VkDebugUtilsMessengerEXT messenger; PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger;
+    VkDevice dev; int have_layer, have_messenger;
+} venv_t;
+
+static void venv_close(venv_t *e) {
+    if (e->dev) vkDestroyDevice(e->dev, NULL);
+    if (e->messenger && e->destroy_messenger) e->destroy_messenger(e->inst, e->messenger, NULL);
+    if (e->inst) vkDestroyInstance(e->inst, NULL);
+    memset(e, 0, sizeof *e);
 }
 
+/* 0 = open; 77 = genuinely no Vulkan / no CPU device (the reason is printed). */
+static int venv_open(venv_t *e, int dynamic_rendering) {
+    memset(e, 0, sizeof *e);
+    const char *layer = "VK_LAYER_KHRONOS_validation";
+    e->have_layer = layer_present(layer);
+    VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "pipeline_build_test", .apiVersion = VK_API_VERSION_1_3 };
+    const char *ext = "VK_EXT_debug_utils";
+    VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledLayerCount = e->have_layer ? 1u : 0u,
+                                 .ppEnabledLayerNames = &layer, .enabledExtensionCount = e->have_layer ? 1u : 0u, .ppEnabledExtensionNames = &ext };
+    VkResult vr = vkCreateInstance(&ici, NULL, &e->inst);
+    if (vr != VK_SUCCESS) { fprintf(stderr, "pipeline_build_test: SKIP: no Vulkan loader/ICD (vkCreateInstance=%d)\n", (int)vr); e->inst = VK_NULL_HANDLE; return 77; }
+    if (e->have_layer) {
+        PFN_vkCreateDebugUtilsMessengerEXT cm = (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(e->inst, "vkCreateDebugUtilsMessengerEXT");
+        e->destroy_messenger = (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(e->inst, "vkDestroyDebugUtilsMessengerEXT");
+        VkDebugUtilsMessengerCreateInfoEXT mc = { .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT, .pfnUserCallback = debug_message_callback };
+        e->have_messenger = cm && e->destroy_messenger && cm(e->inst, &mc, NULL, &e->messenger) == VK_SUCCESS;
+    } else {
+        fprintf(stderr, "pipeline_build_test: %s not installed: pipelines are built but validation messages are not counted\n", layer);
+    }
+    uint32_t n = 0;
+    vkEnumeratePhysicalDevices(e->inst, &n, NULL);
+    VkPhysicalDevice *d = n ? malloc(n * sizeof *d) : NULL;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    if (d) {
+        vkEnumeratePhysicalDevices(e->inst, &n, d);
+        for (uint32_t i = 0; i < n; i++) { VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(d[i], &pr); if (pr.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) { phys = d[i]; break; } }
+        free(d);
+    }
+    if (!phys) { fprintf(stderr, "pipeline_build_test: SKIP: no CPU (lavapipe) Vulkan device\n"); venv_close(e); return 77; }
+    float prio = 1.0f;
+    VkDeviceQueueCreateInfo q = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
+    VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = dynamic_rendering ? VK_TRUE : VK_FALSE };
+    VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &f13, .queueCreateInfoCount = 1, .pQueueCreateInfos = &q };
+    if (vkCreateDevice(phys, &dci, NULL, &e->dev) != VK_SUCCESS) { fprintf(stderr, "pipeline_build_test: SKIP: vkCreateDevice failed\n"); e->dev = VK_NULL_HANDLE; venv_close(e); return 77; }
+    return 0;
+}
+
+typedef struct { VkShaderModule vs, fs, vs_in, fs_in, vs_pt; VkPipelineLayout layout; } vfix_t;
+static int vfix_make(VkDevice dev, vfix_t *f) {
+    memset(f, 0, sizeof *f);
+    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    ci.codeSize = sizeof k_vs_spv; ci.pCode = k_vs_spv;
+    if (vkCreateShaderModule(dev, &ci, NULL, &f->vs) != VK_SUCCESS) return 1;
+    ci.codeSize = sizeof k_fs_spv; ci.pCode = k_fs_spv;
+    if (vkCreateShaderModule(dev, &ci, NULL, &f->fs) != VK_SUCCESS) return 1;
+    ci.codeSize = sizeof k_vs_vin_spv; ci.pCode = k_vs_vin_spv;
+    if (vkCreateShaderModule(dev, &ci, NULL, &f->vs_in) != VK_SUCCESS) return 1;
+    ci.codeSize = sizeof k_fs_vin_spv; ci.pCode = k_fs_vin_spv;
+    if (vkCreateShaderModule(dev, &ci, NULL, &f->fs_in) != VK_SUCCESS) return 1;
+    ci.codeSize = sizeof k_vs_point_spv; ci.pCode = k_vs_point_spv;
+    if (vkCreateShaderModule(dev, &ci, NULL, &f->vs_pt) != VK_SUCCESS) return 1;
+    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    return vkCreatePipelineLayout(dev, &plci, NULL, &f->layout) == VK_SUCCESS ? 0 : 1;
+}
+static void vfix_free(VkDevice dev, vfix_t *f) {
+    if (f->layout) vkDestroyPipelineLayout(dev, f->layout, NULL);
+    if (f->vs_pt) vkDestroyShaderModule(dev, f->vs_pt, NULL);
+    if (f->fs_in) vkDestroyShaderModule(dev, f->fs_in, NULL);
+    if (f->vs_in) vkDestroyShaderModule(dev, f->vs_in, NULL);
+    if (f->fs) vkDestroyShaderModule(dev, f->fs, NULL);
+    if (f->vs) vkDestroyShaderModule(dev, f->vs, NULL);
+}
+
+/* A triangle pipeline through lagfx_pipeline_build, twice: the minimal pair (no vertex input) and the stage-in pair (vertex input from a buffer, as the ARM64 exec path
+ * builds it). OK + non-null + zero validation warnings/errors; objects destroyed children-first. */
+static int test_build_from_triangle(void) {
+    venv_t e;
+    int rc = venv_open(&e, 1);
+    if (rc) return rc;
+    vfix_t f;
+    rc = 1;
+    ASSERT_GOTO(vfix_make(e.dev, &f) == 0, "shader modules / layout created");
+    VkPipeline pa = VK_NULL_HANDLE, pb = VK_NULL_HANDLE;
+    s_vuid_count = 0;
+    lagfx_pipeline_desc_t d;
+    memset(&d, 0, sizeof d);
+    d.vertex_shader = f.vs, d.fragment_shader = f.fs, d.layout = f.layout, d.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    ASSERT_GOTO(lagfx_pipeline_build(e.dev, &d, &pa) == LAGFX_OK && pa != VK_NULL_HANDLE, "minimal triangle pipeline: LAGFX_OK and a non-null VkPipeline");
+    memset(&d, 0, sizeof d);
+    d.vertex_shader = f.vs_in, d.fragment_shader = f.fs_in, d.layout = f.layout, d.color_format = VK_FORMAT_R8G8B8A8_UNORM;
+    d.n_vtx_inputs = 1, d.vtx_in_loc[0] = 0, d.vtx_in_comp[0] = 2, d.vtx_stride = 8;
+    ASSERT_GOTO(lagfx_pipeline_build(e.dev, &d, &pb) == LAGFX_OK && pb != VK_NULL_HANDLE, "stage-in triangle pipeline: LAGFX_OK and a non-null VkPipeline");
+    fprintf(stdout, "pipeline_build_test: validation messages while building the triangle pipelines: %d (layer %s)\n", s_vuid_count, e.have_messenger ? "live" : "absent");
+    ASSERT_GOTO(s_vuid_count == 0, "triangle pipelines are validation-clean");
+    rc = 0;
+out:
+    if (pa) vkDestroyPipeline(e.dev, pa, NULL);
+    if (pb) vkDestroyPipeline(e.dev, pb, NULL);
+    vfix_free(e.dev, &f);
+    venv_close(&e);
+    return rc;
+}
+
+/* One pipeline per primitive topology (point / line list / line strip / triangle list / triangle strip), the per-topology pipelines of the ARM64 exec path; and the
+ * default (topology_plus1 == 0) is the triangle list, so every existing caller is unchanged. */
+static int test_build_topologies(void) {
+    venv_t e;
+    int rc = venv_open(&e, 1);
+    if (rc) return rc;
+    vfix_t f;
+    rc = 1;
+    ASSERT_GOTO(vfix_make(e.dev, &f) == 0, "shader modules / layout created");
+    VkPipeline pipes[6] = { 0 };
+    s_vuid_count = 0;
+    for (int t = -1; t <= 4; t++) {
+        lagfx_pipeline_desc_t d;
+        memset(&d, 0, sizeof d);
+        d.vertex_shader = t == 0 ? f.vs_pt : f.vs_in;   /* a point-list pipeline needs a vertex shader that writes PointSize (VUID-...-topology-08773) */
+        d.fragment_shader = f.fs_in, d.layout = f.layout, d.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+        d.n_vtx_inputs = 1, d.vtx_in_loc[0] = 0, d.vtx_in_comp[0] = 2, d.vtx_stride = 8;
+        d.topology_plus1 = (uint8_t)(t < 0 ? 0 : t + 1);   /* -1: the default */
+        ASSERT_GOTO(lagfx_pipeline_build(e.dev, &d, &pipes[t + 1]) == LAGFX_OK && pipes[t + 1] != VK_NULL_HANDLE, "pipeline per topology: LAGFX_OK and non-null");
+    }
+    for (int i = 0; i < 6; i++) for (int j = i + 1; j < 6; j++) ASSERT_GOTO(pipes[i] != pipes[j], "distinct VkPipeline per build");
+    fprintf(stdout, "pipeline_build_test: validation messages while building 6 topology pipelines: %d\n", s_vuid_count);
+    ASSERT_GOTO(s_vuid_count == 0, "topology pipelines are validation-clean");
+    rc = 0;
+out:
+    for (int i = 0; i < 6; i++) if (pipes[i]) vkDestroyPipeline(e.dev, pipes[i], NULL);
+    vfix_free(e.dev, &f);
+    venv_close(&e);
+    return rc;
+}
+
+/* lagfx_pipeline_build has NO render-pass fallback: it always chains VkPipelineRenderingCreateInfo (dynamic rendering, core in Vulkan 1.3; the library's instance init
+ * enables the feature and records have_dynamic_rendering). Documented behaviour on a device WITHOUT the feature: the build must not be silently valid. This asserts that
+ * the validation layer reports it (VUID ...dynamicRendering-06576) or that the call returns a non-OK status; with no validation layer installed the build outcome is only
+ * checked to be cleaned up (nothing can be asserted) and that is printed. */
 static int test_build_no_dynamic_rendering(void) {
-    /* On Mac dev boxes without lavapipe, skip this test. */
-    fprintf(stderr, "pipeline_build_test: skipping no-dynamic-rendering smoke (requires Linux + lavapipe)\n");
-    return 77;
+    venv_t e;
+    int rc = venv_open(&e, 0);
+    if (rc) return rc;
+    vfix_t f;
+    rc = 1;
+    ASSERT_GOTO(vfix_make(e.dev, &f) == 0, "shader modules / layout created");
+    lagfx_pipeline_desc_t d;
+    memset(&d, 0, sizeof d);
+    d.vertex_shader = f.vs, d.fragment_shader = f.fs, d.layout = f.layout, d.color_format = VK_FORMAT_B8G8R8A8_UNORM;
+    VkPipeline p = VK_NULL_HANDLE;
+    s_vuid_count = 0;
+    lagfx_status_t st = lagfx_pipeline_build(e.dev, &d, &p);
+    fprintf(stdout, "pipeline_build_test: build without dynamicRendering: status=%d validation messages=%d (no render-pass fallback exists in the library)\n", (int)st, s_vuid_count);
+    if (e.have_messenger) ASSERT_GOTO(st != LAGFX_OK || s_vuid_count > 0, "a build without the dynamicRendering feature is rejected or reported by validation");
+    rc = 0;
+out:
+    if (p) vkDestroyPipeline(e.dev, p, NULL);
+    vfix_free(e.dev, &f);
+    venv_close(&e);
+    return rc;
 }
 
 #endif  /* LAGFX_HAVE_VULKAN */

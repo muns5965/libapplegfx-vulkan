@@ -462,7 +462,7 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
         m->n++;
     }
     m->objs[slot] = o;
-    m->st.created++;
+    o->gen = ++m->st.created;
     return o;
 }
 
@@ -839,6 +839,16 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
 
 
 /* ---- render targets and readback ---- */
+
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
+    if (!o->view) {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    }
+    return o->view;
+}
 
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h) {
     if (!x || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return false;

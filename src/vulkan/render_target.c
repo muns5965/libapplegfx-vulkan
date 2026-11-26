@@ -75,11 +75,36 @@ static uint32_t find_memory_type(VkPhysicalDevice phys,
 
 /* --- Render target create/destroy ------------------------------ */
 
+static lagfx_status_t render_target_create_ex(struct lagfx_vk_state *vk,
+                                              uint32_t width,
+                                              uint32_t height,
+                                              VkFormat format,
+                                              VkImageUsageFlags extra_usage,
+                                              lagfx_vk_render_target_t *out);
+
 lagfx_status_t lagfx_vk_render_target_create(struct lagfx_vk_state *vk,
                                              uint32_t width,
                                              uint32_t height,
                                              VkFormat format,
                                              lagfx_vk_render_target_t *out) {
+    return render_target_create_ex(vk, width, height, format, 0, out);
+}
+
+/* The ARM64 exec path's textures are both rendered to and sampled. */
+lagfx_status_t lagfx_vk_render_target_create_sampled(struct lagfx_vk_state *vk,
+                                                     uint32_t width,
+                                                     uint32_t height,
+                                                     VkFormat format,
+                                                     lagfx_vk_render_target_t *out) {
+    return render_target_create_ex(vk, width, height, format, VK_IMAGE_USAGE_SAMPLED_BIT, out);
+}
+
+static lagfx_status_t render_target_create_ex(struct lagfx_vk_state *vk,
+                                              uint32_t width,
+                                              uint32_t height,
+                                              VkFormat format,
+                                              VkImageUsageFlags extra_usage,
+                                              lagfx_vk_render_target_t *out) {
     if (!vk || !out || width == 0u || height == 0u) {
         return LAGFX_ERR_INVALID_ARG;
     }
@@ -123,7 +148,8 @@ lagfx_status_t lagfx_vk_render_target_create(struct lagfx_vk_state *vk,
             .tiling        = rt_cfg[attempt].tiling,
             .usage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT
                            | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
-                           | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                           | VK_IMAGE_USAGE_TRANSFER_DST_BIT
+                           | extra_usage,
             .sharingMode   = VK_SHARING_MODE_EXCLUSIVE,
             .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         };

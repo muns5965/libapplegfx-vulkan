@@ -1446,3 +1446,19 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-integ-unit.c') and vulkan
   )
   test('arm64 exec render+blit integration (lavapipe, validation)', ei_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
 endif
+
+# ARM64 pipeline resolver + descriptor binding + topology + cache invalidation + real-data capture (lavapipe; honest SKIP without fixtures / ICD).
+if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
+  pu_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    pu_deps += [vulkan_dep]
+  endif
+  pu_test = executable('arm64-pipe-unit',
+    'arm64-pipe-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : pu_deps,
+    c_args : ['-DLAGFX_TEST_FIXTURE_DIR="' + (meson.current_source_dir() / 'fixtures') + '"'],
+    build_by_default : true,
+  )
+  test('arm64 pipeline resolver / bindings / invalidation / capture (lavapipe)', pu_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif

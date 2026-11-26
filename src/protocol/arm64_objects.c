@@ -78,13 +78,35 @@ void lagfx_a64_objects_stats(const lagfx_a64_objects_t *t, lagfx_a64_obj_stats_t
     if (t && out) *out = t->st;
 }
 
+bool lagfx_a64_objects_read_entry(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t out[3]) {
+    if (!p || !task || !ref || !out) return false;
+    /* the same bounds as the decoder: Apple only reads the list when the task has set it */
+    if (!task->lists_set || !task->objects_addr || (task->objects_len && ((uint64_t)ref + 1u) * 12u > task->objects_len)) return false;
+    uint8_t eb[12];
+    if (!lagfx_arm64_task_read(p, task, task->objects_addr + (uint64_t)ref * 12u, eb, 12)) return false;
+    out[0] = lagfx_le32(eb), out[1] = lagfx_le32(eb + 4), out[2] = lagfx_le32(eb + 8);
+    return true;
+}
+
+bool lagfx_a64_objects_invalidate(lagfx_a64_objects_t *t, uint32_t task_id, uint32_t ref) {
+    if (!t) return false;
+    for (node_t *n = t->bucket[hash(task_id, ref)]; n; n = n->next)
+        if (n->task == task_id && n->ref == ref) {
+            release(t, n);                 /* the next get() sees an object-less node: it builds a new one (a new generation) */
+            memset(n->entry, 0xff, sizeof n->entry);
+            t->st.invalidated++;
+            return true;
+        }
+    return false;
+}
+
 void *lagfx_a64_objects_get(lagfx_a64_objects_t *t, lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t out_entry[3]) {
     if (!t || !p || !task || !ref) return NULL;
-    /* the same bounds as the decoder: Apple only reads the list when the task has set it */
-    if (!task->lists_set || !task->objects_addr || (task->objects_len && ((uint64_t)ref + 1u) * 12u > task->objects_len)) return NULL;
-    uint8_t eb[12];
-    if (!lagfx_arm64_task_read(p, task, task->objects_addr + (uint64_t)ref * 12u, eb, 12)) { t->st.read_failed++; return NULL; }
-    uint32_t e[3] = { lagfx_le32(eb), lagfx_le32(eb + 4), lagfx_le32(eb + 8) };
+    uint32_t e[3];
+    if (!lagfx_a64_objects_read_entry(p, task, ref, e)) {
+        if (task->lists_set && task->objects_addr && !(task->objects_len && ((uint64_t)ref + 1u) * 12u > task->objects_len)) t->st.read_failed++;
+        return NULL;
+    }
     if (out_entry) memcpy(out_entry, e, sizeof e);
 
     uint32_t h = hash(task->id, ref);
