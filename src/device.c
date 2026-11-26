@@ -430,6 +430,11 @@ size_t lagfx_device_poll_completions(lagfx_device_t *device) {
     return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);
 }
 
+void lagfx_device_diag_tick(lagfx_device_t *device) {
+    if (!lagfx_device_is_valid(device) || !device->protocol_state) return;
+    lagfx_diag_tick((lagfx_protocol_t *)device->protocol_state);
+}
+
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
     lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
@@ -468,6 +473,7 @@ void lagfx_device_free(lagfx_device_t *device) {
         lagfx_protocol_t *pfree = (lagfx_protocol_t *)device->protocol_state;
         /* ARM64 deferred completion: outstanding GPU work (fences) is waited for (bounded) and released while Vulkan is still alive. */
         lagfx_arm64_cq_shutdown(pfree, 2000);
+        lagfx_diag_final(pfree);   /* cumulative GPU statistics once more at VM end (also when the guest went idle long before) */
 #ifdef LAGFX_HAVE_VULKAN
         /* The lazily-created opaque-white fallback texture is protocol-owned
          * but Vulkan-backed — destroy it while vk is still alive. */

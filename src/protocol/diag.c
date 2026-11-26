@@ -50,6 +50,8 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
               (unsigned long long)n, length, arg8, (unsigned)arg8 * 8u, stamp, hex);
 }
 
+void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final);
+
 void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
     if (!p) return;
     /* two vCPU threads can arrive here: relaxed atomics keep the counts honest */
@@ -59,8 +61,31 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
     uint64_t t = now_ns();
     p->diag2.last_mmio_ns = t;
     if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; return; }
-    if (t - p->diag2.last_stats_ns < 10ull * 1000000000ull) return;
-    p->diag2.last_stats_ns = t;
+    lagfx_diag_stats(p, t, false);
+}
+
+void lagfx_diag_tick(lagfx_protocol_t *p) {
+    if (!p || !p->diag2.t0_ns) return;   /* nothing seen yet */
+    lagfx_diag_stats(p, now_ns(), false);
+}
+
+void lagfx_diag_final(lagfx_protocol_t *p) {
+    if (!p || !p->diag2.t0_ns) return;
+    lagfx_diag_stats(p, now_ns(), true);
+}
+
+/* Statistics block. Timer/teardown callers are why this is not tied to guest MMIO any more: an idle guest (WFI) makes no MMIO accesses. */
+void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
+    uint64_t last = __atomic_load_n(&p->diag2.last_stats_ns, __ATOMIC_RELAXED);
+    if (!final) {
+        if (t - last < 10ull * 1000000000ull) return;
+        /* only one of several callers (two vCPU threads + timer) prints for a given interval */
+        if (!__atomic_compare_exchange_n(&p->diag2.last_stats_ns, &last, t, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
+    } else {
+        __atomic_store_n(&p->diag2.last_stats_ns, t, __ATOMIC_RELAXED);
+        LAGFX_LOG("g7-gpu-final: cumulative statistics at VM end follow (log_bytes=%llu log_write_errors=%llu; the log has no size limit of its own)",
+                  (unsigned long long)lagfx_log_bytes_written(), (unsigned long long)lagfx_log_write_errors());
+    }
     char line[2400], tags[400];
     const __typeof__(p->diag2.exec) *X = &p->diag2.exec;
     {   /* up to 24 busiest inner tags as type:tag=count (cumulative) */

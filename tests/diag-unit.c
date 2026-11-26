@@ -67,5 +67,18 @@ int main(void) {
 
     free(p); remove(path); close(fd);
     puts("diag-unit OK");
+    /* idle guest: no MMIO at all, only the timer tick -> the 10 s statistics line still appears; the final one is printed at teardown */
+    {
+        long before = file_lines(path, "g7-gpu: t=");
+        lagfx_diag_tick(p);   /* not due yet */
+        assert(file_lines(path, "g7-gpu: t=") == before);
+        p->diag2.last_stats_ns -= 11ull * 1000000000ull;
+        lagfx_diag_tick(p);
+        assert(file_lines(path, "g7-gpu: t=") == before + 1);
+        lagfx_diag_tick(p);   /* once per interval, however many callers */
+        assert(file_lines(path, "g7-gpu: t=") == before + 1);
+        lagfx_diag_final(p);
+        assert(file_lines(path, "g7-gpu: t=") == before + 2 && file_lines(path, "g7-gpu-final:") == 1);
+    }
     return 0;
 }

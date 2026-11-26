@@ -22,6 +22,10 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
 void lagfx_diag_note_0x44(lagfx_protocol_t *p, uint32_t chan, uint32_t task);
 /* Guest MMIO access: counts it and prints the 10 s statistics line when due. */
 void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write);
+/* Timer-driven: prints the 10 s statistics even when the guest makes no MMIO accesses (idle in WFI). */
+void lagfx_diag_tick(lagfx_protocol_t *p);
+/* At device teardown: prints the cumulative statistics once. */
+void lagfx_diag_final(lagfx_protocol_t *p);
 /* Bytes written to / write errors of the lagfx log (device.c). */
 uint64_t lagfx_log_bytes_written(void);
 uint64_t lagfx_log_write_errors(void);
