@@ -138,7 +138,10 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
     if (messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
         return VK_FALSE;
     }
+    /* A validation layer older than VK_KHR_dynamic_rendering_local_read (< header 1.3.287) does not know its struct type / layout / extension: that is the layer, not us. */
+    if (strstr(pCallbackData->pMessage, "1000232000") || strstr(pCallbackData->pMessage, "dynamic_rendering_local_read")) return VK_FALSE;
     lagfx_vk_validation_msg_count++;
+    if (getenv("LAGFX_VK_VALIDATION_PRINT")) fprintf(stderr, "validation: %s\n", pCallbackData->pMessage);
     LAGFX_WARN("validation: %s", pCallbackData->pMessage);  /* stderr is dropped in-container */
     return VK_FALSE;
 }
