@@ -1651,3 +1651,12 @@ pipeline_bundle_test = executable('pipeline-bundle-unit',
   build_by_default : true,
 )
 test('pipeline failure bundle (unit, lavapipe)', pipeline_bundle_test)
+
+# DIAGNOSTIC SPIR-V rewrites of the pipeline repro's variant matrix (pure; validated with spirv-val when installed).
+spv_variants_test = executable('spv-variants-unit',
+  'spv-variants-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : [libapplegfx_vulkan_dep],
+  build_by_default : true,
+)
+test('spv diagnostic variants (unit)', spv_variants_test)
