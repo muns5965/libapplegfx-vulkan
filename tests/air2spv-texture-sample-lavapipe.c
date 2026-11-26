@@ -4,6 +4,7 @@
  *   plain / bias 0                -> level 0 (the screen footprint is exactly one texel per pixel)
  *   explicit level 0 / 1 / 2      -> that level (constant and shader-computed variable)
  *   bias 1.0 (constant, variable) -> level 1 (implicit LOD 0 + bias 1)
+ *   ConstOffset (1,0) at level 0, ConstOffset (-1,1) at explicit level 1 -> neighbouring texel of THAT level, clamped to the edge
  * Exit 77 (skip) when there is no Vulkan 1.3 device.
  * SPDX-License-Identifier: MIT */
 #include "air2spv/translate.h"
@@ -112,6 +113,8 @@ static int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v;
 static void ref_l0(int x, int y, float o[4]) { texel(0, x, y, o); }
 static void ref_l1(int x, int y, float o[4]) { texel(1, x >> 1, y >> 1, o); }
 static void ref_l2(int x, int y, float o[4]) { texel(2, x >> 2, y >> 2, o); }
+static void ref_off(int x, int y, float o[4]) { texel(0, clampi(x + 1, 0, 7), y, o); }
+static void ref_offl1(int x, int y, float o[4]) { texel(1, clampi((x >> 1) - 1, 0, 3), clampi((y >> 1) + 1, 0, 3), o); }
 
 typedef struct { const char *fixture; void (*ref)(int x, int y, float o[4]); } case_t;
 static const case_t cases[] = {
@@ -121,6 +124,8 @@ static const case_t cases[] = {
     { "tex_run_level2.air.bc", ref_l2 },
     { "tex_run_bias1.air.bc",  ref_l1 },
     { "tex_run_biasvar.air.bc", ref_l1 },
+    { "tex_run_offset.air.bc", ref_off },
+    { "tex_run_offsetlvl.air.bc", ref_offl1 },
 };
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;

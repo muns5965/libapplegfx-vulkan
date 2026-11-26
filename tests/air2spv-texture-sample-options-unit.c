@@ -7,6 +7,8 @@
  *   plain (level=false, bias 0.0)      -> OpImageSampleImplicitLod, no image operands (vertex stage: ExplicitLod, Lod 0.0)
  *   bias (level=false, bias != 0/var)  -> OpImageSampleImplicitLod Bias (vertex stage: bias ignored, Lod 0.0)
  *   explicit level (level=true)        -> OpImageSampleExplicitLod Lod (value = level; vertex stage too)
+ *   constant offset in [-8, 7]         -> ConstOffset (OpConstantComposite of 2 ints); 3D: the first two lanes, z dropped
+ *   non-constant / out-of-range offset -> ignored (logged), no operand
  *   min_lod                            -> ignored (logged); the MinLod capability / shaderResourceMinLod is never enabled
  * half-typed lod/bias operands are converted to float32 (OpFConvert). Fixtures tests/fixtures/tex_*.ll are HAND-WRITTEN IR (not Apple output) assembled with
  * llvm-as (the AIR reader accepts LLVM's opaque-pointer type record, see src/air/bitcode_reader.c). Exit 77 when spirv-val is not installed.
@@ -48,10 +50,16 @@ typedef struct { const char *fixture; const want_t *w; size_t n; } case_t;
 static const want_t w_lod[] = { PLAIN, BIAS_V, BIAS_C(0.5f), LEVEL_C(1.0f), LEVEL_V, LEVEL_C(0.0f), PLAIN, PLAIN, BIAS_V, BIAS_C(2.0f), LEVEL_V };
 /* tex_lod_vertex: plain (Lod 0) / level 1 / level var / bias var (ignored: Lod 0) / bias 0.5 (ignored: Lod 0) */
 static const want_t w_vlod[] = { LEVEL_C(0.0f), LEVEL_C(1.0f), LEVEL_V, LEVEL_C(0.0f), LEVEL_C(0.0f) };
+/* tex_offset_fragment: offset (1,-1) / bias var + (1,2) / level 1 + (-2,0) / (7,-8) / (9,0) out of range / non-constant offset / half-result bias 0.25 + (0,-3) */
+static const want_t w_off[] = { OFF(1, -1), BIAS_V_OFF(1, 2), LEVEL_C_OFF(1.0f, -2, 0), OFF(7, -8), PLAIN, PLAIN, BIAS_C_OFF(0.25f, 0, -3) };
+/* tex_offset3d_fragment: plain 3d / bias var + (1,2,3) -> (1,2) / level 1 + (-1,1,0) -> (-1,1) */
+static const want_t w_off3[] = { PLAIN, BIAS_V_OFF(1, 2), LEVEL_C_OFF(1.0f, -1, 1) };
 
 static const case_t cases[] = {
     { "tex_lod_fragment.air.bc", w_lod, sizeof w_lod / sizeof w_lod[0] },
     { "tex_lod_vertex.air.bc", w_vlod, sizeof w_vlod / sizeof w_vlod[0] },
+    { "tex_offset_fragment.air.bc", w_off, sizeof w_off / sizeof w_off[0] },
+    { "tex_offset3d_fragment.air.bc", w_off3, sizeof w_off3 / sizeof w_off3[0] },
 };
 
 static uint8_t *slurp(const char *name, size_t *n) {
