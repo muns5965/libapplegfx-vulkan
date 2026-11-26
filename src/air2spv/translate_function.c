@@ -3864,16 +3864,21 @@ static const struct {
 /* Look up an AIR callee name in the table above. Returns true on a hit and fills the GLSL.std.450 number, the operand count and the
  * chained-3-operand flag (fmax3/fmin3). Exposed (internal) so tests/air2spv-glsl-intrinsic-table-unit.c can audit the table. */
 bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way) {
+    /* Longest matching prefix wins (table order only breaks ties): with first-match-wins, air.fast.sin shadowed air.fast.sinh (Sin instead of Sinh), air.fast.exp
+     * shadowed air.fast.exp2 and air.fast.atan shadowed air.fast.atan2 (wrong opcode AND wrong operand count). */
+    size_t best = (size_t)-1, best_len = 0;
     for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
         size_t pl = strlen(intrinsic_table[i].prefix);
+        if (pl <= best_len && best != (size_t)-1) continue;
         if (strncmp(fn_name, intrinsic_table[i].prefix, pl) != 0) continue;
         if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
-        if (glsl_inst) *glsl_inst = intrinsic_table[i].glsl_inst;
-        if (num_args) *num_args = intrinsic_table[i].num_args & IXF_NARGS;
-        if (three_way) *three_way = (intrinsic_table[i].num_args & IXF_3WAY) != 0;
-        return true;
+        best = i; best_len = pl;
     }
-    return false;
+    if (best == (size_t)-1) return false;
+    if (glsl_inst) *glsl_inst = intrinsic_table[best].glsl_inst;
+    if (num_args) *num_args = intrinsic_table[best].num_args & IXF_NARGS;
+    if (three_way) *three_way = (intrinsic_table[best].num_args & IXF_3WAY) != 0;
+    return true;
 }
 
 
