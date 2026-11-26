@@ -25,6 +25,7 @@
 
 #ifdef LAGFX_HAVE_VULKAN
 #  include <vulkan/vulkan.h>
+#  include "vulkan/sampler_cache.h"
 #endif
 
 /* Internal Vulkan state. Opaque to callers outside src/vulkan/.
@@ -122,7 +123,9 @@ struct lagfx_vk_state {
 
     /* M1 (c): shared default sampler (linear/clamp) for texture-sampling
      * translated compositor pipelines. */
-    VkSampler             default_sampler;
+    VkSampler             default_sampler;   /* owned by sampler_cache */
+    /* Samplers by state (constexpr samplers, the default above). */
+    lagfx_sampler_cache_t sampler_cache;
     /* GOAL-M2x: unnormalizedCoordinates sampler for Metal coord::pixel
      * (CA glyph-atlas composites; pixel-space texcoords like (70,22)). */
     VkSampler             unnorm_sampler;
