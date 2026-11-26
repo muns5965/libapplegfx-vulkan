@@ -30,6 +30,9 @@ void lagfx_trace_impl(const char *fmt, ...) { (void)fmt; }
 
 #define ASSERT(cond, msg) do { if (!(cond)) { \
     fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
+/* Like ASSERT but for functions that own Vulkan objects: jumps to `out` (with rc=1). */
+#define ASSERT_GOTO(cond, msg) do { if (!(cond)) { \
+    fprintf(stderr, "FAIL: %s\n", msg); rc = 1; goto out; } } while (0)
 
 static int llc_available(void) {
     /* Same candidates as find_llc_binary() in src/air2spirv/shader_translate.c (macOS Homebrew pin, then Linux LLVM 20). */
@@ -118,6 +121,8 @@ int main(void) {
     _exit(0);
 }
 
+/* Messages the validation layer reports at WARNING/ERROR severity. INFO and
+ * VERBOSE chatter (layer start-up, loader notes) is deliberately not counted. */
 static int s_vuid_count = 0;
 
 static VkBool32 VKAPI_PTR debug_message_callback(
@@ -125,196 +130,238 @@ static VkBool32 VKAPI_PTR debug_message_callback(
     VkDebugUtilsMessageTypeFlagsEXT messageType,
     const VkDebugUtilsMessengerCallbackDataEXT *pCallbackData,
     void *pUserData) {
-    (void)messageSeverity; (void)messageType; (void)pUserData;
-    s_vuid_count++;
-    fprintf(stderr, "VK validation: %s\n", pCallbackData->pMessage);
+    (void)messageType; (void)pUserData;
+    if (messageSeverity & (VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+                         | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT)) {
+        s_vuid_count++;
+        fprintf(stderr, "VK validation: %s\n", pCallbackData->pMessage);
+    }
     return VK_FALSE;
 }
 
+/* Minimal valid Vulkan 1.3 SPIR-V (spirv-as + spirv-val clean): a vertex
+ * shader writing gl_Position = (0,0,0,1) and a fragment shader writing
+ * location 0 = (1,0,0,1). Entry point "main". */
+static const uint32_t k_vs_spv[] = {
+    0x07230203u,0x00010600u,0x00070000u,0x0000000cu,
+    0x00000000u,0x00020011u,0x00000001u,0x0003000eu,
+    0x00000000u,0x00000001u,0x0006000fu,0x00000000u,
+    0x00000001u,0x6e69616du,0x00000000u,0x00000002u,
+    0x00040005u,0x00000001u,0x6e69616du,0x00000000u,
+    0x00040047u,0x00000002u,0x0000000bu,0x00000000u,
+    0x00020013u,0x00000003u,0x00030021u,0x00000004u,
+    0x00000003u,0x00030016u,0x00000005u,0x00000020u,
+    0x00040017u,0x00000006u,0x00000005u,0x00000004u,
+    0x00040020u,0x00000007u,0x00000003u,0x00000006u,
+    0x0004003bu,0x00000007u,0x00000002u,0x00000003u,
+    0x0004002bu,0x00000005u,0x00000008u,0x00000000u,
+    0x0004002bu,0x00000005u,0x00000009u,0x3f800000u,
+    0x0007002cu,0x00000006u,0x0000000au,0x00000008u,
+    0x00000008u,0x00000008u,0x00000009u,0x00050036u,
+    0x00000003u,0x00000001u,0x00000000u,0x00000004u,
+    0x000200f8u,0x0000000bu,0x0003003eu,0x00000002u,
+    0x0000000au,0x000100fdu,0x00010038u,
+};
+static const uint32_t k_fs_spv[] = {
+    0x07230203u,0x00010600u,0x00070000u,0x0000000cu,
+    0x00000000u,0x00020011u,0x00000001u,0x0003000eu,
+    0x00000000u,0x00000001u,0x0006000fu,0x00000004u,
+    0x00000001u,0x6e69616du,0x00000000u,0x00000002u,
+    0x00030010u,0x00000001u,0x00000007u,0x00040047u,
+    0x00000002u,0x0000001eu,0x00000000u,0x00020013u,
+    0x00000003u,0x00030021u,0x00000004u,0x00000003u,
+    0x00030016u,0x00000005u,0x00000020u,0x00040017u,
+    0x00000006u,0x00000005u,0x00000004u,0x00040020u,
+    0x00000007u,0x00000003u,0x00000006u,0x0004003bu,
+    0x00000007u,0x00000002u,0x00000003u,0x0004002bu,
+    0x00000005u,0x00000008u,0x00000000u,0x0004002bu,
+    0x00000005u,0x00000009u,0x3f800000u,0x0007002cu,
+    0x00000006u,0x0000000au,0x00000009u,0x00000008u,
+    0x00000008u,0x00000009u,0x00050036u,0x00000003u,
+    0x00000001u,0x00000000u,0x00000004u,0x000200f8u,
+    0x0000000bu,0x0003003eu,0x00000002u,0x0000000au,
+    0x000100fdu,0x00010038u,
+};
+
+static int layer_present(const char *name) {
+    uint32_t n = 0;
+    if (vkEnumerateInstanceLayerProperties(&n, NULL) != VK_SUCCESS || n == 0) return 0;
+    VkLayerProperties *l = malloc(n * sizeof(*l));
+    if (!l) return 0;
+    int found = 0;
+    if (vkEnumerateInstanceLayerProperties(&n, l) == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; ++i)
+            if (strcmp(l[i].layerName, name) == 0) { found = 1; break; }
+    free(l);
+    return found;
+}
+
+/* Builds a real pipeline through lagfx_pipeline_build on lavapipe. When the
+ * Khronos validation layer is installed it is enabled and the build must emit
+ * zero WARNING/ERROR messages; a deliberately
+ * malformed shader module (positive control) must emit some, proving the layer is live. With the layer absent or disabled
+ * (VK_LOADER_LAYERS_DISABLE=*) the build is still performed and checked, only
+ * the validation assertions are not applicable. Returns 0 pass, 1 fail, 77 skip
+ * (no Vulkan ICD / CPU device). Object teardown is children-first. */
 static int test_validation_layers_and_vuids(void) {
-    uint32_t layer_count = 0;
-    VkResult vr = vkEnumerateInstanceLayerProperties(&layer_count, NULL);
-    if (vr != VK_SUCCESS || layer_count == 0) {
-        fprintf(stderr, "pipeline_build_test: vkEnumerateInstanceLayerProperties failed or no layers\n");
-        return 77;
-    }
-
-    VkLayerProperties *layers = malloc(layer_count * sizeof(VkLayerProperties));
-    vr = vkEnumerateInstanceLayerProperties(&layer_count, layers);
-    if (vr != VK_SUCCESS) {
-        fprintf(stderr, "pipeline_build_test: vkEnumerateInstanceLayerProperties failed\n");
-        free(layers);
-        return 77;
-    }
-
-    int validation_available = 0;
-    for (uint32_t i = 0; i < layer_count; ++i) {
-        if (strstr(layers[i].layerName, "VK_LAYER_KHRONOS_validation") != NULL) {
-            validation_available = 1;
-            break;
-        }
-    }
-    free(layers);
-
-    if (!validation_available) {
-        fprintf(stderr, "pipeline_build_test: VK_LAYER_KHRONOS_validation not available; skipping\n");
-        return 77;
-    }
+    const char *layer = "VK_LAYER_KHRONOS_validation";
+    int have_layer = layer_present(layer);
+    if (!have_layer)
+        fprintf(stderr, "pipeline_build_test: %s not available; building pipeline without validation\n", layer);
 
     VkApplicationInfo ai = {
         .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO,
         .pApplicationName = "pipeline_build_test",
         .apiVersion = VK_API_VERSION_1_3,
     };
-
-    const char *validation_layers[] = {"VK_LAYER_KHRONOS_validation"};
     const char *debug_utils_ext = "VK_EXT_debug_utils";
-
     VkInstanceCreateInfo ici = {
         .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO,
         .pApplicationInfo = &ai,
-        .enabledLayerCount = 1,
-        .ppEnabledLayerNames = validation_layers,
-        .enabledExtensionCount = 1,
+        .enabledLayerCount = have_layer ? 1u : 0u,
+        .ppEnabledLayerNames = &layer,
+        .enabledExtensionCount = have_layer ? 1u : 0u,
         .ppEnabledExtensionNames = &debug_utils_ext,
     };
-
     VkInstance inst = VK_NULL_HANDLE;
-    vr = vkCreateInstance(&ici, NULL, &inst);
+    VkResult vr = vkCreateInstance(&ici, NULL, &inst);
     if (vr != VK_SUCCESS) {
-        fprintf(stderr, "pipeline_build_test: vkCreateInstance failed (%d)\n", (int)vr);
+        fprintf(stderr, "pipeline_build_test: vkCreateInstance failed (%d); skipping\n", (int)vr);
         return 77;
     }
 
-    PFN_vkCreateDebugUtilsMessengerEXT vkCreateDebugUtilsMessengerEXT_fn =
-        (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkCreateDebugUtilsMessengerEXT");
-    PFN_vkDestroyDebugUtilsMessengerEXT vkDestroyDebugUtilsMessengerEXT_fn =
-        (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkDestroyDebugUtilsMessengerEXT");
-    
-    VkDebugUtilsMessengerCreateInfoEXT mc = {
-        .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
-        .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT
-                         | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
-                         | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
-        .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
-                     | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT
-                     | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT,
-        .pfnUserCallback = debug_message_callback,
-    };
-
+    int rc = 1;
     VkDebugUtilsMessengerEXT messenger = VK_NULL_HANDLE;
-    if (vkCreateDebugUtilsMessengerEXT_fn) {
-        vr = vkCreateDebugUtilsMessengerEXT_fn(inst, &mc, NULL, &messenger);
-        if (vr != VK_SUCCESS) {
-            fprintf(stderr, "pipeline_build_test: vkCreateDebugUtilsMessengerEXT failed (%d)\n", (int)vr);
-        }
+    PFN_vkDestroyDebugUtilsMessengerEXT destroy_messenger = NULL;
+    VkDevice device = VK_NULL_HANDLE;
+    VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkPipeline pipe = VK_NULL_HANDLE;
+    int have_messenger = 0;
+
+    if (have_layer) {
+        PFN_vkCreateDebugUtilsMessengerEXT create_messenger =
+            (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkCreateDebugUtilsMessengerEXT");
+        destroy_messenger =
+            (PFN_vkDestroyDebugUtilsMessengerEXT)vkGetInstanceProcAddr(inst, "vkDestroyDebugUtilsMessengerEXT");
+        VkDebugUtilsMessengerCreateInfoEXT mc = {
+            .sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT,
+            .messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT
+                             | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT,
+            .messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT
+                         | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT,
+            .pfnUserCallback = debug_message_callback,
+        };
+        if (create_messenger && destroy_messenger
+            && create_messenger(inst, &mc, NULL, &messenger) == VK_SUCCESS)
+            have_messenger = 1;
+        ASSERT_GOTO(have_messenger, "debug messenger created while layer is enabled");
     }
 
     uint32_t device_count = 0;
     vkEnumeratePhysicalDevices(inst, &device_count, NULL);
-    
-    if (device_count == 0) {
-        fprintf(stderr, "pipeline_build_test: no physical devices available\n");
-        if (messenger && vkDestroyDebugUtilsMessengerEXT_fn) {
-            vkDestroyDebugUtilsMessengerEXT_fn(inst, messenger, NULL);
+    VkPhysicalDevice *devices = device_count ? malloc(device_count * sizeof(*devices)) : NULL;
+    VkPhysicalDevice phys = VK_NULL_HANDLE;
+    if (devices) {
+        vkEnumeratePhysicalDevices(inst, &device_count, devices);
+        for (uint32_t i = 0; i < device_count; ++i) {
+            VkPhysicalDeviceProperties props;
+            vkGetPhysicalDeviceProperties(devices[i], &props);
+            if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) { phys = devices[i]; break; }
         }
-        vkDestroyInstance(inst, NULL);
-        return 77;
+        free(devices);
+    }
+    if (!phys) {
+        fprintf(stderr, "pipeline_build_test: no CPU (lavapipe) device; skipping\n");
+        rc = 77;
+        goto out;
     }
 
-    VkPhysicalDevice *devices = malloc(device_count * sizeof(VkPhysicalDevice));
-    vkEnumeratePhysicalDevices(inst, &device_count, devices);
-    
-    VkPhysicalDevice phys_device = VK_NULL_HANDLE;
-    for (uint32_t i = 0; i < device_count; ++i) {
-        VkPhysicalDeviceProperties props;
-        vkGetPhysicalDeviceProperties(devices[i], &props);
-        if (props.deviceType == VK_PHYSICAL_DEVICE_TYPE_CPU) {
-            phys_device = devices[i];
-            break;
-        }
-    }
-
-    free(devices);
-
-    if (!phys_device) {
-        fprintf(stderr, "pipeline_build_test: no CPU device found\n");
-        if (messenger && vkDestroyDebugUtilsMessengerEXT_fn) {
-            vkDestroyDebugUtilsMessengerEXT_fn(inst, messenger, NULL);
-        }
-        vkDestroyInstance(inst, NULL);
-        return 77;
-    }
-
-    float queue_priority = 1.0f;
+    float prio = 1.0f;
     VkDeviceQueueCreateInfo dqci = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
-        .queueFamilyIndex = 0,
-        .queueCount = 1,
-        .pQueuePriorities = &queue_priority,
+        .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio,
     };
-
+    /* lagfx_pipeline_build chains VkPipelineRenderingCreateInfo, so the device
+     * must enable dynamicRendering (VUID-...-dynamicRendering-06576). */
+    VkPhysicalDeviceVulkan13Features f13 = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
+        .dynamicRendering = VK_TRUE,
+    };
     VkDeviceCreateInfo dci = {
         .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-        .queueCreateInfoCount = 1,
-        .pQueueCreateInfos = &dqci,
+        .pNext = &f13,
+        .queueCreateInfoCount = 1, .pQueueCreateInfos = &dqci,
     };
-
-    VkDevice device = VK_NULL_HANDLE;
-    vr = vkCreateDevice(phys_device, &dci, NULL, &device);
+    vr = vkCreateDevice(phys, &dci, NULL, &device);
     if (vr != VK_SUCCESS) {
-        fprintf(stderr, "pipeline_build_test: vkCreateDevice failed (%d)\n", (int)vr);
-        if (messenger && vkDestroyDebugUtilsMessengerEXT_fn) {
-            vkDestroyDebugUtilsMessengerEXT_fn(inst, messenger, NULL);
-        }
-        vkDestroyInstance(inst, NULL);
-        return 77;
+        fprintf(stderr, "pipeline_build_test: vkCreateDevice (dynamicRendering) failed (%d); skipping\n", (int)vr);
+        device = VK_NULL_HANDLE;
+        rc = 77;
+        goto out;
     }
 
-    VkPipelineRenderingCreateInfo rendering_info = {
-        .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = (VkFormat[]){VK_FORMAT_B8G8R8A8_UNORM},
+    VkShaderModuleCreateInfo smci = {
+        .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+        .codeSize = sizeof(k_vs_spv), .pCode = k_vs_spv,
     };
+    ASSERT_GOTO(vkCreateShaderModule(device, &smci, NULL, &vs) == VK_SUCCESS, "vertex shader module created");
+    smci.codeSize = sizeof(k_fs_spv); smci.pCode = k_fs_spv;
+    ASSERT_GOTO(vkCreateShaderModule(device, &smci, NULL, &fs) == VK_SUCCESS, "fragment shader module created");
+    VkPipelineLayoutCreateInfo plci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    ASSERT_GOTO(vkCreatePipelineLayout(device, &plci, NULL, &layout) == VK_SUCCESS, "pipeline layout created");
 
-    VkGraphicsPipelineCreateInfo gpci = {
-        .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &rendering_info,
-        .stageCount = 0,
-        .pStages = NULL,
-        .pVertexInputState = &(VkPipelineVertexInputStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO},
-        .pInputAssemblyState = &(VkPipelineInputAssemblyStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST},
-        .pViewportState = &(VkPipelineViewportStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1},
-        .pRasterizationState = &(VkPipelineRasterizationStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE, .lineWidth = 1.0f},
-        .pMultisampleState = &(VkPipelineMultisampleStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT},
-        .pDepthStencilState = &(VkPipelineDepthStencilStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO},
-        .pColorBlendState = &(VkPipelineColorBlendStateCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 1},
-        .layout = VK_NULL_HANDLE,
-        .renderPass = VK_NULL_HANDLE,
-        .subpass = 0,
-    };
-
-    VkPipeline pipe = VK_NULL_HANDLE;
-    
+    /* (1) Product path: must succeed and be validation-clean. */
+    lagfx_pipeline_desc_t desc;
+    memset(&desc, 0, sizeof(desc));
+    desc.vertex_shader = vs;
+    desc.fragment_shader = fs;
+    desc.layout = layout;
+    desc.color_format = VK_FORMAT_B8G8R8A8_UNORM;
     s_vuid_count = 0;
-    
-    vr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci, NULL, &pipe);
-    
-    if (messenger && vkDestroyDebugUtilsMessengerEXT_fn) {
-        vkDestroyDebugUtilsMessengerEXT_fn(inst, messenger, NULL);
+    lagfx_status_t st = lagfx_pipeline_build(device, &desc, &pipe);
+    ASSERT_GOTO(st == LAGFX_OK, "lagfx_pipeline_build succeeds on lavapipe");
+    ASSERT_GOTO(pipe != VK_NULL_HANDLE, "lagfx_pipeline_build returned a non-null pipeline");
+    int product_vuids = s_vuid_count;
+    fprintf(stdout, "pipeline_build_test: validation messages during lagfx_pipeline_build: %d\n", product_vuids);
+    ASSERT_GOTO(product_vuids == 0, "lagfx_pipeline_build emits no validation warnings/errors");
+
+    /* (2) Positive control (layer only): an intentionally malformed SPIR-V
+     * module (valid header, truncated body) must be reported by the layer. A malformed
+     * *pipeline* create is not used for this because lavapipe dereferences the
+     * bad state behind the layer and crashes (verified with gdb). */
+    if (have_messenger) {
+        /* The layer caches SPIR-V validation results (also across processes), so
+         * a fixed bad blob is only reported once; make the id bound unique per run. */
+        uint32_t bad_code[5];
+        memcpy(bad_code, k_vs_spv, sizeof(bad_code));              /* header only */
+        bad_code[3] = 0x1000u + ((uint32_t)getpid() & 0xffffu);
+        VkShaderModuleCreateInfo bad = {
+            .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+            .codeSize = sizeof(bad_code), .pCode = bad_code,
+        };
+        VkShaderModule bad_mod = VK_NULL_HANDLE;
+        s_vuid_count = 0;
+        VkResult bvr = vkCreateShaderModule(device, &bad, NULL, &bad_mod);
+        fprintf(stdout, "pipeline_build_test: validation messages for intentionally malformed SPIR-V: %d (vr=%d)\n",
+                s_vuid_count, (int)bvr);
+        if (bad_mod != VK_NULL_HANDLE) vkDestroyShaderModule(device, bad_mod, NULL);
+        ASSERT_GOTO(s_vuid_count > 0, "validation layer reports an intentionally malformed shader module");
     }
+    rc = 0;
+
+out:
+    /* Children first: pipeline, layout, modules, device, messenger, instance. */
+    if (device) {
+        if (pipe)   vkDestroyPipeline(device, pipe, NULL);
+        if (layout) vkDestroyPipelineLayout(device, layout, NULL);
+        if (fs)     vkDestroyShaderModule(device, fs, NULL);
+        if (vs)     vkDestroyShaderModule(device, vs, NULL);
+        vkDestroyDevice(device, NULL);
+    }
+    if (messenger && destroy_messenger) destroy_messenger(inst, messenger, NULL);
     vkDestroyInstance(inst, NULL);
-
-    if (vkCreateGraphicsPipelines) {
-        vkDestroyPipeline(device, pipe, NULL);
-    }
-    
-    vkDestroyDevice(device, NULL);
-
-    fprintf(stdout, "pipeline_build_test: VUID count during empty pipeline creation: %d\n", s_vuid_count);
-    ASSERT(s_vuid_count == 0, "No VUID warnings should be emitted");
-
-    return 0;
+    return rc;
 }
 
 static int test_null_inputs(void) {
