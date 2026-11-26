@@ -5,6 +5,7 @@
 #include "air2spirv/metallib_extract.h"
 #include "air2spv/translate.h"
 #include "libapplegfx-vulkan.h"
+#include "vulkan/caps.h"
 #include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,6 +76,7 @@ int main(int argc, char **argv) {
             char out[1400]; snprintf(out, sizeof out, "%s/%.*s_%s_%s.spv", argv[2], (int)(strlen(e->d_name) - 8), e->d_name + 4, fn[k].name, st);
             for (char *c = out + strlen(argv[2]) + 1; *c; c++) if (*c == '.' && c[1] != 's') *c = '_';
             FILE *o = fopen(out, "wb"); if (o) { fwrite(spv, 1, sz, o); fclose(o); ok++; }
+            if (getenv("DUMP_CAPS")) printf("caps %s %s: 0x%x\n", libh, fn[k].name, lagfx_spv_required_caps(spv, sz));
             free(spv);
         }
         free(lib);

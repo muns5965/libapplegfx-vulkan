@@ -693,6 +693,22 @@ static void test_missing_caps(void) {
     uint32_t m[] = { 0x07230203u, 0x00010400u, 0, 8, 0, 0x00020011u, 1u, 0x00020011u, 11u, 0x00020011u, 39u, 0x00020011u, 4448u, 0x00020011u, 4441u, 0x0004000fu, 0, 1, 0x6e69616du };
     uint32_t need = lagfx_spv_required_caps(m, sizeof m);
     assert(need == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14)));
+    {   /* capabilities inferred from USE, with none declared: a half Input variable and a StorageBuffer with a uchar member */
+        /* encoding: OpTypeFloat (22) len 3, OpTypeInt (21) len 4, OpTypePointer (32) len 4, OpTypeStruct (30) len 3 */
+        uint32_t a[] = { 0x07230203u, 0x00010400u, 0, 8, 0,
+            0x00030016u, 1u, 16u,                     /* %1 half */
+            0x00040020u, 2u, 1u, 1u };                /* %2 = Input ptr %1 */
+        uint32_t need_io = lagfx_spv_required_caps(a, sizeof a);
+        assert(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16));
+        assert(need_io & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16));
+        uint32_t b[] = { 0x07230203u, 0x00010400u, 0, 8, 0,
+            0x00040015u, 1u, 8u, 0u,                  /* %1 uchar */
+            0x0003001eu, 2u, 1u,                      /* %2 struct { %1 } */
+            0x00040020u, 3u, 12u, 2u };               /* %3 = StorageBuffer ptr %2 */
+        uint32_t need_sb = lagfx_spv_required_caps(b, sizeof b);
+        assert(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8));
+        assert(!(need_sb & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16)));
+    }
     assert(lagfx_spv_required_caps(m, 7) == 0 && lagfx_vk_caps_parse("int64,bogus,float16") == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)));
     struct lagfx_vk_state *vk = g_dev->vk;
     char line[512];
