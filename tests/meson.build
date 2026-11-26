@@ -1336,6 +1336,15 @@ if fs.is_file(meson.current_source_dir() / 'draw-diag-unit.c')
   test('bounded per-draw diagnostics (unit)', draw_diag_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'spv-glsl-std450-numbers-unit.c')
+  glsl450_num_test = executable('spv-glsl-std450-numbers-unit',
+    'spv-glsl-std450-numbers-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    build_by_default : true,
+  )
+  test('GLSL.std.450 instruction numbers vs Khronos header (unit)', glsl450_num_test)
+endif
+
 if fs.is_file(meson.current_source_dir() / 'metal-format-map-unit.c') and vulkan_dep.found()
   metal_fmt_test = executable('metal-format-map-unit',
     'metal-format-map-unit.c',
