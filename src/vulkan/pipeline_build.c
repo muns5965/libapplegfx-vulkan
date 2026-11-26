@@ -151,7 +151,7 @@ VkFormat lagfx_pso_vertex_format_to_vk(uint32_t f) {
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
-    if (!device || !desc || !desc->vertex_shader || !desc->fragment_shader
+    if (!device || !desc || !desc->vertex_shader || (!desc->fragment_shader && !desc->diag_no_fragment)
         || !out_pipeline) {
         return LAGFX_ERR_INVALID_ARG;
     }
@@ -416,10 +416,11 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     };
 
     /* Graphics pipeline create info */
+    if (desc->diag_no_fragment) rsst.rasterizerDiscardEnable = VK_TRUE;   /* DIAGNOSTIC (pipeline-reduce): vertex-only pipeline */
     VkGraphicsPipelineCreateInfo gpci = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .pNext = desc->diag_render_pass ? NULL : &rendering_info,
-        .stageCount = 2,
+        .stageCount = desc->diag_no_fragment ? 1u : 2u,   /* diag_no_fragment: DIAGNOSTIC, vertex-only pipeline */
         .pStages = stages,
         .pVertexInputState = &vin,
         .pInputAssemblyState = &ia,

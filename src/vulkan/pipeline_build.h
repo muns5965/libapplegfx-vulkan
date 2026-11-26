@@ -104,6 +104,8 @@ typedef struct {
     const void      *diag_gpci_pnext;
     uint64_t         diag_render_pass;
     uint32_t         diag_subpass;
+    /* diag_no_fragment != 0 (pipeline-reduce rows only): no fragment stage (fragment_shader may be VK_NULL_HANDLE) and rasterizerDiscardEnable = VK_TRUE (a vertex-only pipeline). */
+    uint8_t          diag_no_fragment;
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
