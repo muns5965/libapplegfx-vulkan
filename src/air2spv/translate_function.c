@@ -27,6 +27,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* Sentinel for "AIR type-index unknown / unresolved". MUST NOT be 0:
  * AIR type index 0 is a LEGITIMATE type (it is `float` in the compositor
@@ -4246,6 +4247,63 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     return true;
 }
 
+/* ===================================================================
+ * air.sample_texture_{2d,3d} option operands (X04)
+ *
+ *   (tex, samp, coord, [i32 array_index,] i1 has_offset, <N x i32> offset,
+ *    i1 lod_is_level, float lod_or_bias, float min_lod, i32 flags)
+ *
+ * The option operands are read from the constant tables only: a SPIR-V image operand mask is a compile-time property, so an operand that is not a known
+ * constant cannot be used to pick the operand form (a variable lod/bias value is fine: it is only the VALUE of the Lod / Bias operand).
+ * =================================================================== */
+
+/* The constant record behind `vid` (function-local first, then module level), or NULL when `vid` is not a constant. */
+static const lagfx_air_constant_t *sample_opt_const(xlate_ctx_t *c, uint32_t vid, uint32_t *is_local) {
+    uint32_t n_lc = 0;
+    const lagfx_air_constant_t *lc = lagfx_air_function_body_local_constants(c->body, &n_lc);
+    uint32_t lc_base = c->arg_id_base + c->num_args;
+    *is_local = 0;
+    if (lc && vid >= lc_base && vid < lc_base + n_lc) { *is_local = 1; return &lc[vid - lc_base]; }
+    uint32_t n_mod = 0, n_fns = 0;
+    const lagfx_air_constant_t *mc = lagfx_air_module_constants(c->m, &n_mod);
+    (void)lagfx_air_module_functions(c->m, &n_fns);
+    uint32_t mod_base = lagfx_air_module_num_globalvars(c->m) + n_fns;
+    if (mc && vid >= mod_base && vid < mod_base + n_mod) return &mc[vid - mod_base];
+    return NULL;
+}
+
+/* i1 constant -> *out. false when `vid` is not a known i1 constant. */
+static bool sample_opt_i1(xlate_ctx_t *c, uint32_t vid, bool *out) {
+    uint32_t loc; const lagfx_air_constant_t *k = sample_opt_const(c, vid, &loc);
+    if (!k) return false;
+    if (k->kind == LAGFX_AIR_CONST_NULL) { *out = false; return true; }
+    if (k->kind == LAGFX_AIR_CONST_INTEGER) { *out = k->payload.i64 != 0; return true; }
+    return false;
+}
+
+static float sample_half_to_float(uint32_t h) {
+    uint32_t sign = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u;
+    float v;
+    if (e == 0u) v = ldexpf((float)m, -24);
+    else if (e == 31u) v = m ? (float)NAN : (float)INFINITY;
+    else v = ldexpf((float)(m | 1024u), (int)e - 25);
+    return sign ? -v : v;
+}
+
+/* float / half constant -> *out (as a float32). false when `vid` is not a known float constant. */
+static bool sample_opt_f32(xlate_ctx_t *c, uint32_t vid, float *out) {
+    uint32_t loc; const lagfx_air_constant_t *k = sample_opt_const(c, vid, &loc);
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    if (!k || k->type_index >= nt) return false;
+    if (k->kind == LAGFX_AIR_CONST_NULL) { *out = 0.0f; return true; }
+    if (k->kind != LAGFX_AIR_CONST_FLOAT) return false;
+    uint64_t bits; memcpy(&bits, &k->payload.i64, sizeof bits);   /* the reader keeps the record's raw IEEE bits */
+    if (ts[k->type_index].kind == LAGFX_AIR_TYPE_FLOAT) { uint32_t b32 = (uint32_t)bits; memcpy(out, &b32, sizeof *out); return true; }
+    if (ts[k->type_index].kind == LAGFX_AIR_TYPE_HALF) { *out = sample_half_to_float((uint32_t)bits & 0xFFFFu); return true; }
+    return false;
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -4882,14 +4940,68 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 uint32_t sampled = lagfx_spv_builder_alloc_id(c->b);
                 { uint32_t o[] = { simg_t, sampled, img_val, samp_val };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SAMPLED_IMAGE, o, 4); }
-                uint32_t rgba = lagfx_spv_builder_alloc_id(c->b);
+                /* Option operands (see sample_opt_*): bias / explicit level / min_lod. Gradient forms (`_grad`) and operand lists
+                 * shorter than the plain layout keep the old plain sample. */
+                const bool smp_array = strstr(fn_name, "_array") != NULL;
+                const uint32_t o0 = uv_slot + 1u + (smp_array ? 1u : 0u);   /* slot of i1 has_offset */
+                bool have_opts = strstr(fn_name, "_grad") == NULL && inst->num_ops >= o0 + 6u;
+                bool lvl = false, lod_const = false;
+                float lod_c = 0.0f;
+                uint32_t lod_vid = 0u;
+                if (have_opts) {
+                    if (!sample_opt_i1(c, resolve_relative((uint32_t)inst->ops[o0 + 2u], next_val_id), &lvl)) {
+                        LAGFX_WARN("sample_texture: lod_is_level flag is not a constant -- treated as bias");
+                        lvl = false;
+                    }
+                    lod_vid = resolve_relative((uint32_t)inst->ops[o0 + 3u], next_val_id);
+                    lod_const = sample_opt_f32(c, lod_vid, &lod_c);
+                    float ml = 0.0f;
+                    if (!sample_opt_f32(c, resolve_relative((uint32_t)inst->ops[o0 + 4u], next_val_id), &ml))
+                        LAGFX_WARN("sample_texture: min_lod is not a constant -- ignored (MinLod needs the MinLod capability / shaderResourceMinLod, which is not enabled)");
+                    else if (ml != 0.0f)
+                        LAGFX_WARN("sample_texture: min_lod %g ignored (MinLod needs the MinLod capability / shaderResourceMinLod, which is not enabled)", (double)ml);
+                }
+                const bool lod_zero = lod_const && lod_c == 0.0f;
+                /* Lod / Bias value as float32 (the operand may be half). */
+                uint32_t lod_spv = 0u;
+                if (have_opts && !lod_zero) {
+                    if (lod_const) lod_spv = emit_const_float32(c, lod_c);
+                    else {
+                        uint32_t f32t = emit_type_float32(c);
+                        lod_spv = resolve_or_undef(c, lod_vid, f32t);
+                        uint32_t lt = value_air_type_idx(c, lod_vid), nt = 0;
+                        const lagfx_air_type_t *lts = lagfx_air_module_types(c->m, &nt);
+                        if (lt < nt && lts[lt].kind == LAGFX_AIR_TYPE_HALF) {
+                            uint32_t cv = lagfx_spv_builder_alloc_id(c->b);
+                            uint32_t o[] = { f32t, cv, lod_spv };
+                            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o, 3);
+                            lod_spv = cv;
+                        }
+                    }
+                }
+                uint32_t sop = LAGFX_SPV_OP_IMAGE_SAMPLE_IMPLICIT_LOD, mask = 0u;
+                uint32_t iops[8]; uint32_t nio = 0u;
                 if (c->stage == LAGFX_XLATE_STAGE_VERTEX) {   /* no derivatives in the vertex stage: implicit LOD is invalid there; Metal samples level 0 */
-                    uint32_t o[] = { v4f, rgba, sampled, uv_spv, 0x2u /* ImageOperands Lod */, emit_const_float32(c, 0.0f) };
-                    lagfx_spv_builder_emit_op(c->b, 88 /* OpImageSampleExplicitLod */, o, 6);
-                } else {
-                uint32_t o[] = { v4f, rgba, sampled, uv_spv };
-                  lagfx_spv_builder_emit_op(c->b,
-                      LAGFX_SPV_OP_IMAGE_SAMPLE_IMPLICIT_LOD, o, 4); }
+                    sop = 88u /* OpImageSampleExplicitLod */; mask = 0x2u /* Lod */;
+                    iops[nio++] = (have_opts && lvl && lod_spv) ? lod_spv : emit_const_float32(c, 0.0f);
+                    if (have_opts && !lvl && !lod_zero) LAGFX_LOG("sample_texture: bias ignored in the vertex stage (level 0)");
+                } else if (have_opts && lvl) {
+                    sop = 88u; mask = 0x2u /* Lod */;
+                    iops[nio++] = lod_spv ? lod_spv : emit_const_float32(c, 0.0f);
+                } else if (have_opts && !lod_zero) {
+                    mask = 0x1u /* Bias */;
+                    iops[nio++] = lod_spv;
+                }
+                if (have_opts)
+                    LAGFX_LOG("sample_texture opts: kind=%s stage=%s", lvl ? "level" : (lod_zero ? "plain" : "bias"),
+                              c->stage == LAGFX_XLATE_STAGE_VERTEX ? "vertex" : "fragment");
+                uint32_t rgba = lagfx_spv_builder_alloc_id(c->b);
+                {
+                    uint32_t o[4 + 1 + 8] = { v4f, rgba, sampled, uv_spv };
+                    uint32_t no = 4u;
+                    if (mask) { o[no++] = mask; for (uint32_t q = 0; q < nio; q++) o[no++] = iops[q]; }
+                    lagfx_spv_builder_emit_op(c->b, sop, o, no);
+                }
 
                 /* Build the { vec4, i8 } result struct. The struct type +
                  * Int8 are already pre-emitted (the call-return pre-emit
