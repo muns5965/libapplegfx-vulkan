@@ -55,9 +55,14 @@ typedef struct {
 
 static inline bool lagfx_a64_blend_on(const lagfx_a64_blend_t *b) { return b->enabled_token && b->enabled_value != 0u; }
 
+typedef enum { LAGFX_A64_ROOT_NA = 0, LAGFX_A64_ROOT_OK, LAGFX_A64_ROOT_MALFORMED, LAGFX_A64_ROOT_MISSING, LAGFX_A64_ROOT_SAME, LAGFX_A64_ROOT_BAD_TYPE, LAGFX_A64_ROOT_N } lagfx_a64_root_status_t;
+const char *lagfx_a64_root_status_name(int st);
+
 typedef struct {
     uint32_t tag, size, ref, length;             /* header words 0..3 */
-    uint32_t nrefs, refs[LAGFX_A64_PDESC_MAX_REFS];   /* function-object refs, first-seen order */
+    uint32_t nrefs, refs[LAGFX_A64_PDESC_MAX_REFS];   /* the functions the descriptor names: tag 0xe + root_status OK = { vertex (root tag 1), fragment (root tag 2) } exactly; tile (0x33) = { root tag 1 }; tag 0xe with a bad root = none; other shapes = the scanned tokens */
+    uint32_t root_status, root_ref1, root_ref2;  /* lagfx_a64_root_status_t; root tags 1 / 2 as serialized (0 = absent) */
+    uint32_t nscan, scan[LAGFX_A64_PDESC_MAX_REFS];   /* diagnostic: every `04 <u32>` token naming a function (first-seen order); NEVER used to pick a render pipeline's stages */
     uint32_t nattrs; lagfx_a64_vattr_t attrs[LAGFX_A64_PDESC_MAX_ATTRS];   /* sorted by offset */
     uint32_t stride;                             /* 0 = not found */
     lagfx_a64_blend_t color0;

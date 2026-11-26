@@ -592,6 +592,7 @@ typedef struct lagfx_protocol {
             struct {
                 uint64_t resolved, resolve_failed;
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
+                uint64_t rf_root[6], rf_root_stage;   /* pipeline refused because the descriptor root (tag 1 vertex / tag 2 fragment) is malformed / missing / the same ref twice / names a non-function object (index = lagfx_a64_root_status_t), or names a function of the wrong stage */
                 uint64_t xlate_air2spv;
                 uint64_t link_mismatch_fixed, link_missing_zeroed, link_unlinked;   /* fragment stage linker (air2spv): input read as the vertex type + converted / input with no vertex output zeroed / left unresolved */
                 uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */

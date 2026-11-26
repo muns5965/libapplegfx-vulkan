@@ -81,6 +81,14 @@ executable('dump-translate',
   build_by_default : true,
 )
 
+# dump-psolink — offline replay of the resolver's stage selection (recorded token scan vs root tags 1/2) + translation: stage_link counters per selection.
+executable('dump-psolink',
+  'dump-psolink.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)
+
 # dump-bindings — per PSO of an arm64 dump: bindings per stage and why the resolver would stub a framebuffer-fetch pipeline.
 executable('dump-bindings',
   'dump-bindings.c',
