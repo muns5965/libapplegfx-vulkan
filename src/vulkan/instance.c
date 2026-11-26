@@ -687,6 +687,26 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
 
     s->caps_enabled = caps_en, s->caps_missing = LAGFX_VK_CAP_ALL & ~caps_en;
+    {   /* record what the device was created with (read back by the pipeline failure bundle) */
+        size_t eo = 0;
+        s->dev_exts[0] = 0;
+        for (uint32_t i = 0; i < wanted_dev_n; i++) { int w = snprintf(s->dev_exts + eo, sizeof s->dev_exts - eo, "%s%s", i ? "," : "", wanted_dev_exts[i]); if (w < 0 || (size_t)w >= sizeof s->dev_exts - eo) break; eo += (size_t)w; }
+        snprintf(s->dev_features, sizeof s->dev_features,
+                 "shaderInt64=%d shaderInt16=%d independentBlend=%d depthBiasClamp=%d samplerAnisotropy=%d shaderStorageImageWriteWithoutFormat=%d fragmentStoresAndAtomics=%d vertexPipelineStoresAndAtomics=%d "
+                 "shaderInt8=%d shaderFloat16=%d storageBuffer8BitAccess=%d uniformAndStorageBuffer8BitAccess=%d storagePushConstant8=%d storageBuffer16BitAccess=%d uniformAndStorageBuffer16BitAccess=%d storagePushConstant16=%d "
+                 "storageInputOutput16=%d variablePointers=%d variablePointersStorageBuffer=%d timelineSemaphore=%d descriptorIndexing=%d bufferDeviceAddress=%d dynamicRendering=%d synchronization2=%d subgroupSizeControl=%d "
+                 "dynamicRenderingLocalRead=%d rasterizationOrderColorAttachmentAccess=%d",
+                 (int)feat2.features.shaderInt64, (int)feat2.features.shaderInt16, (int)feat2.features.independentBlend, (int)feat2.features.depthBiasClamp, (int)feat2.features.samplerAnisotropy,
+                 (int)feat2.features.shaderStorageImageWriteWithoutFormat, (int)feat2.features.fragmentStoresAndAtomics, (int)feat2.features.vertexPipelineStoresAndAtomics,
+                 (int)feat12.shaderInt8, (int)feat12.shaderFloat16, (int)feat12.storageBuffer8BitAccess, (int)feat12.uniformAndStorageBuffer8BitAccess, (int)feat12.storagePushConstant8,
+                 (int)feat11.storageBuffer16BitAccess, (int)feat11.uniformAndStorageBuffer16BitAccess, (int)feat11.storagePushConstant16, (int)feat11.storageInputOutput16,
+                 (int)feat11.variablePointers, (int)feat11.variablePointersStorageBuffer, (int)feat12.timelineSemaphore, (int)feat12.descriptorIndexing, (int)feat12.bufferDeviceAddress,
+                 (int)feat13.dynamicRendering, (int)feat13.synchronization2, (int)feat13.subgroupSizeControl, (int)s->have_local_read, (int)s->have_raster_order);
+        VkPhysicalDeviceDriverProperties drv = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES };
+        VkPhysicalDeviceProperties2 dp2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &drv };
+        vkGetPhysicalDeviceProperties2(s->phys_device, &dp2);
+        snprintf(s->driver_name, sizeof s->driver_name, "%s", drv.driverName), snprintf(s->driver_info, sizeof s->driver_info, "%s", drv.driverInfo);
+    }
     if (feat13.subgroupSizeControl != VK_TRUE) s->sg_control = false;
     {   /* printed once per process: Metal's simdgroup is 32 lanes; a kernel that maps lanes to pixels needs a 32-wide subgroup (pinned when the device allows it) */
         static bool sg_printed;

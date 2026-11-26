@@ -49,6 +49,9 @@ lagfx_status_t lagfx_build_pipeline_layout_from_spv(
     VkDescriptorSetLayout *out_dsl,
     VkPipelineLayout *out_pl);
 
+/* The set-0 bindings lagfx_build_pipeline_layout_from_spv() would create (same code), without creating anything: `binds` must hold 32 entries. */
+uint32_t lagfx_layout_bindings_from_spv(const uint8_t *const *spv_blobs, const size_t *spv_lens, uint32_t n_stages, VkDescriptorSetLayoutBinding *binds);
+
 #ifdef __cplusplus
 }
 #endif

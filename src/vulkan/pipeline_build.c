@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "pipeline_build.h"
+#include "pipeline_bundle.h"
 #include "common/log.h"
 #include "common/policy.h"
 
@@ -90,6 +91,34 @@ static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc
               desc->fragment_spv_bytes, (unsigned long long)fh, fm, desc->fragment_entry_point ? desc->fragment_entry_point : "main",
               vin->vertexBindingDescriptionCount, vin->vertexAttributeDescriptionCount, attrs,
               vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, desc->caps_enabled, nseen);
+}
+
+/* Failure bundle, informational part: the Vulkan create-info state exactly as built above (one fact per line; the bundle prefixes each line with "# "). */
+static void describe_state(char *buf, size_t cap, const VkGraphicsPipelineCreateInfo *g, const VkPipelineRenderingCreateInfo *ri) {
+    size_t o = 0;
+#define W(...) do { if (o + 1u < cap) { int w_ = snprintf(buf + o, cap - o, __VA_ARGS__); if (w_ > 0) o = (size_t)w_ >= cap - o ? cap - 1u : o + (size_t)w_; } } while (0)
+    const VkPipelineVertexInputStateCreateInfo *vi = g->pVertexInputState;
+    for (uint32_t i = 0; i < vi->vertexBindingDescriptionCount; i++) W("vertex_binding %u stride=%u rate=%d\n", vi->pVertexBindingDescriptions[i].binding, vi->pVertexBindingDescriptions[i].stride, (int)vi->pVertexBindingDescriptions[i].inputRate);
+    for (uint32_t i = 0; i < vi->vertexAttributeDescriptionCount; i++) W("vertex_attr loc=%u binding=%u format=%d offset=%u\n", vi->pVertexAttributeDescriptions[i].location, vi->pVertexAttributeDescriptions[i].binding, (int)vi->pVertexAttributeDescriptions[i].format, vi->pVertexAttributeDescriptions[i].offset);
+    W("topology %d primitiveRestart %u\n", (int)g->pInputAssemblyState->topology, g->pInputAssemblyState->primitiveRestartEnable);
+    W("rendering viewMask=%u colorAttachments=%u depthFormat=%d stencilFormat=%d\n", ri->viewMask, ri->colorAttachmentCount, (int)ri->depthAttachmentFormat, (int)ri->stencilAttachmentFormat);
+    for (uint32_t i = 0; i < ri->colorAttachmentCount; i++) W("color_format[%u] %d\n", i, (int)ri->pColorAttachmentFormats[i]);
+    const VkPipelineColorBlendStateCreateInfo *cb = g->pColorBlendState;
+    W("blend flags=0x%x logicOpEnable=%u attachments=%u\n", (unsigned)cb->flags, cb->logicOpEnable, cb->attachmentCount);
+    for (uint32_t i = 0; i < cb->attachmentCount; i++) { const VkPipelineColorBlendAttachmentState *a = &cb->pAttachments[i];
+        W("blend_att[%u] enable=%u color=%d/%d/%d alpha=%d/%d/%d writeMask=0x%x\n", i, a->blendEnable, (int)a->srcColorBlendFactor, (int)a->dstColorBlendFactor, (int)a->colorBlendOp, (int)a->srcAlphaBlendFactor, (int)a->dstAlphaBlendFactor, (int)a->alphaBlendOp, (unsigned)a->colorWriteMask); }
+    const VkPipelineRasterizationStateCreateInfo *r = g->pRasterizationState;
+    W("raster polygon=%d cull=%d front=%d depthClamp=%u discard=%u depthBias=%u lineWidth=%g\n", (int)r->polygonMode, (int)r->cullMode, (int)r->frontFace, r->depthClampEnable, r->rasterizerDiscardEnable, r->depthBiasEnable, (double)r->lineWidth);
+    W("multisample samples=%d sampleShading=%u\n", (int)g->pMultisampleState->rasterizationSamples, g->pMultisampleState->sampleShadingEnable);
+    const VkPipelineDepthStencilStateCreateInfo *d = g->pDepthStencilState;
+    W("depth_stencil(static) depthTest=%u depthWrite=%u compare=%d stencilTest=%u (dynamic when listed below)\n", d->depthTestEnable, d->depthWriteEnable, (int)d->depthCompareOp, d->stencilTestEnable);
+    W("viewport(static,ignored: dynamic) x=%g y=%g w=%g h=%g\n", (double)g->pViewportState->pViewports[0].x, (double)g->pViewportState->pViewports[0].y, (double)g->pViewportState->pViewports[0].width, (double)g->pViewportState->pViewports[0].height);
+    W("dynamic_states");
+    for (uint32_t i = 0; i < g->pDynamicState->dynamicStateCount; i++) W(" %d", (int)g->pDynamicState->pDynamicStates[i]);
+    W("\n");
+    for (uint32_t i = 0; i < g->stageCount; i++) W("stage %d module=handle entry=%s specialization=none\n", (int)g->pStages[i].stage, g->pStages[i].pName);
+#undef W
+    buf[o < cap ? o : cap - 1u] = 0;
 }
 
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
@@ -398,6 +427,11 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         LAGFX_ERR("lagfx_pipeline_build: vkCreateGraphicsPipelines failed (%d)",
                   (int)vr);
         log_build_failure(device, desc, &vin, ia.topology, color_fmt, vr);
+        if (lagfx_pipeline_bundle_dir()) {   /* option, default off: a self-contained bundle of this failure (src/vulkan/pipeline_bundle.h) */
+            char local[6144];
+            describe_state(local, sizeof local, &gpci, &rendering_info);
+            lagfx_pipeline_bundle_write(desc, vr, local, NULL, 0);
+        }
         return LAGFX_ERR_BACKEND;
     }
 

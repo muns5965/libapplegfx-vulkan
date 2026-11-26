@@ -1638,3 +1638,16 @@ pipeline_spv_hash_test = executable('pipeline-spv-hash-unit',
   build_by_default : true,
 )
 test('pipeline spv hash (unit)', pipeline_spv_hash_test, workdir : meson.current_source_dir() / '..')
+
+# Pipeline failure bundle (LAGFX_PIPEFAIL_BUNDLE_DIR): forced vkCreateGraphicsPipelines failure on lavapipe writes pipefail_<hash>/.
+pipeline_bundle_deps = [libapplegfx_vulkan_dep]
+if vulkan_dep.found()
+  pipeline_bundle_deps += [vulkan_dep]
+endif
+pipeline_bundle_test = executable('pipeline-bundle-unit',
+  'pipeline-bundle-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('pipeline failure bundle (unit, lavapipe)', pipeline_bundle_test)

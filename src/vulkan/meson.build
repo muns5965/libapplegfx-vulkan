@@ -11,6 +11,7 @@ lagfx_sources += files(
   'command.c',
   'pipeline.c',
   'pipeline_build.c',
+  'pipeline_bundle.c',
   'descriptor_layout.c',
   'render_target.c',
   'cursor.c',

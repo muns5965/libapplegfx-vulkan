@@ -261,6 +261,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 #include "arm64_tile.h"
 #include "../vulkan/instance.h"
 #include "../vulkan/descriptor_layout.h"
+#include "../vulkan/pipeline_bundle.h"
 #include "../air/bitcode_reader.h"
 #include "../air2spv/translate.h"
 #include "../air2spv/spv_reflect.h"
@@ -276,6 +277,9 @@ typedef struct {
     VkPipelineLayout pl;
     char vname[64], fname[64];
     uint8_t *vspv, *fspv; size_t vsz, fsz;   /* the SPIR-V the modules were made from (diagnostics of a failed vkCreateGraphicsPipelines; owned) */
+    lagfx_pipeline_diag_t diag;              /* failure bundle inputs (only filled when the bundle option is on: pipeline_bundle.h) */
+    uint8_t *vbc, *fbc;                      /* copies of the AIR bitcode, same condition (owned) */
+    char vfn[96], ffn[96], origin[96];
 } pres_t;
 
 static void pres_release(void *u) {
@@ -286,7 +290,7 @@ static void pres_release(void *u) {
     if (r->vs) vkDestroyShaderModule(r->dev, r->vs, NULL);
     if (r->fs) vkDestroyShaderModule(r->dev, r->fs, NULL);
     if (r->fs_alt) vkDestroyShaderModule(r->dev, r->fs_alt, NULL);
-    free(r->vspv); free(r->fspv);
+    free(r->vspv); free(r->fspv); free(r->vbc); free(r->fbc);
     free(r);
 }
 
@@ -496,6 +500,15 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             if (!out->desc.blend_enable) CNTP(p).blend_off++;
             if (b->found1) CNTP(p).color1_seen++;
         } else CNTP(p).stub_blend++;
+    }
+    if (lagfx_pipeline_bundle_dir()) {   /* option on: keep what a failure bundle needs (the AIR bitcode is freed with the libraries below) */
+        r->vbc = malloc(vf->bitcode_len), r->fbc = malloc(ff->bitcode_len);
+        if (r->vbc) memcpy(r->vbc, vf->bitcode, vf->bitcode_len);
+        if (r->fbc) memcpy(r->fbc, ff->bitcode, ff->bitcode_len);
+        snprintf(r->vfn, sizeof r->vfn, "%.95s", vf->name), snprintf(r->ffn, sizeof r->ffn, "%.95s", ff->name);
+        snprintf(r->origin, sizeof r->origin, "arm64 pso task=%u ref=%u", task->id, ref);
+        r->diag = (lagfx_pipeline_diag_t){ .vk = vk, .vs_bc = r->vbc, .fs_bc = r->fbc, .vs_bc_bytes = r->vbc ? vf->bitcode_len : 0, .fs_bc_bytes = r->fbc ? ff->bitcode_len : 0, .vs_fn = r->vfn, .fs_fn = r->ffn, .origin = r->origin };
+        out->desc.diag = &r->diag;
     }
     r->vspv = vspv, r->vsz = vsz, r->fspv = fspv, r->fsz = fsz;
     vspv = fspv = NULL;
