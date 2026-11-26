@@ -29,6 +29,12 @@ static bool mapped_wb_on_render(void) {
     const char *e = getenv("LAGFX_ARM64_MAPPED_WRITEBACK");
     return e && e[0] == '1' && e[1] == 0;
 }
+/* EXPERIMENT (default off), =swap: a surface a flag-2 exec rendered into is only marked OWED; the write-back to the guest happens when a display command
+ * arrives (lagfx_a64_res_display_swap), so many execs per frame cost one copy. Exclusive with the immediate mode above (=1), which stays for comparison. */
+static bool mapped_wb_on_swap(void) {
+    const char *e = getenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+    return e && !strcmp(e, "swap");
+}
 
 #ifndef LAGFX_HAVE_VULKAN
 /* No Vulkan: nothing can be executed. */
@@ -38,6 +44,7 @@ void lagfx_a64_res_blit_segment(lagfx_a64_rexec_t *x, const uint8_t *body, uint3
 lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) { (void)x; return LAGFX_A64_FAILED; }
 lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t w) { (void)p; (void)w; return LAGFX_A64_DONE; }
 bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { (void)p; return false; }
+uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) { (void)p; return 0; }
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return 0; }
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) { (void)p; (void)hdr; return false; }
@@ -72,7 +79,7 @@ typedef struct lagfx_a64_msurf {
     VkFormat format; VkImageUsageFlags usage;
     VkImage img; VkDeviceMemory img_mem;
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
-    bool host_valid, guest_stale, down_pending;
+    bool host_valid, guest_stale, down_pending, owed;
     uint64_t up_epoch, down_epoch;
 } msurf_t;
 
@@ -1014,6 +1021,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
         if ((x->res[i].flags & 4u) && o->linear) lin_push_x(x, o);
         if ((x->res[i].flags & 4u) && o->ms) ms_record_down(m, x->cb, o->ms);
         else if ((x->res[i].flags & 2u) && o->ms && mapped_wb_on_render()) ms_record_down(m, x->cb, o->ms);
+        else if ((x->res[i].flags & 2u) && o->ms && mapped_wb_on_swap()) o->ms->owed = true;   /* paid at the next display command */
     }
     barrier(x->cb);
     m->cur = NULL;   /* recording is over */
@@ -1085,6 +1093,36 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     return ns;
 }
 
+
+/* A display command is about to reach the shell: write every owed mapped surface to the guest first (one copy per surface, however many execs drew into it).
+ * Returns the number written. Nothing is written (surfaces stay owed) while an exec is recording / in flight or the GPU wait does not complete. */
+uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    if (!m || !mapped_wb_on_swap()) return 0;
+    MRUN(p).swap_events++;
+    uint32_t nowed = 0;
+    for (uint32_t i = 0; i < m->nms; i++) if (m->ms[i] && m->ms[i]->owed) nowed++;
+    if (!nowed) return 0;
+    struct lagfx_vk_state *vk = vk_of(p);
+    if (!vk || m->cur || m->pending) { MRUN(p).swap_deferred += nowed; return 0; }
+    VkCommandBuffer cb;
+    if (!cb_begin(vk, &cb)) { MRUN(p).swap_deferred += nowed; return 0; }
+    msurf_t *sel[MAX_MS];
+    uint32_t ns = 0;
+    m->epoch++;
+    for (uint32_t i = 0; i < m->nms && ns < MAX_MS; i++) {
+        msurf_t *ms = m->ms[i];
+        if (!ms || !ms->owed) continue;
+        if (ms_record_down(m, cb, ms)) sel[ns++] = ms; else ms->owed = false;   /* nothing meaningful on the GPU: not owed */
+    }
+    barrier(cb);
+    bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;
+    if (cb) lagfx_vk_cmdbuf_free(vk, cb);
+    if (!ok) { for (uint32_t i = 0; i < ns; i++) sel[i]->down_pending = false; MRUN(p).swap_deferred += ns; return 0; }
+    for (uint32_t i = 0; i < ns; i++) { ms_finish_down(p, sel[i]); sel[i]->owed = false; }
+    MRUN(p).swap_flushed += ns;
+    return ns;
+}
 
 /* ---- render targets and readback ---- */
 

@@ -458,6 +458,22 @@ int main(void) {
       assert(CNT(p).mapped_written_back == wbx + 1 && !memcmp(half_px(0, 0), clear8, 8) && !memcmp(half_px(63, 79), clear8, 8)); }
     printf("PASS: MAPPED_WRITEBACK experiment on an RGhA surface: off = guest untouched, on = half-float pixels written back once\n");
 
+    /* (3d) =swap: execs only owe the surface; the guest sees it when a display command arrives (once, however many execs), and swap with nothing owed costs nothing. */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint64_t wbx = CNT(p).mapped_written_back, fl = CNT(p).swap_flushed;
+      surf_fill(SENT);
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
+      run_exec(p, 34, REF_M1, 2, green, false, res, 1, true);
+      run_exec(p, 35, REF_M1, 2, green, false, res, 1, true);
+      assert(CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);   /* owed, not paid */
+      assert(lagfx_a64_res_display_swap(p) == 1);
+      assert(CNT(p).mapped_written_back == wbx + 1 && CNT(p).swap_flushed == fl + 1 && *surf_px(32, 40) == GREEN && *surf_px(63, 79) == GREEN);
+      surf_fill(SENT);
+      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab);   /* nothing owed */
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      assert(lagfx_a64_res_display_swap(p) == 0); }
+    printf("PASS: MAPPED_WRITEBACK=swap: two execs owe, ONE display swap pays, an empty swap writes nothing, off = no-op\n");
+
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
     lagfx_arm64_cq_shutdown(p, 0);

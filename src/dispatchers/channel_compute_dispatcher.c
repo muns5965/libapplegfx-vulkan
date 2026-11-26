@@ -117,6 +117,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                     LAGFX_LOG("compute: arm64 display op 0x%02x ch=%u forwarded=%d (n=%u)", hdr->opcode, (unsigned)p->current_chan_id,
                                dev && dev->desc.shell.display_command && hdr->payload, dseen);
                 p->diag2.display_submits++;
+                lagfx_a64_res_display_swap(p);   /* =swap mode: the owed display surfaces reach the guest before the shell looks */
                 if (dev && dev->desc.shell.display_command && hdr->payload) {
                     dev->desc.shell.display_command(dev->desc.shell.opaque, p->current_chan_id,
                                                     hdr->payload - LAGFX_CMD_HEADER_BYTES, hdr->length);
