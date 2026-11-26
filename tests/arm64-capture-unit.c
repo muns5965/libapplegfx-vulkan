@@ -1,0 +1,574 @@
+/* ARM64 render replay capture (LAGFX_ARM64_DUMP_DATA=1) on lavapipe: harness copied from arm64-exec-run-unit.c.
+ * ARM64 0x43/0x45 execution of Render segments (LAGFX_ARM64_EXEC=1): (task, ref) object table lifetime, and real Vulkan recording
+ * (lavapipe in CI / this container; NOT verified on a hardware GPU) read back pixel by pixel. SKIPs the Vulkan part when no ICD is present.
+ * SPDX-License-Identifier: MIT */
+#include "dispatchers/channel_compute_dispatcher.h"
+#include "dispatchers/ring_common.h"
+#include "protocol/state.h"
+#include "protocol/arm64_exec_decode.h"
+#include "protocol/arm64_exec_run.h"
+#include "protocol/arm64_objects.h"
+#include "protocol/arm64_capture.h"
+#include "protocol/arm64_dump.h"
+#include "device.h"
+#include "libapplegfx-vulkan.h"
+#ifdef LAGFX_HAVE_VULKAN
+#include "vulkan/instance.h"
+#include <vulkan/vulkan.h>
+#include "arm64-exec-run-shaders.h"
+#include "arm64-exec-blend-shader.h"
+#include "arm64-exec-fetch-shader.h"
+#include "arm64-exec-ds-shaders.h"
+#endif
+#include <assert.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define MEM_SIZE   (2u << 20)
+#define SHARED_PFN 1u
+#define TABLE_PFN  2u
+#define RING_PFN0  4u
+#define ROOT_PFN   16u
+#define TOP_PFN    17u
+#define LEAF_PFN   18u
+#define DATA_PFN0  32u
+#define NVPN       24u
+
+static uint8_t *g_mem;
+static bool rd(void *o, uint64_t gpa, uint64_t len, void *dst) { (void)o; if (gpa + len > MEM_SIZE) return false; memcpy(dst, g_mem + gpa, len); return true; }
+static bool wr(void *o, uint64_t gpa, uint64_t len, const void *src) { (void)o; if (gpa + len > MEM_SIZE) return false; memcpy(g_mem + gpa, src, len); return true; }
+static void irq(void *o, uint32_t v) { (void)o; (void)v; }
+static lagfx_task_t *cb_create_task(void *o, uint64_t s, void **p) { (void)o; (void)s; (void)p; return NULL; }
+static void cb_destroy_task(void *o, lagfx_task_t *t) { (void)o; (void)t; }
+static bool cb_map(void *a, lagfx_task_t *t, uint64_t o, const lagfx_physical_range_t *r, size_t c, bool ro) { (void)a; (void)t; (void)o; (void)r; (void)c; (void)ro; return true; }
+static bool cb_unmap(void *a, lagfx_task_t *t, uint64_t o, uint64_t l) { (void)a; (void)t; (void)o; (void)l; return true; }
+static void put32(uint64_t gpa, uint32_t v) { memcpy(g_mem + gpa, &v, 4); }
+static uint32_t g_wp;
+
+static lagfx_device_t *g_dev;   /* real device: Vulkan state when an ICD exists */
+
+static lagfx_device_t *make_device(void) {
+    lagfx_device_descriptor_t d;
+    memset(&d, 0, sizeof d);
+    d.shell.opaque = (void *)0xfeedu;
+    d.shell.create_task = cb_create_task; d.shell.destroy_task = cb_destroy_task; d.shell.map_memory = cb_map; d.shell.unmap_memory = cb_unmap;
+    d.shell.read_memory = rd; d.shell.write_memory = wr; d.shell.raise_interrupt = irq;
+    d.thread_count = 2;
+    char *err = NULL;
+    return lagfx_device_new(&d, &err);
+}
+
+static void submit(lagfx_protocol_t *p, uint16_t op, uint16_t arg8, const uint32_t *words, uint32_t nwords) {
+    uint32_t len = 12u + nwords * 4u;
+    uint64_t ring = (uint64_t)RING_PFN0 << 14;
+    uint8_t cmd[2048]; memset(cmd, 0, sizeof cmd);
+    assert(len <= sizeof cmd);
+    memcpy(cmd, &op, 2); memcpy(cmd + 2, &arg8, 2); memcpy(cmd + 4, &len, 4);
+    uint32_t stamp = g_wp + 1u; memcpy(cmd + 8, &stamp, 4);
+    if (nwords) memcpy(cmd + 12, words, nwords * 4u);
+    assert(g_wp % 0x10000u + len <= 0x10000u);
+    memcpy(g_mem + ring + (g_wp % 0x10000u), cmd, len);
+    g_wp += len;
+    put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 0x00, g_wp);
+    p->current_chan_id = 1;
+    channel_compute_dispatcher_drain(p, 1);
+}
+
+static lagfx_protocol_t *mk(uint32_t mode) {
+    memset(g_mem, 0, MEM_SIZE); g_wp = 0;
+    lagfx_protocol_t *p = calloc(1, sizeof *p);
+    p->magic = LAGFX_PROTOCOL_MAGIC; p->dev = g_dev;
+    p->ring_page_shift = 14; p->protocol_mode = mode;
+    p->ring_shared_page_pfn = SHARED_PFN;
+    uint64_t d = ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET;
+    put32(d + 0x0c, 1); put32(d + 0x10, TABLE_PFN);
+    for (uint32_t i = 0; i < 4; i++) put32(((uint64_t)TABLE_PFN << 14) + 4u * i, RING_PFN0 + i);
+    put32((uint64_t)ROOT_PFN << 14, TOP_PFN); put32(((uint64_t)ROOT_PFN << 14) + 4, 2);
+    put32((uint64_t)TOP_PFN << 14, LEAF_PFN);
+    for (uint32_t v = 0; v < NVPN; v++) put32(((uint64_t)LEAF_PFN << 14) + 4u * v, DATA_PFN0 + v);
+    return p;
+}
+static void va_write(uint64_t va, const void *src, uint32_t n) {
+    const uint8_t *s = src;
+    while (n) {
+        uint32_t vpn = (uint32_t)(va >> 14), in = (uint32_t)(va & 0x3fff), c = 0x4000 - in < n ? 0x4000 - in : n;
+        assert(vpn < NVPN);
+        memcpy(g_mem + ((uint64_t)(DATA_PFN0 + vpn) << 14) + in, s, c);
+        va += c; s += c; n -= c;
+    }
+}
+static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
+    lagfx_task_entry_t *t = lagfx_protocol_alloc_task_slot(p);
+    assert(t);
+    t->id = task; t->live = true; t->root_page_pfn = ROOT_PFN;
+    t->lists_set = true; t->objects_addr = 0x100; t->objects_len = 0;
+    return t;
+}
+
+/* ---- guest layout ---- */
+#define VA_OBJ    0x0100u            /* object list: ref * 12 (objects_addr must be non-zero) */
+#define VA_PAY    0x4000u            /* payloads of the entries */
+#define VA_CMD    0x8000u            /* command buffer */
+#define VPN_VB    10u                /* vertex data page */
+#define VPN_IB    11u
+#define VPN_TEX   12u                /* guest pages behind the render-target texture */                /* index data page */
+#define REF_TEX 1u
+#define REF_VB  2u
+#define REF_PIPE 3u
+#define REF_IB  4u
+#define REF_TEX2 5u
+#define VPN_TEX2 13u
+#define RT_W 16u
+#define RT_H 16u
+
+static void entry(uint32_t ref, uint32_t type, uint32_t size, uint64_t addr) {
+    uint32_t e[3] = { type | size << 8, (uint32_t)addr, (uint32_t)(addr >> 32) };
+    va_write(VA_OBJ + ref * 12u, e, 12);
+}
+static void put_buffer_object(uint32_t ref, uint32_t pay_off, uint64_t len, uint32_t vpage) {
+    uint8_t h[16] = {0};
+    memcpy(h, &len, 8); memcpy(h + 8, &vpage, 4);
+    va_write(VA_PAY + pay_off, h, 16);
+    entry(ref, LAGFX_A64_OBJ_BUFFER, 16, VA_PAY + pay_off);
+}
+static void build_objects(void) {
+    /* texture (mirror layout): {u64 length, u32 vpage}, layout (mips = 1, mip table: off, row, w, h, d), {tag, size, ref}, v1 description (2D, BGRA8 = 80, w x h, 1 sample) */
+    uint8_t t[220]; memset(t, 0, sizeof t);
+    uint64_t tlen = RT_W * RT_H * 4u; uint32_t tvp = VPN_TEX;
+    memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
+    t[12] = 1;                                   /* mips */
+    { uint8_t *mp = t + 12 + 0x18; uint64_t row = RT_W * 4u; uint32_t mw = RT_W, mh = RT_H, md = 1; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+    uint32_t rec = 12 + 0x18 + 36, tag = 0x14;
+    memcpy(t + rec, &tag, 4);
+    uint8_t *d = t + rec + 12;
+    d[0] = 2; d[2] = 80;
+    uint32_t w = RT_W, h = RT_H, one = 1;
+    memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &one, 4);
+    d[16] = 1; d[18] = 1;
+    uint32_t tsize = rec + 12 + 28;
+    va_write(VA_PAY, t, tsize);
+    entry(REF_TEX, LAGFX_A64_OBJ_TEXTURE, tsize, VA_PAY);
+    /* vertex buffer: 4 vertices (float2). 0..2 a big triangle, 3 spare. */
+    const float v[8] = { -0.9f, -0.9f, 0.9f, -0.9f, 0.0f, 0.9f, 0.0f, 0.0f };
+    va_write((uint64_t)VPN_VB << 14, v, sizeof v);
+    put_buffer_object(REF_VB, 0x200, 0x4000, VPN_VB);
+    const uint16_t idx[6] = { 0, 1, 2, 0, 1, 2 };
+    va_write((uint64_t)VPN_IB << 14, idx, sizeof idx);
+    put_buffer_object(REF_IB, 0x220, 0x4000, VPN_IB);
+    uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
+    va_write(VA_PAY + 0x300, pl, 16);
+    entry(REF_PIPE, LAGFX_A64_OBJ_SERIALIZED, 16, VA_PAY + 0x300);
+    {   /* a second render target: RGBA16Float (pixel format 115), 8 bytes per pixel */
+        uint8_t t2[220]; memset(t2, 0, sizeof t2);
+        uint64_t len2 = RT_W * RT_H * 8u; uint32_t vp2 = VPN_TEX2;
+        memcpy(t2, &len2, 8); memcpy(t2 + 8, &vp2, 4);
+        t2[12] = 1;
+        { uint8_t *mp = t2 + 12 + 0x18; uint64_t row = RT_W * 8u; uint32_t mw = RT_W, mh = RT_H, md = 1; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+        uint32_t rec2 = 12 + 0x18 + 36, tag2 = 0x14;
+        memcpy(t2 + rec2, &tag2, 4);
+        uint8_t *d2 = t2 + rec2 + 12;
+        d2[0] = 2; d2[2] = 115;
+        uint32_t w2 = RT_W, h2 = RT_H, one2 = 1;
+        memcpy(d2 + 4, &w2, 4); memcpy(d2 + 8, &h2, 4); memcpy(d2 + 12, &one2, 4);
+        d2[16] = 1; d2[18] = 1;
+        uint32_t ts2 = rec2 + 12 + 28;
+        va_write(VA_PAY + 0x400, t2, ts2);
+        entry(REF_TEX2, LAGFX_A64_OBJ_TEXTURE, ts2, VA_PAY + 0x400);
+    }
+}
+
+/* ---- command buffer builder ---- */
+static uint8_t g_cb[4096];
+static uint32_t g_cbn;
+static void cb_reset(void) { g_cbn = 8; memset(g_cb, 0, sizeof g_cb); }
+static void cb_cmd(uint32_t tag, const void *payload, uint32_t n) {
+    uint32_t sz = 8 + n;
+    memcpy(g_cb + g_cbn, &tag, 4); memcpy(g_cb + g_cbn + 4, &sz, 4);
+    if (n) memcpy(g_cb + g_cbn + 8, payload, n);
+    g_cbn += sz;
+}
+static void cb_pass(uint32_t ref, uint16_t load, const double clear[4]) {
+    uint8_t r[584]; memset(r, 0, sizeof r);
+    uint8_t *c = r + 0x4c;
+    memcpy(c, &ref, 4);
+    memcpy(c + 20, &load, 2);
+    uint16_t store = 1; memcpy(c + 22, &store, 2);
+    memcpy(c + 0x1c, clear, 32);
+    cb_cmd(26, r, sizeof r);
+}
+/* a pass whose colour attachments are given per slot (0 = unused): texture ref, load action (2 clear), clear colour */
+static void cb_pass_n(const uint32_t ref[2], const uint16_t load[2], const double clear[2][4]) {
+    uint8_t r[584]; memset(r, 0, sizeof r);
+    for (int k = 0; k < 2; k++) {
+        if (!ref[k]) continue;
+        uint8_t *c = r + 0x4c + 0x3c * k;
+        memcpy(c, &ref[k], 4);
+        memcpy(c + 20, &load[k], 2);
+        uint16_t store = 1; memcpy(c + 22, &store, 2);
+        memcpy(c + 0x1c, clear[k], 32);
+    }
+    cb_cmd(26, r, sizeof r);
+}
+static void cb_viewport(double w, double h) { double v[6] = { 0, 0, w, h, 0, 1 }; cb_cmd(130, v, sizeof v); }
+static void cb_pipeline(uint32_t ref) { cb_cmd(116, &ref, 4); }
+static void cb_vbuf(uint32_t ref, uint64_t off) { uint8_t r[20]; uint32_t idx = 0, cnt = 1; memcpy(r, &idx, 4); memcpy(r + 4, &cnt, 4); memcpy(r + 8, &ref, 4); memcpy(r + 12, &off, 8); cb_cmd(125, r, 20); }
+static void cb_draw(uint32_t start, uint32_t count) { uint8_t r[8]; uint32_t prim = 3; uint16_t s = (uint16_t)start, c = (uint16_t)count; memcpy(r, &prim, 4); memcpy(r + 4, &s, 2); memcpy(r + 6, &c, 2); cb_cmd(1, r, 8); }
+static void cb_draw_indexed(uint32_t ref, uint32_t count) { uint8_t r[12] = {0}; uint16_t prim = 3, it = 0, c = (uint16_t)count; memcpy(r, &prim, 2); memcpy(r + 2, &it, 2); memcpy(r + 4, &ref, 4); memcpy(r + 8, &c, 2); cb_cmd(7, r, 12); }
+static uint32_t cb_finish(void) {
+    uint32_t seglen = g_cbn, info = 0;      /* seglen = the whole buffer incl. the 8-byte header, as the real guest writes it; type 0 render */
+    memcpy(g_cb, &seglen, 4); memcpy(g_cb + 4, &info, 4);
+    va_write(VA_CMD, g_cb, g_cbn);
+    return g_cbn;
+}
+static bool g_res_tex2;   /* also list the second render target in the exec's resource list */
+static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len, bool with_res) {
+    uint32_t w[3 + 10 + 4], n = 0;
+    w[n++] = task; w[n++] = with_res ? (g_res_tex2 ? 5 : 4) : 0; w[n++] = 1;
+    if (with_res) { w[n++] = REF_TEX; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0; w[n++] = REF_IB; w[n++] = 1; if (g_res_tex2) { w[n++] = REF_TEX2; w[n++] = 2; } }
+    uint64_t off = VA_CMD, l = len;
+    memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
+    submit(p, 0x43, 0, w, n);
+}
+
+/* ---- (A) object table lifetime, no Vulkan ---- */
+static int g_created, g_destroyed;
+static void *fk_create(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
+    (void)c; (void)p; (void)t; (void)e;
+    g_created++;
+    if (ref == 99) return NULL;                      /* a failing create */
+    int *o = malloc(sizeof *o); *o = (int)ref; return o;
+}
+static void fk_destroy(void *c, void *o) { (void)c; g_destroyed++; free(o); }
+
+static void test_objects(void) {
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *t1 = def_task(p, 1), *t2 = def_task(p, 2);
+    entry(1, 1, 16, 0x5000); entry(2, 1, 16, 0x5100); entry(3, 0, 0, 0); entry(99, 7, 16, 0x5200);
+    lagfx_a64_obj_ops_t ops = { NULL, fk_create, fk_destroy };
+    lagfx_a64_objects_t *t = lagfx_a64_objects_new(&ops);
+    assert(t);
+    g_created = g_destroyed = 0;
+    uint32_t e[3];
+    void *a = lagfx_a64_objects_get(t, p, t1, 1, e);
+    assert(a && *(int *)a == 1 && (e[0] & 0xff) == 1 && g_created == 1);
+    assert(lagfx_a64_objects_get(t, p, t1, 1, NULL) == a && g_created == 1);            /* hit: not created twice */
+    assert(lagfx_a64_objects_get(t, p, t2, 1, NULL) != a && g_created == 2);            /* same ref, other task: its own object */
+    assert(!lagfx_a64_objects_get(t, p, t1, 0, NULL));                                  /* ref 0 */
+    assert(!lagfx_a64_objects_get(t, p, t1, 3, NULL) && g_created == 2);                /* empty slot: nothing built */
+    assert(!lagfx_a64_objects_get(t, p, t1, 99, NULL) && g_created == 3);
+    assert(!lagfx_a64_objects_get(t, p, t1, 99, NULL) && g_created == 3);               /* failure is remembered, not retried */
+    entry(1, 1, 16, 0x6000);                                                            /* the guest rewrites the slot */
+    void *a2 = lagfx_a64_objects_get(t, p, t1, 1, NULL);
+    assert(a2 && g_created == 4 && g_destroyed == 1);                                   /* old destroyed, new created */
+    entry(3, 1, 16, 0x5300);                                                            /* an empty slot gets filled later */
+    assert(lagfx_a64_objects_get(t, p, t1, 3, NULL) && g_created == 5);
+    lagfx_a64_obj_stats_t st;
+    lagfx_a64_objects_stats(t, &st);
+    assert(st.live == 4 && st.created == 4 && st.destroyed == 1 && st.failed == 1);      /* the failed create is not counted as created */
+    assert(lagfx_a64_objects_drop_task(t, 1) == 3);                                     /* refs 1, 3 and the remembered failure 99 */
+    lagfx_a64_objects_stats(t, &st);
+    assert(st.live == 1);
+    assert(lagfx_a64_objects_drop_task(t, 1) == 0);
+    lagfx_a64_objects_free(t);
+    assert(g_created - 1 == g_destroyed);                                               /* every created object (the NULL one aside) destroyed: no leaks */
+    free(p);
+    puts("PASS: object table lifetime");
+}
+
+#ifdef LAGFX_HAVE_VULKAN
+/* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
+static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt, g_vs3, g_fs_green;
+static struct { int on; } g_ds;   /* depth / stencil / raster tests: float3 positions, REF_PIPE draws red, REF_PIPE2 green */
+#define REF_PIPE2 7u
+static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks, fetch, fail; } g_blend;
+static VkShaderModule g_fs_fetch2, g_fetch2_unused; static VkDescriptorSetLayout g_fetch2_dsl; static VkPipelineLayout g_fetch2_pl;
+static VkShaderModule g_fs_fetch; static VkDescriptorSetLayout g_fetch_dsl; static VkPipelineLayout g_fetch_pl;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
+static int g_released;
+static void rel(void *u) { (void)u; g_released++; }
+static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
+    (void)c; (void)t; (void)e;
+    struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
+    if (!g_vs) {
+        VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs_spv, .pCode = k_vs_spv };
+        assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_vs) == VK_SUCCESS);
+        ci.codeSize = sizeof k_fs_spv, ci.pCode = k_fs_spv;
+        assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs) == VK_SUCCESS);
+    }
+    memset(out, 0, sizeof *out);
+    out->desc.vertex_shader = g_vs, out->desc.fragment_shader = g_fs, out->desc.layout = vk->empty_layout;
+    out->desc.n_vtx_inputs = 1, out->desc.vtx_in_loc[0] = 0, out->desc.vtx_in_comp[0] = 2, out->desc.vtx_stride = 8;
+    out->vertex_buffer_index = 0;
+    if (g_blend.set) {
+        if (!g_fs_half) { VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_half_spv, .pCode = k_fs_half_spv }; assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_half) == VK_SUCCESS); }
+        out->desc.fragment_shader = g_fs_half;   /* premultiplied (0.5, 0, 0, 0.5) */
+        out->desc.blend_set = 1, out->desc.blend_enable = (uint8_t)g_blend.enable;
+        out->desc.blend_src_rgb = g_blend.sf, out->desc.blend_dst_rgb = g_blend.df, out->desc.blend_op_rgb = g_blend.op;
+        out->desc.blend_src_a = g_blend.saf, out->desc.blend_dst_a = g_blend.daf, out->desc.blend_op_a = g_blend.aop;
+        out->desc.color_write_mask = g_blend.mask;
+        out->desc.color_write_masks[0] = g_blend.mask, out->desc.color_write_masks[1] = g_blend.mask1, out->desc.color_write_masks[2] = out->desc.color_write_masks[3] = 0xfu;
+        out->desc.masks_valid = 1;
+        if (g_blend.s1add) { out->desc.slot_blend[1].set = 1, out->desc.slot_blend[1].enable = 1; out->desc.slot_blend[1].src_rgb = out->desc.slot_blend[1].dst_rgb = out->desc.slot_blend[1].src_a = out->desc.slot_blend[1].dst_a = VK_BLEND_FACTOR_ONE; }
+        if (g_blend.nomasks) { out->desc.masks_valid = 0; for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0; }
+        if (g_blend.mrt) {
+            if (!g_fs_mrt) { VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_mrt_spv, .pCode = k_fs_mrt_spv }; assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_mrt) == VK_SUCCESS); }
+            out->desc.fragment_shader = g_fs_mrt;
+        }
+    }
+    if (g_blend.fetch == 1) {   /* framebuffer fetch: FS reads input attachment 0 (binding 24) = colour attachment 0 */
+        if (!g_fs_fetch) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_fetch_spv, .pCode = k_fs_fetch_spv };
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_fetch) == VK_SUCCESS);
+            VkDescriptorSetLayoutBinding lb = { .binding = 24, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT };
+            VkDescriptorSetLayoutCreateInfo dl = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &lb };
+            assert(vkCreateDescriptorSetLayout(vk->device, &dl, NULL, &g_fetch_dsl) == VK_SUCCESS);
+            VkPipelineLayoutCreateInfo pl = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_fetch_dsl };
+            assert(vkCreatePipelineLayout(vk->device, &pl, NULL, &g_fetch_pl) == VK_SUCCESS);
+        }
+        out->desc.fragment_shader = g_fs_fetch, out->desc.layout = g_fetch_pl, out->dsl = g_fetch_dsl;
+        out->n_bind = 1, out->bind[0].binding = 24, out->bind[0].kind = LAGFX_A64_BIND_INPUT, out->bind[0].stage = 1, out->bind[0].metal_index = 0;
+    }
+    if (g_blend.fetch == 2) {   /* two input attachments (bindings 24, 25) and two outputs */
+        if (!g_fs_fetch2) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_fetch2_spv, .pCode = k_fs_fetch2_spv };
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_fetch2) == VK_SUCCESS);
+            VkDescriptorSetLayoutBinding lb[2] = { { .binding = 24, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+                                                   { .binding = 25, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } };
+            VkDescriptorSetLayoutCreateInfo dl = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb };
+            assert(vkCreateDescriptorSetLayout(vk->device, &dl, NULL, &g_fetch2_dsl) == VK_SUCCESS);
+            VkPipelineLayoutCreateInfo pl = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_fetch2_dsl };
+            assert(vkCreatePipelineLayout(vk->device, &pl, NULL, &g_fetch2_pl) == VK_SUCCESS);
+        }
+        out->desc.fragment_shader = g_fs_fetch2, out->desc.layout = g_fetch2_pl, out->dsl = g_fetch2_dsl;
+        out->n_bind = 2;
+        for (int i = 0; i < 2; i++) out->bind[i].binding = (uint8_t)(24 + i), out->bind[i].kind = LAGFX_A64_BIND_INPUT, out->bind[i].stage = 1, out->bind[i].metal_index = (int16_t)i;
+        out->desc.blend_set = 1, out->desc.blend_enable = 0, out->desc.blend_src_rgb = out->desc.blend_src_a = VK_BLEND_FACTOR_ONE, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ZERO;
+        out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
+        for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
+    }
+    if (g_blend.fail) out->desc.fragment_shader = VK_NULL_HANDLE;   /* pipeline build refuses a missing stage */
+    if (g_ds.on) {
+        if (!g_vs3) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs3_spv, .pCode = k_vs3_spv };
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_vs3) == VK_SUCCESS);
+            ci.codeSize = sizeof k_fs_green_spv, ci.pCode = k_fs_green_spv;
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_green) == VK_SUCCESS);
+        }
+        out->desc.vertex_shader = g_vs3, out->desc.fragment_shader = ref == REF_PIPE2 ? g_fs_green : g_fs;
+        out->desc.vtx_in_comp[0] = 3, out->desc.vtx_stride = 12;
+    }
+    out->desc.vertex_spv = k_vs_spv, out->desc.vertex_spv_bytes = sizeof k_vs_spv, out->desc.fragment_spv = k_fs_spv, out->desc.fragment_spv_bytes = sizeof k_fs_spv;
+    out->blob_hash = 0x1234u;
+    out->release = rel;
+    return true;
+}
+
+static uint32_t px(const uint8_t *img, uint32_t x, uint32_t y) { uint32_t v; memcpy(&v, img + (y * RT_W + x) * 4, 4); return v; }
+#define RED   0xffff0000u   /* B8G8R8A8 little-endian word: A R G B */
+#define GREEN 0xff00ff00u
+
+/* ---- capture tests ---- */
+static char g_dir[256];
+static void fresh_dir(void) {
+    snprintf(g_dir, sizeof g_dir, "/tmp/lagfx-cap-%d-XXXXXX", (int)getpid());
+    assert(mkdtemp(g_dir));
+    setenv("LAGFX_ARM64_DUMP_DIR", g_dir, 1);
+    lagfx_a64_dump_reset();
+    lagfx_a64_capture_reset();
+}
+static void cap_env(const char *draws, const char *fail, const char *total) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1); setenv("LAGFX_ARM64_DUMP", "1", 1); setenv("LAGFX_ARM64_DUMP_DATA", "1", 1); setenv("LAGFX_ARM64_DUMP_DATA_PNG", "1", 1);
+    if (draws) setenv("LAGFX_ARM64_DUMP_DATA_DRAWS", draws, 1); else unsetenv("LAGFX_ARM64_DUMP_DATA_DRAWS");
+    if (fail) setenv("LAGFX_ARM64_DUMP_DATA_FAIL", fail, 1); else unsetenv("LAGFX_ARM64_DUMP_DATA_FAIL");
+    if (total) setenv("LAGFX_ARM64_DUMP_DATA_MAX_TOTAL", total, 1); else unsetenv("LAGFX_ARM64_DUMP_DATA_MAX_TOTAL");
+}
+static void cap_env_off(void) {
+    unsetenv("LAGFX_ARM64_DUMP_DATA"); unsetenv("LAGFX_ARM64_DUMP"); unsetenv("LAGFX_ARM64_DUMP_DIR"); unsetenv("LAGFX_ARM64_DUMP_DATA_DRAWS"); unsetenv("LAGFX_ARM64_DUMP_DATA_FAIL");
+    unsetenv("LAGFX_ARM64_DUMP_DATA_MAX_TOTAL"); unsetenv("LAGFX_ARM64_DUMP_DATA_PNG"); unsetenv("LAGFX_ARM64_EXEC");
+    lagfx_a64_dump_reset(); lagfx_a64_capture_reset();
+}
+static const double G4[4] = { 0, 1, 0, 1 };
+
+/* two execs: (1) clear green + draw, (2) Load + indexed draw */
+static lagfx_protocol_t *two_execs(void) {
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1);
+    build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
+    exec(p, 1, cb_finish(), true);
+    cb_reset(); cb_pass(REF_TEX, 1, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw_indexed(REF_IB, 3);
+    exec(p, 1, cb_finish(), true);
+    return p;
+}
+
+static void test_capture_basic(void) {
+    fresh_dir(); cap_env(NULL, NULL, NULL);
+    lagfx_protocol_t *p = two_execs();
+    assert(p->diag2.exec.run.draws == 2);
+    __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
+    assert(Q->cap_draws == 2 && Q->cap_passes == 2 && Q->cap_failed == 0 && Q->cap_snaps >= 6 && Q->cap_bytes > 0);
+    const char *err = NULL;
+    lagfx_cap_t *c = lagfx_cap_load(g_dir, &err);
+    assert(c && c->version == 1 && c->npasses == 2 && c->ndraws == 2 && c->natts == 2);
+    /* command order and process-wide draw numbers */
+    assert(c->passes[0].seq == 1 && c->draws[0].seq == 2 && c->passes[1].seq == 1 && c->draws[1].seq == 2 && c->draws[0].n == 0 && c->draws[1].n == 1);
+    assert(c->passes[0].w == RT_W && c->passes[0].h == RT_H && c->passes[0].ncolor == 1 && c->passes[0].exec != c->passes[1].exec);
+    const lagfx_cap_draw_t *d0 = &c->draws[0], *d1 = &c->draws[1];
+    assert(d0->prim == 3 && d0->count == 3 && d0->instances == 1 && !d0->indexed && !d0->skip[0] && d0->pipe_ref == REF_PIPE && d0->pipe_hash == 0x1234u && d0->vtx_stride == 8 && d0->n_vtx_in == 1);
+    assert(d1->indexed && d1->index_buf && d1->count == 3 && d1->index_type == 0);
+    assert(d0->vp[2] == (float)RT_W && d0->vp[3] == (float)RT_H);
+    /* shaders */
+    size_t n;
+    uint8_t *vs = lagfx_cap_read_blob(c, d0->vs_spv, &n);
+    assert(vs && n == sizeof k_vs_spv && !memcmp(vs, k_vs_spv, n)); free(vs);
+    uint8_t *fs = lagfx_cap_read_blob(c, d0->fs_spv, &n);
+    assert(fs && n == sizeof k_fs_spv && !memcmp(fs, k_fs_spv, n)); free(fs);
+    /* vertex buffer snapshot = the guest bytes (first 32 bytes of the vertex page) + object generation recorded */
+    const lagfx_cap_buf_t *vb = lagfx_cap_find_buf(c, d0->vtx_buf);
+    assert(vb && vb->ref == REF_VB && vb->gen > 0 && vb->length == 0x4000 && vb->off == 0 && vb->len == 0x4000);
+    uint8_t *vd = lagfx_cap_read_blob(c, vb->blob, &n);
+    const float v[8] = { -0.9f, -0.9f, 0.9f, -0.9f, 0.0f, 0.9f, 0.0f, 0.0f };
+    assert(vd && n == 0x4000 && !memcmp(vd, v, sizeof v)); free(vd);
+    const lagfx_cap_buf_t *ib = lagfx_cap_find_buf(c, d1->index_buf);
+    const uint16_t idx[6] = { 0, 1, 2, 0, 1, 2 };
+    uint8_t *id = ib ? lagfx_cap_read_blob(c, ib->blob, &n) : NULL;
+    assert(id && !memcmp(id, idx, sizeof idx)); free(id);
+    /* attachments: pre of pass 1 = zeros, post of pass 1 = what the GPU drew (read back through the mirror) and pre of pass 2 is the SAME blob (dedupe by hash) */
+    const lagfx_cap_att_t *a0 = &c->atts[0], *a1 = &c->atts[1];
+    assert(a0->slot == 0 && a0->load == 2 && a0->clear[1] == 1.0f && a0->w == RT_W && a0->bpp == 4 && a0->vkfmt == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM && a0->mtlfmt == 80);
+    assert(a1->load == 1 && a1->gen == a0->gen);
+    const lagfx_cap_img_t *pre0 = lagfx_cap_find_img(c, a0->pre), *post0 = lagfx_cap_find_img(c, a0->post), *pre1 = lagfx_cap_find_img(c, a1->pre);
+    assert(pre0 && post0 && pre1 && !pre0->mirror && pre0->row == RT_W * 4u && pre0->len == RT_W * RT_H * 4u);
+    assert(post0->blob && pre1->blob == post0->blob && pre0->blob != post0->blob);
+    assert(Q->cap_blobs_dedup >= 1);
+    uint8_t *post = lagfx_cap_read_blob(c, post0->blob, &n);
+    assert(post && n == RT_W * RT_H * 4u && px(post, 8, 8) == RED);
+    int green = (px(post, 0, 0) == GREEN) + (px(post, 15, 0) == GREEN) + (px(post, 0, 15) == GREEN) + (px(post, 15, 15) == GREEN);
+    assert(green >= 2);
+    uint8_t rb[RT_W * RT_H * 4]; uint32_t w, h;   /* and the final state is what the mirror reads back */
+    assert(lagfx_a64_exec_readback_texture(p, lagfx_protocol_find_task(p, 1), REF_TEX, rb, sizeof rb, &w, &h));
+    const lagfx_cap_img_t *post1 = lagfx_cap_find_img(c, a1->post);
+    uint8_t *post_b = lagfx_cap_read_blob(c, post1->blob, &n);
+    assert(post_b && !memcmp(post_b, rb, sizeof rb)); free(post_b); free(post);
+    /* PNG next to it (8-bit conversion of the post image) */
+    assert(a0->post_png[0] && strncmp(a0->post_png, "-", 2) && a0->post_png[strlen(a0->post_png) - 1] == 'g');
+    char pp[600]; snprintf(pp, sizeof pp, "%s/%s", g_dir, a0->post_png);
+    FILE *f = fopen(pp, "rb"); uint8_t sig[8] = {0}; assert(f && fread(sig, 1, 8, f) == 8 && !memcmp(sig, "\x89PNG\r\n\x1a\n", 8)); fclose(f);
+    lagfx_cap_free(c);
+    free(p);
+    cap_env_off();
+    puts("PASS: capture: format round-trips through lagfx_cap_load (blobs, order, pre/post, shaders, dedupe, PNG)");
+}
+
+static void test_capture_filters_and_caps(void) {
+    /* draw number filter: only n = 1 */
+    fresh_dir(); cap_env("1-1", NULL, NULL);
+    lagfx_protocol_t *p = two_execs();
+    assert(p->diag2.exec.pipe.cap_draws == 1 && p->diag2.exec.pipe.cap_skipped_filter >= 1);
+    lagfx_cap_t *c = lagfx_cap_load(g_dir, NULL);
+    assert(c && c->ndraws == 1 && c->draws[0].n == 1 && c->draws[0].indexed && c->npasses == 1);
+    lagfx_cap_free(c); free(p);
+    /* range already passed: the pass takes no pre snapshots at all */
+    fresh_dir(); cap_env("0-0", NULL, NULL);
+    p = two_execs();
+    assert(p->diag2.exec.pipe.cap_draws == 1);
+    c = lagfx_cap_load(g_dir, NULL);
+    assert(c && c->ndraws == 1 && c->draws[0].n == 0);
+    lagfx_cap_free(c); free(p);
+    /* a pipeline filter that matches nothing records nothing (and writes no pass) */
+    fresh_dir(); cap_env(NULL, NULL, NULL); setenv("LAGFX_ARM64_DUMP_DATA_PIPE", "99", 1);
+    p = two_execs();
+    assert(p->diag2.exec.pipe.cap_draws == 0);
+    c = lagfx_cap_load(g_dir, NULL);
+    assert(!c || (c->ndraws == 0 && c->npasses == 0));
+    lagfx_cap_free(c); free(p); unsetenv("LAGFX_ARM64_DUMP_DATA_PIPE");
+    /* hard total cap: draws are still described, blobs are 0 and counted */
+    fresh_dir(); cap_env(NULL, NULL, "1024");
+    p = two_execs();
+    assert(p->diag2.exec.pipe.cap_draws == 2 && p->diag2.exec.pipe.cap_skipped_cap > 0 && p->diag2.exec.pipe.cap_bytes <= 1024);
+    c = lagfx_cap_load(g_dir, NULL);
+    assert(c && c->ndraws == 2);
+    for (size_t i = 0; i < c->nblobs; i++) assert(c->blobs[i].bytes <= 1024);
+    lagfx_cap_free(c); free(p);
+    cap_env_off();
+    puts("PASS: capture: draw-number / pipeline filters and the hard byte cap (counted in cap_skipped_*)");
+}
+
+static void test_capture_skipped_draw(void) {
+    fresh_dir(); cap_env(NULL, "1", NULL);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1); build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_draw(0, 3);   /* no vertex buffer bound: the executor skips the draw */
+    exec(p, 1, cb_finish(), true);
+    assert(p->diag2.exec.run.draws_skipped == 1 && p->diag2.exec.pipe.cap_draws == 1);
+    lagfx_cap_t *c = lagfx_cap_load(g_dir, NULL);
+    assert(c && c->ndraws == 1 && !strcmp(c->draws[0].skip, "no_vertex_buf") && c->draws[0].nbind == 0);
+    lagfx_cap_free(c); free(p);
+    /* default: skipped draws are not recorded */
+    fresh_dir(); cap_env(NULL, NULL, NULL);
+    p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    def_task(p, 1); build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_draw(0, 3);
+    exec(p, 1, cb_finish(), true);
+    assert(p->diag2.exec.pipe.cap_draws == 0);
+    free(p);
+    cap_env_off();
+    puts("PASS: capture: skipped draws only with LAGFX_ARM64_DUMP_DATA_FAIL, with the reason");
+}
+
+static void test_capture_off_by_default(void) {
+    fresh_dir(); cap_env(NULL, NULL, NULL);
+    unsetenv("LAGFX_ARM64_DUMP_DATA");
+    lagfx_protocol_t *p = two_execs();
+    assert(p->diag2.exec.run.draws == 2 && p->diag2.exec.pipe.cap_draws == 0 && p->diag2.exec.pipe.cap_snaps == 0 && p->diag2.exec.pipe.cap_passes == 0);
+    lagfx_cap_t *c = lagfx_cap_load(g_dir, NULL);
+    assert(!c);   /* no cap_header was ever written */
+    free(p);
+    cap_env_off();
+    puts("PASS: capture: off unless LAGFX_ARM64_DUMP_DATA=1 (no extra copies, no cap lines)");
+}
+
+static void test_capture_loader_unknown(void) {
+    fresh_dir();
+    char path[300]; snprintf(path, sizeof path, "%s/index.txt", g_dir);
+    FILE *f = fopen(path, "w");
+    fputs("cap_header version=1 byte_order=le\ncap_future x=1 y=2\ncap_blob id=1 file=cap_x.bin bytes=4 full=8 trunc=1 hash=ff extra=zz\nobj task=1 ref=2\n", f);
+    fclose(f);
+    lagfx_cap_t *c = lagfx_cap_load(g_dir, NULL);
+    assert(c && c->nblobs == 1 && c->blobs[0].trunc && c->blobs[0].full == 8 && c->blobs[0].hash == 0xff && c->lines_unknown == 1);
+    lagfx_cap_free(c);
+    const char *err = NULL;
+    assert(!lagfx_cap_load("/nonexistent-dir-xyz", &err) && err && err[0]);
+    cap_env_off();
+    puts("PASS: capture loader ignores unknown kinds / keys");
+}
+
+int main(void) {
+    g_mem = calloc(1, MEM_SIZE);
+    g_dev = make_device();
+    assert(g_dev);
+    if (g_dev->vk && g_dev->vk->initialized) {
+        test_capture_off_by_default();
+        test_capture_basic();
+        test_capture_filters_and_caps();
+        test_capture_skipped_draw();
+        test_capture_loader_unknown();
+        if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);
+        if (g_fs) vkDestroyShaderModule(g_dev->vk->device, g_fs, NULL);
+    } else {
+        puts("SKIP: no Vulkan device; capture tests not run");
+        return 77;
+    }
+    lagfx_device_free(g_dev);
+    free(g_mem);
+    return 0;
+}
+#else
+int main(void) { puts("SKIP: built without Vulkan"); return 77; }
+#endif

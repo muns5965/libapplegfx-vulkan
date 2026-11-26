@@ -99,6 +99,7 @@ struct lagfx_a64_obj {
     uint8_t  ds_aspects;                                    /* depth / stencil attachment texture (bit 0 depth, bit 1 stencil): a device image only, see lagfx_a64_res_ds_begin */
     VkFormat format; VkImageType img_type; VkImageUsageFlags usage; VkImageView view;   /* view: lazily made, 2D layer 0 level 0 (render target) */
     uint32_t bpp, width, height, depth, mips, layers;
+    uint32_t mtl_format;                                    /* Metal pixel format number of the guest descriptor (0 unknown); diagnostics / capture only */
     uint64_t tex_base, tex_stride; uint32_t tex_block_h, tex_mip_count;
     struct { uint64_t off, row; uint32_t w, h, d; } mip[LAGFX_A64_MAX_MIPS];
 };
@@ -126,6 +127,16 @@ VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o)
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* A host-visible storage buffer (zeroed, persistently mapped) owned by the exec and freed with it, e.g. an aligned copy of a misaligned buffer range. */
 bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map);
+/* ---- render replay capture support (arm64_capture.c, LAGFX_ARM64_DUMP_DATA=1 only: nothing here is called otherwise) ----
+ * Snapshots are GPU copies recorded into the exec's command buffer (so they see what earlier execs and earlier passes of this exec rendered, never the stale CPU
+ * mirror); the host reads them only after the fence signalled, from the finish hook. The recorder must be OUTSIDE a render pass (images are in GENERAL layout there). */
+typedef struct { const uint8_t *data; uint64_t bytes, full, off; } lagfx_a64_snap_t;   /* data valid until the finish hook returns */
+/* buffer bytes [off, off+min(max_bytes, length-off)) */
+bool lagfx_a64_res_snap_buffer(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, uint64_t off, uint64_t max_bytes, lagfx_a64_snap_t *s);
+/* texture: tight = level 0 / layer 0, rows packed (w*bpp); else the whole object in its guest (mirror) layout, prefix of max_bytes (needs guest pages: false otherwise) */
+bool lagfx_a64_res_snap_texture(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool tight, uint64_t max_bytes, lagfx_a64_snap_t *s);
+/* fn(ctx, true) runs once when the exec's fence signalled (before its resources are released, snapshots readable); fn(ctx, false) when the exec is dropped without that. */
+void lagfx_a64_res_set_finish_hook(lagfx_a64_rexec_t *x, void (*fn)(void *ctx, bool done), void *ctx);
 /* The task entry's mirror object (NULL if never created); no side effects. For tests / diagnostics. */
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref);
 /* Test / debug: level 0, layer 0 of a mirrored texture as linear rows (width*bpp) via a one-shot copy; false while an exec records / is pending. */

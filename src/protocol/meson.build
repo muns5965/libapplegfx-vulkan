@@ -18,6 +18,8 @@ lagfx_sources += files(
   'arm64_pipeline.c',     # ARM64 pipeline-state resolver (serialized pipeline -> SPIR-V, layouts)
   'arm64_tile.c',         # ARM64 tile shaders: tag 0x33 tile pipelines, tile binds, compute dispatch between two halves of a render pass
   'arm64_depth_stencil.c', # ARM64 depth/stencil state object (tag 4) decoder
+  'arm64_capture_load.c', # ARM64 render replay capture: loader (no Vulkan)
+  'arm64_capture.c',      # ARM64 render replay capture: writer (LAGFX_ARM64_DUMP_DATA=1)
   'arm64_dump.c',         # ARM64 bounded capture of real pipeline/library/binding data (LAGFX_ARM64_DUMP=1)
   'arm64_sampler.c',      # ARM64 serialized sampler (tag 3) -> VkSamplerCreateInfo
   'arm64_draw_decode.c',  # ARM64 render draw record decoder (tags 0-11, 0x10, 0x11)

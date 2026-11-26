@@ -584,6 +584,7 @@ typedef struct lagfx_protocol {
                 uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
                 uint64_t desc_sets, desc_unbound, desc_unaligned, desc_feedback, desc_failed, samplers, sampler_failed, point_no_size;
                 uint64_t dump_objects, dump_bytes, dump_files, dump_skipped_cap, dump_truncated, dump_draws, dump_table_full;
+                uint64_t cap_draws, cap_passes, cap_snaps, cap_bytes, cap_truncated, cap_skipped_filter, cap_skipped_cap, cap_failed, cap_blobs_dedup;   /* arm64_capture.c */
             } pipe;
             /* ARM64 tile shaders (src/protocol/arm64_tile.c): tile pipelines, tile binds, dispatches run as compute between two halves of the render pass */
             struct {

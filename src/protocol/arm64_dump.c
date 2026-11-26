@@ -22,6 +22,7 @@
 #define INDEX_LINES_MAX 8192u
 #define MAXB 32u
 
+static void open_dir(void);
 static struct {
     uint64_t seen[SEEN_MAX]; uint32_t nseen;
     int dirfd, idxfd; bool dir_tried, announced;
@@ -32,6 +33,9 @@ static struct {
     struct { uint32_t ref; uint64_t off; } vb[MAXB], fb[MAXB];
     uint32_t tex[MAXB], samp[MAXB];
 } G = { .dirfd = -1, .idxfd = -1 };
+
+int lagfx_a64_dump_dir_fd(void) { open_dir(); return G.dirfd; }
+int lagfx_a64_dump_index_fd(void) { open_dir(); return G.idxfd; }
 
 bool lagfx_a64_dump_enabled(void) {
     const char *e = getenv("LAGFX_ARM64_DUMP");

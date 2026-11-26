@@ -48,6 +48,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../translate/render_encoder.h"
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
+#include "arm64_capture_rec.h"
 #include <vulkan/vulkan.h>
 
 #define A64_MAX_VB    31u
@@ -87,6 +88,8 @@ typedef struct {
     struct lagfx_vk_state *vk;
     lagfx_a64_pipeline_resolver_t resolver; void *resolver_ctx;
     lagfx_a64_rexec_t *x;            /* the exec being recorded (mirror context), NULL outside an exec */
+    lagfx_a64_cap_t *cap; bool cap_pass;   /* render replay capture (LAGFX_ARM64_DUMP_DATA=1): the exec's recorder (owned by the mirror's finish hook once the exec ended) and an open captured pass */
+    uint32_t fsref[A64_MAX_FSAMP], vsref[A64_MAX_FSAMP];   /* object refs of the bound fragment / vertex samplers (capture only) */
     bool pass_open;                  /* a tag 26 was seen and the segment chain has not ended it */
     bool last_fetch;                 /* the previous draw of this pass read input attachments (framebuffer fetch) */
     bool rendering;                  /* the render encoder has a vkCmdBeginRendering open (pass_open without it = a pass with no usable target) */
@@ -363,7 +366,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     if (!r) return false;
     CNT(p).execs++;
     r->vk = get_vk(p);
-    r->x = NULL;
+    r->x = NULL, r->cap = NULL, r->cap_pass = false;
     r->pass_open = r->rendering = r->wrote_storage = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->pipe_failed = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     if (!r->vk) { CNT(p).no_vulkan++; return false; }
@@ -385,6 +388,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
         } else CNT(p).no_vulkan++;
         return false;
     }
+    r->cap = lagfx_a64_cap_begin(p, r->x, task->id, 0);   /* NULL unless LAGFX_ARM64_DUMP_DATA=1 (+ dump dir) */
     /* the resource list's pipeline / sampler objects (serialized, type 7) are resolved here, as before: the mirror only owns buffers and textures */
     for (uint32_t i = 0; i < nres; i++) {
         uint32_t ref = lagfx_le32(res + 8u * i), e[3];
@@ -650,7 +654,9 @@ static void pass_end(a64_run_t *r) {
         r->wrote_storage = false;
         for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
         if (r->dsobj) lagfx_a64_res_ds_end(r->x, r->dsobj);
+        if (r->cap_pass) lagfx_a64_cap_pass_close(r->cap);   /* capture: post copies + bound resources, recorded after the attachments are back in GENERAL */
     }
+    r->cap_pass = false;
     r->dsobj = NULL, r->ds_dfmt = r->ds_sfmt = VK_FORMAT_UNDEFINED;
     r->pass_open = r->rendering = false, r->last_fetch = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
@@ -693,6 +699,12 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         .imageLayout = r->vk->have_local_read ? (VkImageLayout)1000232000 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
     lagfx_a64_obj_t *first = NULL;
     uint32_t fw = 0, fh = 0, nslots = 0;
+    uint32_t cap_load[4] = {0}; double cap_clear[4][4]; memset(cap_clear, 0, sizeof cap_clear);
+    const bool capw = r->cap && lagfx_a64_cap_pass_wanted(r->cap);
+    if (capw) {   /* capture: contents BEFORE the pass, copied while the attachments are still in GENERAL (nothing is recorded otherwise) */
+        for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++)
+            if (d.colors[k].slot < 4u) lagfx_a64_cap_pre(r->cap, lagfx_a64_res_object(r->x, d.colors[k].texture_ref));
+    }
     for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++) {
         uint32_t slot = d.colors[k].slot;
         if (slot >= 4u) { CNT(p).extra_attach_ignored++; continue; }
@@ -713,6 +725,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         if (dup) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* the same image twice is not a valid attachment set */
         if (!first) first = t, fw = w, fh = h;
         r->rts[slot] = t;
+        cap_load[slot] = load; for (int c = 0; c < 4; c++) cap_clear[slot][c] = d.colors[k].clear_color[c];
         ca[slot].imageView = view, ca[slot].loadOp = lop, ca[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE, ca[slot].clearValue = cv;
         if (slot + 1u > nslots) nslots = slot + 1u;
         if (slot > 0u) CNT(p).multi_attach++;
@@ -773,6 +786,13 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
+    if (r->cap) {
+        lagfx_a64_cap_att_in_t ai[4]; uint32_t na = 0;
+        for (uint32_t k = 0; k < 4u; k++) if (r->rts[k]) { memset(&ai[na], 0, sizeof ai[na]); ai[na].o = r->rts[k], ai[na].slot = k, ai[na].load = cap_load[k]; for (int c = 0; c < 4; c++) ai[na].clear[c] = (float)cap_clear[k][c]; na++; }
+        lagfx_a64_cap_pass_in_t pi = { .w = fw, .h = fh, .depth = dso && (dso->ds_aspects & 1u), .stencil = dso && (dso->ds_aspects & 2u), .depth_ref = d.depth_texture_ref, .depth_vkfmt = dso ? (uint32_t)dso->format : 0u,
+            .depth_load = d.depth_load_action, .stencil_load = d.stencil_load_action, .stencil_clear = d.stencil_clear_value, .depth_clear = (float)d.depth_clear_value };
+        if (capw) lagfx_a64_cap_pass_open(r->cap, &pi, ai, na), r->cap_pass = true;
+    }
     memcpy(r->rsnap.ca, ca, sizeof ca), r->rsnap.dai = dai, r->rsnap.sai = sai, r->rsnap.img = first ? first->img : dso->img;
     r->rsnap.has_d = dso && (dso->ds_aspects & 1u), r->rsnap.has_s = dso && (dso->ds_aspects & 2u);
     tag_done(p, 26);
@@ -868,7 +888,9 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
 /* Every draw record (tags 0..11 direct, 0x10 / 0x11 indirect; layouts in arm64_draw_decode.h). Indirect draws read their argument block from the mirror of
  * the argument buffer at record time (a snapshot, as the independent reference does: it does not see GPU writes of the same exec). A draw with zero vertices /
  * indices or zero instances draws nothing and is done, not skipped. */
-static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+typedef struct { bool have; lagfx_a64_draw_t d; uint32_t index_start; lagfx_a64_obj_t *ib; } cap_dinfo_t;   /* what draw_cmd_inner resolved (indirect arguments included) */
+
+static void draw_cmd_inner(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n, cap_dinfo_t *di) {
     lagfx_a64_draw_t d;
     if (lagfx_a64_draw_decode(tag, rec, n, &d) != LAGFX_A64_DRAW_OK) { CNT(p).bad_rec++; tag_unsup(p, tag); return; }
     if (!draw_ready(r, p)) { tag_partial(p, tag); return; }
@@ -898,6 +920,7 @@ static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint
             CNT(p).no_index_buf++, CNT(p).draws_skipped++; tag_partial(p, tag); return;
         }
     }
+    if (di) di->have = true, di->d = d, di->index_start = index_start, di->ib = ib;
     if (!bind_for_draw(r, p, d.prim)) { tag_partial(p, tag); return; }
     lagfx_status_t st;
     if (d.indexed) {
@@ -909,6 +932,92 @@ static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint
     if (st != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); return; }
     CNT(p).draws++;
     tag_done(p, tag);
+}
+
+
+/* ---- render replay capture of one draw (arm64_capture.c; nothing below runs unless r->cap) ---- */
+
+static const char *cap_skip_reason(const a64_run_t *r, lagfx_protocol_t *p, const uint64_t *before) {
+    static const char *const nm[] = { "no_pipeline", "no_target", "no_vertex_buf", "no_index_buf", "prim_unsupported", "indirect_bad", "desc_unbound", "desc_unaligned", "desc_feedback", "desc_failed", "point_no_size", "stub_fbfetch", "unnorm_skipped" };
+    uint64_t now[13] = { CNT(p).no_pipeline, CNT(p).no_target, CNT(p).no_vertex_buf, CNT(p).no_index_buf, CNT(p).prim_unsupported, CNT(p).ext_draw_indirect_bad, p->diag2.exec.pipe.desc_unbound,
+                         p->diag2.exec.pipe.desc_unaligned, p->diag2.exec.pipe.desc_feedback, p->diag2.exec.pipe.desc_failed, p->diag2.exec.pipe.point_no_size, p->diag2.exec.pipe.stub_fbfetch, CNT(p).ext_unnorm_skipped };
+    (void)r;
+    for (unsigned i = 0; i < 13; i++) if (now[i] != before[i]) return nm[i];
+    return "other";
+}
+
+static void cap_counters(lagfx_protocol_t *p, uint64_t *v) {
+    v[0] = CNT(p).no_pipeline, v[1] = CNT(p).no_target, v[2] = CNT(p).no_vertex_buf, v[3] = CNT(p).no_index_buf, v[4] = CNT(p).prim_unsupported, v[5] = CNT(p).ext_draw_indirect_bad, v[6] = p->diag2.exec.pipe.desc_unbound,
+    v[7] = p->diag2.exec.pipe.desc_unaligned, v[8] = p->diag2.exec.pipe.desc_feedback, v[9] = p->diag2.exec.pipe.desc_failed, v[10] = p->diag2.exec.pipe.point_no_size, v[11] = p->diag2.exec.pipe.stub_fbfetch, v[12] = CNT(p).ext_unnorm_skipped;
+}
+
+static void cap_fill(a64_run_t *r, const cap_dinfo_t *di, lagfx_a64_cap_draw_in_t *o) {
+    memset(o, 0, sizeof *o);
+    const lagfx_a64_draw_t *d = &di->d;
+    o->tag = 0, o->prim = d->prim, o->indexed = d->indexed, o->count = d->count, o->instances = d->instances, o->first_vertex = d->first_vertex, o->base_instance = d->base_instance, o->base_vertex = d->base_vertex;
+    o->index_start = di->index_start, o->index_type = d->index_type, o->index_off = d->index_offset, o->ib = di->ib;
+    o->vp[0] = (float)r->region.vp_x, o->vp[1] = (float)r->region.vp_y, o->vp[2] = (float)r->region.vp_w, o->vp[3] = (float)r->region.vp_h, o->vp[4] = r->region.vp_znear, o->vp[5] = r->region.vp_zfar;
+    o->sc[0] = r->region.sc_x, o->sc[1] = r->region.sc_y, o->sc[2] = r->region.sc_w, o->sc[3] = r->region.sc_h;
+    o->cull = r->es.cull, o->winding = r->es.winding, memcpy(o->bias, r->es.bias, sizeof o->bias);
+    o->depth_test = lagfx_a64_dss_depth_test(&r->es.dss), o->depth_write = r->es.dss.depth_write, o->depth_cmp = r->es.dss.depth_compare, o->stencil_test = lagfx_a64_dss_stencil_test(&r->es.dss);
+    o->sref[0] = r->es.sref[0], o->sref[1] = r->es.sref[1];
+    for (uint32_t i = 0; i < 4u && i < r->nslots; i++) if (r->rts[i]) o->color_fmts[i] = (uint32_t)r->rts[i]->format;
+    o->ncolor_fmts = r->nslots;
+    a64_pipe_t *pp = r->pipe;
+    if (!pp) return;
+    const lagfx_pipeline_desc_t *pd = &pp->src.desc;
+    o->pipe_ref = pp->ref, o->pipe_gen = pp->h.gen, o->pipe_hash = pp->src.blob_hash;
+    o->vs = pd->vertex_spv, o->vs_bytes = pd->vertex_spv_bytes, o->fs = pd->fragment_spv, o->fs_bytes = pd->fragment_spv_bytes;
+    o->vtx_slot = pp->src.vertex_buffer_index, o->vtx_stride = pd->vtx_stride;
+    if (pd->n_vtx_inputs && o->vtx_slot < A64_MAX_VB) o->vb = r->vb[o->vtx_slot].b, o->vb_off = r->vb[o->vtx_slot].off;
+    o->n_vtx_in = pd->n_vtx_inputs < 8u ? pd->n_vtx_inputs : 8u;
+    for (uint32_t i = 0; i < o->n_vtx_in; i++) o->vtx_in_loc[i] = pd->vtx_in_loc[i], o->vtx_in_comp[i] = pd->vtx_in_comp[i];
+    o->n_attr = pd->n_pso_attrs < 8u ? pd->n_pso_attrs : 8u;
+    for (uint32_t i = 0; i < o->n_attr; i++) o->attr_fmt[i] = pd->pso_attr_fmt[i], o->attr_off[i] = pd->pso_attr_off[i];
+    o->blend_set = pd->blend_set, o->blend = pd->blend_enable, o->blend_rgb[0] = pd->blend_src_rgb, o->blend_rgb[1] = pd->blend_dst_rgb, o->blend_rgb[2] = pd->blend_op_rgb;
+    o->blend_a[0] = pd->blend_src_a, o->blend_a[1] = pd->blend_dst_a, o->blend_a[2] = pd->blend_op_a, o->write_mask = pd->color_write_mask;
+    for (uint32_t i = 0; i < pp->src.n_bind && i < LAGFX_A64_MAX_BINDINGS; i++) {
+        lagfx_a64_cap_bind_in_t *b = &o->binds[o->nbind++];
+        int16_t mis = pp->src.bind[i].metal_index;
+        uint32_t mi = (uint32_t)mis, st = pp->src.bind[i].stage;
+        b->binding = pp->src.bind[i].binding, b->kind = pp->src.bind[i].kind, b->stage = st, b->idx = mi, b->writable = pp->src.bind[i].writable;
+        if (mis < 0) continue;
+        if (b->kind == LAGFX_A64_BIND_BUFFER) {
+            if (st ? mi < A64_MAX_FB : mi < A64_MAX_VB) {
+                b->obj = st ? r->fb[mi].b : r->vb[mi].b, b->off = st ? r->fb[mi].off : r->vb[mi].off;
+                if (b->obj) b->range = b->off < b->obj->length ? b->obj->length - b->off : 0;
+            }
+        } else if (b->kind == LAGFX_A64_BIND_IMAGE) {
+            if (mi < A64_MAX_FB) b->obj = st ? r->ftex[mi] : r->vtex[mi];
+        } else if (b->kind == LAGFX_A64_BIND_SAMPLER) {
+            if (mi >= A64_MAX_FSAMP) continue;
+            a64_samp_t *sm = st ? r->fsamp[mi] : r->vsamp[mi];
+            VkSampler ov = (st ? r->fvar : r->vvar)[mi];
+            if (!sm) continue;
+            b->has_samp = true, b->samp.ref = (st ? r->fsref : r->vsref)[mi], b->samp.gen = sm->h.gen, b->samp.ci = sm->ci, b->samp.mip = sm->mip, b->samp.lod_lo = sm->ci.minLod, b->samp.lod_hi = sm->ci.maxLod;
+            for (uint32_t k = 0; ov && k < sm->nvar; k++) if (sm->var[k].s == ov) { b->samp.lod_lo = sm->var[k].lo, b->samp.lod_hi = sm->var[k].hi; break; }
+        }
+    }
+}
+
+static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+    if (!r->cap) { draw_cmd_inner(r, p, tag, rec, n, NULL); return; }
+    bool sel = false;
+    uint32_t dn = lagfx_a64_cap_draw_enter(r->cap, r->pipe ? r->pipe->ref : 0u, &sel);
+    if (!sel) { draw_cmd_inner(r, p, tag, rec, n, NULL); return; }
+    uint64_t c0[13], d0 = CNT(p).draws, s0 = CNT(p).draws_skipped;
+    cap_counters(p, c0);
+    cap_dinfo_t di;
+    memset(&di, 0, sizeof di);
+    draw_cmd_inner(r, p, tag, rec, n, &di);
+    if (!di.have) return;   /* not decodable / zero-sized: no record */
+    lagfx_a64_cap_draw_in_t *in = malloc(sizeof *in);
+    if (!in) return;
+    cap_fill(r, &di, in);
+    in->tag = tag;
+    if (CNT(p).draws != d0) lagfx_a64_cap_draw(r->cap, dn, NULL, in);
+    else if (CNT(p).draws_skipped != s0) lagfx_a64_cap_draw(r->cap, dn, cap_skip_reason(r, p, c0), in);
+    free(in);
 }
 
 /* Tile records (arm64_tile.c). A dispatch cannot run inside a dynamic-rendering instance: tile_suspend ends it (attachments -> GENERAL), the compute dispatch is
@@ -1002,7 +1111,7 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
             if (tex) {   /* only textures the mirror already holds (the exec's resource list): creating + uploading one now would record copies inside the pass */
                 lagfx_a64_obj_t *t = lagfx_a64_res_lookup(p, r->task->id, R32(8 + i * 4));
                 tt[index + i] = t && t->kind == LAGFX_A64_TEXTURE ? t : NULL;
-            } else ss[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP), vv[index + i] = VK_NULL_HANDLE;
+            } else ss[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP), vv[index + i] = VK_NULL_HANDLE, (vs ? r->vsref : r->fsref)[index + i] = R32(8 + i * 4);
         }
         if (vs) CNT(p).ext_vs_tex_binds++;
         tag_done(p, tag);
@@ -1073,7 +1182,7 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
             a64_samp_t **ss = tag == 128 ? r->vsamp : r->fsamp; VkSampler *vv = tag == 128 ? r->vvar : r->fvar;
             for (uint32_t i = 0; i < count && index + i < A64_MAX_FSAMP; i++) {
                 a64_samp_t *sm = get_kind(r, p, r->task, R32(8 + i * 12), K_SAMP);
-                ss[index + i] = sm, vv[index + i] = VK_NULL_HANDLE;
+                ss[index + i] = sm, vv[index + i] = VK_NULL_HANDLE, (tag == 128 ? r->vsref : r->fsref)[index + i] = R32(8 + i * 12);
                 if (!sm) continue;
                 uint32_t lo = R32(12 + i * 12), hi = R32(16 + i * 12);
                 float flo, fhi;
@@ -1206,7 +1315,7 @@ lagfx_a64_exec_status_t lagfx_a64_exec_end(lagfx_protocol_t *p) {
     if (!r || !r->x) return LAGFX_A64_EXEC_NONE;
     pass_end(r);
     lagfx_a64_rexec_t *x = r->x;
-    r->x = NULL;
+    r->x = NULL, r->cap = NULL;   /* the capture now belongs to the mirror's finish hook (written once the fence signalled) */
     lagfx_a64_status_t st = lagfx_a64_res_end(x);   /* submits once, bounded wait (lagfx_vk_wait_bounded), then the flag-0x04 write-backs if DONE */
     lagfx_arm64_submit_ctx_t *ctx = lagfx_arm64_submit_current(p);
     switch (st) {

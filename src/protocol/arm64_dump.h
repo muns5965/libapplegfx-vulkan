@@ -22,6 +22,9 @@
 #include "state.h"
 #include "arm64_exec_decode.h"
 
+/* The opened LAGFX_ARM64_DUMP_DIR / its index.txt (append) for arm64_capture.c; -1 when no directory is set / it could not be opened. */
+int lagfx_a64_dump_dir_fd(void);
+int lagfx_a64_dump_index_fd(void);
 bool lagfx_a64_dump_enabled(void);   /* LAGFX_ARM64_DUMP == "1", read at every call */
 void lagfx_a64_dump_reset(void);     /* forgets the seen set, closes the directory (tests; a new run) */
 

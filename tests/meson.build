@@ -1581,3 +1581,14 @@ if fs.is_file(meson.current_source_dir() / 'arm64-fbfetch-check-unit.c')
     build_by_default : true)
   test('arm64 framebuffer-fetch binding check', fbf_check_test)
 endif
+
+# ARM64 render replay capture (LAGFX_ARM64_DUMP_DATA=1): format round trip through the loader, filters, caps, on lavapipe.
+if fs.is_file(meson.current_source_dir() / 'arm64-capture-unit.c') and vulkan_dep.found()
+  cap_test = executable('arm64-capture-unit',
+    'arm64-capture-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 render replay capture (unit, lavapipe)', cap_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif

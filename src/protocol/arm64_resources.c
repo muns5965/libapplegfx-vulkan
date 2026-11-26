@@ -531,6 +531,7 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
         MRUN(p).mapped_shared++;
     }
     ms->refs++;
+    o->mtl_format = fmt;
     o->ms = ms, o->mapping = (uint32_t)mapping;
     o->kind = LAGFX_A64_TEXTURE, o->has_pages = false, o->length = 0, o->tex_mip_count = 1;
     o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = (uint64_t)o->width * o->bpp;
@@ -587,6 +588,7 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
             }
         }
         free(d);
+        o->mtl_format = fmt;
         o->format = VK_FORMAT_UNDEFINED;
         for (size_t i = 0; ok && i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
         for (size_t i = 0; ok && o->format == VK_FORMAT_UNDEFINED && i < sizeof k_dfmt / sizeof *k_dfmt; i++)
@@ -628,6 +630,7 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         } else if (tag == 0x14 || tag == 1) {
             mtype = desc[0] & 0xfu, fmt = desc[2] | desc[3] << 8, o->width = lagfx_le32(desc + 4), o->height = lagfx_le32(desc + 8), samples = lagfx_le16(desc + 18);
         } else goto bad_linear;
+        o->mtl_format = fmt;
         o->format = VK_FORMAT_UNDEFINED;
         for (size_t i = 0; i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
         if (mtype != 2 || samples > 1 || o->format == VK_FORMAT_UNDEFINED || !o->width || !o->height || o->width > 16384 || o->height > 16384) goto bad_linear;
@@ -662,6 +665,8 @@ struct lagfx_a64_rexec {
     xres_t *res; uint32_t nres;
     VkFence fence;
     VkBuffer tmp_b[MAX_TMP]; VkDeviceMemory tmp_m[MAX_TMP]; uint32_t ntmp;
+    struct { VkBuffer b; VkDeviceMemory m; } *snap; uint32_t nsnap, capsnap;   /* capture snapshots (TRANSFER_DST), freed with the exec */
+    void (*hook)(void *, bool); void *hook_ctx;
 };
 
 static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
@@ -1010,9 +1015,86 @@ bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *bu
     return true;
 }
 
+/* ---- render replay capture snapshots (see arm64_resources.h) ---- */
+
+void lagfx_a64_res_set_finish_hook(lagfx_a64_rexec_t *x, void (*fn)(void *, bool), void *ctx) { if (x) x->hook = fn, x->hook_ctx = ctx; }
+
+static bool snap_alloc(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *b, uint8_t **map) {
+    if (x->nsnap == x->capsnap) {
+        uint32_t nc = x->capsnap ? x->capsnap * 2u : 32u;
+        void *n = realloc(x->snap, nc * sizeof *x->snap);
+        if (!n) return false;
+        x->snap = n, x->capsnap = nc;
+    }
+    VkDeviceMemory m;
+    if (!make_buf(x->vk, size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, b, &m, map)) return false;
+    x->snap[x->nsnap].b = *b, x->snap[x->nsnap].m = m, x->nsnap++;
+    return true;
+}
+
+bool lagfx_a64_res_snap_buffer(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, uint64_t off, uint64_t max_bytes, lagfx_a64_snap_t *s) {
+    if (!x || !o || !s || o->kind != LAGFX_A64_BUFFER || !o->buf || off >= o->length || !max_bytes) return false;
+    uint64_t len = o->length - off < max_bytes ? o->length - off : max_bytes;
+    VkBuffer b; uint8_t *mp;
+    if (!snap_alloc(x, len, &b, &mp)) return false;
+    barrier(x->cb);   /* earlier GPU writes (draws' storage writes, blit fills, transfers) -> this copy */
+    VkBufferCopy r = { off, 0, len };
+    vkCmdCopyBuffer(x->cb, o->buf, b, 1, &r);
+    barrier(x->cb);
+    s->data = mp, s->bytes = len, s->full = o->length, s->off = off;
+    return true;
+}
+
+bool lagfx_a64_res_snap_texture(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool tight, uint64_t max_bytes, lagfx_a64_snap_t *s) {
+    if (!x || !o || !s || o->kind != LAGFX_A64_TEXTURE || o->ds_aspects || !o->img || !max_bytes) return false;
+    if (!tight && (!o->has_pages || !o->length)) return false;
+    uint64_t full = tight ? (uint64_t)o->width * o->height * (is_tex3d(o) ? o->depth : 1u) * o->bpp : o->length;
+    uint64_t sz = full < max_bytes ? full : max_bytes;
+    if (!sz) return false;
+    VkBuffer b; uint8_t *mp;
+    if (!snap_alloc(x, sz, &b, &mp)) return false;
+    barrier(x->cb);
+    if (tight) {
+        if (sz == full) {
+            VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { o->width, o->height, is_tex3d(o) ? o->depth : 1u } };
+            lagfx_translate_blit_cmd_buffer_image(x->cb, b, o->img, &r, false);
+        } else {   /* cut by the cap: whole rows only (rows that fit in the prefix) */
+            uint64_t rows = sz / ((uint64_t)o->width * o->bpp);
+            if (rows > o->height) rows = o->height;
+            if (rows) {
+                VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { o->width, (uint32_t)rows, 1 } };
+                lagfx_translate_blit_cmd_buffer_image(x->cb, b, o->img, &r, false);
+            }
+        }
+    } else {
+        uint32_t layers = is_tex3d(o) ? 1u : o->layers;
+        for (uint32_t sl = 0; sl < layers; sl++)
+            for (uint32_t l = 0; l < o->mips; l++) {
+                VkBufferImageCopy r;
+                if (!tex_region(o, sl, l, &r)) continue;
+                uint64_t end = r.bufferOffset + (uint64_t)o->mip[l].row * o->mip[l].h * o->mip[l].d;
+                if (end > sz) continue;   /* beyond the cap: the prefix keeps only regions that fit completely */
+                lagfx_translate_blit_cmd_buffer_image(x->cb, b, o->img, &r, false);
+            }
+    }
+    barrier(x->cb);
+    s->data = mp, s->bytes = sz, s->full = full, s->off = 0;
+    return true;
+}
+
 /* ---- completion ---- */
 
+static void exec_hook(lagfx_a64_rexec_t *x, bool done) {
+    if (!x->hook) return;
+    void (*fn)(void *, bool) = x->hook;
+    x->hook = NULL;
+    fn(x->hook_ctx, done);
+}
+
 static void exec_free(lagfx_a64_rexec_t *x) {
+    exec_hook(x, false);
+    for (uint32_t i = 0; i < x->nsnap; i++) free_buf(x->vk, x->snap[i].b, x->snap[i].m);
+    free(x->snap);
     for (uint32_t i = 0; i < x->ntmp; i++) free_buf(x->vk, x->tmp_b[i], x->tmp_m[i]);
     if (x->fence) vkDestroyFence(x->vk->device, x->fence, NULL);
     if (x->cb) lagfx_vk_cmdbuf_free(x->vk, x->cb);
@@ -1037,6 +1119,7 @@ static lagfx_a64_status_t exec_finish(lagfx_a64_rexec_t *x) {
     }
     mgr2_t *m = x->m;
     struct lagfx_vk_state *vk = x->vk;
+    exec_hook(x, true);   /* the GPU is done: capture snapshots are readable now */
     if (m->pending == x) m->pending = NULL;
     exec_free(x);
     dead_flush(m, vk);   /* the fence signalled: objects replaced / dropped meanwhile can go now */
@@ -1080,6 +1163,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
     m->st.gpu_fail++;
     LAGFX_WARN("arm64 exec: fence wait failed (device lost?); resources leaked");
     x->cb = VK_NULL_HANDLE, x->fence = VK_NULL_HANDLE, x->ntmp = 0;
+    exec_hook(x, false); x->nsnap = 0;   /* snapshots leaked with the rest */
     free(x->res); free(x);
     return LAGFX_A64_FAILED;
 }
@@ -1098,6 +1182,7 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms) {
     m->st.gpu_fail++;
     m->pending = NULL;
     x->cb = VK_NULL_HANDLE, x->fence = VK_NULL_HANDLE, x->ntmp = 0;   /* leaked */
+    exec_hook(x, false); x->nsnap = 0;
     free(x->res); free(x);
     return LAGFX_A64_FAILED;
 }
