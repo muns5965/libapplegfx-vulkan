@@ -247,6 +247,7 @@ enum {
 /* OpTypeImage `Dim` operand. */
 enum {
     LAGFX_SPV_DIM_2D                    = 1,
+    LAGFX_SPV_DIM_3D                    = 2,
 };
 
 /* OpTypeImage `ImageFormat` operand — Unknown = no storage-image
