@@ -1730,3 +1730,32 @@ pipeline_repro_test = executable('pipeline-repro-unit',
   build_by_default : true,
 )
 test('pipeline repro (unit, lavapipe)', pipeline_repro_test, workdir : meson.current_source_dir() / '..')
+
+
+# Constexpr sampler extraction (AIR global -> i64 word -> decoded state).
+if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
+  constexpr_sampler_test = executable('air2spv-constexpr-sampler-unit',
+    'air2spv-constexpr-sampler-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('air2spv constexpr sampler (unit)', constexpr_sampler_test,
+       workdir : meson.current_source_dir() / '..')
+endif
+
+# VkSampler cache by state (lavapipe): distinct states -> distinct samplers.
+if fs.is_file(meson.current_source_dir() / 'vulkan-sampler-cache-unit.c')
+  sampler_cache_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    sampler_cache_deps += [vulkan_dep]
+  endif
+  sampler_cache_test = executable('vulkan-sampler-cache-unit',
+    'vulkan-sampler-cache-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : sampler_cache_deps,
+    build_by_default : true,
+  )
+  test('vulkan sampler cache (unit)', sampler_cache_test,
+       workdir : meson.current_source_dir() / '..')
+endif

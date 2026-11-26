@@ -904,25 +904,17 @@ static lagfx_status_t create_fallback_ds(struct lagfx_vk_state *vk) {
     }
 
     /* M1 (c): one shared default sampler (linear filter, clamp-to-edge) for
-     * texture-sampling compositor pipelines. The translator's shaders use a
-     * Metal constexpr sampler; a single linear/clamp sampler is a faithful
-     * default and avoids per-draw sampler churn. Non-fatal on failure. */
+     * texture-sampling compositor pipelines — the fallback whenever a
+     * shader's constexpr sampler state cannot be decoded (see
+     * air2spv/constexpr_sampler.h). Owned by the sampler cache, which also
+     * serves decoded constexpr states. Non-fatal on failure. */
     {
-        VkSamplerCreateInfo sci = {
-            .sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-            .magFilter    = VK_FILTER_LINEAR,
-            .minFilter    = VK_FILTER_LINEAR,
-            .mipmapMode   = VK_SAMPLER_MIPMAP_MODE_NEAREST,
-            .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
-            .maxLod       = VK_LOD_CLAMP_NONE,
-        };
-        VkResult svr = vkCreateSampler(vk->device, &sci, NULL, &vk->default_sampler);
-        if (svr != VK_SUCCESS) {
-            LAGFX_WARN("pipeline_init: default_sampler create failed (%d) — "
-                       "texture pipelines fall back to substitute", (int)svr);
-            vk->default_sampler = VK_NULL_HANDLE;
+        lagfx_sampler_cache_init(&vk->sampler_cache, vk->device, vk->have_sampler_anisotropy);
+        lagfx_sampler_state_t def = lagfx_sampler_state_default();
+        vk->default_sampler = lagfx_sampler_cache_get(&vk->sampler_cache, &def);
+        if (vk->default_sampler == VK_NULL_HANDLE) {
+            LAGFX_WARN("pipeline_init: default_sampler create failed — "
+                       "texture pipelines fall back to substitute");
         } else {
             LAGFX_LOG("pipeline_init: default_sampler created (M1 c)");
         }
@@ -965,10 +957,8 @@ static void destroy_fallback_ds(struct lagfx_vk_state *vk) {
         vkDestroyDescriptorPool(vk->device, vk->draw_desc_pool, NULL);
         vk->draw_desc_pool = VK_NULL_HANDLE;
     }
-    if (vk->default_sampler != VK_NULL_HANDLE) {
-        vkDestroySampler(vk->device, vk->default_sampler, NULL);
-        vk->default_sampler = VK_NULL_HANDLE;
-    }
+    lagfx_sampler_cache_destroy(&vk->sampler_cache);   /* owns default_sampler */
+    vk->default_sampler = VK_NULL_HANDLE;
     if (vk->unnorm_sampler != VK_NULL_HANDLE) {
         vkDestroySampler(vk->device, vk->unnorm_sampler, NULL);
         vk->unnorm_sampler = VK_NULL_HANDLE;
