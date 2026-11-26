@@ -5,6 +5,7 @@
 #include "dispatchers/channel_compute_dispatcher.h"
 #include "dispatchers/ring_common.h"
 #include "protocol/state.h"
+#include "protocol/protocol.h"
 #include "protocol/arm64_exec_decode.h"
 #include "protocol/arm64_exec_run.h"
 #include "protocol/arm64_resources.h"

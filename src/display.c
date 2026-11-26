@@ -27,6 +27,7 @@
 #include "vulkan/instance.h"
 #include "vulkan/command.h"
 #include "vulkan/render_target.h"
+#include "vulkan/surface_writeback.h"
 #include "vulkan/cursor.h"
 #include "common/log.h"
 #include "common/perf.h"
