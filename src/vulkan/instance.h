@@ -14,6 +14,9 @@
 
 #ifndef LIBAPPLEGFX_VULKAN_INSTANCE_H
 #define LIBAPPLEGFX_VULKAN_INSTANCE_H
+#include <stddef.h>
+#include <stdint.h>
+#include "caps.h"
 
 #include "libapplegfx-vulkan.h"
 
@@ -30,6 +33,8 @@
  * the struct is still defined but fields are minimal — it exists only
  * so the device.c lifecycle can hold the pointer uniformly. */
 struct lagfx_vk_state {
+    /* LAGFX_VK_CAP_* masks (caps.h): what the device was created with / what the generated SPIR-V may use but the physical device does not report. */
+    uint32_t caps_enabled, caps_missing;
 #ifdef LAGFX_HAVE_VULKAN
     VkInstance       instance;
     VkPhysicalDevice phys_device;
@@ -221,5 +226,11 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
                                                    VkDeviceMemory *out_mem,
                                                    VkDeviceAddress *out_addr);
 #endif
+
+/* The g7-gpu-caps diagnostic line for this device (also printed once by lagfx_vk_init); returns buf. */
+const char *lagfx_vk_caps_line(const struct lagfx_vk_state *vk, char *buf, size_t n);
+/* TEST SEAM ('feature missing'): marks caps as missing on an existing device (the Vulkan device itself is not changed; only the gate sees it).
+ * At init the same is possible through LAGFX_VK_CAPS_OFF=int64,int8,... which also keeps those features OFF at vkCreateDevice. */
+void lagfx_vk_caps_inject_missing(struct lagfx_vk_state *vk, uint32_t mask);
 
 #endif /* LIBAPPLEGFX_VULKAN_INSTANCE_H */

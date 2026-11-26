@@ -618,6 +618,61 @@ static void test_dump(void) {
     puts("PASS: capture: decode-only (no exec, no Vulkan), full payload files + index, caps/.TRUNCATED, no overwrite/symlink, bad dir, with exec");
 }
 
+#ifdef LAGFX_HAVE_VULKAN
+/* Device-capability gate (vulkan/caps.h): a translated module that declares a capability the device was not created with is not built; the draw is skipped. The
+ * 'feature missing' seam lagfx_vk_caps_inject_missing marks capabilities as missing on the lavapipe device (which reports everything). */
+static void test_missing_caps(void) {
+    /* pure: the OpCapability / version scan */
+    uint32_t m[] = { 0x07230203u, 0x00010400u, 0, 8, 0, 0x00020011u, 1u, 0x00020011u, 11u, 0x00020011u, 39u, 0x00020011u, 4448u, 0x00020011u, 4441u, 0x0004000fu, 0, 1, 0x6e69616du };
+    uint32_t need = lagfx_spv_required_caps(m, sizeof m);
+    assert(need == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14)));
+    assert(lagfx_spv_required_caps(m, 7) == 0 && lagfx_vk_caps_parse("int64,bogus,float16") == (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)));
+    struct lagfx_vk_state *vk = g_dev->vk;
+    char line[512];
+    lagfx_vk_caps_line(vk, line, sizeof line);
+    printf("INFO: %s\n", line);
+    assert(strstr(line, "g7-gpu-caps:") && vk->caps_enabled == (vk->caps_enabled & LAGFX_VK_CAP_ALL) && (vk->caps_enabled | vk->caps_missing) == LAGFX_VK_CAP_ALL);
+    uint32_t saved_en = vk->caps_enabled, saved_ms = vk->caps_missing;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    /* baseline: nothing missing, the pipeline resolves and draws */
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+    assert(PIPE(p).resolved == 1 && RUNC(p).draws == 1 && PIPE(p).rf_missing_cap == 0);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    /* every capability 'missing': the generated shaders declare at least Int64 / VariablePointers... or SPIR-V 1.4; those pipelines must not be built */
+    lagfx_vk_caps_inject_missing(vk, LAGFX_VK_CAP_ALL);
+    p = new_task(&t);
+    tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+    uint64_t total = 0;
+    for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT; c++) total += PIPE(p).stub_missing_cap[c];
+    printf("INFO: missing-cap: rf_missing_cap=%llu stubs=%llu draws=%llu skipped=%llu resolved=%llu built=%llu\n", (unsigned long long)PIPE(p).rf_missing_cap, (unsigned long long)total,
+           (unsigned long long)RUNC(p).draws, (unsigned long long)RUNC(p).draws_skipped, (unsigned long long)PIPE(p).resolved, (unsigned long long)PIPE(p).pipes_built);
+    assert(PIPE(p).rf_missing_cap == 1 && total >= 1 && PIPE(p).resolved == 0 && PIPE(p).pipes_built == 0);   /* no shader module, no pipeline: nothing invalid reached Vulkan */
+    assert(RUNC(p).draws == 0 && RUNC(p).draws_skipped >= 1 && RUNC(p).submit_failed == 0);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    /* only a capability the shaders do not use is missing: unaffected */
+    vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
+    uint32_t need_tri = 0;
+    {   /* what the triangle shaders need = what the previous run counted */
+        p = new_task(&t);
+        lagfx_vk_caps_inject_missing(vk, LAGFX_VK_CAP_ALL);
+        tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+        for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT; c++) if (PIPE(p).stub_missing_cap[c]) need_tri |= LAGFX_VK_CAP_BIT(c);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+        vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
+    }
+    assert(need_tri != 0);
+    lagfx_vk_caps_inject_missing(vk, LAGFX_VK_CAP_ALL & ~need_tri);
+    p = new_task(&t);
+    tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+    assert(PIPE(p).rf_missing_cap == 0 && PIPE(p).resolved == 1 && RUNC(p).draws == 1);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
+    printf("PASS: device-capability gate: shader needing missing caps (mask 0x%x) -> no pipeline, draw skipped, stub_missing_cap counted; unrelated missing caps do not block\n", need_tri);
+}
+#endif
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -631,6 +686,7 @@ int main(void) {
         test_resolver_triangle_and_topology();
         test_textured_draw();
         test_invalidation();
+        test_missing_caps();
     } else {
         puts("SKIP: no Vulkan device; resolver/binding/invalidation tests not run (pdesc + decode-only capture ran)");
         lagfx_device_free(g_dev); free(g_mem);

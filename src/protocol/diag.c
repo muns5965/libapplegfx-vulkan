@@ -5,9 +5,11 @@
 #include "state.h"
 #include "arm64_completion.h"
 #include "../vulkan/command.h"
+#include "../vulkan/caps.h"
 #include "../common/log.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <time.h>
 
 static uint64_t now_ns(void) {
@@ -134,7 +136,7 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
     }
-    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects) {   /* ARM64 pipeline resolver / descriptor binding / capture */
+    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;
 #define U(f) (unsigned long long)Q->f
         char pl[1400];
@@ -147,6 +149,11 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
                  U(pipes_built), U(pipe_build_failed), U(pipe_replaced), U(topo[0]), U(topo[1]), U(topo[2]), U(topo[3]), U(topo[4]),
                  U(desc_sets), U(desc_unbound), U(desc_unaligned), U(desc_feedback), U(desc_failed), U(point_no_size), U(samplers), U(sampler_failed),
                  U(dump_objects), U(dump_bytes), U(dump_files), U(dump_skipped_cap), U(dump_truncated), U(dump_draws), U(dump_table_full));
+        {
+            size_t po = strlen(pl);
+            for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT && po + 40 < sizeof pl; c++)
+                if (Q->stub_missing_cap[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " stub_missing_cap_%s=%llu", lagfx_vk_cap_name(c), U(stub_missing_cap[c]));
+        }
 #undef U
         fprintf(stderr, "%s\n", pl);
         LAGFX_LOG("%s", pl);

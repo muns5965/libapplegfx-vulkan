@@ -389,7 +389,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
 
     /* Required (core-1.3 promoted but still enumerated as extensions
      * on some ICDs; ask explicitly for widest compatibility). */
-    const char *wanted_dev_exts[8];
+    const char *wanted_dev_exts[10];
     uint32_t    wanted_dev_n = 0;
     bool want_dyn_rendering =
         has_ext(dext, dext_n, "VK_KHR_dynamic_rendering");
@@ -416,6 +416,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         LAGFX_LOG("vk_init: VK_EXT_extended_dynamic_state3 missing — "
                   "later phases may need fallbacks");
     }
+    bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     free(dext);
 
     /* === Device features =========================================
@@ -539,9 +540,36 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         LAGFX_WARN("vk_init: shaderInt64 not advertised by ICD; AIR shaders "
                    "that declare OpCapability Int64 will fail pipeline build.");
     }
+    /* Capabilities of the generated SPIR-V (caps.h): enable ONLY what the physical device reports. LAGFX_VK_CAPS_OFF=int64,int8,... (test seam) forces some
+     * of them off even if reported. Adreno reports several of these as optional. */
+    const char *caps_off_env = getenv("LAGFX_VK_CAPS_OFF");
+    uint32_t caps_off = caps_off_env ? lagfx_vk_caps_parse(caps_off_env) : 0u;
+    uint32_t caps_en = 0;
+    if (have_shader_int64 && !(caps_off & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64))) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64);
+    if (probe2.features.shaderInt16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16);
+    if (probe12.shaderInt8) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8);
+    if (probe12.shaderFloat16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16);
+    if (probe12.storageBuffer8BitAccess && probe12.uniformAndStorageBuffer8BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8);
+    if (probe11.storageBuffer16BitAccess && probe11.uniformAndStorageBuffer16BitAccess) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16);
+    if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
+    if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
+    bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
+    if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
+    caps_en &= ~caps_off;
+    if (!spirv14_core && have_spirv14_ext && (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14))) {
+        wanted_dev_exts[wanted_dev_n++] = "VK_KHR_spirv_1_4";
+        wanted_dev_exts[wanted_dev_n++] = "VK_KHR_shader_float_controls";
+    }
+    feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
+    feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
+    feat12.storageBuffer8BitAccess = feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE8)) ? VK_TRUE : VK_FALSE;
+    feat11.storageBuffer16BitAccess = feat11.uniformAndStorageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_STORAGE16)) ? VK_TRUE : VK_FALSE;
+    feat11.variablePointers = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR)) ? VK_TRUE : VK_FALSE;
+    feat11.variablePointersStorageBuffer = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB)) ? VK_TRUE : VK_FALSE;
     VkPhysicalDeviceFeatures2 feat2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
-        .features = { .shaderInt64 = have_shader_int64 ? VK_TRUE : VK_FALSE },
+        .features = { .shaderInt64 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) ? VK_TRUE : VK_FALSE,
+                      .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE },
         .pNext = &feat12,
     };
 
@@ -569,6 +597,17 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         return LAGFX_ERR_VULKAN_INIT;
     }
 
+    s->caps_enabled = caps_en, s->caps_missing = LAGFX_VK_CAP_ALL & ~caps_en;
+    {   /* printed once per process */
+        static bool caps_printed;
+        if (!caps_printed) {
+            caps_printed = true;
+            char cl[512];
+            lagfx_vk_caps_line(s, cl, sizeof cl);
+            fprintf(stderr, "%s\n", cl);
+            LAGFX_LOG("%s", cl);
+        }
+    }
     s->have_dynamic_rendering      = have_dyn_rendering_feature;
     s->have_synchronization2       = have_synchronization2;
     s->have_timeline_semaphore     = have_timeline_semaphore_feat;
