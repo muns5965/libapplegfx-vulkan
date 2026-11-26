@@ -524,7 +524,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
         if (s->bind[i].kind == LAGFX_A64_BIND_BUFFER) {
             lagfx_a64_obj_t *b = mi_s < 0 ? NULL : st ? (mi < A64_MAX_FB ? r->fb[mi].b : NULL) : (mi < A64_MAX_VB ? r->vb[mi].b : NULL);
             uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
-            if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
             if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
@@ -538,13 +538,13 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             MIX(b->gen), MIX(off), MIX((uint64_t)(uintptr_t)dbuf);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_INPUT) {   /* framebuffer fetch: colour attachment mi of the open pass */
             lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
-            if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x1f0u);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_STORAGE_IMAGE) {   /* texture2d<T, access::write>: the mirror texture itself, GENERAL layout */
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
-            if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[2]++; return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* writing an attachment being rendered */
@@ -556,12 +556,12 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             r->wrote_storage = true;
         } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? (st ? r->ftex[mi] : r->vtex[mi]) : NULL;
-            if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[3]++; return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
             VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_sample_view(r->x, t);   /* a linear texture needs a buffer pull recorded outside a pass: not sampled */
-            if (!v) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
             MIX(t->gen);
@@ -569,7 +569,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? (st ? r->fsamp[mi] : r->vsamp[mi]) : NULL;
             VkSampler *vvt = st ? r->fvar : r->vvar;
             VkSampler vs = sm ? (vvt[mi] ? vvt[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
-            if (!vs) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            if (!vs) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[5]++; return false; }
             ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];
             MIX(sm ? sm->h.gen : 0xd5u), MIX((uint64_t)(uintptr_t)vs);

@@ -21,7 +21,7 @@ static uint8_t *slurp(const char *p, size_t *n) {
     uint8_t *b = malloc((size_t)l + 1u); if (!b || fread(b, 1, (size_t)l, f) != (size_t)l) { fclose(f); free(b); return NULL; }
     fclose(f); *n = (size_t)l; return b;
 }
-static const char *kname(int k) { static const char *n[] = { "?", "buffer", "image", "sampler", "input", "storage_img" }; return k >= 0 && k < 6 ? n[k] : "?"; }
+static const char *kname(int k) { static const char *n[] = { "?", "image", "sampler", "buffer", "input", "storage_img" }; return k >= 0 && k < 6 ? n[k] : "?"; }
 
 typedef struct { uint8_t *lib; size_t len; lagfx_metallib_function_t fn[8]; size_t nfn; } lib_t;
 
