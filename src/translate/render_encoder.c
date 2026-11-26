@@ -107,6 +107,22 @@ lagfx_status_t lagfx_translate_render_begin(
     const float clear_rgba[4],
     const VkRenderingAttachmentInfoKHR *color_attachments,
     uint32_t color_attachment_count) {
+    return lagfx_translate_render_begin_ds(vk, state, vk_cmdbuf, target, target_width, target_height, clear_rgba,
+                                           color_attachments, color_attachment_count, NULL, NULL);
+}
+
+lagfx_status_t lagfx_translate_render_begin_ds(
+    struct lagfx_vk_state *vk,
+    lagfx_translate_render_state_t *state,
+    VkCommandBuffer vk_cmdbuf,
+    VkImage target,
+    uint32_t target_width,
+    uint32_t target_height,
+    const float clear_rgba[4],
+    const VkRenderingAttachmentInfoKHR *color_attachments,
+    uint32_t color_attachment_count,
+    const VkRenderingAttachmentInfoKHR *depth_attachment,
+    const VkRenderingAttachmentInfoKHR *stencil_attachment) {
     if (!vk || !state || vk_cmdbuf == VK_NULL_HANDLE
         || target_width == 0u || target_height == 0u) {
         LAGFX_ERR("translate_render_begin: invalid arg");
@@ -185,6 +201,8 @@ lagfx_status_t lagfx_translate_render_begin(
         .layerCount           = 1,
         .colorAttachmentCount = n_atts,
         .pColorAttachments    = p_atts,
+        .pDepthAttachment     = depth_attachment,
+        .pStencilAttachment   = stencil_attachment,
     };
     vkCmdBeginRendering(vk_cmdbuf, &ri);
 

@@ -19,7 +19,7 @@
  *                  row pitch and first-byte offset) into a staging buffer on the flag rules below; image -> guest: flag 0x04 / sync ops write the pixels back (shell
  *                  write_memory), missing pages are skipped and counted. Counters: diag2.exec.run.mapped_*.
  * Not supported (resolve returns NULL, blit using them is counted as 'bad_object'): heaps (13/14),
- * cube/1D/MSAA/compressed/depth-stencil textures, type 6/7 objects, mapped surfaces that are not BGRA.
+ * cube/1D/MSAA/compressed textures, type 6/7 objects; depth / stencil textures (type 2, formats 250 252 253 255 260) are device-only render attachments (lagfx_a64_res_ds_begin), mapped surfaces that are not BGRA.
  * Each supported object owns a host-visible "guest copy" VkBuffer holding the bytes in the GUEST layout (for a buffer it IS the object),
  * and a texture additionally a device VkImage kept in VK_IMAGE_LAYOUT_GENERAL between uses.
  *
@@ -94,6 +94,7 @@ struct lagfx_a64_obj {
     uint64_t vpage;                     /* guest VA = vpage << 14 */
     VkBuffer buf; VkDeviceMemory buf_mem; uint8_t *map;     /* guest-layout copy (the object itself for a buffer) */
     VkImage  img; VkDeviceMemory img_mem;                   /* textures */
+    uint8_t  ds_aspects;                                    /* depth / stencil attachment texture (bit 0 depth, bit 1 stencil): a device image only, see lagfx_a64_res_ds_begin */
     VkFormat format; VkImageType img_type; VkImageUsageFlags usage; VkImageView view;   /* view: lazily made, 2D layer 0 level 0 (render target) */
     uint32_t bpp, width, height, depth, mips, layers;
     uint64_t tex_base, tex_stride; uint32_t tex_block_h, tex_mip_count;
@@ -106,6 +107,10 @@ VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x);
  * texture cannot be a colour target (3D, no attachment usage). target_end records COLOR_ATTACHMENT_OPTIMAL -> GENERAL (attachment write -> transfer / shader
  * read+write), so a following Blit (or a later Render pass) in the same command buffer sees it. */
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h);
+/* Depth / stencil render targets (Metal 250 / 252 / 253 / 255 / 260 textures): a device image only (no guest pages, no blit, no sampling, no readback). ds_begin
+ * returns the view over all aspects of the format and the level-0 extent and orders earlier writes before attachment access; the image stays in GENERAL. */
+bool lagfx_a64_res_ds_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h);
+void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* The 2D layer-0 level-0 view of a sampled texture (GENERAL layout, usable as SAMPLED_IMAGE in the shaders); VK_NULL_HANDLE if the format cannot be sampled / 3D. */
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);

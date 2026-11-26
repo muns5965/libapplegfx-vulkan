@@ -10,7 +10,8 @@
  * what the x86 side learned of the same serialization (object_resolver.c: `04 <u32>` tokens; function refs are tokens whose value names a
  * function-typed object; vertex attributes `01 04 fmt 02 04 off 03 04 bufidx`; strides `04 <v> 02|01`), UNVERIFIED on real ARM64 guest data:
  * set LAGFX_ARM64_DUMP=1 (arm64_dump.c) to capture the real descriptors. Colour attachment formats, blend and depth/stencil are NOT decoded:
- * the pass's render-target format is used, and the rest are counted stubs (diag2.exec.pipe.stub_*).
+ * the pass's render-target format is used, and the rest are counted stubs (diag2.exec.pipe.stub_*). Depth/stencil and raster state are not pipeline
+ * state in Metal: they are encoder state (arm64_depth_stencil.h, arm64_exec_run.c) and are applied as Vulkan dynamic state.
  */
 #ifndef LAGFX_PROTOCOL_ARM64_PIPELINE_H
 #define LAGFX_PROTOCOL_ARM64_PIPELINE_H

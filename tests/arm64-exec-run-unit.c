@@ -15,6 +15,7 @@
 #include "arm64-exec-run-shaders.h"
 #include "arm64-exec-blend-shader.h"
 #include "arm64-exec-fetch-shader.h"
+#include "arm64-exec-ds-shaders.h"
 #endif
 #include <assert.h>
 #include <stdio.h>
@@ -275,14 +276,16 @@ static void test_objects(void) {
 
 #ifdef LAGFX_HAVE_VULKAN
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
-static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt;
+static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt, g_vs3, g_fs_green;
+static struct { int on; } g_ds;   /* depth / stencil / raster tests: float3 positions, REF_PIPE draws red, REF_PIPE2 green */
+#define REF_PIPE2 7u
 static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks, fetch, fail; } g_blend;
 static VkShaderModule g_fs_fetch2, g_fetch2_unused; static VkDescriptorSetLayout g_fetch2_dsl; static VkPipelineLayout g_fetch2_pl;
 static VkShaderModule g_fs_fetch; static VkDescriptorSetLayout g_fetch_dsl; static VkPipelineLayout g_fetch_pl;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
 static void rel(void *u) { (void)u; g_released++; }
 static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
-    (void)c; (void)t; (void)ref; (void)e;
+    (void)c; (void)t; (void)e;
     struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
     if (!g_vs) {
         VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs_spv, .pCode = k_vs_spv };
@@ -342,6 +345,16 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
         for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     }
     if (g_blend.fail) out->desc.fragment_shader = VK_NULL_HANDLE;   /* pipeline build refuses a missing stage */
+    if (g_ds.on) {
+        if (!g_vs3) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs3_spv, .pCode = k_vs3_spv };
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_vs3) == VK_SUCCESS);
+            ci.codeSize = sizeof k_fs_green_spv, ci.pCode = k_fs_green_spv;
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_green) == VK_SUCCESS);
+        }
+        out->desc.vertex_shader = g_vs3, out->desc.fragment_shader = ref == REF_PIPE2 ? g_fs_green : g_fs;
+        out->desc.vtx_in_comp[0] = 3, out->desc.vtx_stride = 12;
+    }
     out->release = rel;
     return true;
 }
@@ -654,6 +667,210 @@ static void test_exec_mrt(void) {
     puts("PASS: two colour attachments (BGRA8 + RGBA16Float, original slots, per-slot write masks, unused slot 0) on lavapipe");
 }
 
+/* ---- depth / stencil / raster state (tags 26 depth + stencil attachments, 104 107 108 115 119 130), read back pixel by pixel on lavapipe ---- */
+#define BLUE   0xff0000ffu
+#define REF_VB3   6u
+#define VPN_VB3   14u
+#define REF_D32   8u    /* Depth32Float 252 */
+#define REF_D32S8 9u    /* Depth32Float_Stencil8 260 */
+#define REF_S8    21u   /* Stencil8 253 */
+#define REF_D16   22u   /* Depth16Unorm 250 */
+#define REF_D24S8 23u   /* Depth24Unorm_Stencil8 255 */
+#define REF_COLOR_AS_DEPTH REF_TEX2
+enum { DSS_LESS_W = 10, DSS_LESS_NW, DSS_GREATER_W, DSS_ALWAYS, DSS_ST_REPLACE, DSS_ST_EQUAL, DSS_ST_INC, DSS_LESSEQ_W, DSS_BAD_SIZE };
+
+static void put_ds_tex(uint32_t ref, uint32_t pay_off, uint32_t mtl_fmt) {
+    uint8_t t[220]; memset(t, 0, sizeof t);
+    uint64_t tlen = RT_W * RT_H * 4u; uint32_t tvp = 15;
+    memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
+    t[12] = 1;
+    { uint8_t *mp = t + 12 + 0x18; uint64_t row = RT_W * 4u; uint32_t mw = RT_W, mh = RT_H, md = 1; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+    uint32_t rec = 12 + 0x18 + 36, tag = 0x14;
+    memcpy(t + rec, &tag, 4);
+    uint8_t *d = t + rec + 12;
+    d[0] = 2; d[2] = (uint8_t)(mtl_fmt & 255u); d[3] = (uint8_t)(mtl_fmt >> 8);
+    uint32_t w = RT_W, h = RT_H, one = 1;
+    memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &one, 4);
+    d[16] = 1; d[18] = 1;
+    uint32_t tsize = rec + 12 + 28;
+    va_write(VA_PAY + pay_off, t, tsize);
+    entry(ref, LAGFX_A64_OBJ_TEXTURE, tsize, VA_PAY + pay_off);
+}
+static void w32le(uint8_t *b, uint32_t v) { memcpy(b, &v, 4); }
+static void put_dss(uint32_t ref, uint32_t pay_off, uint8_t depth_state, uint32_t ops) {
+    uint8_t b[40]; memset(b, 0xaa, sizeof b);
+    w32le(b, 4), w32le(b + 4, 40), w32le(b + 8, ref); b[12] = depth_state;
+    w32le(b + 16, ops), w32le(b + 20, 0xffu), w32le(b + 24, 0xffu), w32le(b + 28, ops), w32le(b + 32, 0xffu), w32le(b + 36, 0xffu);
+    va_write(VA_PAY + pay_off, b, 40);
+    entry(ref, LAGFX_A64_OBJ_SERIALIZED, 40, VA_PAY + pay_off);
+}
+static void build_ds_objects(void) {
+    /* 15 vertices (float3): 0 CCW (on screen, y up) z .5 | 3 CCW z .3 | 6 CCW z .7 | 9 CW z .5 | 12 small CCW z .5 */
+    const float v[45] = { -.9f, -.9f, .5f,  .9f, -.9f, .5f,  0.f, .9f, .5f,
+                          -.9f, -.9f, .3f,  .9f, -.9f, .3f,  0.f, .9f, .3f,
+                          -.9f, -.9f, .7f,  .9f, -.9f, .7f,  0.f, .9f, .7f,
+                          -.9f, -.9f, .5f,  0.f, .9f, .5f,  .9f, -.9f, .5f,
+                          -.3f, -.3f, .5f,  .3f, -.3f, .5f,  0.f, .3f, .5f };
+    va_write((uint64_t)VPN_VB3 << 14, v, sizeof v);
+    put_buffer_object(REF_VB3, 0x500, 0x4000, VPN_VB3);
+    uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
+    va_write(VA_PAY + 0x520, pl, 16);
+    entry(REF_PIPE2, LAGFX_A64_OBJ_SERIALIZED, 16, VA_PAY + 0x520);
+    put_ds_tex(REF_D32, 0x600, 252); put_ds_tex(REF_D32S8, 0x700, 260); put_ds_tex(REF_S8, 0x800, 253); put_ds_tex(REF_D16, 0x900, 250); put_ds_tex(REF_D24S8, 0xa00, 255);
+    /* depth state byte: bits 2:0 compare, bit 3 write, bits 5:4 = 3 as the serializer writes them; stencil ops word: compare 7 (Always) | pass op << 9 */
+    put_dss(DSS_LESS_W, 0xb00, 0x39, 7); put_dss(DSS_LESS_NW, 0xb40, 0x31, 7); put_dss(DSS_GREATER_W, 0xb80, 0x3c, 7); put_dss(DSS_ALWAYS, 0xbc0, 0x37, 7);
+    put_dss(DSS_ST_REPLACE, 0xc00, 0x37, 7u | 2u << 9); put_dss(DSS_ST_EQUAL, 0xc40, 0x37, 2u); put_dss(DSS_ST_INC, 0xc80, 0x37, 7u | 3u << 9); put_dss(DSS_LESSEQ_W, 0xcc0, 0x3b, 7);
+    { uint8_t b[36] = {0}; w32le(b, 4), w32le(b + 4, 36); va_write(VA_PAY + 0xd00, b, 36); entry(DSS_BAD_SIZE, LAGFX_A64_OBJ_SERIALIZED, 36, VA_PAY + 0xd00); }
+}
+static void cb_pass_ds(uint32_t cref, uint16_t cload, uint32_t dref, uint16_t dload, double dclear, uint32_t sref, uint16_t sload, uint32_t sclear) {
+    uint8_t r[584]; memset(r, 0, sizeof r);
+    uint16_t store = 1;
+    if (cref) { uint8_t *c = r + 0x4c; double blue[4] = { 0, 0, 1, 1 }; memcpy(c, &cref, 4); memcpy(c + 20, &cload, 2); memcpy(c + 22, &store, 2); memcpy(c + 0x1c, blue, 32); }
+    if (dref) { memcpy(r, &dref, 4); memcpy(r + 0x14, &dload, 2); memcpy(r + 0x16, &store, 2); memcpy(r + 0x1c, &dclear, 8); }
+    if (sref) { memcpy(r + 0x28, &sref, 4); memcpy(r + 0x3c, &sload, 2); memcpy(r + 0x3e, &store, 2); memcpy(r + 0x44, &sclear, 4); }
+    cb_cmd(26, r, sizeof r);
+}
+static void cb_dss(uint32_t ref) { cb_cmd(104, &ref, 4); }
+static void cb_stref(uint32_t f, uint32_t b) { uint32_t r[2] = { f, b }; cb_cmd(119, r, 8); }
+static void cb_u64(uint32_t tag, uint64_t v) { cb_cmd(tag, &v, 8); }
+static void cb_bias(float b, float slope, float clamp) { float r[3] = { b, slope, clamp }; cb_cmd(108, r, 12); }
+static void cb_viewport_z(double zn, double zf) { double v[6] = { 0, 0, RT_W, RT_H, zn, zf }; cb_cmd(130, v, sizeof v); }
+static void cb_use_vb3(void) { cb_viewport(RT_W, RT_H); cb_vbuf(REF_VB3, 0); }
+
+static __typeof__(((lagfx_protocol_t *)0)->diag2.exec.run) g_R;   /* counters of the last ds_run */
+static uint64_t g_dss_decoded, g_dss_bad;
+static uint32_t g_pix2;                                          /* the second probed pixel of the last ds_run */
+/* Builds the command buffer with `build` on a fresh protocol, executes it and returns the pixel at (x, y) of the colour target (16x16 BGRA8: A R G B); (x2, y2) goes to g_pix2. */
+static uint32_t ds_run(void (*build)(void), uint32_t x, uint32_t y, uint32_t x2, uint32_t y2) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *t = def_task(p, 1);
+    build_objects(); build_ds_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    g_ds.on = 1;
+    cb_reset(); build();
+    exec(p, 1, cb_finish(), true);
+    g_R = p->diag2.exec.run;
+    g_dss_decoded = g_R.dss_decoded, g_dss_bad = g_R.dss_bad;
+    assert(g_R.submit_failed == 0 && g_R.submits == 1);
+    uint8_t img[RT_W * RT_H * 4]; uint32_t w, h;
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h));
+    uint32_t v = px(img, x, y);
+    g_pix2 = px(img, x2, y2);
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    free(p);
+    g_ds.on = 0;
+    return v;
+}
+#define COLOR_PASS(dref, dload, dclear) cb_pass_ds(REF_TEX, 2, (dref), (dload), (dclear), 0, 0, 0)
+#define DRAW_RED(first)   do { cb_pipeline(REF_PIPE);  cb_draw((first), 3); } while (0)
+#define DRAW_GREEN(first) do { cb_pipeline(REF_PIPE2); cb_draw((first), 3); } while (0)
+
+/* depth test */
+static void b_less_fail(void)  { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(6); }      /* 0.7 behind the stored 0.5 */
+static void b_less_pass(void)  { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(3); }      /* 0.3 in front */
+static void b_no_dss(void)     { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); DRAW_RED(0); DRAW_GREEN(6); }                           /* default state: no depth test, painter's order */
+static void b_always_dss(void) { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_ALWAYS); DRAW_RED(0); DRAW_GREEN(6); }
+static void b_no_write(void)   { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_NW); DRAW_RED(0); DRAW_GREEN(6); }     /* nothing was written: 0.7 < 1.0 passes */
+static void b_ref0_resets(void){ COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); cb_dss(0); DRAW_GREEN(6); }   /* ref 0: the default state again */
+static void b_clear04_less(void)    { COLOR_PASS(REF_D32, 2, 0.4); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); }                  /* 0.5 is not < 0.4 */
+static void b_clear04_greater(void) { COLOR_PASS(REF_D32, 2, 0.4); cb_use_vb3(); cb_dss(DSS_GREATER_W); DRAW_RED(0); }               /* 0.5 > 0.4 */
+static void b_clear_clamped(void)   { COLOR_PASS(REF_D32, 2, 7.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); }                  /* clear depth is clamped to 1 */
+static void b_bad_dss(void)    { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); cb_dss(DSS_BAD_SIZE); DRAW_GREEN(6); }   /* not decodable: back to the default state */
+static void b_depth_only_load(void) {   /* pass 1: depth only (clear 1, write 0.5); pass 2: colour + depth Load, a farther triangle must fail */
+    cb_pass_ds(0, 0, REF_D32, 2, 1.0, 0, 0, 0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0);
+    COLOR_PASS(REF_D32, 1, 0.0); cb_use_vb3(); cb_dss(DSS_LESS_NW); DRAW_GREEN(6);
+}
+static void b_depth_only_load2(void) {
+    cb_pass_ds(0, 0, REF_D32, 2, 1.0, 0, 0, 0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0);
+    COLOR_PASS(REF_D32, 1, 0.0); cb_use_vb3(); cb_dss(DSS_LESS_NW); DRAW_GREEN(3);
+}
+static void b_d16(void)   { COLOR_PASS(REF_D16, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(6); }
+static void b_d24s8(void) { COLOR_PASS(REF_D24S8, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(6); }
+static void b_d32s8_depth_only_named(void) { cb_pass_ds(REF_TEX, 2, REF_D32S8, 2, 1.0, 0, 0, 0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(6); }   /* combined texture, only depth named */
+static void b_vp_depth_range(void) { COLOR_PASS(REF_D32, 2, 0.35); cb_viewport_z(0.2, 0.4); cb_vbuf(REF_VB3, 0); cb_dss(DSS_LESS_W); DRAW_RED(0); }   /* z 0.5 -> 0.2 + 0.5 * 0.2 = 0.3 < 0.35 */
+static void b_vp_depth_default(void) { COLOR_PASS(REF_D32, 2, 0.35); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); }
+/* stencil */
+static void st_pass(uint32_t ref) { cb_pass_ds(REF_TEX, 2, REF_D32S8, 2, 1.0, REF_D32S8, 2, 0); cb_use_vb3(); (void)ref; }
+static void b_stencil_ref1(void) { st_pass(0); cb_dss(DSS_ST_REPLACE); cb_stref(1, 1); DRAW_RED(12); cb_dss(DSS_ST_EQUAL); cb_stref(1, 1); DRAW_GREEN(0); }
+static void b_stencil_ref2(void) { st_pass(0); cb_dss(DSS_ST_REPLACE); cb_stref(1, 1); DRAW_RED(12); cb_dss(DSS_ST_EQUAL); cb_stref(2, 2); DRAW_GREEN(0); }
+static void b_stencil_inc(void)  { st_pass(0); cb_dss(DSS_ST_INC); DRAW_RED(12); DRAW_RED(12); cb_dss(DSS_ST_EQUAL); cb_stref(2, 2); DRAW_GREEN(0); }   /* 0 -> 1 -> 2 */
+static void b_stencil_inc_ref1(void) { st_pass(0); cb_dss(DSS_ST_INC); DRAW_RED(12); DRAW_RED(12); cb_dss(DSS_ST_EQUAL); cb_stref(1, 1); DRAW_GREEN(0); }
+static void b_stencil_clear(void) { cb_pass_ds(REF_TEX, 2, REF_D32S8, 2, 1.0, REF_D32S8, 2, 5); cb_use_vb3(); cb_dss(DSS_ST_EQUAL); cb_stref(5, 5); DRAW_GREEN(0); }   /* the clear value is 5 */
+static void b_stencil8_only(void) { cb_pass_ds(REF_TEX, 2, 0, 0, 0.0, REF_S8, 2, 0); cb_use_vb3(); cb_dss(DSS_ST_REPLACE); cb_stref(1, 1); DRAW_RED(12); cb_dss(DSS_ST_EQUAL); DRAW_GREEN(0); }
+/* cull / winding (colour-only pass: pipelines still carry the dynamic raster state); tri 0 is CCW on screen, tri 3 (vertex 9) CW */
+static uint64_t g_cull, g_wind; static int g_cull_set, g_wind_set; static uint32_t g_tri;
+static void b_cull(void) { cb_pass(REF_TEX, 2, (double[4]){ 0, 0, 1, 1 }); cb_use_vb3(); if (g_cull_set) cb_u64(107, g_cull); if (g_wind_set) cb_u64(115, g_wind); DRAW_RED(g_tri); }
+/* bias */
+static float g_bias;
+static void b_bias(void) { COLOR_PASS(REF_D32, 2, 1.0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); cb_bias(g_bias, 0.f, 0.f); cb_dss(DSS_LESS_NW); DRAW_GREEN(0); }
+
+static void test_exec_depth_stencil(void) {
+    uint32_t v;
+    v = ds_run(b_less_fail, 8, 8, 0, 0);     assert(v == RED && g_pix2 == BLUE && g_R.ds_passes == 1 && g_R.dss_bound == 1 && g_R.ds_draws == 2 && g_dss_decoded == 1 && g_dss_bad == 0);   /* depth test fails: the closer red stays */
+    assert(g_R.tag_done[104] == 1 && g_R.extra_attach_ignored == 0 && g_R.ds_attach_unsupported == 0);
+    v = ds_run(b_less_pass, 8, 8, 0, 0);     assert(v == GREEN);                     /* depth test passes: green over red */
+    v = ds_run(b_no_dss, 8, 8, 0, 0);        assert(v == GREEN && g_R.ds_draws == 0);   /* nothing bound: no depth test even with a depth attachment */
+    v = ds_run(b_always_dss, 8, 8, 0, 0);    assert(v == GREEN);
+    v = ds_run(b_no_write, 8, 8, 0, 0);      assert(v == GREEN);                     /* depth write off: the first triangle left no depth behind */
+    v = ds_run(b_ref0_resets, 8, 8, 0, 0);   assert(v == GREEN);
+    v = ds_run(b_bad_dss, 8, 8, 0, 0);       assert(v == GREEN && g_R.dss_bad == 1 && g_R.dss_unresolved == 1);   /* undecodable object: counted, state back to default */
+    v = ds_run(b_clear04_less, 8, 8, 0, 0);  assert(v == BLUE);                      /* depth clear value reaches the attachment */
+    v = ds_run(b_clear04_greater, 8, 8, 0, 0); assert(v == RED);
+    v = ds_run(b_clear_clamped, 8, 8, 0, 0); assert(v == RED);
+    v = ds_run(b_depth_only_load, 8, 8, 0, 0);  assert(v == BLUE && g_R.ds_depth_only_passes == 1 && g_R.ds_passes == 2);   /* depth written by a pass with no colour is stored and Loaded */
+    v = ds_run(b_depth_only_load2, 8, 8, 0, 0); assert(v == GREEN);
+    v = ds_run(b_d16, 8, 8, 0, 0);           assert(v == RED);                       /* Depth16Unorm */
+    v = ds_run(b_d24s8, 8, 8, 0, 0);         assert(v == RED);                       /* Depth24Unorm_Stencil8 (or its D32_S8 stand-in) */
+    v = ds_run(b_d32s8_depth_only_named, 8, 8, 0, 0); assert(v == RED && g_R.ds_passes == 1);
+    v = ds_run(b_vp_depth_range, 8, 8, 0, 0);   assert(v == RED && g_R.viewport_depth_set == 1);
+    v = ds_run(b_vp_depth_default, 8, 8, 0, 0); assert(v == BLUE);
+    puts("PASS: depth attachment (Depth32Float / 16Unorm / 24S8 / combined, clear value, Load, depth-only pass, test / write / compare, default state, viewport depth range) on lavapipe");
+
+    v = ds_run(b_stencil_ref1, 8, 8, 2, 14);  assert(v == GREEN && g_pix2 == BLUE && g_R.stencil_ref_set == 2);   /* the first triangle wrote 1 into its pixels: only there does the Equal test pass */
+    v = ds_run(b_stencil_ref2, 8, 8, 2, 14);  assert(v == RED && g_pix2 == BLUE);
+    v = ds_run(b_stencil_inc, 8, 8, 2, 14);   assert(v == GREEN && g_pix2 == BLUE);   /* IncrementClamp twice */
+    v = ds_run(b_stencil_inc_ref1, 8, 8, 2, 14); assert(v == RED);
+    v = ds_run(b_stencil_clear, 8, 8, 2, 14); assert(v == GREEN && g_pix2 == GREEN);
+    v = ds_run(b_stencil8_only, 8, 8, 2, 14); assert(v == GREEN && g_pix2 == BLUE && g_R.ds_passes == 1);   /* Stencil8, no depth aspect */
+    puts("PASS: stencil attachment (Replace, IncrementClamp, Equal with reference values, clear value, Stencil8) on lavapipe");
+
+    static const struct { int cs; uint64_t cull; int ws; uint64_t wind; uint32_t tri; bool visible; const char *name; } cc[] = {
+        { 0, 0, 0, 0, 0, true,  "default: nothing culled (CCW tri)" },
+        { 0, 0, 0, 0, 9, true,  "default: nothing culled (CW tri)" },
+        { 1, 2, 0, 0, 0, false, "cull back, default winding CW: the CCW tri is back-facing" },
+        { 1, 2, 0, 0, 9, true,  "cull back, default winding CW: the CW tri stays" },
+        { 1, 1, 0, 0, 0, true,  "cull front, CW: the CCW tri stays" },
+        { 1, 1, 0, 0, 9, false, "cull front, CW: the CW tri is front-facing" },
+        { 1, 2, 1, 1, 0, true,  "cull back, winding CCW: the CCW tri is front-facing" },
+        { 1, 2, 1, 1, 9, false, "cull back, winding CCW: the CW tri is back-facing" },
+        { 1, 0, 0, 0, 9, true,  "explicit cull none" },
+    };
+    for (unsigned i = 0; i < sizeof cc / sizeof *cc; i++) {
+        g_cull_set = cc[i].cs, g_cull = cc[i].cull, g_wind_set = cc[i].ws, g_wind = cc[i].wind, g_tri = cc[i].tri;
+        v = ds_run(b_cull, 8, 8, 0, 0);
+        if ((v == RED) != cc[i].visible || (!cc[i].visible && v != BLUE)) fprintf(stderr, "cull case %u (%s): pixel 0x%08x\n", i, cc[i].name, v);
+        assert((v == RED) == cc[i].visible && (cc[i].visible || v == BLUE));
+        assert(g_R.cull_set == (uint64_t)cc[i].cs && g_R.winding_set == (uint64_t)cc[i].ws);
+    }
+    g_cull_set = g_wind_set = 0;
+    puts("PASS: cull mode and front-facing winding (both triangle orientations, front / back / none) on lavapipe");
+
+    g_bias = 0.f;       v = ds_run(b_bias, 8, 8, 0, 0); assert(v == RED && g_R.bias_set == 1);   /* equal depth: Less fails */
+    g_bias = -1.0e6f;   v = ds_run(b_bias, 8, 8, 0, 0); assert(v == GREEN);                       /* a negative bias pulls the second triangle in front */
+    g_bias = 1.0e6f;    v = ds_run(b_bias, 8, 8, 0, 0); assert(v == RED);
+    puts("PASS: depth bias (constant factor, both directions) on lavapipe");
+}
+
+/* A pass whose depth attachment is a colour texture / a texture that cannot be one is counted and rendered without depth; render still completes. */
+static void b_bad_attach(void) { cb_pass_ds(REF_TEX, 2, REF_COLOR_AS_DEPTH, 2, 1.0, 0, 0, 0); cb_use_vb3(); cb_dss(DSS_LESS_W); DRAW_RED(0); DRAW_GREEN(6); }
+static void test_exec_depth_unsupported(void) {
+    uint32_t v = ds_run(b_bad_attach, 8, 8, 0, 0);
+    assert(v == GREEN && g_R.ds_attach_unsupported == 1 && g_R.ds_passes == 0 && g_R.draws == 2);   /* no depth attachment: painter's order, nothing aborted */
+    puts("PASS: a depth attachment that is not a depth texture is counted and ignored");
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -667,11 +884,15 @@ int main(void) {
         test_exec_mrt();
         test_exec_fail_cache();
         test_exec_fetch();
+        test_exec_depth_stencil();
+        test_exec_depth_unsupported();
         test_exec_no_resolver_and_pending();
         if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);
         if (g_fs) vkDestroyShaderModule(g_dev->vk->device, g_fs, NULL);
         if (g_fs_half) vkDestroyShaderModule(g_dev->vk->device, g_fs_half, NULL);
         if (g_fs_mrt) vkDestroyShaderModule(g_dev->vk->device, g_fs_mrt, NULL);
+        if (g_vs3) vkDestroyShaderModule(g_dev->vk->device, g_vs3, NULL);
+        if (g_fs_green) vkDestroyShaderModule(g_dev->vk->device, g_fs_green, NULL);
     } else {
         puts("SKIP: no Vulkan device; execution tests not run");
         lagfx_device_free(g_dev); free(g_mem);

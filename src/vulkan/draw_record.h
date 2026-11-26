@@ -27,6 +27,8 @@
 typedef struct {
     uint32_t vp_x, vp_y, vp_w, vp_h;
     uint32_t sc_x, sc_y, sc_w, sc_h;
+    float    vp_znear, vp_zfar;     /* depth range of the viewport, used only when vp_z_set (zero-initialised regions keep 0..1) */
+    bool     vp_z_set;
 } lagfx_draw_region_t;
 
 /* Record and submit a single draw command into a one-shot command buffer.

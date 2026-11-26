@@ -589,7 +589,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .features = { .shaderInt64 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) ? VK_TRUE : VK_FALSE,
                       .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE,
-                      .independentBlend = probe2.features.independentBlend ? VK_TRUE : VK_FALSE },
+                      .independentBlend = probe2.features.independentBlend ? VK_TRUE : VK_FALSE,
+                      .depthBiasClamp = probe2.features.depthBiasClamp ? VK_TRUE : VK_FALSE },
         .pNext = &feat12,
     };
 
@@ -613,6 +614,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT ro_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, .rasterizationOrderColorAttachmentAccess = VK_TRUE };
     feat2.features.samplerAnisotropy = probe2.features.samplerAnisotropy ? VK_TRUE : VK_FALSE;   /* sampler anisotropy (Metal maxAnisotropy) */
     s->have_sampler_anisotropy = feat2.features.samplerAnisotropy == VK_TRUE;
+    s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
     {   /* Framebuffer-fetch / blend diagnostics, queried only (never enabled here): printed once as the g7-gpu-feat line. Own struct for local read: older headers lack it. */
         const bool lr_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 4u);

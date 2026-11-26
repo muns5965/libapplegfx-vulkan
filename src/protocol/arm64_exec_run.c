@@ -4,6 +4,7 @@
 #include "arm64_exec_run.h"
 #include "arm64_objects.h"
 #include "arm64_pipeline.h"
+#include "arm64_depth_stencil.h"
 #include "arm64_exec_decode.h"
 #include "arm64_draw_decode.h"
 #include "arm64_sampler.h"
@@ -55,7 +56,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #define A64_GATHER_MAX (8ull << 20)
 #define A64_GATHER_CACHE 8u
 
-enum { K_PIPE = 3, K_SAMP = 4 };
+enum { K_PIPE = 3, K_SAMP = 4, K_DSS = 5 };
 
 /* gen: unique per creation (a replaced (task, ref) is a new object with a new gen); every cache key below includes it. Mirror buffers/textures carry their own gen. */
 typedef struct { uint32_t kind; uint64_t gen; } objhdr_t;
@@ -66,10 +67,11 @@ typedef struct {
     VkSamplerCreateInfo ci; bool mip;                                        /* what s was made from; mip = the descriptor is mip mapped (clamps apply) */
     struct { float lo, hi; VkSampler s; } var[A64_SAMP_VARIANTS]; uint32_t nvar;
 } a64_samp_t;
+typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded depth/stencil state object (tag 4) */
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour formats of slots 0..3, topology), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology), owned by THIS object only */
     uint32_t ncache;
     uint32_t ref;
 } a64_pipe_t;
@@ -104,6 +106,10 @@ typedef struct {
     VkDeviceSize max_sb_range;
     struct { uint64_t gen, off, range; VkBuffer buf; } gc[8]; uint32_t ngc;   /* aligned copies made in this exec (gather_copy) */
     lagfx_draw_region_t region;
+    /* depth / stencil attachment of the open pass (NULL / UNDEFINED = none) and the encoder state Metal keeps outside the pipeline; all of it is reset by a new pass
+     * (a new Metal encoder starts from the defaults) and applied as Vulkan dynamic state before each draw */
+    lagfx_a64_obj_t *dsobj; VkFormat ds_dfmt, ds_sfmt;
+    struct { lagfx_a64_dss_t dss; uint32_t sref[2]; uint32_t cull, winding; float bias[3]; bool dirty; } es;
     deferred_t *def; uint32_t ndef, capdef;
 } a64_run_t;
 
@@ -123,6 +129,13 @@ static struct lagfx_vk_state *get_vk(lagfx_protocol_t *p) {
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     struct lagfx_vk_state *vk = dev ? dev->vk : NULL;
     return (vk && vk->initialized && vk->device != VK_NULL_HANDLE) ? vk : NULL;
+}
+
+/* The depth / stencil and raster state is applied with the Vulkan 1.3 core dynamic-state commands (cull mode, front face, depth test / write / compare, stencil
+ * test / op). A device below 1.3 keeps the previous behaviour (state ignored, counted). */
+static bool vk_core13(const struct lagfx_vk_state *vk) {
+    uint32_t v = vk->phys_props.apiVersion;
+    return VK_VERSION_MAJOR(v) > 1u || (VK_VERSION_MAJOR(v) == 1u && VK_VERSION_MINOR(v) >= 3u);
 }
 
 /* ---- destruction (parked while the GPU may still use the object: a command buffer being recorded or a submission in flight) ---- */
@@ -204,6 +217,19 @@ static VkSampler sampler_variant(a64_run_t *r, a64_samp_t *sm, float lo, float h
     return v;
 }
 
+static void *make_dss(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, const uint32_t e[3]) {
+    uint8_t d[LAGFX_A64_DSS_SIZE];
+    a64_dss_t *o;
+    if ((e[0] >> 8) != LAGFX_A64_DSS_SIZE || !lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], d, sizeof d)) { CNT(p).dss_bad++; return NULL; }
+    o = calloc(1, sizeof *o);
+    if (!o) return NULL;
+    if (!lagfx_a64_dss_decode(d, sizeof d, &o->d)) { CNT(p).dss_bad++; free(o); return NULL; }
+    (void)r;
+    o->h.kind = K_DSS;
+    CNT(p).dss_decoded++;
+    return o;
+}
+
 static void *make_pipeline(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
     if (!r->resolver) { CNT(p).pipeline_unresolved++; return NULL; }
     a64_pipe_t *pp = calloc(1, sizeof *pp);
@@ -215,9 +241,11 @@ static void *make_pipeline(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_e
 
 static void *obj_create_inner(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3]) {
     lagfx_a64_dump_touch_object(p, t, ref, e);   /* LAGFX_ARM64_DUMP=1: a pipeline / sampler first read here is captured even if no resource list named it */
-    if ((e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) {   /* by the payload's own tag: 3 = sampler; anything else goes to the pipeline resolver, which rejects what it cannot execute */
+    if ((e[0] & 0xffu) == LAGFX_A64_OBJ_SERIALIZED) {   /* by the payload's own tag: 3 = sampler, 4 = depth/stencil state; anything else goes to the pipeline resolver, which rejects what it cannot execute */
         uint8_t tg[4];
-        if ((e[0] >> 8) >= 4u && lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], tg, 4) && lagfx_le32(tg) == 3u) return make_sampler(r, p, t, e);
+        bool have = (e[0] >> 8) >= 4u && lagfx_arm64_task_read(p, t, (uint64_t)e[2] << 32 | e[1], tg, 4);
+        if (have && lagfx_le32(tg) == 3u) return make_sampler(r, p, t, e);
+        if (have && lagfx_le32(tg) == LAGFX_A64_DSS_TAG) return make_dss(r, p, t, e);
         return make_pipeline(r, p, t, ref, e);
     }
     CNT(p).obj_unsupported++;
@@ -378,17 +406,23 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
 }
 
 /* pl == VK_NULL_HANDLE records a failed build (looked up like a hit, returns NULL). */
-static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], uint32_t topo, VkPipeline pl, a64_run_t *r) {
+static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm[2], uint32_t topo, VkPipeline pl, a64_run_t *r) {
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
     pp->ncache++;
 }
 
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
-    for (uint32_t i = 0; i < pp->ncache; i++) if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && pp->cache[i].topo == topo) return pp->cache[i].pl;
+    const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
+    for (uint32_t i = 0; i < pp->ncache; i++)
+        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == topo) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
     d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
+    if (nslots == 1u && fmts[0] == VK_FORMAT_UNDEFINED) d.no_color = 1;   /* a depth/stencil-only pass: the one colour slot is unused */
+    if (vk_core13(r->vk)) {   /* cull / front face / depth bias and the depth / stencil state are encoder state, set dynamically before each draw (see apply_encoder_state) */
+        d.dyn_state = 1, d.ds_depth_format = dfm[0], d.ds_stencil_format = dfm[1];
+    }
     if (nslots > 1u) {   /* several colour attachments (or a gap before the first): one format per slot, write mask per slot from the descriptor */
         d.n_color = (uint8_t)nslots;
         d.independent_blend = r->vk->have_independent_blend;
@@ -409,12 +443,12 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
         p->diag2.exec.pipe.pipe_build_failed++;
         lagfx_a64_dump_spirv(p, d.vertex_spv, d.vertex_spv_bytes, d.fragment_spv, d.fragment_spv_bytes);   /* LAGFX_ARM64_DUMP=1 + dir: the failing modules, for offline spirv-val */
-        cache_put(pp, fmts, topo, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
+        cache_put(pp, fmts, dfm, topo, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
         return VK_NULL_HANDLE;
     }
     p->diag2.exec.pipe.pipes_built++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
-    cache_put(pp, fmts, topo, pl, r);
+    cache_put(pp, fmts, dfm, topo, pl, r);
     return pl;
 }
 
@@ -569,7 +603,9 @@ static void pass_end(a64_run_t *r) {
     if (r->rendering) {
         lagfx_translate_render_end(&r->rs);
         for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
+        if (r->dsobj) lagfx_a64_res_ds_end(r->x, r->dsobj);
     }
+    r->dsobj = NULL, r->ds_dfmt = r->ds_sfmt = VK_FORMAT_UNDEFINED;
     r->pass_open = r->rendering = false, r->last_fetch = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->bound_vk = VK_NULL_HANDLE;
@@ -580,8 +616,14 @@ static void pass_end(a64_run_t *r) {
 static double rd_f64(const uint8_t *b) { uint64_t u = lagfx_le64(b); double d; memcpy(&d, &u, 8); return d; }
 
 
-/* tag 26 (inner opcode 0x1a): the 584-byte pass descriptor, parsed by the existing lagfx_parse_render_pass_descriptor (render_pass.c). Only colour
- * attachment 0 is rendered to; begin/end of the dynamic rendering go through the existing render encoder (translate/render_encoder.c). */
+static bool dup_of_color(const a64_run_t *r, const lagfx_a64_obj_t *o) {
+    for (uint32_t q = 0; q < 4u; q++) if (r->rts[q] == o) return true;
+    return false;
+}
+
+/* tag 26 (inner opcode 0x1a): the 584-byte pass descriptor, parsed by the existing lagfx_parse_render_pass_descriptor (render_pass.c). Up to four colour
+ * attachments (by original slot) and one depth / stencil texture are rendered to; begin/end of the dynamic rendering go through the existing render encoder
+ * (translate/render_encoder.c). */
 static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, uint32_t n) {
     pass_end(r);
     CNT(p).passes++;
@@ -591,7 +633,11 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     reset_frag_tables(r);
     lagfx_render_pass_full_desc_t d;
     if (n < LAGFX_RENDER_PASS_WIRE_SIZE || lagfx_parse_render_pass_descriptor(rec, n, &d) != 0) { CNT(p).bad_rec++; tag_unsup(p, 26); return; }
-    if (d.has_depth || d.has_stencil) CNT(p).extra_attach_ignored++;
+    {   /* a new encoder: Metal's defaults for everything the depth / stencil / raster records set */
+        memset(&r->es, 0, sizeof r->es);
+        lagfx_a64_dss_default(&r->es.dss);
+        r->es.dirty = true;
+    }
     /* colour attachments by their ORIGINAL slot (the fragment output location); up to 4. The SAME mirror object a blit / sync / write-back of this exec
      * resolves for the ref. A slot whose target cannot be built is left unused (and counted), the others still render. */
     VkRenderingAttachmentInfo ca[4];
@@ -624,12 +670,60 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         if (slot + 1u > nslots) nslots = slot + 1u;
         if (slot > 0u) CNT(p).multi_attach++;
     }
-    if (!first) { CNT(p).no_target++; tag_partial(p, 26); return; }
+    /* depth / stencil attachment: one mirror texture of a depth, stencil or combined format. A combined texture is attached with both aspects whichever the pass
+     * names (an aspect the pass does not name is loaded and stored, i.e. left alone). Store actions are not honoured (set later by tags 105 / 120): the attachment
+     * is always stored, which only ever keeps more than Metal would. Anything else is counted and the pass runs without depth / stencil. */
+    VkRenderingAttachmentInfo dai = {0}, sai = {0};
+    lagfx_a64_obj_t *dso = NULL;
+    VkImageView dview = VK_NULL_HANDLE; uint32_t dw = 0, dh = 0;
+    if (d.has_depth || d.has_stencil) {
+        uint32_t dref = d.has_depth ? d.depth_texture_ref : 0u, sref = d.has_stencil ? d.stencil_texture_ref : 0u;
+        lagfx_a64_obj_t *o = NULL;
+        if (!vk_core13(r->vk)) { CNT(p).ds_no_device_support++; p->diag2.exec.pipe.stub_depth_stencil++; }
+        else {
+            o = lagfx_a64_res_object(r->x, dref ? dref : sref);
+            if (!o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || (dref && !(o->ds_aspects & 1u)) || (!dref && !(o->ds_aspects & 2u))) { CNT(p).ds_attach_unsupported++; o = NULL; }
+            else if (dref && sref && sref != dref) { CNT(p).ds_split_ignored++; }   /* the stencil lives in another texture: only the depth one is attached */
+            else if (dref && d.depth_level) { CNT(p).ds_attach_unsupported++; o = NULL; }
+        }
+        if (o && lagfx_a64_res_ds_begin(r->x, o, &dview, &dw, &dh)) {
+            if ((first && (dw < fw || dh < fh)) || dup_of_color(r, o)) { CNT(p).ds_attach_unsupported++; CNT(p).extra_attach_ignored++; }   /* attachments must cover the render area */
+            else dso = o;
+        } else if (o) CNT(p).ds_attach_unsupported++;
+    }
+    if (!first && !dso) { CNT(p).no_target++; tag_partial(p, 26); return; }
+    if (dso) {
+        const bool want_d = d.has_depth && d.depth_texture_ref && (dso->ds_aspects & 1u), want_s = d.has_stencil && d.stencil_texture_ref == (want_d ? d.depth_texture_ref : d.stencil_texture_ref) && (dso->ds_aspects & 2u);
+        dai = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = dview, .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+            .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
+        sai = dai;
+        if (want_d) {
+            double cd = d.depth_clear_value;
+            dai.loadOp = d.depth_load_action == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : d.depth_load_action == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            dai.clearValue.depthStencil.depth = cd >= 1.0 ? 1.0f : cd > 0.0 ? (float)cd : 0.0f;   /* Metal clamps the clear depth to [0, 1] (also maps NaN to 0) */
+        }
+        if (want_s) {
+            sai.loadOp = d.stencil_load_action == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : d.stencil_load_action == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+            sai.clearValue.depthStencil.stencil = d.stencil_clear_value;
+        }
+        if (!first) { fw = dw, fh = dh; }
+    }
+    if (!first) {   /* depth / stencil only: one unused colour slot keeps the pipeline and rendering-info counts consistent */
+        nslots = 1u;
+        CNT(p).ds_depth_only_passes++;
+    }
     r->nslots = nslots;
-    if (lagfx_translate_render_begin(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first->img, fw, fh, NULL, ca, nslots) != LAGFX_OK) {
+    if (lagfx_translate_render_begin_ds(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, NULL, ca, nslots,
+                                        dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL) != LAGFX_OK) {
         for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
+        if (dso) lagfx_a64_res_ds_end(r->x, dso);
         memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
         CNT(p).no_target++; tag_partial(p, 26); return;
+    }
+    if (dso) {
+        r->dsobj = dso;
+        r->ds_dfmt = (dso->ds_aspects & 1u) ? dso->format : VK_FORMAT_UNDEFINED, r->ds_sfmt = (dso->ds_aspects & 2u) ? dso->format : VK_FORMAT_UNDEFINED;
+        CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
     tag_done(p, 26);
@@ -650,8 +744,67 @@ static bool draw_ready(a64_run_t *r, lagfx_protocol_t *p) {
     return true;
 }
 
+/* Metal MTLCompareFunction / MTLStencilOperation and the Vulkan enums share one numbering (0..7), but the mapping is spelled out so a change on either side
+ * cannot slip through unnoticed. */
+static VkCompareOp vk_cmp(uint32_t m) {
+    switch (m) {
+    case LAGFX_MTL_CMP_NEVER: return VK_COMPARE_OP_NEVER;
+    case LAGFX_MTL_CMP_LESS: return VK_COMPARE_OP_LESS;
+    case LAGFX_MTL_CMP_EQUAL: return VK_COMPARE_OP_EQUAL;
+    case LAGFX_MTL_CMP_LESS_EQUAL: return VK_COMPARE_OP_LESS_OR_EQUAL;
+    case LAGFX_MTL_CMP_GREATER: return VK_COMPARE_OP_GREATER;
+    case LAGFX_MTL_CMP_NOT_EQUAL: return VK_COMPARE_OP_NOT_EQUAL;
+    case LAGFX_MTL_CMP_GREATER_EQUAL: return VK_COMPARE_OP_GREATER_OR_EQUAL;
+    default: return VK_COMPARE_OP_ALWAYS;
+    }
+}
+static VkStencilOp vk_sop(uint32_t m) {
+    switch (m) {
+    case LAGFX_MTL_STENCIL_ZERO: return VK_STENCIL_OP_ZERO;
+    case LAGFX_MTL_STENCIL_REPLACE: return VK_STENCIL_OP_REPLACE;
+    case LAGFX_MTL_STENCIL_INC_CLAMP: return VK_STENCIL_OP_INCREMENT_AND_CLAMP;
+    case LAGFX_MTL_STENCIL_DEC_CLAMP: return VK_STENCIL_OP_DECREMENT_AND_CLAMP;
+    case LAGFX_MTL_STENCIL_INVERT: return VK_STENCIL_OP_INVERT;
+    case LAGFX_MTL_STENCIL_INC_WRAP: return VK_STENCIL_OP_INCREMENT_AND_WRAP;
+    case LAGFX_MTL_STENCIL_DEC_WRAP: return VK_STENCIL_OP_DECREMENT_AND_WRAP;
+    default: return VK_STENCIL_OP_KEEP;
+    }
+}
+
+/* Records the encoder state a draw depends on that is not in the VkPipeline (all of it dynamic): cull mode, winding, depth bias, and, with a depth / stencil
+ * attachment in the pass, the depth test / write / compare and the stencil test, operations, masks and reference of both faces. Only when something changed
+ * since the last draw of the pass. Winding: the viewport is flipped (negative height) to give Metal's y-up clip space, and Vulkan decides the facing from the
+ * final window coordinates, so on-screen clockwise (Metal's default, 0) is VK_FRONT_FACE_CLOCKWISE. */
+static void apply_encoder_state(a64_run_t *r, lagfx_protocol_t *p) {
+    if (!r->es.dirty || !vk_core13(r->vk)) return;
+    VkCommandBuffer cb = lagfx_a64_res_cmdbuf(r->x);
+    vkCmdSetCullMode(cb, r->es.cull == 1u ? VK_CULL_MODE_FRONT_BIT : r->es.cull == 2u ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+    vkCmdSetFrontFace(cb, r->es.winding == 1u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    float clamp = r->es.bias[2];
+    if (clamp != 0.0f && !r->vk->have_depth_bias_clamp) { clamp = 0.0f; CNT(p).bias_clamp_dropped++; }
+    vkCmdSetDepthBias(cb, r->es.bias[0], clamp, r->es.bias[1]);
+    if (r->dsobj) {
+        const lagfx_a64_dss_t *d = &r->es.dss;
+        vkCmdSetDepthTestEnable(cb, lagfx_a64_dss_depth_test(d) ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthWriteEnable(cb, d->depth_write ? VK_TRUE : VK_FALSE);
+        vkCmdSetDepthCompareOp(cb, vk_cmp(d->depth_compare));
+        vkCmdSetStencilTestEnable(cb, lagfx_a64_dss_stencil_test(d) ? VK_TRUE : VK_FALSE);
+        const VkStencilFaceFlags fc[2] = { VK_STENCIL_FACE_FRONT_BIT, VK_STENCIL_FACE_BACK_BIT };
+        const lagfx_a64_ds_face_t *f[2] = { &d->front, &d->back };
+        for (int i = 0; i < 2; i++) {
+            vkCmdSetStencilOp(cb, fc[i], vk_sop(f[i]->fail_op), vk_sop(f[i]->pass_op), vk_sop(f[i]->depth_fail_op), vk_cmp(f[i]->compare));
+            vkCmdSetStencilCompareMask(cb, fc[i], f[i]->read_mask);
+            vkCmdSetStencilWriteMask(cb, fc[i], f[i]->write_mask);
+            vkCmdSetStencilReference(cb, fc[i], r->es.sref[i]);
+        }
+    }
+    r->es.dirty = false;
+}
+
 static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (!prepare_pipeline(r, p, prim)) return false;
+    apply_encoder_state(r, p);
+    if (r->dsobj && (lagfx_a64_dss_depth_test(&r->es.dss) || lagfx_a64_dss_stencil_test(&r->es.dss))) CNT(p).ds_draws++;
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
     lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region);   /* existing viewport/scissor helper of draw_record.c (Y-flip, clamping) */
     if (r->pipe->src.desc.n_vtx_inputs) {
@@ -749,6 +902,40 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         tag_done(p, tag);
         break;
     }
+    case 104: {                              /* setDepthStencilState {ref u32}: ref 0 = the default state (no depth test, no write, stencil off) */
+        if (n < 4u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        uint32_t ref = R32(0);
+        a64_dss_t *o = ref ? (a64_dss_t *)get_kind(r, p, r->task, ref, K_DSS) : NULL;
+        lagfx_a64_dss_default(&r->es.dss);
+        r->es.dirty = true;
+        if (o) { r->es.dss = o->d; CNT(p).dss_bound++; tag_done(p, tag); }
+        else if (!ref) tag_done(p, tag);
+        else { CNT(p).dss_unresolved++; tag_partial(p, tag); }   /* not a decodable depth/stencil object: the default (no depth test) stays, as when no state is bound */
+        break;
+    }
+    case 119:                                /* setStencilReferenceValue / setStencilFront:back: {front u32, back u32} (the one-value selector writes it twice) */
+        if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        r->es.sref[0] = R32(0), r->es.sref[1] = R32(4), r->es.dirty = true;
+        CNT(p).stencil_ref_set++;
+        tag_done(p, tag);
+        break;
+    case 107: case 115: {                    /* setCullMode (0 none, 1 front, 2 back) / setFrontFacingWinding (0 clockwise, 1 counter-clockwise): {mode u64} */
+        if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        uint64_t m = lagfx_le64(rec);
+        if (m > (tag == 107 ? 2u : 1u)) { tag_unsup(p, tag); break; }
+        if (tag == 107) r->es.cull = (uint32_t)m, CNT(p).cull_set++; else r->es.winding = (uint32_t)m, CNT(p).winding_set++;
+        r->es.dirty = true;
+        tag_done(p, tag);
+        break;
+    }
+    case 108: {                              /* setDepthBias:slopeScale:clamp: {bias f32, slope f32, clamp f32} */
+        if (n < 12u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        for (int i = 0; i < 3; i++) { uint32_t u = R32(4 * i); float f; memcpy(&f, &u, 4); r->es.bias[i] = f == f ? f : 0.0f; }
+        r->es.dirty = true;
+        CNT(p).bias_set++;
+        tag_done(p, tag);
+        break;
+    }
     case 117:                                /* MTLScissorRect: x, y, width, height as u64 */
         if (n < 32u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         r->region.sc_x = (uint32_t)lagfx_le64(rec), r->region.sc_y = (uint32_t)lagfx_le64(rec + 8);
@@ -760,6 +947,12 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         double x = rd_f64(rec), y = rd_f64(rec + 8), w = rd_f64(rec + 16), h = rd_f64(rec + 24);
         r->region.vp_x = x > 0 ? (uint32_t)x : 0u, r->region.vp_y = y > 0 ? (uint32_t)y : 0u;
         r->region.vp_w = w > 0 ? (uint32_t)w : 0u, r->region.vp_h = h > 0 ? (uint32_t)h : 0u;
+        {   /* znear / zfar: the depth range the clip-space z is mapped to (Vulkan only takes [0, 1]; a value outside it is clamped, a NaN reads as the default) */
+            double zn = rd_f64(rec + 32), zf = rd_f64(rec + 40);
+            r->region.vp_znear = zn >= 1.0 ? 1.0f : zn > 0.0 ? (float)zn : 0.0f, r->region.vp_zfar = zf >= 1.0 ? 1.0f : zf > 0.0 ? (float)zf : (zf == zf ? 0.0f : 1.0f);
+            r->region.vp_z_set = true;
+            CNT(p).viewport_depth_set++;
+        }
         tag_done(p, tag);
         break;
     }
@@ -814,7 +1007,7 @@ bool lagfx_a64_exec_render_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *
 }
 
 static bool supported_tag(uint32_t tag) {
-    switch (tag) { case 26: case 116: case 125: case 110: case 126: case 111: case 114: case 112: case 117: case 130: case 7: case 1: return true; default: return false; }
+    switch (tag) { case 26: case 116: case 125: case 110: case 126: case 111: case 114: case 112: case 117: case 130: case 7: case 1: case 104: case 107: case 108: case 115: case 119: return true; default: return false; }
 }
 /* Tags this module executes itself (no handler of the x86-shaped table in render_inner_ops.c exists for them): draw variants, LOD sampler binds, hints, fences, barriers. */
 static bool hint_tag(uint32_t tag) { return tag == 137u || tag == 27u || tag == 134u || tag == 135u || tag == 24u || tag == 25u; }

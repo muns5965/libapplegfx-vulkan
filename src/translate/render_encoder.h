@@ -212,6 +212,22 @@ lagfx_status_t lagfx_translate_render_begin(
     const VkRenderingAttachmentInfoKHR *color_attachments,
     uint32_t color_attachment_count);
 
+/* Same, with optional depth and/or stencil attachments (NULL = none; both may point at one image view when the format has both aspects). The caller owns
+ * load/store policy and the image layout named in the attachment infos. Colour attachments are as above; with no colour attachment the caller passes one
+ * entry whose imageView is VK_NULL_HANDLE (an unused slot) and a non-null `target`. */
+lagfx_status_t lagfx_translate_render_begin_ds(
+    struct lagfx_vk_state *vk,
+    lagfx_translate_render_state_t *state,
+    VkCommandBuffer vk_cmdbuf,
+    VkImage target,
+    uint32_t target_width,
+    uint32_t target_height,
+    const float clear_rgba[4],
+    const VkRenderingAttachmentInfoKHR *color_attachments,
+    uint32_t color_attachment_count,
+    const VkRenderingAttachmentInfoKHR *depth_attachment,
+    const VkRenderingAttachmentInfoKHR *stencil_attachment);
+
 /* Bind a pipeline selected by `shader_kind`. At Phase 3.A scaffold
  * we only RECORD the intent — the catalog → VkShader/VkPipeline
  * binding is Phase 3.E's job. `layout` is stored for later

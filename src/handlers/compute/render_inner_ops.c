@@ -435,6 +435,7 @@ static int op_set_color_store_action_options(lagfx_protocol_t *p, const uint8_t 
 }
 
 static int op_set_depth_stencil_state(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_a64_exec_render_op(p, 104, payload, len)) return 0;   /* ARM64 executor: encoder state (arm64_exec_run.c) */
     (void)p;
     if (len < 4) { LAGFX_WARN("SetDepthStencilState: payload too short (%zu < 4)", len); return 0; }
     LAGFX_TRACE("SetDepthStencilState: ref=0x%08x", lagfx_le32(payload + 0));
@@ -456,6 +457,7 @@ static int op_set_depth_store_action_options(lagfx_protocol_t *p, const uint8_t 
 }
 
 static int op_set_cull_mode(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_a64_exec_render_op(p, 107, payload, len)) return 0;   /* ARM64 executor: encoder state (arm64_exec_run.c) */
     (void)p;
     if (len < 8) { LAGFX_WARN("SetCullMode: payload too short (%zu < 8)", len); return 0; }
     LAGFX_TRACE("SetCullMode: value=%u extra=%u",
@@ -464,6 +466,7 @@ static int op_set_cull_mode(lagfx_protocol_t *p, const uint8_t *payload, size_t 
 }
 
 static int op_set_depth_bias(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_a64_exec_render_op(p, 108, payload, len)) return 0;   /* ARM64 executor: encoder state (arm64_exec_run.c) */
     (void)p;
     if (len < 12) { LAGFX_WARN("SetDepthBias: payload too short (%zu < 12)", len); return 0; }
     LAGFX_TRACE("SetDepthBias: bias=%g slope=%g clamp=%g",
@@ -555,6 +558,7 @@ static int op_set_fragment_textures(lagfx_protocol_t *p, const uint8_t *payload,
 }
 
 static int op_set_front_facing_winding(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_a64_exec_render_op(p, 115, payload, len)) return 0;   /* ARM64 executor: encoder state (arm64_exec_run.c) */
     (void)p;
     if (len < 8) { LAGFX_WARN("SetFrontFacingWinding: payload too short (%zu < 8)", len); return 0; }
     LAGFX_TRACE("SetFrontFacingWinding: value=%u extra=%u",
@@ -597,6 +601,7 @@ static int op_set_scissor_rects(lagfx_protocol_t *p, const uint8_t *payload, siz
 }
 
 static int op_set_stencil_ref(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_a64_exec_render_op(p, 119, payload, len)) return 0;   /* ARM64 executor: encoder state (arm64_exec_run.c) */
     (void)p;
     if (len < 8) { LAGFX_WARN("SetStencilRef: payload too short (%zu < 8)", len); return 0; }
     LAGFX_TRACE("SetStencilRef: front=%u back=%u",

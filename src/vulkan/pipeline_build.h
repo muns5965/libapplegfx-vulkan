@@ -78,6 +78,12 @@ typedef struct {
     struct { uint8_t set, enable; uint32_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a; } slot_blend[4];
     uint32_t         color_formats[4];
     uint32_t         color_write_masks[4];
+    /* Encoder-state mode of the ARM64 executor (all zero = every existing caller unchanged). dyn_state != 0 makes cull mode, front face and depth bias dynamic
+     * (Vulkan 1.3 core extended dynamic state; the caller checks the device) and, for the attachments named by ds_depth_format / ds_stencil_format (the
+     * dynamic-rendering formats, VK_FORMAT_UNDEFINED = no such attachment; separate from the legacy depth_format above, which this builder ignores), depth test /
+     * write / compare, stencil test / ops / masks / reference dynamic as well. no_color != 0: the pass has no colour attachment (one unused slot). */
+    VkFormat         ds_depth_format, ds_stencil_format;
+    uint8_t          dyn_state, no_color;
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;

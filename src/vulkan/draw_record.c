@@ -93,7 +93,7 @@ void lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t 
             .x = (float)vx, .y = yflip ? (float)(vy + vh) : (float)vy,
             .width = (float)vw,
             .height = yflip ? -(float)vh : (float)vh,
-            .minDepth = 0.0f, .maxDepth = 1.0f,
+            .minDepth = region && region->vp_z_set ? region->vp_znear : 0.0f, .maxDepth = region && region->vp_z_set ? region->vp_zfar : 1.0f,
         };
         VkRect2D dsc = { .offset = {(int32_t)sx, (int32_t)sy},
                          .extent = { sw, sh } };

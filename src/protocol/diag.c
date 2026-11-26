@@ -188,6 +188,18 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->mapped_pages_skipped, tg);
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
+        if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set) {
+            char dl[700];
+            snprintf(dl, sizeof dl,
+                     "g7-gpu-ds: dss[decoded=%llu bad=%llu bound=%llu unresolved=%llu] passes[ds=%llu depth_only=%llu attach_unsupported=%llu split_ignored=%llu no_device_support=%llu] draws_ds=%llu "
+                     "stencil_ref=%llu cull=%llu winding=%llu bias=%llu bias_clamp_dropped=%llu viewport_depth=%llu",
+                     (unsigned long long)R->dss_decoded, (unsigned long long)R->dss_bad, (unsigned long long)R->dss_bound, (unsigned long long)R->dss_unresolved,
+                     (unsigned long long)R->ds_passes, (unsigned long long)R->ds_depth_only_passes, (unsigned long long)R->ds_attach_unsupported, (unsigned long long)R->ds_split_ignored,
+                     (unsigned long long)R->ds_no_device_support, (unsigned long long)R->ds_draws, (unsigned long long)R->stencil_ref_set, (unsigned long long)R->cull_set,
+                     (unsigned long long)R->winding_set, (unsigned long long)R->bias_set, (unsigned long long)R->bias_clamp_dropped, (unsigned long long)R->viewport_depth_set);
+            fprintf(stderr, "%s\n", dl);
+            LAGFX_LOG("%s", dl);
+        }
     }
     if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;

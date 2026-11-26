@@ -558,6 +558,10 @@ typedef struct lagfx_protocol {
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
                 uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
                 uint64_t multi_attach, blend_indep_mismatch, extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported, obj_unsupported_linear;
+                /* depth / stencil / raster state (arm64_depth_stencil.c, arm64_exec_run.c) */
+                uint64_t dss_decoded, dss_bad, dss_bound, dss_unresolved;   /* tag-4 objects decoded / rejected; tag 104 applied / ref not a decodable object (state then stays as it was) */
+                uint64_t ds_passes, ds_depth_only_passes, ds_attach_unsupported, ds_split_ignored, ds_no_device_support;   /* passes with a depth or stencil attachment; without any colour; one that could not be attached (format / texture / device); stencil in a texture other than the depth one (stencil dropped); device without core Vulkan 1.3 dynamic state */
+                uint64_t ds_draws, stencil_ref_set, cull_set, winding_set, bias_set, bias_clamp_dropped, viewport_depth_set;   /* draws that ran with depth or stencil testing on; state records applied; a bias clamp dropped because the device has no depthBiasClamp */
                 uint64_t mapped_created, mapped_shared, mapped_uploaded, mapped_written_back, mapped_unsupported, mapped_no_desc, mapped_bytes_up, mapped_bytes_down, mapped_pages_skipped;   /* type 11 mapped textures (guest display surfaces) */
                 uint64_t tag_done[512], tag_partial[512], tag_unsup[512];   /* by inner tag; partial = recorded but not applied to Vulkan */
                 uint64_t tag_over;                                   /* tags >= 512, any outcome */

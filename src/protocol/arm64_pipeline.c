@@ -447,7 +447,9 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     vspv = fspv = NULL;
     out->blob_hash = lagfx_a64_hash64(blob, blen);
     out->release = pres_release, out->user = r;
-    CNTP(p).stub_depth_stencil++, CNTP(p).stub_color_format_from_pass++, CNTP(p).stub_raster_state++;
+    /* depth/stencil and raster state are no longer stubs: they are encoder state (tags 104 107 108 115 119, arm64_exec_run.c), applied dynamically. What stays taken from the pass
+     * instead of the descriptor is the attachment pixel formats (stub_color_format_from_pass). stub_depth_stencil now counts passes the device could not give depth state to. */
+    CNTP(p).stub_color_format_from_pass++;
     CNTP(p).resolve_failed--, CNTP(p).resolved++;
     ok = true;
     r = NULL;   /* owned by out now */

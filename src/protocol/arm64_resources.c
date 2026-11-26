@@ -185,6 +185,15 @@ static const struct { uint32_t mtl; VkFormat vk; uint32_t bpp; } k_fmt[] = {
     {123, VK_FORMAT_R32G32B32A32_UINT, 16}, {124, VK_FORMAT_R32G32B32A32_SINT, 16}, {125, VK_FORMAT_R32G32B32A32_SFLOAT, 16},
 };
 
+/* Depth / stencil pixel formats (MTLPixelFormat: Depth16Unorm 250, Depth32Float 252, Stencil8 253, Depth24Unorm_Stencil8 255, Depth32Float_Stencil8 260). Such a
+ * texture is a device image only, used as a render attachment: no guest copy, no upload or write-back, no blit and no sampling (all refused, counted as bad_object
+ * by the callers). aspects: bit 0 depth, bit 1 stencil. 255 is macOS-only in Metal and optional in Vulkan: create_image falls back to D32_SFLOAT_S8_UINT
+ * (a superset of the 24-bit unorm range) where D24_UNORM_S8_UINT cannot be an attachment. Not mapped: 261 / 262 (stencil views of a combined texture), 20x / 26x others. */
+static const struct { uint32_t mtl; VkFormat vk; uint8_t aspects; } k_dfmt[] = {
+    {250, VK_FORMAT_D16_UNORM, 1}, {252, VK_FORMAT_D32_SFLOAT, 1}, {253, VK_FORMAT_S8_UINT, 2},
+    {255, VK_FORMAT_D24_UNORM_S8_UINT, 3}, {260, VK_FORMAT_D32_SFLOAT_S8_UINT, 3},
+};
+
 /* ---- object lifetime ---- */
 
 static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
@@ -311,17 +320,33 @@ static void tex_record(VkCommandBuffer cb, lagfx_a64_obj_t *o, bool down) {
         }
 }
 
+static VkImageAspectFlags ds_aspect_mask(const lagfx_a64_obj_t *o) {
+    return ((o->ds_aspects & 1u) ? VK_IMAGE_ASPECT_DEPTH_BIT : 0u) | ((o->ds_aspects & 2u) ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
+}
+
 /* ---- object creation from the guest's table entry ---- */
 
 static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *o) {
     VkFormatProperties fp;
     vkGetPhysicalDeviceFormatProperties(vk->phys_device, o->format, &fp);
-    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-    if ((fp.optimalTilingFeatures & need) != need) return false;
-    VkImageUsageFlags u = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) u |= VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    const bool ds = o->ds_aspects != 0;
+    if (ds && o->format == VK_FORMAT_D24_UNORM_S8_UINT && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
+        o->format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+        vkGetPhysicalDeviceFormatProperties(vk->phys_device, o->format, &fp);
+    }
+    VkImageUsageFlags u;
+    if (ds) {   /* attachment only; transfer usage just for the initial clear when the format offers it */
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) return false;
+        u = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) u |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    } else {
+        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        if ((fp.optimalTilingFeatures & need) != need) return false;
+        u = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) u |= VK_IMAGE_USAGE_SAMPLED_BIT;
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     o->usage = u;
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = o->img_type, .format = o->format,
         .extent = { o->width, o->height, o->depth }, .mipLevels = o->mips, .arrayLayers = is_tex3d(o) ? 1u : o->layers, .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -337,12 +362,16 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     /* UNDEFINED -> GENERAL and a defined (zero) content */
     VkCommandBuffer cb;
     if (!cb_begin(vk, &cb)) return false;
-    VkImageSubresourceRange rg = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
+    VkImageSubresourceRange rg = { ds ? ds_aspect_mask(o) : VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
         .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img, .subresourceRange = rg };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
-    VkClearColorValue z; memset(&z, 0, sizeof z);
-    vkCmdClearColorImage(cb, o->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+    if (ds) {
+        if (u & VK_IMAGE_USAGE_TRANSFER_DST_BIT) { VkClearDepthStencilValue zz = { 0.0f, 0u }; vkCmdClearDepthStencilImage(cb, o->img, VK_IMAGE_LAYOUT_GENERAL, &zz, 1, &rg); }
+    } else {
+        VkClearColorValue z; memset(&z, 0, sizeof z);
+        vkCmdClearColorImage(cb, o->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
+    }
     barrier(cb);
     bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS;
     if (ok) {
@@ -522,6 +551,8 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         free(d);
         o->format = VK_FORMAT_UNDEFINED;
         for (size_t i = 0; ok && i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
+        for (size_t i = 0; ok && o->format == VK_FORMAT_UNDEFINED && i < sizeof k_dfmt / sizeof *k_dfmt; i++)
+            if (k_dfmt[i].mtl == fmt) o->format = k_dfmt[i].vk, o->ds_aspects = k_dfmt[i].aspects, o->bpp = 4;   /* bpp only keeps divisions safe: no guest copy is ever made */
         /* MTLTextureType 2 = 2D, 3 = 2D array, 7 = 3D */
         o->img_type = mtype == 7 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
         if (!ok || o->format == VK_FORMAT_UNDEFINED || (mtype != 2 && mtype != 3 && mtype != 7) || samples > 1 || !o->width || !o->height || o->width > 16384 || o->height > 16384) goto bad;
@@ -531,6 +562,12 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         o->layers = mtype == 3 ? array : 1u;
         if (!o->layers || o->layers > LAGFX_A64_MAX_LAYERS) goto bad;
         o->kind = LAGFX_A64_TEXTURE, o->length = (len + 0x3fffu) & ~0x3fffull;
+        if (o->ds_aspects) {   /* depth / stencil attachment: a plain 2D image of one level, content only on the device */
+            if (mtype != 2 || o->mips != 1) goto bad;
+            o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
+            if (!create_image(vk, m, o)) goto bad;
+            return o;
+        }
         if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o->buf, &o->buf_mem, &o->map)) goto bad;
         if (!create_image(vk, m, o)) goto bad;
     } else if (type == 8 || type == 9) {
@@ -752,6 +789,7 @@ static bool xfer_fits(uint64_t off, uint64_t row, uint64_t img, uint64_t w, uint
 typedef struct { uint64_t x, y, z, w, h, d; uint32_t slice, level; } box_t;
 
 static bool box_ok(const lagfx_a64_obj_t *t, const box_t *b) {
+    if (t->ds_aspects) return false;   /* depth / stencil images take part in no copy */
     if (!b->w || !b->h || !b->d || b->w > 65536 || b->h > 65536 || b->d > 65536 || b->x > 65536 || b->y > 65536 || b->z > 65536) return false;
     if (b->level >= t->mips) return false;
     if (is_tex3d(t) ? b->slice != 0 : (b->slice >= t->layers || b->d != 1 || b->z != 0)) return false;
@@ -1091,11 +1129,40 @@ void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (o->linear) lin_push_x(x, o);   /* the render result goes back into the buffer */
 }
 
+/* Depth / stencil attachment of a mirrored texture. The image stays in GENERAL (a layout dynamic rendering accepts for these attachments), so begin / end only
+ * order the accesses. The view covers every aspect of the format. */
+bool lagfx_a64_res_ds_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h) {
+    if (!x || !o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || !(o->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return false;
+    if (!o->view) {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
+            .subresourceRange = { ds_aspect_mask(o), 0, 1, 0, 1 } };
+        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return false; }
+    }
+    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img, .subresourceRange = { ds_aspect_mask(o), 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    *view = o->view, *w = o->width, *h = o->height;
+    return true;
+}
+
+void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o || !o->ds_aspects) return;
+    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_TRANSFER_WRITE_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img, .subresourceRange = { ds_aspect_mask(o), 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+}
+
 bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
     mgr2_t *m = p ? p->a64_res : NULL;
     struct lagfx_vk_state *vk = vk_of(p);
     lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
-    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || m->cur || m->pending) return false;
+    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || m->cur || m->pending) return false;
     size_t need = (size_t)o->width * o->height * o->bpp;
     if (!dst || dst_size < need) return false;
     VkBuffer b; VkDeviceMemory bm; uint8_t *mp;

@@ -320,13 +320,16 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     };
 
     /* Dynamic rendering pNext chain (VK_KHR_dynamic_rendering) */
-    const VkFormat color_fmt = desc->color_format != VK_FORMAT_UNDEFINED
+    const VkFormat color_fmt = desc->no_color ? VK_FORMAT_UNDEFINED
+                               : desc->color_format != VK_FORMAT_UNDEFINED
                                ? desc->color_format
                                : VK_FORMAT_B8G8R8A8_UNORM;
     VkPipelineRenderingCreateInfo rendering_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
         .colorAttachmentCount = ncol,
         .pColorAttachmentFormats = ncol > 1u ? color_fmts : &color_fmt,
+        .depthAttachmentFormat = desc->dyn_state ? desc->ds_depth_format : VK_FORMAT_UNDEFINED,
+        .stencilAttachmentFormat = desc->dyn_state ? desc->ds_stencil_format : VK_FORMAT_UNDEFINED,
     };
 
     /* Depth/stencil — NULL as in triangle test (no depth) */
@@ -340,12 +343,29 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
      * draws (the "zoom"). The draw site sets the viewport per-draw to the ACTUAL
      * render-target dims (with the Y-flip). Static vp/sc above become ignored
      * placeholders. */
-    VkDynamicState dyn_states[2] = {
+    VkDynamicState dyn_states[16] = {
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
     };
+    uint32_t n_dyn = 2;
+    if (desc->dyn_state) {   /* Metal keeps these on the encoder, not in the pipeline: the executor sets them before each draw */
+        dyn_states[n_dyn++] = VK_DYNAMIC_STATE_CULL_MODE;
+        dyn_states[n_dyn++] = VK_DYNAMIC_STATE_FRONT_FACE;
+        dyn_states[n_dyn++] = VK_DYNAMIC_STATE_DEPTH_BIAS;
+        rsst.depthBiasEnable = VK_TRUE;   /* zero constant / slope = no bias */
+        if (desc->ds_depth_format != VK_FORMAT_UNDEFINED || desc->ds_stencil_format != VK_FORMAT_UNDEFINED) {
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_DEPTH_COMPARE_OP;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_STENCIL_OP;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_STENCIL_WRITE_MASK;
+            dyn_states[n_dyn++] = VK_DYNAMIC_STATE_STENCIL_REFERENCE;
+        }
+    }
     VkPipelineDynamicStateCreateInfo dyn = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO,
-        .dynamicStateCount = 2, .pDynamicStates = dyn_states,
+        .dynamicStateCount = n_dyn, .pDynamicStates = dyn_states,
     };
 
     /* Graphics pipeline create info */

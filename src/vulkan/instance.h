@@ -55,6 +55,7 @@ struct lagfx_vk_state {
     bool have_local_read;          /* VK_KHR_dynamic_rendering_local_read enabled: colour attachments can be read as input attachments (framebuffer fetch) */
     bool have_sampler_anisotropy;  /* enabled device feature samplerAnisotropy */
     bool have_independent_blend;   /* enabled device feature: per-attachment blend state / write masks may differ */
+    bool have_depth_bias_clamp;    /* enabled device feature depthBiasClamp: vkCmdSetDepthBias may carry a non-zero clamp */
     bool have_synchronization2;
     bool have_timeline_semaphore;
     bool have_descriptor_indexing;

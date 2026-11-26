@@ -364,7 +364,7 @@ static void test_resolver_triangle_and_topology(void) {
     tri_exec(p, REF_PIPE_TRI, 3, 3, false);
     assert(PIPE(p).resolved == 1 && PIPE(p).resolve_failed == 0 && PIPE(p).xlate_air2spv == 2 && RUNC(p).pipeline_unresolved == 0);
     assert(RUNC(p).draws == 1 && RUNC(p).submit_failed == 0 && PIPE(p).pipes_built == 1 && PIPE(p).topo[3] == 1);
-    assert(PIPE(p).stub_blend == 1 && PIPE(p).stub_depth_stencil == 1 && PIPE(p).stub_color_format_from_pass == 1);
+    assert(PIPE(p).stub_blend == 1 && PIPE(p).stub_depth_stencil == 0 && PIPE(p).stub_raster_state == 0 && PIPE(p).stub_color_format_from_pass == 1);
     assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h));
     uint32_t centre = px(img, 8, 8), corner = px(img, 0, 0);
     printf("INFO: triangle list: centre=%08x corner=%08x\n", centre, corner);

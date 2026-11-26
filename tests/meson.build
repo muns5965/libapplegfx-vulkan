@@ -1512,3 +1512,14 @@ if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   )
   test('arm64 pipeline resolver / bindings / invalidation / capture (lavapipe)', pu_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
+
+# ARM64 depth/stencil state object (serialized tag 4) decoder: pure, synthetic records.
+if fs.is_file(meson.current_source_dir() / 'arm64-depth-stencil-unit.c')
+  ds_test = executable('arm64-depth-stencil-unit',
+    'arm64-depth-stencil-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 depth/stencil state object decoder (unit)', ds_test)
+endif
