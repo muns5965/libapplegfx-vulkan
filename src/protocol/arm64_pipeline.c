@@ -5,6 +5,8 @@
 #include "arm64_objects.h"
 #include "arm64_exec_decode.h"
 #include "arm64_dump.h"
+#include "../air2spv/spv_reflect.h"
+#include "../air2spv/translate.h"
 #include "../common/le.h"
 #include "../common/log.h"
 
@@ -202,6 +204,49 @@ uint8_t *lagfx_a64_read_function_lib(lagfx_protocol_t *p, const lagfx_task_entry
     return b;
 }
 
+
+/* ---- descriptor binding map (pure; shared by the resolver and examples/dump-draws) ---- */
+
+/* Per stage: the reflected set-0 bindings in binding order, each matched to the n-th Metal argument of its KIND (buffer / texture / sampler) from Apple's arg
+ * metadata. By kind, not by position: the translator emits an extra sampler binding for an inline `constexpr sampler` that has no argument; such a sampler
+ * gets metal_index -1 = the default sampler. Appends to bind[*n_bind]; on a failure the entries already appended stay (the pipeline is dropped anyway). */
+int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const lagfx_air_arg_binding_t *ab, size_t nab, bool have_local_read, bool have_storage_img_write,
+                                 lagfx_a64_bind_t *bind, uint32_t *n_bind, int *fbf_why) {
+    lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT];
+    size_t nt = lagfx_spv_reflect_bindings(spv, len, tmp, LAGFX_A64_MAX_REFLECT);
+    if (nt > LAGFX_A64_MAX_REFLECT) return LAGFX_A64_MAP_FAIL;   /* reflect returns the TOTAL: more than the buffer holds must fail, not be truncated */
+    for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
+    uint32_t nth[6] = { 0, 0, 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
+    for (size_t t = 0; t < nt; t++) {
+        if (tmp[t].set != 0u) continue;
+        if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
+            int why = lagfx_a64_fbfetch_check(st, have_local_read, tmp[t].binding, *n_bind);
+            if (why != LAGFX_A64_FBF_OK) { if (fbf_why) *fbf_why = why; return LAGFX_A64_MAP_FBFETCH; }
+            bind[*n_bind].binding = (uint8_t)tmp[t].binding, bind[*n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT, bind[*n_bind].writable = 0;
+            bind[*n_bind].stage = 1, bind[*n_bind].metal_index = (int16_t)(tmp[t].binding - LAGFX_A64_FRAG_BINDING_BASE - LAGFX_A64_FBF_BINDING_BASE);
+            (*n_bind)++;
+            continue;
+        }
+        if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER &&
+            tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_IMAGE) return LAGFX_A64_MAP_FAIL;
+        if (tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE && (st == 0 || !have_storage_img_write)) return st == 0 ? LAGFX_A64_MAP_VERTEX_RES : LAGFX_A64_MAP_FAIL;   /* fragment writes only; needs the device features */
+        if (*n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) return LAGFX_A64_MAP_FAIL;
+        uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : (tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? 2 : 3;
+        uint8_t want_w = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE;   /* textures split by access: written ones are storage images */
+        uint32_t n = nth[tmp[t].kind]++, seen = 0;
+        int midx = -1; uint8_t wr = 0;
+        for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && (want != 2 || ab[k].written == want_w) && seen++ == n) { midx = ab[k].metal_index; wr = ab[k].written; break; }
+        if (midx > 31 || (midx < 0 && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER)) return LAGFX_A64_MAP_FAIL;   /* a buffer/texture nobody can feed */
+        bind[*n_bind].binding = (uint8_t)tmp[t].binding;
+        bind[*n_bind].kind = (uint8_t)tmp[t].kind;
+        bind[*n_bind].stage = (uint8_t)st;
+        bind[*n_bind].metal_index = (int16_t)midx;
+        bind[*n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? wr : 0u;
+        (*n_bind)++;
+    }
+    return LAGFX_A64_MAP_OK;
+}
+
 /* ---- the resolver (Vulkan) ---- */
 
 #ifndef LAGFX_HAVE_VULKAN
@@ -381,45 +426,17 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
      * metadata. By kind, not by position: the translator emits an extra sampler binding for an inline `constexpr sampler` that has no argument; such a sampler
      * gets metal_index -1 = the default sampler. */
     for (int st = 0; st < 2; st++) {
-        lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT];
-        size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, LAGFX_A64_MAX_REFLECT);
-        if (nt > LAGFX_A64_MAX_REFLECT) { CNTP(p).rf_bindings++; goto done; }   /* reflect returns the TOTAL: more than the buffer holds must fail, not be truncated */
-        for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
-        const lagfx_air_arg_binding_t *ab = st ? fab : vab;
-        size_t nab = st ? nfab : nvab;
-        uint32_t nth[6] = { 0, 0, 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
-        for (size_t t = 0; t < nt; t++) {
-            if (tmp[t].set != 0u) continue;
-            if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
-                int why = lagfx_a64_fbfetch_check(st, vk->have_local_read, tmp[t].binding, out->n_bind);
-                if (why != LAGFX_A64_FBF_OK) {
-                    CNTP(p).stub_fbfetch++;
-                    if (CNTP(p).stub_fbfetch_why[why]++ == 0)
-                        LAGFX_LOG("arm64 pipeline %u: framebuffer-fetch pipeline not built (%s): stage=%d binding=%u n_bind=%u local_read=%d", ref, lagfx_a64_fbfetch_reason_name(why), st, tmp[t].binding, out->n_bind, (int)vk->have_local_read);
-                    goto done;
-                }
-                out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding, out->bind[out->n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT;
-                out->bind[out->n_bind].stage = 1, out->bind[out->n_bind].metal_index = (int16_t)(tmp[t].binding - LAGFX_A64_FRAG_BINDING_BASE - LAGFX_A64_FBF_BINDING_BASE);
-                out->n_bind++, CNTP(p).fbfetch_pipes++;
-                continue;
-            }
-            if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER &&
-                tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_IMAGE) { CNTP(p).rf_bindings++; goto done; }
-            if (tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE && (st == 0 || !vk->have_storage_img_write)) { if (st == 0) CNTP(p).rf_vertex_res++; else CNTP(p).rf_bindings++; goto done; }   /* fragment writes only; needs the device features */
-            if (out->n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) { CNTP(p).rf_bindings++; goto done; }
-            uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : (tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? 2 : 3;
-            uint8_t want_w = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE;   /* textures split by access: written ones are storage images */
-            uint32_t n = nth[tmp[t].kind]++, seen = 0;
-            int midx = -1; uint8_t wr = 0;
-            for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && (want != 2 || ab[k].written == want_w) && seen++ == n) { midx = ab[k].metal_index; wr = ab[k].written; break; }
-            if (midx > 31 || (midx < 0 && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER)) { CNTP(p).rf_bindings++; goto done; }   /* a buffer/texture nobody can feed */
-            out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding;
-            out->bind[out->n_bind].kind = (uint8_t)tmp[t].kind;
-            out->bind[out->n_bind].stage = (uint8_t)st;
-            out->bind[out->n_bind].metal_index = (int16_t)midx;
-            out->bind[out->n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? wr : 0u;
-            out->n_bind++;
+        int why = 0;
+        int mr = lagfx_a64_map_stage_bindings(blobs[st], lens[st], st, st ? fab : vab, st ? nfab : nvab, vk->have_local_read, vk->have_storage_img_write, out->bind, &out->n_bind, &why);
+        if (mr == LAGFX_A64_MAP_FBFETCH) {
+            CNTP(p).stub_fbfetch++;
+            if (CNTP(p).stub_fbfetch_why[why]++ == 0)
+                LAGFX_LOG("arm64 pipeline %u: framebuffer-fetch pipeline not built (%s): stage=%d n_bind=%u local_read=%d", ref, lagfx_a64_fbfetch_reason_name(why), st, out->n_bind, (int)vk->have_local_read);
+            goto done;
         }
+        if (mr == LAGFX_A64_MAP_VERTEX_RES) { CNTP(p).rf_vertex_res++; goto done; }
+        if (mr != LAGFX_A64_MAP_OK) { CNTP(p).rf_bindings++; goto done; }
+        for (uint32_t k = 0; k < out->n_bind; k++) if (out->bind[k].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT && out->bind[k].stage == 1u) CNTP(p).fbfetch_pipes++;
     }
     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
     ci.codeSize = vsz, ci.pCode = (const uint32_t *)vspv;

@@ -86,6 +86,13 @@ bool lagfx_a64_payload_hash(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
 
 
 #include "arm64_exec_run.h"
+#include "../air2spv/translate.h"
+/* Binding map of one stage (pure, no Vulkan): reflects the SPIR-V (fragment modules already offset by LAGFX_A64_FRAG_BINDING_BASE) and appends one lagfx_a64_bind_t
+ * per set-0 binding to bind[*n_bind], matching each to the n-th Metal argument of its kind in ab[] (see the definition). Returns LAGFX_A64_MAP_OK or why not;
+ * *fbf_why = the LAGFX_A64_FBF_* reason for LAGFX_A64_MAP_FBFETCH. */
+enum { LAGFX_A64_MAP_OK = 0, LAGFX_A64_MAP_FAIL, LAGFX_A64_MAP_VERTEX_RES, LAGFX_A64_MAP_FBFETCH };
+int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int stage, const lagfx_air_arg_binding_t *ab, size_t nab, bool have_local_read, bool have_storage_img_write,
+                                 lagfx_a64_bind_t *bind, uint32_t *n_bind, int *fbf_why);
 /* The pipeline resolver the executor installs by default (ARM64 mode, LAGFX_ARM64_EXEC=1): decodes the guest's serialized pipeline, loads its function
  * libraries from guest memory, translates AIR -> SPIR-V (air2spv, the translator the x86 draw path uses; no external tools), reflects vertex inputs and
  * descriptor bindings (+ Metal indices from Apple's arg metadata), builds the shader modules and the set-0 layout. False = unresolved (counted by

@@ -38,6 +38,7 @@ bool lagfx_a64_exec_enabled(const lagfx_protocol_t *p);
  * descriptor is not decoded by this module: the resolver turns it into ready shader modules + layout. desc.color_format is overwritten
  * with the pass's format when the VkPipeline is built. */
 enum { LAGFX_A64_BIND_IMAGE = 1, LAGFX_A64_BIND_SAMPLER = 2, LAGFX_A64_BIND_BUFFER = 3, LAGFX_A64_BIND_INPUT = 4, LAGFX_A64_BIND_STORAGE_IMAGE = 5 };   /* = lagfx_spv_binding_kind_t */
+typedef struct { uint8_t binding, kind, stage; int16_t metal_index; uint8_t writable; } lagfx_a64_bind_t;   /* one set-0 binding of a resolved pipeline */
 typedef struct {
     lagfx_pipeline_desc_t desc;
     /* Resources of set 0 (all zero = the pipeline has none: desc.layout is the empty layout). Each: the Vulkan binding, its kind, the stage whose Metal
@@ -45,7 +46,7 @@ typedef struct {
     VkDescriptorSetLayout dsl;
     VkShaderModule alt_fragment_shader;   /* optional: desc.fragment_shader with explicit LOD 0 sampling, used instead while an unnormalized-coordinates sampler is bound to a fragment sampler slot */
     uint32_t n_bind;
-    struct { uint8_t binding, kind, stage; int16_t metal_index; uint8_t writable; } bind[LAGFX_A64_MAX_BINDINGS];   /* writable: a buffer the shader may write (air.write / air.read_write) */
+    lagfx_a64_bind_t bind[LAGFX_A64_MAX_BINDINGS];   /* writable: a buffer the shader may write (air.write / air.read_write) */
     bool no_point_size;             /* the vertex shader does not write PointSize: a point-list draw is invalid in Vulkan (VUID-...-topology-08773) and is skipped */
     uint64_t blob_hash;             /* hash of the serialized payload this was resolved from (0 = unknown): a changed payload under an unchanged entry replaces the pipeline */
     uint32_t vertex_buffer_index;   /* the Metal vertex buffer slot that feeds Vulkan binding 0 (lagfx_pipeline_build has one stream) */
