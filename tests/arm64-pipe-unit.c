@@ -698,6 +698,17 @@ static void test_pdesc_blend(void) {
     assert(lagfx_a64_pdesc_decode(b135, sizeof b135, NULL, NULL, &d) && d.color0.found && d.color0.pixfmt == 115u && d.color0.enabled_token && lagfx_a64_blend_on(&d.color0) && d.color0.dst_rgb == 5u);
     assert(d.color0.found1 && d.color0.pixfmt1 == 115u);
     assert(d.color0.mask1 == 0u);   /* the dump's second attachment record carries writeMask 0 */
+    assert(!d.color0.a1.enabled_token && !d.color0.a1.any_blend_token && d.color0.a1.src_rgb == 1u && d.color0.a1.dst_rgb == 0u);   /* real dump: attachment 1 has no blend tokens */
+    {   /* attachment 1 with its own blend tokens: `02 04 1`, `03 04 4`, `04 04 5` placed before its writeMask (keys increasing) */
+        uint8_t u[sizeof b135 + 18], *w = u; const uint8_t extra[18] = { 2,4,1,0,0,0, 3,4,4,0,0,0, 4,4,5,0,0,0 };
+        size_t mk = 0; for (size_t i = sizeof b135 - 6; i > 0; i--) if (b135[i] == 0x09 && b135[i + 1] == 0x04) { mk = i; break; }
+        assert(mk);
+        memcpy(w, b135, mk); memcpy(w + mk, extra, 18); memcpy(w + mk + 18, b135 + mk, sizeof b135 - mk);
+        uint32_t L = lagfx_le32(u + 12) + 18u; u[12] = (uint8_t)L; u[13] = (uint8_t)(L >> 8);
+        lagfx_a64_pdesc_t e;
+        assert(lagfx_a64_pdesc_decode(u, sizeof u, NULL, NULL, &e) && e.color0.found1);
+        assert(e.color0.a1.enabled_token && e.color0.a1.enabled_value == 1u && e.color0.a1.src_rgb == 4u && e.color0.a1.dst_rgb == 5u && e.color0.mask1 == 0u);
+    }
     {   /* structural checks: an inconsistent length, a truncated body and an explicit key-2 value 0 are not mis-decoded */
         uint8_t t[sizeof b135]; memcpy(t, b135, sizeof t);
         for (size_t k = sizeof t - 30; k > 16; k--) if (t[k] == 0x0c && !t[k + 1] && t[k + 9] == 0 && t[k + 10] == 4) { t[k + 4]++; break; }   /* the LAST chunk: len != 6*count+13 */

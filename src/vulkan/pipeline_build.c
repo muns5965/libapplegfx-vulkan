@@ -280,8 +280,15 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
             blend_multi[i] = blend_att;
             color_fmts[i] = (VkFormat)desc->color_formats[i];
             if (!desc->independent_blend) continue;   /* without the feature every element must be identical (VUID 00605), unused slots included */
-            if (color_fmts[i] == VK_FORMAT_UNDEFINED) { blend_multi[i].blendEnable = VK_FALSE; blend_multi[i].colorWriteMask = 0; }
-            else blend_multi[i].colorWriteMask = (VkColorComponentFlags)desc->color_write_masks[i];
+            if (color_fmts[i] == VK_FORMAT_UNDEFINED) { blend_multi[i].blendEnable = VK_FALSE; blend_multi[i].colorWriteMask = 0; continue; }
+            blend_multi[i].colorWriteMask = desc->masks_valid ? (VkColorComponentFlags)desc->color_write_masks[i] : 0xfu;
+            if (i >= 1u && desc->blend_set && desc->slot_blend[i].set) {
+                blend_multi[i].blendEnable = desc->slot_blend[i].enable && LAGFX_POLICY("M2_SRCOVER") ? VK_TRUE : VK_FALSE;
+                blend_multi[i].srcColorBlendFactor = (VkBlendFactor)desc->slot_blend[i].src_rgb, blend_multi[i].dstColorBlendFactor = (VkBlendFactor)desc->slot_blend[i].dst_rgb;
+                blend_multi[i].colorBlendOp = (VkBlendOp)desc->slot_blend[i].op_rgb;
+                blend_multi[i].srcAlphaBlendFactor = (VkBlendFactor)desc->slot_blend[i].src_a, blend_multi[i].dstAlphaBlendFactor = (VkBlendFactor)desc->slot_blend[i].dst_a;
+                blend_multi[i].alphaBlendOp = (VkBlendOp)desc->slot_blend[i].op_a;
+            }
         }
     }
     VkPipelineColorBlendStateCreateInfo cb = {

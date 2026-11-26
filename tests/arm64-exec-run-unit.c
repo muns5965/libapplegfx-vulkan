@@ -275,7 +275,7 @@ static void test_objects(void) {
 #ifdef LAGFX_HAVE_VULKAN
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
 static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt;
-static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; } g_blend;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
+static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks; } g_blend;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
 static void rel(void *u) { (void)u; g_released++; }
 static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
@@ -299,6 +299,9 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
         out->desc.blend_src_a = g_blend.saf, out->desc.blend_dst_a = g_blend.daf, out->desc.blend_op_a = g_blend.aop;
         out->desc.color_write_mask = g_blend.mask;
         out->desc.color_write_masks[0] = g_blend.mask, out->desc.color_write_masks[1] = g_blend.mask1, out->desc.color_write_masks[2] = out->desc.color_write_masks[3] = 0xfu;
+        out->desc.masks_valid = 1;
+        if (g_blend.s1add) { out->desc.slot_blend[1].set = 1, out->desc.slot_blend[1].enable = 1; out->desc.slot_blend[1].src_rgb = out->desc.slot_blend[1].dst_rgb = out->desc.slot_blend[1].src_a = out->desc.slot_blend[1].dst_a = VK_BLEND_FACTOR_ONE; }
+        if (g_blend.nomasks) { out->desc.masks_valid = 0; for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0; }
         if (g_blend.mrt) {
             if (!g_fs_mrt) { VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_mrt_spv, .pCode = k_fs_mrt_spv }; assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_mrt) == VK_SUCCESS); }
             out->desc.fragment_shader = g_fs_mrt;
@@ -474,7 +477,7 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
     g_res_tex2 = slot1;
     const uint32_t refs[2] = { slot0 ? REF_TEX : 0u, slot1 ? REF_TEX2 : 0u };
     const uint16_t loads[2] = { 2, 2 };
-    const double clr[2][4] = { { 0, 0, 1, 1 }, { 0, 0, 0, 1 } };
+    const double clr[2][4] = { { 0, 0, 1, 1 }, { g_blend.s1add ? 0.5 : 0, 0, 0, 1 } };
     cb_reset(); cb_pass_n(refs, loads, clr); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
     exec(p, 1, cb_finish(), true);
     uint8_t img[RT_W * RT_H * 8]; uint32_t w, h;
@@ -487,9 +490,12 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
     }
     if (slot1) {
         assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, RT_W * RT_H * 8, &w, &h));
-        if (mask1 == 0xfu) assert(half_at(img, 8, 8, 0) == 0 && half_at(img, 8, 8, 1) == 0x3c00 && half_at(img, 8, 8, 2) == 0 && half_at(img, 8, 8, 3) == 0x3c00);
-        else if (mask1 == 0u) assert(half_at(img, 8, 8, 1) == 0 && half_at(img, 8, 8, 3) == 0x3c00);   /* clear colour (0,0,0,1) stays */
+        if (mask1 == 0xfu && !g_blend.s1add) assert(half_at(img, 8, 8, 0) == 0 && half_at(img, 8, 8, 1) == 0x3c00 && half_at(img, 8, 8, 2) == 0 && half_at(img, 8, 8, 3) == 0x3c00);
+        else if (mask1 == 0u && !g_blend.nomasks) assert(half_at(img, 8, 8, 1) == 0 && half_at(img, 8, 8, 3) == 0x3c00);   /* clear colour (0,0,0,1) stays */
     }
+    if (slot1 && g_blend.s1add && g_dev->vk->have_independent_blend) assert(half_at(img, 8, 8, 0) == 0x3800 && half_at(img, 8, 8, 1) == 0x3c00);
+    if (slot1 && g_blend.s1add && !g_dev->vk->have_independent_blend) assert(half_at(img, 8, 8, 0) == 0 && R->blend_indep_mismatch >= 1);   /* attachment 0's (off) state applies, and the difference is counted */   /* additive on slot 1 only: 0.5 + 0 red kept, green 1 */
+    if (slot1 && g_blend.nomasks) assert(half_at(img, 8, 8, 1) == 0x3c00);   /* masks unknown: every slot writes */
     if (slot0 && slot1) assert(R->multi_attach >= 1);
     if (!slot0) assert(R->multi_attach >= 1 && R->submit_failed == 0);
     assert(R->submit_failed == 0 && R->draws == 1);
@@ -504,6 +510,16 @@ static void test_exec_mrt(void) {
     mrt_case("both attachments written", true, true, 0xfu, 0xfu);
     mrt_case("attachment 1 write mask 0", true, true, 0xfu, 0u);
     mrt_case("only slot 1 attached (slot 0 unused)", false, true, 0xfu, 0xfu);
+    g_blend.s1add = 1; mrt_case("slot 1 own blend (additive) while slot 0 is off", true, true, 0xfu, 0xfu); g_blend.s1add = 0;
+    g_blend.nomasks = 1; mrt_case("masks not decoded: all slots write", true, true, 0u, 0u); g_blend.nomasks = 0;
+    {   /* device without independentBlend: attachment 1 differs -> counted, not silently hidden */
+        const uint8_t saved = g_dev->vk->have_independent_blend;
+        g_dev->vk->have_independent_blend = 0;
+        g_blend.s1add = 1;
+        setenv("LAGFX_ARM64_EXEC", "1", 1);
+        mrt_case("independentBlend off, differing slot 1", true, true, 0xfu, 0xfu);
+        g_blend.s1add = 0; g_dev->vk->have_independent_blend = saved;
+    }
     puts("PASS: two colour attachments (BGRA8 + RGBA16Float, original slots, per-slot write masks, unused slot 0) on lavapipe");
 }
 

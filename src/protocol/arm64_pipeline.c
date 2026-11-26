@@ -29,6 +29,7 @@ static bool is_pixfmt(uint32_t f) { return f == 10u || f == 70u || f == 80u || f
 static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o) {
     memset(o, 0, sizeof *o);
     o->src_rgb = 1, o->dst_rgb = 0, o->op_rgb = 0, o->src_a = 1, o->dst_a = 0, o->op_a = 0, o->mask = 0xfu, o->mask1 = 0xfu;
+    o->a1.src_rgb = 1, o->a1.src_a = 1;
     if (limit < 21u) return;
     for (uint32_t i = limit - 21u;; i--) {   /* last chunk first; every read below is < i + 21 <= limit */
         if (b[i] == 0x0cu && !b[i + 1] && !b[i + 2] && !b[i + 3] && b[i + 9] == 0x00u && b[i + 10] == 0x04u && !lagfx_le32(b + i + 11) &&
@@ -61,7 +62,24 @@ static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o
                     /* attachment 1: `03 00 04 01 00 00 00 01 04 <fmt>` [`09 04 <writeMask>`] right after attachment 0 */
                     if (at + 13u <= limit && b[at] == 0x03u && b[at + 1] == 0x00u && b[at + 2] == 0x04u && lagfx_le32(b + at + 3) == 1u && b[at + 7] == 0x01u && b[at + 8] == 0x04u && is_pixfmt(lagfx_le32(b + at + 9))) {
                         t.found1 = true, t.pixfmt1 = lagfx_le32(b + at + 9);
-                        if (at + 19u <= limit && b[at + 13] == 0x09u && b[at + 14] == 0x04u && lagfx_le32(b + at + 15) <= 0xfu) t.mask1 = (uint8_t)lagfx_le32(b + at + 15);
+                        /* tokens of attachment 1 after its pixel format (same grammar as attachment 0: increasing keys 2..9, value <= 0xff); stops at the first byte that is not one */
+                        uint32_t q = at + 13u, pk = 1u;
+                        while (q + 6u <= limit && b[q + 1] == 0x04u && b[q] > pk && b[q] <= 9u && lagfx_le32(b + q + 2u) <= 0xffu) {
+                            uint32_t key = b[q], v = lagfx_le32(b + q + 2u);
+                            lagfx_a64_att_blend_t *a = &t.a1;
+                            switch (key) {
+                            case 2: a->enabled_token = true; a->enabled_value = (uint8_t)v; break;
+                            case 3: a->src_rgb = (uint8_t)v; a->any_blend_token = true; break;
+                            case 4: a->dst_rgb = (uint8_t)v; a->any_blend_token = true; break;
+                            case 5: a->op_rgb = (uint8_t)v; a->any_blend_token = true; break;
+                            case 6: a->src_a = (uint8_t)v; a->any_blend_token = true; break;
+                            case 7: a->dst_a = (uint8_t)v; a->any_blend_token = true; break;
+                            case 8: a->op_a = (uint8_t)v; a->any_blend_token = true; break;
+                            case 9: if (v <= 0xfu) t.mask1 = (uint8_t)v; break;
+                            default: break;
+                            }
+                            pk = key; q += 6u;
+                        }
                     }
                     *o = t;
                     return;
@@ -402,7 +420,14 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             out->desc.color_write_mask = ((b->mask & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((b->mask & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((b->mask & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((b->mask & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
             for (uint32_t i = 0; i < 4u; i++) out->desc.color_write_masks[i] = 0xfu;
             out->desc.color_write_masks[0] = out->desc.color_write_mask;
-            if (b->found1) {   /* attachment 1's write mask (the dump's second attachment record carries writeMask 0) */
+            out->desc.masks_valid = 1;
+            if (b->found1) {
+                const lagfx_a64_att_blend_t *a = &b->a1;
+                if (a->src_rgb < 11u && a->dst_rgb < 11u && a->src_a < 11u && a->dst_a < 11u && a->op_rgb < 5u && a->op_a < 5u) {
+                    out->desc.slot_blend[1].set = 1, out->desc.slot_blend[1].enable = a->enabled_token && a->enabled_value != 0u;
+                    out->desc.slot_blend[1].src_rgb = fac[a->src_rgb], out->desc.slot_blend[1].dst_rgb = fac[a->dst_rgb], out->desc.slot_blend[1].op_rgb = ops[a->op_rgb];
+                    out->desc.slot_blend[1].src_a = fac[a->src_a], out->desc.slot_blend[1].dst_a = fac[a->dst_a], out->desc.slot_blend[1].op_a = ops[a->op_a];
+                }   /* else (BlendColor factors): slot 1 copies attachment 0 and the pipeline counts it as a mismatch */   /* attachment 1's write mask (the dump's second attachment record carries writeMask 0) */
                 uint8_t m1 = b->mask1;
                 out->desc.color_write_masks[1] = ((m1 & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((m1 & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((m1 & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((m1 & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
             }

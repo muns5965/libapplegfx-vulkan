@@ -71,6 +71,10 @@ typedef struct {
      * (VK_FORMAT_UNDEFINED = an unused slot: nothing written) and the blend state above with write mask color_write_masks[i] (when independent_blend == 0 every
      * mask is forced to color_write_mask: without the device feature all attachments must be identical). */
     uint8_t          n_color, independent_blend;
+    /* masks_valid: color_write_masks[] were decoded (an all-zero array is then a real "write nothing"); 0 = unknown, the builder uses 0xf for every slot.
+     * slot_blend[i] (i >= 1): that attachment's own blend state when .set, used only with independent_blend; otherwise slot i copies attachment 0. */
+    uint8_t          masks_valid;
+    struct { uint8_t set, enable; uint32_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a; } slot_blend[4];
     uint32_t         color_formats[4];
     uint32_t         color_write_masks[4];
     /* Future fields (Stage 70b+):

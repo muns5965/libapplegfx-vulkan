@@ -34,7 +34,9 @@ typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;
  * RGBA16Float, the blend values are valid MTLBlendFactor values and the common 4=5,7=5 pair is the premultiplied source-over the compositor uses). Key 2 is blendingEnabled and an absent key means disabled
  * (13 descriptors carry factors without it): this matches an independent implementation of the same serialization that renders macOS screens (medfa12/
  * apple-silicon-anyos-project, GPL: only the token meanings were compared, no code taken). found = the record was recognised; otherwise every field is the Metal default and the caller keeps its fixed state. */
+typedef struct { bool enabled_token, any_blend_token; uint8_t enabled_value, src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a; } lagfx_a64_att_blend_t;   /* one attachment's blend tokens (Metal defaults when absent) */
 typedef struct {
+    lagfx_a64_att_blend_t a1;                     /* attachment 1's blend tokens (keys 2..8 after its pixel format), valid when found1 */
     bool found, any_blend_token, enabled_token, found1;
     uint8_t enabled_value, mask1;                 /* key-2 value; attachment 1's writeMask (default 0xf) */
     uint32_t pixfmt, pixfmt1;                     /* attachment 1: `03 00 04 01 ...` record that follows attachment 0 (found1) */

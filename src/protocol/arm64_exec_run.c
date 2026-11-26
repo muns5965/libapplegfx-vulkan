@@ -369,7 +369,15 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
         d.n_color = (uint8_t)nslots;
         d.independent_blend = r->vk->have_independent_blend;
         for (uint32_t i = 0; i < 4u; i++) d.color_formats[i] = (uint32_t)fmts[i];
-        if (!d.color_write_masks[0] && !d.color_write_masks[1] && !d.color_write_masks[2] && !d.color_write_masks[3]) for (uint32_t i = 0; i < 4u; i++) d.color_write_masks[i] = 0xfu;
+        if (!r->vk->have_independent_blend) {   /* the device cannot give attachments different blend/mask: say so instead of silently forcing attachment 0's state */
+            bool diff = false;
+            for (uint32_t i = 1; i < nslots && i < 4u; i++) {
+                if (fmts[i] == VK_FORMAT_UNDEFINED) continue;
+                if (d.masks_valid && d.color_write_masks[i] != d.color_write_masks[0]) diff = true;
+                if (d.slot_blend[i].set && (d.slot_blend[i].enable != d.blend_enable || (d.slot_blend[i].enable && (d.slot_blend[i].src_rgb != d.blend_src_rgb || d.slot_blend[i].dst_rgb != d.blend_dst_rgb || d.slot_blend[i].op_rgb != d.blend_op_rgb || d.slot_blend[i].src_a != d.blend_src_a || d.slot_blend[i].dst_a != d.blend_dst_a || d.slot_blend[i].op_a != d.blend_op_a)))) diff = true;
+            }
+            if (diff) p->diag2.exec.run.blend_indep_mismatch++;
+        }
     }
     d.topology_plus1 = (uint8_t)(topo + 1u);
     VkPipeline pl = VK_NULL_HANDLE;
