@@ -29,6 +29,15 @@ int lagfx_spv_variant_drop_dead_undef(const uint32_t *in, size_t words, uint32_t
 /* (j) ONLY the struct-typed OpUndef -> OpConstantNull (no pointer): (h) minus the pointer-typed ones. CHANGES MEANING for a consumed struct undef. */
 int lagfx_spv_variant_undef_struct(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
 
+/* (k) ONLY the OpReturnValue operands that are an OpUndef -> a fresh OpConstantNull (the OpUndef and its other uses stay). CHANGES MEANING for a returned undef (undefined -> zero). */
+int lagfx_spv_variant_undef_returns(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+/* (M2) SPIR-V 1.4 -> 1.3 (version word, OpEntryPoint interface lists trimmed to Input / Output variables, scalar-condition OpSelect of a vector rewritten with a bool-vector condition) when the module uses no other 1.4-only feature (OpCopyLogical, OpPtrEqual/NotEqual/Diff, aggregate OpSelect, ...); 0 = refused / not 1.4 (reason in info),
+ * otherwise 1 + the number of interface ids dropped. Value-preserving. */
+int lagfx_spv_variant_downgrade13(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+/* (M3b / M4a) input-attachment renumbering read from the module (InputAttachmentIndex k marks an input attachment). mode 0: input attachments -> Binding k, every other descriptor variable
+ * shifted up by `nia`; mode 1: input attachments -> DescriptorSet 1, Binding k. The pipeline layout must be renumbered the same way. Value-preserving then. */
+int lagfx_spv_variant_ia_rebind(const uint32_t *in, size_t words, unsigned mode, uint32_t nia, uint32_t **out, size_t *out_words, char *info, size_t cap);
+
 /* Minimal valid stage stubs ("main"; vertex writes gl_Position = (0,0,0,1) and has no inputs / outputs; fragment writes nothing). */
 extern const uint32_t lagfx_stub_vs_spv[67], lagfx_stub_fs_spv[32];
 

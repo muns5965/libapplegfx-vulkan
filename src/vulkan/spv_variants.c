@@ -236,3 +236,192 @@ int lagfx_spv_variant_drop_dead_undef(const uint32_t *in, size_t words, uint32_t
     if (info && cap) snprintf(info, cap, "%d unreferenced OpUndef dropped", dropped);
     return dropped;
 }
+
+/* ---- rows of the -13 matrix (src/vulkan/pipeline_matrix.c) ---- */
+#define OP_ENTRY_POINT 15u
+#define OP_VARIABLE 59u
+#define OP_SELECT 169u
+#define OP_DECORATE 71u
+#define OP_RETURN_VALUE 254u
+#define OP_COPY_LOGICAL 400u
+#define OP_PTR_EQUAL 401u
+#define OP_PTR_NOT_EQUAL 402u
+#define OP_PTR_DIFF 403u
+#define OP_DECORATE_STRING 5632u
+#define OP_MEMBER_DECORATE_STRING 5633u
+#define OP_EXTENSION 10u
+#define OP_EXECUTION_MODE 16u
+#define DEC_BINDING 33u
+#define DEC_DESCRIPTOR_SET 34u
+
+/* (M9k) ONLY the OpReturnValue operands that are an OpUndef become a fresh OpConstantNull of the same type (hoisted to the module scope); the OpUndef itself and every other
+ * use of it stay. CHANGES MEANING for a returned undef (undefined -> zero). */
+int lagfx_spv_variant_undef_returns(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    if (out) *out = NULL;
+    if (!walk_ok(in, words)) return -1;
+    uint32_t bound = in[3];
+    uint32_t *undef_ty = calloc((size_t)bound + 1, 4);
+    if (!undef_ty) return -1;
+    for (size_t w = 5; w < words; w += in[w] >> 16)
+        if ((in[w] & 0xffffu) == OP_UNDEF && (in[w] >> 16) == 3 && in[w + 2] < bound) undef_ty[in[w + 2]] = in[w + 1];
+    uint32_t *nullid = calloc((size_t)bound + 1, 4);   /* per type id */
+    if (!nullid) { free(undef_ty); return -1; }
+    wbuf_t b = { 0 }, hoist = { 0 };
+    int rc = wput(&b, in, 5), changes = 0;
+    uint32_t next = bound;
+    for (size_t w = 5; w < words && rc >= 0;) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        if (op == OP_RETURN_VALUE && wc == 2 && in[w + 1] < bound && undef_ty[in[w + 1]]) {
+            uint32_t ty = undef_ty[in[w + 1]];
+            if (!nullid[ty]) { nullid[ty] = next++; uint32_t n[3] = { OP_CONST_NULL | (3u << 16), ty, nullid[ty] }; rc = wput(&hoist, n, 3); }
+            uint32_t r[2] = { OP_RETURN_VALUE | (2u << 16), nullid[ty] };
+            if (rc >= 0) rc = wput(&b, r, 2);
+            changes++;
+        } else rc = wput(&b, in + w, wc);
+        w += wc;
+    }
+    free(undef_ty); free(nullid);
+    if (rc < 0) { free(b.w); free(hoist.w); return -1; }
+    if (!changes) { free(b.w); free(hoist.w); if (info && cap) snprintf(info, cap, "no OpReturnValue of an OpUndef"); return 0; }
+    size_t at = first_function(b.w, b.n);
+    uint32_t *nw = malloc((b.n + hoist.n) * 4);
+    if (!nw) { free(b.w); free(hoist.w); return -1; }
+    memcpy(nw, b.w, at * 4), memcpy(nw + at, hoist.w, hoist.n * 4), memcpy(nw + at + hoist.n, b.w + at, (b.n - at) * 4);
+    nw[3] = next;
+    size_t nn = b.n + hoist.n;
+    free(b.w); free(hoist.w);
+    *out = nw, *out_words = nn;
+    if (info && cap) snprintf(info, cap, "%d OpReturnValue(OpUndef) operand(s) -> OpConstantNull (%u new null constant(s))", changes, (unsigned)(next - bound));
+    return changes;
+}
+
+/* (M2) SPIR-V 1.4 -> 1.3 for a module that uses no 1.4-only feature: the version word, and the OpEntryPoint interface lists, which in 1.4+ name EVERY global variable but in
+ * 1.3 may only name Input / Output ones (the others are dropped from the list). Refused (0, reason in info) for a module that is not exactly 1.4 or that uses OpCopyLogical, OpPtrEqual /
+ * NotEqual / Diff, OpSelect of a struct / array, OpDecorateString (no extension) or a float-controls execution mode (no extension). */
+int lagfx_spv_variant_downgrade13(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    if (out) *out = NULL;
+    if (!walk_ok(in, words)) return -1;
+    if (in[1] != 0x00010400u) { if (info && cap) snprintf(info, cap, "module is SPIR-V %u.%u, not 1.4: nothing to downgrade", (in[1] >> 16) & 0xffu, (in[1] >> 8) & 0xffu); return 0; }
+    uint32_t bound = in[3];
+    uint8_t *agg = calloc((size_t)bound + 1, 1);
+    uint8_t *sclass = calloc((size_t)bound + 1, 1);   /* storage class + 1 of each OpVariable id */
+    uint32_t *tyof = calloc((size_t)bound + 1, 4), *vecn = calloc((size_t)bound + 1, 4);   /* result type of an id; component count of a vector type id */
+    if (!agg || !sclass || !tyof || !vecn) { free(agg); free(sclass); free(tyof); free(vecn); return -1; }
+    int fc_ext = 0, has_hlsl_ext = 0, rc = 0;
+    uint32_t booltype = 0, boolvec[5] = { 0 };
+    uint8_t needvec[5] = { 0 };
+    unsigned n_copylogical = 0, n_ptrcmp = 0, n_selagg = 0, n_decstr = 0, n_fc_mode = 0, n_selvec = 0;
+    for (size_t w = 5; w < words; w += in[w] >> 16) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        if ((op == 30u || op == 28u) && wc >= 2 && in[w + 1] < bound) agg[in[w + 1]] = 1;   /* OpTypeStruct / OpTypeArray */
+        else if (op == 20u && wc >= 2 && !booltype) booltype = in[w + 1];                    /* OpTypeBool */
+        else if (op == OP_TYPE_VECTOR && wc >= 4 && in[w + 1] < bound) { vecn[in[w + 1]] = in[w + 3]; if (booltype && in[w + 2] == booltype && in[w + 3] >= 2 && in[w + 3] <= 4) boolvec[in[w + 3]] = in[w + 1]; }
+        else if (op == OP_VARIABLE && wc >= 4 && in[w + 2] < bound) { sclass[in[w + 2]] = (uint8_t)(in[w + 3] + 1u); tyof[in[w + 2]] = in[w + 1]; }
+        else if (op == OP_EXTENSION) {
+            const char *e = (const char *)(in + w + 1);
+            if (!strncmp(e, "SPV_KHR_float_controls", 22)) fc_ext = 1;
+            if (!strncmp(e, "SPV_GOOGLE_hlsl_functionality1", 30) || !strncmp(e, "SPV_GOOGLE_user_type", 20)) has_hlsl_ext = 1;
+        } else if (op == OP_COPY_LOGICAL) n_copylogical++;
+        else if (op == OP_PTR_EQUAL || op == OP_PTR_NOT_EQUAL || op == OP_PTR_DIFF) n_ptrcmp++;
+        else if (op == OP_SELECT && wc == 6 && in[w + 1] < bound && agg[in[w + 1]]) n_selagg++;
+        else if (op == OP_DECORATE_STRING || op == OP_MEMBER_DECORATE_STRING) n_decstr++;
+        else if (op == OP_EXECUTION_MODE && wc >= 3 && in[w + 2] >= 4459u && in[w + 2] <= 4463u) n_fc_mode++;
+        if (typed(op) && wc >= 3 && in[w + 2] < bound) tyof[in[w + 2]] = in[w + 1];
+        if (op == OP_SELECT && wc == 6 && in[w + 1] < bound && vecn[in[w + 1]] && in[w + 3] < bound && booltype && tyof[in[w + 3]] == booltype) { n_selvec++; if (vecn[in[w + 1]] <= 4) needvec[vecn[in[w + 1]]] = 1; }   /* scalar condition, vector result: 1.4 only */
+    }
+    if (n_copylogical || n_ptrcmp || n_selagg || (n_decstr && !has_hlsl_ext) || (n_fc_mode && !fc_ext)) {
+        if (info && cap) snprintf(info, cap, "uses 1.4-only features: OpCopyLogical x%u, OpPtrEqual/NotEqual/Diff x%u, OpSelect of struct/array x%u, OpDecorateString x%u, float-controls modes x%u", n_copylogical, n_ptrcmp, n_selagg, n_decstr, n_fc_mode);
+        free(agg); free(sclass); free(tyof); free(vecn);
+        return 0;
+    }
+    /* a scalar-condition OpSelect of a vector (1.4 only) becomes OpCompositeConstruct of a bool vector + the vector-condition OpSelect (valid in 1.3); needs bool-vector types, added at the module scope when absent */
+    wbuf_t b = { 0 }, newtypes = { 0 };
+    uint32_t next = bound;
+    if (n_selvec) {
+        for (uint32_t n = 2; n <= 4; n++) if (needvec[n] && !boolvec[n]) { boolvec[n] = next++; uint32_t t[4] = { OP_TYPE_VECTOR | (4u << 16), boolvec[n], booltype, n }; if (wput(&newtypes, t, 4) < 0) rc = -1; }
+    }
+    if (rc >= 0) rc = wput(&b, in, 5);
+    int dropped = 0;
+    if (rc >= 0) b.w[1] = 0x00010300u;
+    for (size_t w = 5; w < words && rc >= 0;) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        if (op == OP_ENTRY_POINT && wc >= 4) {
+            size_t k = w + 3;   /* the name: a nul-terminated string in whole words */
+            while (k < w + wc) { const char *p = (const char *)(in + k); k++; if (!p[0] || !p[1] || !p[2] || !p[3]) break; }
+            uint32_t *tmp = malloc((size_t)wc * 4);
+            if (!tmp) { rc = -1; break; }
+            size_t o = k - w;
+            memcpy(tmp, in + w, o * 4);
+            for (size_t i = k; i < w + wc; i++) {
+                uint32_t id = in[i];
+                uint32_t sc = id < bound ? sclass[id] : 0u;   /* storage class + 1 */
+                if (sc && sc != 2u /* Input */ && sc != 4u /* Output */) { dropped++; continue; }
+                tmp[o++] = id;
+            }
+            tmp[0] = OP_ENTRY_POINT | ((uint32_t)o << 16);
+            rc = wput(&b, tmp, o);
+            free(tmp);
+        } else if (op == OP_SELECT && wc == 6 && in[w + 1] < bound && vecn[in[w + 1]] && in[w + 3] < bound && booltype && tyof[in[w + 3]] == booltype) {
+            uint32_t n = vecn[in[w + 1]], cv = next++;
+            uint32_t cc[7] = { 80u /* OpCompositeConstruct */ | ((3u + n) << 16), boolvec[n], cv, in[w + 3], in[w + 3], in[w + 3], in[w + 3] };
+            rc = wput(&b, cc, 3u + n);
+            uint32_t sel[6] = { OP_SELECT | (6u << 16), in[w + 1], in[w + 2], cv, in[w + 4], in[w + 5] };
+            if (rc >= 0) rc = wput(&b, sel, 6);
+        } else rc = wput(&b, in + w, wc);
+        w += wc;
+    }
+    free(agg); free(sclass); free(tyof); free(vecn);
+    if (rc >= 0 && newtypes.n) {
+        size_t at = first_function(b.w, b.n);
+        uint32_t *nw = malloc((b.n + newtypes.n) * 4);
+        if (!nw) rc = -1;
+        else { memcpy(nw, b.w, at * 4), memcpy(nw + at, newtypes.w, newtypes.n * 4), memcpy(nw + at + newtypes.n, b.w + at, (b.n - at) * 4); free(b.w); b.w = nw, b.n += newtypes.n; }
+    }
+    free(newtypes.w);
+    if (rc < 0) { free(b.w); return -1; }
+    b.w[3] = next;
+    *out = b.w, *out_words = b.n;
+    if (info && cap) snprintf(info, cap, "SPIR-V 1.4 -> 1.3, %d non-Input/Output id(s) dropped from the OpEntryPoint interface list(s), %u scalar-condition OpSelect of a vector rewritten with a bool-vector condition", dropped, n_selvec);
+    return 1 + dropped + (int)n_selvec;
+}
+
+/* (M3b / M4a) input-attachment renumbering, read from the module itself. A variable with an InputAttachmentIndex k is an input attachment.
+ *   mode 0 (IAFIRST): input attachments get Binding = k (set unchanged); every other descriptor variable of set 0 is shifted up by `nia`.
+ *   mode 1 (IASET1):  input attachments move to DescriptorSet 1, Binding = k; nothing else changes.
+ * `nia` = the number of input attachments of the FRAGMENT module (the vertex module has none but its bindings shift all the same). The pipeline layout must be renumbered the same way. */
+#define DEC_INPUT_ATTACHMENT_INDEX 43u
+int lagfx_spv_variant_ia_rebind(const uint32_t *in, size_t words, unsigned mode, uint32_t nia, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    if (out) *out = NULL;
+    if (!walk_ok(in, words)) return -1;
+    uint32_t bound = in[3];
+    uint32_t *iai = calloc((size_t)bound + 1, 4);   /* InputAttachmentIndex + 1 */
+    uint8_t *has_b = calloc((size_t)bound + 1, 1);
+    if (!iai || !has_b) { free(iai); free(has_b); return -1; }
+    unsigned n_ia = 0;
+    for (size_t w = 5; w < words; w += in[w] >> 16) {
+        if ((in[w] & 0xffffu) != OP_DECORATE || (in[w] >> 16) < 4 || in[w + 1] >= bound) continue;
+        if (in[w + 2] == DEC_INPUT_ATTACHMENT_INDEX) { iai[in[w + 1]] = in[w + 3] + 1u; n_ia++; }
+        else if (in[w + 2] == DEC_BINDING) has_b[in[w + 1]] = 1;
+    }
+    wbuf_t b = { 0 };
+    int rc = wput(&b, in, 5), changes = 0;
+    for (size_t w = 5; w < words && rc >= 0;) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        uint32_t tmp[4];
+        if (op == OP_DECORATE && wc == 4 && in[w + 1] < bound && has_b[in[w + 1]] && (in[w + 2] == DEC_DESCRIPTOR_SET || in[w + 2] == DEC_BINDING)) {
+            memcpy(tmp, in + w, 16);
+            uint32_t k = iai[in[w + 1]];
+            if (mode == 0) { if (in[w + 2] == DEC_BINDING) tmp[3] = k ? k - 1u : in[w + 3] + nia; }
+            else if (k) tmp[3] = in[w + 2] == DEC_DESCRIPTOR_SET ? 1u : k - 1u;
+            if (tmp[3] != in[w + 3]) changes++;
+            rc = wput(&b, tmp, 4);
+        } else rc = wput(&b, in + w, wc);
+        w += wc;
+    }
+    free(iai); free(has_b);
+    if (rc < 0) { free(b.w); return -1; }
+    if (!changes) { free(b.w); if (info && cap) snprintf(info, cap, "no descriptor variable to renumber"); return 0; }
+    *out = b.w, *out_words = b.n;
+    if (info && cap) snprintf(info, cap, "%d descriptor decoration(s) renumbered (%u input attachment variable(s))", changes, n_ia);
+    return changes;
+}
