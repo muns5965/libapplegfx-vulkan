@@ -10,6 +10,7 @@
 #include "protocol/arm64_objects.h"
 #include "protocol/arm64_pipeline.h"
 #include "protocol/arm64_dump.h"
+#include "protocol/arm64_completion.h"
 #include "vulkan/command.h"
 #include <dirent.h>
 #include <fcntl.h>
@@ -37,6 +38,9 @@
 #define LEAF_PFN   18u
 #define DATA_PFN0  32u
 #define NVPN       24u
+
+/* test protocols are calloc'ed: the deferred-completion queue the drain creates must be shut down before the struct goes (leak check under ASAN) */
+static void pfree(lagfx_protocol_t *p) { lagfx_arm64_cq_shutdown(p, 1000); free(p); }
 
 static uint8_t *g_mem;
 static bool rd(void *o, uint64_t gpa, uint64_t len, void *dst) { (void)o; if (gpa + len > MEM_SIZE) return false; memcpy(dst, g_mem + gpa, len); return true; }
@@ -384,7 +388,7 @@ static void test_resolver_triangle_and_topology(void) {
     assert(PIPE(p).rf_no_refs == 1 && RUNC(p).pipeline_unresolved == 1 && RUNC(p).draws == 5);
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
-    free(p);
+    pfree(p);
     puts("PASS: default resolver on lavapipe: triangle.metallib, line/strip/list/strip topologies cached per pipeline, point skipped (no PointSize), unsupported primitive, unresolvable pipeline");
 }
 
@@ -427,7 +431,7 @@ static void test_textured_draw(void) {
     assert(PIPE(p).desc_unaligned + PIPE(p).desc_unbound + PIPE(p).desc_feedback >= 3);
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
-    free(p);
+    pfree(p);
     g_res_tex = false;
     puts("PASS: descriptor binding on lavapipe: 3 storage buffers + texture + inline sampler read back, unbound / feedback / unaligned skipped");
 }
@@ -472,7 +476,7 @@ static void test_invalidation(void) {
     lagfx_a64_exec_object_counts(p, &live, &cr, &de);
     assert(live == 0 && cr == de);
     lagfx_a64_exec_free(p);
-    free(p);
+    pfree(p);
     puts("PASS: cache invalidation: payload rewritten in place, entry replaced, release deferred behind a pending fence");
 }
 #endif
@@ -543,7 +547,7 @@ static void test_dump(void) {
     uint64_t before = PIPE(p).dump_objects;
     dump_exec(p);
     assert(PIPE(p).dump_objects == before && PIPE(p).dump_draws == 2 + 2);
-    free(p);
+    pfree(p);
 
     /* caps: a per-file cap below the library size writes .TRUNCATED and says so; the total cap stops files but the index still lists every blob */
     mkdtemp_dir();
@@ -559,7 +563,7 @@ static void test_dump(void) {
     assert(PIPE(p).dump_truncated >= 1 && PIPE(p).dump_skipped_cap >= 1 && PIPE(p).dump_bytes <= 250);
     idx = read_all(g_dir, "index.txt");
     assert(idx && strstr(idx, "truncated=1") && strstr(idx, "saved_size=100") && strstr(idx, "saved_size=0") && strstr(idx, "full_size=6652"));
-    free(idx); free(p);
+    free(idx); pfree(p);
 
     /* no overwrite, no symlink following: pre-create what would be written */
     mkdtemp_dir();
@@ -569,7 +573,7 @@ static void test_dump(void) {
         setenv("LAGFX_ARM64_DUMP_DIR", d2, 1);
         unsetenv("LAGFX_ARM64_DUMP_MAX_FILE"); unsetenv("LAGFX_ARM64_DUMP_MAX_TOTAL");
         lagfx_a64_dump_reset();
-        p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p); free(p);
+        p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p); pfree(p);
         assert(dir_has(d2, "lib_", first, sizeof first));
     }
     snprintf(victim, sizeof victim, "%s/victim.txt", g_dir);
@@ -578,7 +582,7 @@ static void test_dump(void) {
     assert(symlink(victim, lnk) == 0);
     setenv("LAGFX_ARM64_DUMP_DIR", g_dir, 1);
     lagfx_a64_dump_reset();
-    p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p); free(p);
+    p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p); pfree(p);
     char *vk = read_all(g_dir, "victim.txt");
     assert(vk && !strcmp(vk, "KEEP"));                                                       /* the symlink was not followed, the file not overwritten */
     free(vk);
@@ -589,12 +593,12 @@ static void test_dump(void) {
     lagfx_a64_dump_reset();
     p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p);
     assert(PIPE(p).dump_objects >= 6 && PIPE(p).dump_files == 0);
-    free(p);
+    pfree(p);
     setenv("LAGFX_ARM64_DUMP_DIR", "/nonexistent-lagfx-dir", 1);
     lagfx_a64_dump_reset();
     p = mk(LAGFX_PROTO_ARM64_VMAPPLE); def_task(p, 1); build_objects(); dump_exec(p);
     assert(PIPE(p).dump_objects >= 6 && PIPE(p).dump_files == 0);
-    free(p);
+    pfree(p);
     unsetenv("LAGFX_ARM64_DUMP_DIR");
     lagfx_a64_dump_reset();
 
@@ -608,7 +612,7 @@ static void test_dump(void) {
         cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TRI); cb_draw(3, 0, 3); exec(p, 1, cb_finish());
         if (0) printf("INFO: nt=%llu np=%llu ni=%llu bad=%llu nopipe=%llu skipped=%llu ou=%llu\n", (unsigned long long)RUNC(p).no_target, (unsigned long long)RUNC(p).no_pass, (unsigned long long)RUNC(p).pipeline_unresolved,(unsigned long long)RUNC(p).bad_rec,(unsigned long long)RUNC(p).no_pipeline,(unsigned long long)RUNC(p).draws_skipped,(unsigned long long)RUNC(p).obj_unsupported); printf("INFO: both on: objs=%llu files=%llu draws=%llu resolved=%llu failed=%llu\n", (unsigned long long)PIPE(p).dump_objects, (unsigned long long)PIPE(p).dump_files, (unsigned long long)RUNC(p).draws, (unsigned long long)PIPE(p).resolved, (unsigned long long)PIPE(p).resolve_failed);
         assert(PIPE(p).dump_objects >= 6 && PIPE(p).dump_files >= 4 && RUNC(p).draws == 1 && PIPE(p).resolved >= 2);
-        lagfx_a64_exec_free(p); free(p);
+        lagfx_a64_exec_free(p); pfree(p);
         unsetenv("LAGFX_ARM64_EXEC");
     }
 #endif
@@ -639,7 +643,7 @@ static void test_missing_caps(void) {
     lagfx_protocol_t *p = new_task(&t);
     tri_exec(p, REF_PIPE_TRI, 3, 3, false);
     assert(PIPE(p).resolved == 1 && RUNC(p).draws == 1 && PIPE(p).rf_missing_cap == 0);
-    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
     /* every capability 'missing': the generated shaders declare at least Int64 / VariablePointers... or SPIR-V 1.4; those pipelines must not be built */
     lagfx_vk_caps_inject_missing(vk, LAGFX_VK_CAP_ALL);
     p = new_task(&t);
@@ -650,7 +654,7 @@ static void test_missing_caps(void) {
            (unsigned long long)RUNC(p).draws, (unsigned long long)RUNC(p).draws_skipped, (unsigned long long)PIPE(p).resolved, (unsigned long long)PIPE(p).pipes_built);
     assert(PIPE(p).rf_missing_cap == 1 && total >= 1 && PIPE(p).resolved == 0 && PIPE(p).pipes_built == 0);   /* no shader module, no pipeline: nothing invalid reached Vulkan */
     assert(RUNC(p).draws == 0 && RUNC(p).draws_skipped >= 1 && RUNC(p).submit_failed == 0);
-    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
     /* only a capability the shaders do not use is missing: unaffected */
     vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
     uint32_t need_tri = 0;
@@ -659,7 +663,7 @@ static void test_missing_caps(void) {
         lagfx_vk_caps_inject_missing(vk, LAGFX_VK_CAP_ALL);
         tri_exec(p, REF_PIPE_TRI, 3, 3, false);
         for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT; c++) if (PIPE(p).stub_missing_cap[c]) need_tri |= LAGFX_VK_CAP_BIT(c);
-        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
         vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
     }
     assert(need_tri != 0);
@@ -667,7 +671,7 @@ static void test_missing_caps(void) {
     p = new_task(&t);
     tri_exec(p, REF_PIPE_TRI, 3, 3, false);
     assert(PIPE(p).rf_missing_cap == 0 && PIPE(p).resolved == 1 && RUNC(p).draws == 1);
-    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
     vk->caps_enabled = saved_en, vk->caps_missing = saved_ms;
     printf("PASS: device-capability gate: shader needing missing caps (mask 0x%x) -> no pipeline, draw skipped, stub_missing_cap counted; unrelated missing caps do not block\n", need_tri);
 }
