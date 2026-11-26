@@ -462,6 +462,10 @@ typedef struct lagfx_protocol {
     _Atomic uint32_t pending_stamps_bitmask;  // Bits set for slots needing IRQ
     uint32_t last_completed_stamp;             // Most recent stamp value acked (diag only)
     _Atomic uint32_t pending_displays_bitmask; // Display interrupt bitmask
+    /* Display doorbell counters (diagnostics only, relaxed atomics: touched by vCPU threads and the shell's signal thread, never reset by device reset).
+     * db_reads/db_nonzero/db_bit[]: MMIO reads of 0x1014 and the bits of the returned mask; sig_total/sig_bit[]: lagfx_device_signal_display() calls
+     * and the cause bits they raised. */
+    _Atomic uint64_t db_reads, db_nonzero, db_bit[4], sig_total, sig_bit[4];
 
     /* Task table (per CmdDefineTask2) */
     lagfx_task_entry_t tasks[LAGFX_MAX_TASKS];

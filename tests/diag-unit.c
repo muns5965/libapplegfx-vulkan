@@ -2,6 +2,9 @@
 #include "dispatchers/channel_0_dispatcher.h"
 #include "protocol/diag.h"
 #include "protocol/state.h"
+#include "device.h"
+#include "doorbell.h"
+#include "libapplegfx-vulkan.h"
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +18,9 @@ static long file_lines(const char *path, const char *needle) {
     while (fgets(line, sizeof line, f)) if (strstr(line, needle)) n++;
     fclose(f); return n;
 }
+
+#include <time.h>
+static uint64_t now_ns_for_test(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec; }
 
 static void *tick_hammer(void *arg) {
     lagfx_protocol_t *p = arg;
@@ -93,6 +99,25 @@ int main(void) {
         assert(file_lines(path, "g7-gpu: t=") == nb + 2);
         lagfx_diag_final(p);
         assert(file_lines(path, "g7-gpu: t=") == nb + 3 && file_lines(path, "g7-gpu-final:") == 1);
+    }
+
+    {   /* display doorbell counters: reads of 0x1014 and signals, library side; they must reach the g7-gpu-display line without any display op */
+        lagfx_device_t *dev = calloc(1, sizeof *dev);
+        dev->magic = LAGFX_DEVICE_MAGIC; dev->protocol_state = p;
+        assert(doorbell_handle_read(p, 0x1014) == 0);
+        lagfx_device_signal_display(dev, 0x1); lagfx_device_signal_display(dev, 0x5); lagfx_device_signal_display(dev, 0);
+        assert(doorbell_handle_read(p, 0x1014) == 0x5);   /* 0x1 | 0x5, cleared by the read */
+        assert(doorbell_handle_read(p, 0x1014) == 0);
+        lagfx_device_signal_display(dev, 0x8);
+        assert(doorbell_handle_read(p, 0x1014) == 0x8);
+        assert(p->db_reads == 4 && p->db_nonzero == 2 && p->db_bit[0] == 1 && p->db_bit[1] == 0 && p->db_bit[2] == 1 && p->db_bit[3] == 1);
+        assert(p->sig_total == 3 && p->sig_bit[0] == 2 && p->sig_bit[1] == 0 && p->sig_bit[2] == 1 && p->sig_bit[3] == 1);
+        long nd = file_lines(path, "g7-gpu-display:");
+        lagfx_diag_stats(p, now_ns_for_test(), true);
+        assert(file_lines(path, "g7-gpu-display:") == nd + 1);
+        assert(file_lines(path, "op_setpage=0 op_ack=0 op_swap=0") >= 1);
+        assert(file_lines(path, "db_reads=4 db_nonzero=2 db_bit0=1 db_bit1=0 db_bit2=1 db_bit3=1 sig_total=3 sig_bit0=2 sig_bit1=0 sig_bit2=1 sig_bit3=1") == 1);
+        free(dev);
     }
 
     free(p); remove(path); close(fd);
