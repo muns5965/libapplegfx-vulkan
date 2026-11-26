@@ -593,6 +593,11 @@ typedef struct lagfx_protocol {
                 uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override, sg_emulated;
                 uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
                 uint64_t skip_no_pass, skip_no_pipe, skip_bad_rec, skip_local, skip_no_sg32, skip_rt, skip_unbound, skip_unaligned, skip_feedback, skip_desc, skip_pipe_build, resume_failed;
+                uint64_t gathered, gather_failed, unaligned_written;    /* read-only buffers bound through an aligned copy / copy impossible / unaligned buffers the kernel may write (skipped) */
+#define LAGFX_TILE_SEEN_MAX 8u
+                /* the first 8 distinct dispatch geometries and unaligned buffer binds (for the log) */
+                struct lagfx_tile_geom { bool region; uint32_t ox, oy, rw, rh, tw, th, td, tgt_w, tgt_h; } geom[LAGFX_TILE_SEEN_MAX]; uint32_t n_geom;
+                struct lagfx_tile_unal { uint32_t metal_index; bool written; uint64_t off, len, align; } unal[LAGFX_TILE_SEEN_MAX]; uint32_t n_unal;
             } tile;
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];

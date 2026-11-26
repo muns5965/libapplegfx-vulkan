@@ -28,7 +28,7 @@
 
 enum { TB_BUFFER = 1, TB_TEXTURE = 2, TB_SAMPLER = 3, TB_RT = 5 };
 
-typedef struct { uint8_t binding, kind; int16_t metal_index; } tile_bind_t;
+typedef struct { uint8_t binding, kind; int16_t metal_index; uint8_t written; } tile_bind_t;   /* written: the arg metadata says the kernel may write the buffer (air.write / air.read_write) */
 
 struct lagfx_a64_tile_pipe {
     struct lagfx_vk_state *vk;
@@ -190,14 +190,14 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
         uint32_t nth[4] = { 0, 0, 0, 0 };
         for (uint32_t i = 0; i < nsb; i++) {
             tile_bind_t *b = &tp->bind[tp->n_bind];
-            b->binding = (uint8_t)sb[i].binding, b->kind = sb[i].kind, b->metal_index = -1;
+            b->binding = (uint8_t)sb[i].binding, b->kind = sb[i].kind, b->metal_index = -1, b->written = 1;   /* unknown access (no metadata) counts as written: never gathered */
             if (sb[i].binding > 255u) { TILE(p).pipe_bindings++; goto fail; }
             if (sb[i].kind == TB_RT) {
                 if (sb[i].binding < TILE_RT_BASE || sb[i].binding >= TILE_RT_BASE + 4u) { TILE(p).pipe_bindings++; goto fail; }
                 tp->rt_mask |= 1u << (sb[i].binding - TILE_RT_BASE);
             } else {
                 uint32_t want = sb[i].kind, n = nth[want]++, seen = 0;
-                for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && seen++ == n) { b->metal_index = ab[k].metal_index; break; }
+                for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && seen++ == n) { b->metal_index = ab[k].metal_index; b->written = ab[k].written; break; }
                 if (b->metal_index > 30 || (b->metal_index < 0 && sb[i].kind != TB_SAMPLER)) { TILE(p).pipe_bindings++; goto fail; }
             }
             tp->n_bind++;
@@ -343,10 +343,37 @@ static VkDescriptorSet alloc_set(lagfx_a64_tile_t *t, VkDescriptorSetLayout dsl)
     }
 }
 
+
+/* The first TILE_SEEN_MAX distinct geometries / unaligned binds are kept in the stats so the device log names them (state.h: tile.seen_*). */
+static void tile_note_geom(lagfx_protocol_t *p, const lagfx_a64_tile_disp_t *d, uint32_t tgt_w, uint32_t tgt_h) {
+    struct lagfx_tile_geom g; memset(&g, 0, sizeof g);
+    g = (struct lagfx_tile_geom){ d->region, d->ox, d->oy, d->rw, d->rh, d->tw, d->th, d->td, tgt_w, tgt_h };
+    for (uint32_t i = 0; i < TILE(p).n_geom; i++) if (!memcmp(&TILE(p).geom[i], &g, sizeof g)) return;
+    if (TILE(p).n_geom < LAGFX_TILE_SEEN_MAX) TILE(p).geom[TILE(p).n_geom++] = g;
+}
+static void tile_note_unaligned(lagfx_protocol_t *p, uint32_t metal_index, uint64_t off, uint64_t len, uint64_t align, bool written) {
+    struct lagfx_tile_unal u; memset(&u, 0, sizeof u);
+    u = (struct lagfx_tile_unal){ metal_index, written, off, len, align };
+    for (uint32_t i = 0; i < TILE(p).n_unal; i++) if (!memcmp(&TILE(p).unal[i], &u, sizeof u)) return;
+    if (TILE(p).n_unal < LAGFX_TILE_SEEN_MAX) TILE(p).unal[TILE(p).n_unal++] = u;
+}
+#define TILE_GATHER_MAX (8ull << 20)
+/* Metal accepts any 4-aligned buffer offset, Vulkan only multiples of minStorageBufferOffsetAlignment. A buffer the kernel never writes (arg metadata has no
+ * air.write) is bound as an aligned host copy of [off, length) made now (a snapshot: GPU writes earlier in the same exec are not seen). Same technique as
+ * arm64_exec_run.c gather_copy. A buffer the kernel may write cannot be copied (its writes would be lost): skipped. */
+static VkBuffer tile_gather(lagfx_a64_rexec_t *x, lagfx_protocol_t *p, lagfx_a64_obj_t *o, uint64_t off, uint64_t range) {
+    VkBuffer sb; uint8_t *mp;
+    if (!o->map || range > TILE_GATHER_MAX || !lagfx_a64_res_scratch(x, range, &sb, &mp)) { TILE(p).gather_failed++; return VK_NULL_HANDLE; }
+    memcpy(mp, o->map + off, (size_t)range);
+    TILE(p).gathered++;
+    return sb;
+}
+
 bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, const lagfx_a64_tile_env_t *e, const lagfx_a64_tile_disp_t *d) {
     lagfx_protocol_t *p = e->p;
     struct lagfx_vk_state *vk = t->vk;
     const VkPhysicalDeviceLimits *lim = &vk->phys_props.limits;
+    tile_note_geom(p, d, e->tgt_w, e->tgt_h);
     if (d->has_rt_index && d->rt_index) { TILE(p).rt_index_ignored++; }
     if (d->tw > lim->maxComputeWorkGroupSize[0] || d->th > lim->maxComputeWorkGroupSize[1] || d->td > lim->maxComputeWorkGroupSize[2] ||
         (uint64_t)d->tw * d->th * d->td > lim->maxComputeWorkGroupInvocations) { TILE(p).skip_local++; return false; }
@@ -398,10 +425,17 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
         if (b->kind == TB_BUFFER) {
             lagfx_a64_obj_t *o = t->buf[mi].b; uint64_t off = t->buf[mi].off;
             if (!o || off >= o->length) { TILE(p).skip_unbound++; return false; }
-            if (off % sb_align) { TILE(p).skip_unaligned++; return false; }
             VkDeviceSize range = o->length - off;
             if (lim->maxStorageBufferRange && range > lim->maxStorageBufferRange) range = lim->maxStorageBufferRange;
-            bi[i] = (VkDescriptorBufferInfo){ o->buf, off, range }, w[i].pBufferInfo = &bi[i];
+            VkBuffer dbuf = o->buf; VkDeviceSize doff = off;
+            if (off % sb_align) {
+                tile_note_unaligned(p, mi, off, o->length, sb_align, b->written);
+                if (b->written) { TILE(p).skip_unaligned++, TILE(p).unaligned_written++; return false; }
+                dbuf = tile_gather(e->x, p, o, off, range);
+                if (!dbuf) { TILE(p).skip_unaligned++; return false; }
+                doff = 0;
+            }
+            bi[i] = (VkDescriptorBufferInfo){ dbuf, doff, range }, w[i].pBufferInfo = &bi[i];
             lagfx_a64_res_buf_written(o);   /* the kernel may write it: a linear texture over it is stale from here on */
         } else if (b->kind == TB_TEXTURE) {
             lagfx_a64_obj_t *o = t->tex[mi];
