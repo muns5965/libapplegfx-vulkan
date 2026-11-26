@@ -70,7 +70,10 @@ int lagfx_exec_walk_segment(const uint8_t *buf, uint32_t avail, uint64_t len, la
     s->seglen = seglen;
     uint64_t room = len - pos;                       /* bytes after the header(s) */
     uint64_t body = seglen;
-    if (body > room) body = room, s->clamped = true; /* Apple: `if (p + seglen < end) end = p + seglen` -> clamps silently */
+    if (body > room) {   /* Apple only ever shrinks the end (p + seglen < end); real guests write seglen = whole buffer including the 8-byte header, i.e. room + 8 */
+        body = room;
+        if (seglen > room + 8u) s->clamped = true;   /* only a seglen beyond even that is unusual */
+    }
     s->body_len = (uint32_t)body;
     s->tail = (uint32_t)(room - body);
     uint64_t have = avail > pos ? avail - pos : 0;   /* bytes of the body actually in buf */
