@@ -139,7 +139,9 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
         return VK_FALSE;
     }
     /* A validation layer older than VK_KHR_dynamic_rendering_local_read (< header 1.3.287) does not know its struct type / layout / extension: that is the layer, not us. */
-    if (strstr(pCallbackData->pMessage, "1000232000") || strstr(pCallbackData->pMessage, "dynamic_rendering_local_read")) return VK_FALSE;
+    if (strstr(pCallbackData->pMessage, "unknown VkStructureType (1000232000)") ||
+        (strstr(pCallbackData->pMessage, "VK_KHR_dynamic_rendering_local_read is not supported by this layer")) ||
+        strstr(pCallbackData->pMessage, "(1000232000) does not fall within the begin..end range of the core VkImageLayout")) return VK_FALSE;
     lagfx_vk_validation_msg_count++;
     if (getenv("LAGFX_VK_VALIDATION_PRINT")) fprintf(stderr, "validation: %s\n", pCallbackData->pMessage);
     LAGFX_WARN("validation: %s", pCallbackData->pMessage);  /* stderr is dropped in-container */
@@ -392,7 +394,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
 
     /* Required (core-1.3 promoted but still enumerated as extensions
      * on some ICDs; ask explicitly for widest compatibility). */
-    const char *wanted_dev_exts[12];
+    const char *wanted_dev_exts[14];
     uint32_t    wanted_dev_n = 0;
     bool want_dyn_rendering =
         has_ext(dext, dext_n, "VK_KHR_dynamic_rendering");
@@ -608,6 +610,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .ppEnabledExtensionNames = wanted_dev_n ? wanted_dev_exts : NULL,
     };
     s->have_independent_blend = probe2.features.independentBlend == VK_TRUE;
+    VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT ro_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, .rasterizationOrderColorAttachmentAccess = VK_TRUE };
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
     {   /* Framebuffer-fetch / blend diagnostics, queried only (never enabled here): printed once as the g7-gpu-feat line. Own struct for local read: older headers lack it. */
         const bool lr_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 4u);
@@ -626,12 +629,18 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
             s->have_local_read = true;
         }
+        if ((ext_ro_ext || ext_ro_arm) && ro.rasterizationOrderColorAttachmentAccess && !getenv("LAGFX_VK_NO_RASTER_ORDER")) {   /* same-draw ordering of input-attachment reads/writes */
+            ro_en.pNext = feat13.pNext; feat13.pNext = &ro_en;
+            wanted_dev_exts[wanted_dev_n++] = ext_ro_ext ? "VK_EXT_rasterization_order_attachment_access" : "VK_ARM_rasterization_order_attachment_access";
+            dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+            s->have_raster_order = true;
+        }
         static bool feat_printed;
         if (!feat_printed) {
             feat_printed = true;
             char fl[400];
-            snprintf(fl, sizeof fl, "g7-gpu-feat: local_read_enabled=%d independentBlend=%d dynamicRenderingLocalRead=%d(core1.4=%d ext=%d) rasterOrderColorAttachmentAccess=%d(ext_EXT=%d ext_ARM=%d) rasterOrderDepthAccess=%d rasterOrderStencilAccess=%d",
-                     (int)s->have_local_read, (int)probe2.features.independentBlend, (int)((lr_core || ext_lr) ? lr.dynamicRenderingLocalRead : 0), (int)lr_core, (int)ext_lr,
+            snprintf(fl, sizeof fl, "g7-gpu-feat: local_read_enabled=%d raster_order_enabled=%d independentBlend=%d dynamicRenderingLocalRead=%d(core1.4=%d ext=%d) rasterOrderColorAttachmentAccess=%d(ext_EXT=%d ext_ARM=%d) rasterOrderDepthAccess=%d rasterOrderStencilAccess=%d",
+                     (int)s->have_local_read, (int)s->have_raster_order, (int)probe2.features.independentBlend, (int)((lr_core || ext_lr) ? lr.dynamicRenderingLocalRead : 0), (int)lr_core, (int)ext_lr,
                      (int)((ext_ro_ext || ext_ro_arm) ? ro.rasterizationOrderColorAttachmentAccess : 0), (int)ext_ro_ext, (int)ext_ro_arm,
                      (int)((ext_ro_ext || ext_ro_arm) ? ro.rasterizationOrderDepthAttachmentAccess : 0), (int)((ext_ro_ext || ext_ro_arm) ? ro.rasterizationOrderStencilAttachmentAccess : 0));
             fprintf(stderr, "%s\n", fl);

@@ -150,7 +150,7 @@ static void build_objects(void) {
     const float v[8] = { -0.9f, -0.9f, 0.9f, -0.9f, 0.0f, 0.9f, 0.0f, 0.0f };
     va_write((uint64_t)VPN_VB << 14, v, sizeof v);
     put_buffer_object(REF_VB, 0x200, 0x4000, VPN_VB);
-    const uint16_t idx[4] = { 0, 1, 2, 0 };
+    const uint16_t idx[6] = { 0, 1, 2, 0, 1, 2 };
     va_write((uint64_t)VPN_IB << 14, idx, sizeof idx);
     put_buffer_object(REF_IB, 0x220, 0x4000, VPN_IB);
     uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
@@ -541,6 +541,24 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
 }
 
 static void test_exec_fetch(void) {
+    if (!g_dev->vk->have_local_read) {   /* LAGFX_VK_NO_LOCAL_READ=1 run: the draw is refused and counted, the clear survives */
+        setenv("LAGFX_ARM64_EXEC", "1", 1);
+        lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        lagfx_task_entry_t *t = def_task(p, 1);
+        build_objects();
+        lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+        g_blend.fetch = 1;
+        static const double blue[4] = { 0, 0, 1, 1 };
+        cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
+        exec(p, 1, cb_finish(), true);
+        uint8_t img[RT_W * RT_H * 4]; uint32_t w, h;
+        assert(p->diag2.exec.pipe.stub_fbfetch == 1 && p->diag2.exec.run.draws_skipped == 1 && p->diag2.exec.run.submit_failed == 0);
+        assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h) && px(img, 8, 8) == 0xff0000ffu);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+        g_blend.fetch = 0;
+        puts("PASS: framebuffer fetch without local read: draw refused and counted, clear kept");
+        return;
+    }
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
     lagfx_task_entry_t *t = def_task(p, 1);
@@ -562,6 +580,21 @@ static void test_exec_fetch(void) {
     lagfx_a64_exec_free(p);
     free(p);
     g_blend.fetch = 0;
+    {   /* ONE indexed draw of two overlapping identical triangles: the second fragment must read what the first wrote (0.5 -> 1.0 red) */
+        lagfx_protocol_t *q = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        lagfx_task_entry_t *tq = def_task(q, 1);
+        build_objects();
+        lagfx_a64_exec_set_pipeline_resolver(q, resolver, NULL);
+        g_blend.fetch = 1;
+        cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw_indexed(REF_IB, 6);
+        exec(q, 1, cb_finish(), true);
+        assert(q->diag2.exec.run.submit_failed == 0 && q->diag2.exec.run.draws == 1);
+        assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX, img, sizeof img, &w, &h));
+        uint32_t v2 = px(img, 8, 8);
+        assert(((v2 >> 16) & 255) == 255 && (v2 & 255) == 255);
+        lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
+        g_blend.fetch = 0;
+    }
     /* two attachments: BGRA8 slot 0 + RGBA16F slot 1, FS reads BOTH (dest_0 / dest_1 told apart) and writes both */
     {
         lagfx_protocol_t *q = mk(LAGFX_PROTO_ARM64_VMAPPLE);

@@ -293,6 +293,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     }
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
+        .flags = desc->raster_order_access ? 0x1u /* VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT (= the ARM bit) */ : 0u,
         .attachmentCount = ncol,
         .pAttachments = ncol > 1u ? blend_multi : &blend_att,
     };

@@ -1424,6 +1424,8 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
     build_by_default : true,
   )
   test('arm64 exec render execution (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1'])
+  test('arm64 exec render, local read forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_LOCAL_READ=1'])
+  test('arm64 exec render, raster order forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
 endif
 
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-blit-unit.c') and vulkan_dep.found()

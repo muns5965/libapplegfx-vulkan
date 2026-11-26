@@ -74,6 +74,7 @@ typedef struct {
     /* masks_valid: color_write_masks[] were decoded (an all-zero array is then a real "write nothing"); 0 = unknown, the builder uses 0xf for every slot.
      * slot_blend[i] (i >= 1): that attachment's own blend state when .set, used only with independent_blend; otherwise slot i copies attachment 0. */
     uint8_t          masks_valid;
+    uint8_t          raster_order_access;   /* set the colour-blend rasterization-order attachment access flag (framebuffer-fetch pipelines; needs the device feature) */
     struct { uint8_t set, enable; uint32_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a; } slot_blend[4];
     uint32_t         color_formats[4];
     uint32_t         color_write_masks[4];
