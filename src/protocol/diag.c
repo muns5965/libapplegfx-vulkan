@@ -104,9 +104,9 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
         lagfx_arm64_cq_stats(p, &q);
         lagfx_vk_gpu_fail_stats(&wt, &wf, &sf);
         if (p->a64cq || wt || wf || sf) {
-            snprintf(line, sizeof line, "g7-gpu-sync: cq_ok=%llu cq_failed_pre=%llu cq_fault_completed=%llu cq_fault_rejected=%llu cq_slow=%llu cq_hard_timeouts=%llu fault=%d cq_pending=%llu vk_wait_timeouts=%llu vk_wait_failed=%llu vk_submit_failed=%llu",
+            snprintf(line, sizeof line, "g7-gpu-sync: cq_ok=%llu cq_failed_pre=%llu cq_fault_completed=%llu cq_fault_rejected=%llu cq_slow=%llu cq_hard_timeouts=%llu barrier_holds=%llu barrier_drains=%llu barrier_timeouts=%llu fault=%d cq_pending=%llu vk_wait_timeouts=%llu vk_wait_failed=%llu vk_submit_failed=%llu",
                      (unsigned long long)q.ok, (unsigned long long)q.failed_pre, (unsigned long long)q.fault_completed, (unsigned long long)q.fault_rejected,
-                     (unsigned long long)q.slow, (unsigned long long)q.hard_timeouts, (int)q.fault, (unsigned long long)lagfx_arm64_cq_pending(p),
+                     (unsigned long long)q.slow, (unsigned long long)q.hard_timeouts, (unsigned long long)q.barrier_holds, (unsigned long long)q.barrier_drains, (unsigned long long)q.barrier_timeouts, (int)q.fault, (unsigned long long)lagfx_arm64_cq_pending(p),
                      (unsigned long long)wt, (unsigned long long)wf, (unsigned long long)sf);
             fprintf(stderr, "%s\n", line);
             LAGFX_LOG("%s", line);

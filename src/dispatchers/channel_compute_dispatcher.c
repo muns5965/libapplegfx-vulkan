@@ -421,12 +421,41 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
 }
 
 /* Drain ring buffer for compute channels. Returns number of commands processed. */
+static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id);
+
+/* Re-run channels whose head command is held by a barrier (queue on only). */
+size_t channel_compute_retry_held(lagfx_protocol_t *p) {
+    size_t n = 0;
+    uint32_t held = lagfx_arm64_held_channels(p);
+    for (uint32_t ch = 1; held && ch <= 4; ch++) {
+        if (!(held & (1u << ch))) continue;
+        held &= ~(1u << ch);
+        if (!lagfx_arm64_chan_enter(p, ch)) continue;
+        uint8_t save = p->current_chan_id; p->current_chan_id = (uint8_t)ch;
+        n += drain_impl(p, ch);
+        p->current_chan_id = save;
+        lagfx_arm64_chan_leave(p, ch);
+    }
+    return n;
+}
+
 size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
+    if (!lagfx_protocol_is_valid(p)) return 0;
+    bool own = lagfx_arm64_cq_ensure(p) && lagfx_arm64_chan_enter(p, chan_id);   /* queue off: no guard, nothing changes */
+    size_t n = drain_impl(p, chan_id);
+    if (own) {
+        lagfx_arm64_chan_leave(p, chan_id);
+        if (lagfx_arm64_held_channels(p)) n += channel_compute_retry_held(p);   /* this drain may have released another channel's barrier */
+    }
+    return n;
+}
+
+static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
     if (!lagfx_protocol_is_valid(p)) {
         return 0;
     }
     /* ARM64 deferred completion (LAGFX_ARM64_EXEC=1): retire what the GPU finished since the last drain. No-op when off. */
-    if (lagfx_arm64_cq_ensure(p)) lagfx_arm64_poll_completions(p);
+    if (p->a64cq || lagfx_arm64_cq_ensure(p)) lagfx_arm64_poll_completions(p);
 
     /* Look up the per-channel ring geometry from the FIFORingDescriptor.
      * Helper lives in ring_common.{c,h}; shared with display dispatcher. */
@@ -498,6 +527,23 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
                        chan_id, length, opcode, rp, (unsigned)(write_ptr - rp));
             rp = write_ptr;
             break;
+        }
+        /* Barriers gate processing across channels (queue on): the command stays in the ring until the channel it names has submitted up to the stamp. */
+        if (a64 && p->a64cq && arg_count_8b && length >= LAGFX_CMD_HEADER_BYTES + 8u) {
+            uint32_t nb = arg_count_8b < LAGFX_A64CQ_MAX_BARRIERS ? arg_count_8b : LAGFX_A64CQ_MAX_BARRIERS;
+            if (nb * 8u > length - LAGFX_CMD_HEADER_BYTES) nb = (length - LAGFX_CMD_HEADER_BYTES) / 8u;
+            uint8_t bar[LAGFX_A64CQ_MAX_BARRIERS * 8u];
+            if (nb && lagfx_ring_read_bytes(p, page0_gpa, ring_size, rp + LAGFX_CMD_HEADER_BYTES, nb * 8u, bar)) {
+                uint32_t dep = lagfx_arm64_barrier_blocker(p, chan_id, bar, nb);
+                if (dep >= 1 && dep <= 4 && lagfx_arm64_chan_enter(p, dep)) {   /* hand the dependency's work over first (Henge do_channel) */
+                    uint8_t save = p->current_chan_id; p->current_chan_id = (uint8_t)dep;
+                    lagfx_arm64_barrier_note_drain(p);
+                    drain_impl(p, dep);
+                    p->current_chan_id = save;
+                    lagfx_arm64_chan_leave(p, dep);
+                }
+                if (lagfx_arm64_barrier_gate(p, chan_id, bar, nb) == LAGFX_BARRIER_HOLD) break;   /* rp stays: retried later */
+            }
         }
         if (a64 && length > LAGFX_COMPUTE_MAX_CMD_BYTES && length <= ring_size) {
             /* valid for Apple, larger than our scratch: skip it visibly rather than stall */

@@ -288,6 +288,96 @@ static void test_threads(void) {
     rm(p);
 }
 
+/* ---- cross-channel barriers gate PROCESSING order (two real rings: ch1 and ch2) ---- */
+#define RING2_PFN0 24u
+#define TABLE2_PFN 3u
+static uint32_t g_wp1, g_wp2;
+static void ring_cmd_ch(uint32_t ch, uint16_t op, uint16_t nbar, uint32_t b_ch, uint32_t b_stamp, uint32_t stamp) {
+    uint32_t len = 12u + nbar * 8u, *wpp = ch == 1 ? &g_wp1 : &g_wp2;
+    uint8_t *c = g_mem + ((uint64_t)(ch == 1 ? RING_PFN0 : RING2_PFN0) << 14) + (*wpp % 0x10000u);
+    memset(c, 0, len);
+    memcpy(c, &op, 2); memcpy(c + 2, &nbar, 2); memcpy(c + 4, &len, 4); memcpy(c + 8, &stamp, 4);
+    if (nbar) { memcpy(c + 12, &b_ch, 4); memcpy(c + 16, &b_stamp, 4); }
+    *wpp += len;
+}
+static void doorbell_ch(lagfx_protocol_t *p, uint32_t ch) {
+    uint64_t d = ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 20u * (ch - 1);
+    put32(d, ch == 1 ? g_wp1 : g_wp2);
+    p->current_chan_id = (uint8_t)ch;
+    channel_compute_dispatcher_drain(p, ch);
+}
+static uint32_t rdptr(uint32_t ch) { uint32_t v; memcpy(&v, g_mem + ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 20u * (ch - 1) + 4, 4); return v; }
+static lagfx_protocol_t *mk2(void) {
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    g_wp1 = g_wp2 = 0;
+    uint64_t d2 = ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 20u;
+    put32(d2 + 0x0c, 1); put32(d2 + 0x10, TABLE2_PFN);
+    for (uint32_t i = 0; i < 4; i++) put32(((uint64_t)TABLE2_PFN << 14) + 4u * i, RING2_PFN0 + i);
+    assert(lagfx_arm64_cq_enable(p));
+    return p;
+}
+static void test_barrier_processing_order(void) {
+    lagfx_arm64_cq_stats_t q;
+    /* 1. dependency channel has work in its ring: draining ch2 first hands ch1's work over (Henge do_channel), then processes ch2 */
+    lagfx_protocol_t *p = mk2();
+    ring_cmd_ch(1, 0x24, 0, 0, 0, 5);                       /* ch1 stamp 5: write pointer published, doorbell not rung yet */
+    put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET, g_wp1);
+    ring_cmd_ch(2, 0x24, 1, 1, 5, 9);                       /* ch2 stamp 9 behind barrier {ch1, 5} */
+    doorbell_ch(p, 2);
+    assert(cell(1) == 5 && cell(2) == 9 && rdptr(2) == g_wp2 && rdptr(1) == g_wp1);
+    lagfx_arm64_cq_stats(p, &q);
+    assert(q.barrier_drains == 1 && q.barrier_holds == 0 && q.barrier_timeouts == 0);
+    /* a satisfied barrier (stamp 4 <= submitted 5), signed compare: no hold, no drain */
+    ring_cmd_ch(2, 0x24, 1, 1, 4, 10); doorbell_ch(p, 2);
+    assert(cell(2) == 10);
+    lagfx_arm64_cq_stats(p, &q); assert(q.barrier_drains == 1 && q.barrier_holds == 0);
+    rm(p);
+    /* 2. dependency not there yet: ch2's command STAYS in the ring (not processed, not completed); it runs when ch1 submits (retry at end of ch1's drain) */
+    p = mk2();
+    ring_cmd_ch(2, 0x24, 1, 1, 5, 9);
+    doorbell_ch(p, 2);
+    assert(cell(2) == 0 && rdptr(2) == 0 && lagfx_arm64_held_channels(p) == (1u << 2));
+    ring_cmd_ch(1, 0x24, 0, 0, 0, 4);                       /* ch1 stamp 4 < 5: still not enough */
+    doorbell_ch(p, 1);
+    assert(cell(1) == 4 && cell(2) == 0 && rdptr(2) == 0);
+    ring_cmd_ch(1, 0x24, 0, 0, 0, 5);
+    doorbell_ch(p, 1);                                      /* submitted 5: ch2 released, processed after ch1's stamp */
+    assert(cell(1) == 5 && cell(2) == 9 && rdptr(2) == g_wp2 && lagfx_arm64_held_channels(p) == 0);
+    lagfx_arm64_cq_stats(p, &q); assert(q.barrier_holds >= 2 && q.barrier_timeouts == 0);
+    rm(p);
+    /* 3. mutual barrier (ch1 waits ch2, ch2 waits ch1): recursion guard, no hang; resolved by the bound */
+    setenv("LAGFX_ARM64_BARRIER_RETRIES", "3", 1);
+    p = mk2(); unsetenv("LAGFX_ARM64_BARRIER_RETRIES");
+    ring_cmd_ch(1, 0x24, 1, 2, 7, 3);
+    ring_cmd_ch(2, 0x24, 1, 1, 3, 7);
+    put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 20u, g_wp2);
+    doorbell_ch(p, 1);                                      /* neither can go first until the bound lets one through; no hang, no recursion loop */
+    for (int i = 0; i < 8 && (cell(1) == 0 || cell(2) == 0); i++) channel_compute_retry_held(p);
+    assert(cell(1) == 3 && cell(2) == 7);
+    lagfx_arm64_cq_stats(p, &q); assert(q.barrier_timeouts >= 1);
+    rm(p);
+    /* 4. stuck dependency (nothing will ever come on ch1): held for the bound, then let through and logged/counted */
+    setenv("LAGFX_ARM64_BARRIER_RETRIES", "4", 1);
+    p = mk2(); unsetenv("LAGFX_ARM64_BARRIER_RETRIES");
+    ring_cmd_ch(2, 0x24, 1, 1, 50, 9);
+    doorbell_ch(p, 2);                                      /* attempt 1 (doorbell) + attempt 2 (retry at the end of the drain): both held */
+    assert(cell(2) == 0 && rdptr(2) == 0);
+    lagfx_arm64_cq_stats(p, &q); assert(q.barrier_holds == 2 && q.barrier_timeouts == 0);
+    doorbell_ch(p, 2);                                      /* attempt 3 held, attempt 4 reaches the bound: let through, counted */
+    assert(cell(2) == 9 && rdptr(2) == g_wp2);
+    lagfx_arm64_cq_stats(p, &q); assert(q.barrier_holds == 3 && q.barrier_timeouts == 1 && lagfx_arm64_held_channels(p) == 0);
+    rm(p);
+    /* 5. queue off: barriers are ignored exactly as before (no ensure, no hold) */
+    p = mk(LAGFX_PROTO_ARM64_VMAPPLE); g_wp1 = g_wp2 = 0;
+    { uint64_t d2 = ((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 20u;
+      put32(d2 + 0x0c, 1); put32(d2 + 0x10, TABLE2_PFN);
+      for (uint32_t i = 0; i < 4; i++) put32(((uint64_t)TABLE2_PFN << 14) + 4u * i, RING2_PFN0 + i); }
+    ring_cmd_ch(2, 0x24, 1, 1, 50, 9);
+    doorbell_ch(p, 2);
+    assert(cell(2) == 9 && !p->a64cq);
+    rm(p);
+}
+
 /* ---- the compute drain itself ---- */
 static uint32_t g_wp;
 static void ring_cmd(uint16_t op, uint32_t len, uint32_t stamp) {
@@ -350,6 +440,7 @@ int main(void) {
     test_teardown();
     test_reentrancy();
     test_threads();
+    test_barrier_processing_order();
     test_drain();
     puts("arm64-completion-unit: ok");
     return 0;
