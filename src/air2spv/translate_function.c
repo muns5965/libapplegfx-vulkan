@@ -3703,6 +3703,245 @@ static bool intrinsic_suffix_is_float(const char *suffix) {
     return q[0] == 'f' && q[1] >= '0' && q[1] <= '9';
 }
 
+/* Intrinsic dispatch table: air.* math intrinsics -> GLSL.std.450 instruction numbers (LAGFX_SPV_GLSL_* in spv_builder.h).
+ * Rows match by string prefix, FIRST match wins, so a row whose name is a prefix of another row ("sin" / "sinh") must come after it. */
+enum { IXF_FLOATSFX = 0x80, IXF_3WAY = 0x40, IXF_NARGS = 0x3f };
+static const struct {
+    const char *prefix;
+    uint32_t    glsl_inst;
+    uint8_t     num_args;
+} intrinsic_table[] = {
+    /* fmax3/fmin3(a,b,c) = max(max(a,b),c): BEFORE the two-operand air.fast_fmax / air.fast_fmin rows, whose prefix also matches
+     * "air.fast_fmax3." and would silently drop the third operand. IXF_3WAY = chained lowering in the emitter. */
+    {"air.fast_fmax3.",    LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+    {"air.fast_fmin3.",    LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+    {"air.precise_fmax3.", LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+    {"air.precise_fmin3.", LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+    {"air.fmax3.",         LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
+    {"air.fmin3.",         LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
+    /* Plain (non fast_/precise_) float math: Metal emits these for half operands and for precise math, e.g. air.fmax.f16 / air.clamp.v3f16 / air.fabs.v2f16.
+     * IXF_FLOATSFX: only when the type suffix is a float type (f16/f32/vNf16/vNf32) -- the integer forms are air.max.s.i32 / air.clamp.u.i32. */
+    {"air.fmax.",          LAGFX_SPV_GLSL_FMAX,         2 | IXF_FLOATSFX},
+    {"air.fmin.",          LAGFX_SPV_GLSL_FMIN,         2 | IXF_FLOATSFX},
+    {"air.clamp.",         LAGFX_SPV_GLSL_FCLAMP,       3 | IXF_FLOATSFX},
+    {"air.fabs.",          LAGFX_SPV_GLSL_FABS,         1 | IXF_FLOATSFX},
+    {"air.sqrt.",          LAGFX_SPV_GLSL_SQRT,         1 | IXF_FLOATSFX},
+    {"air.rsqrt.",         LAGFX_SPV_GLSL_INVERSE_SQRT, 1 | IXF_FLOATSFX},
+    {"air.fract.",         LAGFX_SPV_GLSL_FRACT,        1 | IXF_FLOATSFX},
+    {"air.floor.",         LAGFX_SPV_GLSL_FLOOR,        1 | IXF_FLOATSFX},
+    {"air.ceil.",          LAGFX_SPV_GLSL_CEIL,         1 | IXF_FLOATSFX},
+    {"air.trunc.",         LAGFX_SPV_GLSL_TRUNC,        1 | IXF_FLOATSFX},
+    {"air.exp.",           LAGFX_SPV_GLSL_EXP,          1 | IXF_FLOATSFX},
+    {"air.exp2.",          LAGFX_SPV_GLSL_EXP2,         1 | IXF_FLOATSFX},
+    {"air.log.",           LAGFX_SPV_GLSL_LOG,          1 | IXF_FLOATSFX},
+    {"air.log2.",          LAGFX_SPV_GLSL_LOG2,         1 | IXF_FLOATSFX},
+    {"air.sin.",           LAGFX_SPV_GLSL_SIN,          1 | IXF_FLOATSFX},
+    {"air.cos.",           LAGFX_SPV_GLSL_COS,          1 | IXF_FLOATSFX},
+    /* powr(x,y) (x >= 0) = pow(x,y); fast_powr likewise (the dump has air.fast_powr.f32 / .v4f32 and air.powr.f16: all three used to be OpUndef). */
+    {"air.powr.",          LAGFX_SPV_GLSL_POW,          2 | IXF_FLOATSFX},
+    {"air.fast_powr.",     LAGFX_SPV_GLSL_POW,          2},
+    {"air.precise_powr.",  LAGFX_SPV_GLSL_POW,          2},
+    /* Unary intrinsics (num_args=1) */
+    {"air.fast.sqrt",      LAGFX_SPV_GLSL_SQRT,         1},
+    {"air.fast.rsqrt",     LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
+    {"air.fast.exp",       LAGFX_SPV_GLSL_EXP,          1},
+    {"air.fast.log",       LAGFX_SPV_GLSL_LOG,          1},
+    {"air.fast.sin",       LAGFX_SPV_GLSL_SIN,          1},
+    {"air.fast.cos",       LAGFX_SPV_GLSL_COS,          1},
+    {"air.fast.normalize", LAGFX_SPV_GLSL_NORMALIZE,    1},
+    {"air.fast.length",    LAGFX_SPV_GLSL_LENGTH,       1},
+    {"air.fast.fabs",      LAGFX_SPV_GLSL_FABS,         1},
+    {"air.fast.floor",     LAGFX_SPV_GLSL_FLOOR,        1},
+    {"air.fast.ceil",      LAGFX_SPV_GLSL_CEIL,         1},
+    {"air.fast.round",     LAGFX_SPV_GLSL_ROUND,        1},
+    {"air.fast.fract",     LAGFX_SPV_GLSL_FRACT,        1},
+    /* air.precise.* variants (same GLSL insts, num_args=1) */
+    {"air.precise.sqrt",   LAGFX_SPV_GLSL_SQRT,         1},
+    {"air.precise.rsqrt",  LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
+    {"air.precise.exp",    LAGFX_SPV_GLSL_EXP,          1},
+    {"air.precise.log",    LAGFX_SPV_GLSL_LOG,          1},
+    {"air.precise.sin",    LAGFX_SPV_GLSL_SIN,          1},
+    {"air.precise.cos",    LAGFX_SPV_GLSL_COS,          1},
+    {"air.precise.normalize", LAGFX_SPV_GLSL_NORMALIZE, 1},
+    {"air.precise.length", LAGFX_SPV_GLSL_LENGTH,       1},
+    /* Multi-operand intrinsics */
+    {"air.fast.fmin",      LAGFX_SPV_GLSL_FMIN,         2},
+    {"air.fast.fmax",      LAGFX_SPV_GLSL_FMAX,         2},
+    {"air.fast.pow",       LAGFX_SPV_GLSL_POW,          2},
+    {"air.fast.distance",  LAGFX_SPV_GLSL_DISTANCE,     2},
+    {"air.fast.reflect",   LAGFX_SPV_GLSL_REFLECT,      2},
+    {"air.fast.cross",     LAGFX_SPV_GLSL_CROSS,        2},
+    {"air.fast.fclamp",    LAGFX_SPV_GLSL_FCLAMP,       3},
+    {"air.fast.fmix",      LAGFX_SPV_GLSL_FMIX,         3},
+    {"air.fast.step",      LAGFX_SPV_GLSL_STEP,         2},
+    {"air.fast.smoothstep", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
+    /* air.precise.* variants for multi-operand intrinsics */
+    {"air.precise.fmin",      LAGFX_SPV_GLSL_FMIN,         2},
+    {"air.precise.fmax",      LAGFX_SPV_GLSL_FMAX,         2},
+    {"air.precise.pow",       LAGFX_SPV_GLSL_POW,          2},
+    {"air.precise.distance",  LAGFX_SPV_GLSL_DISTANCE,     2},
+    {"air.precise.reflect",   LAGFX_SPV_GLSL_REFLECT,      2},
+    {"air.precise.cross",     LAGFX_SPV_GLSL_CROSS,        2},
+    {"air.precise.fclamp",    LAGFX_SPV_GLSL_FCLAMP,       3},
+    {"air.precise.fmix",      LAGFX_SPV_GLSL_FMIX,         3},
+    {"air.precise.step",      LAGFX_SPV_GLSL_STEP,         2},
+    {"air.precise.smoothstep", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
+    /* Round 3: trig + misc (GLSL numbers verified vs GLSL.std.450.h). */
+    {"air.fast.tan",        LAGFX_SPV_GLSL_TAN,     1},
+    {"air.fast.asin",       LAGFX_SPV_GLSL_ASIN,    1},
+    {"air.fast.acos",       LAGFX_SPV_GLSL_ACOS,    1},
+    {"air.fast.atan",       LAGFX_SPV_GLSL_ATAN,    1},
+    {"air.fast.sinh",       LAGFX_SPV_GLSL_SINH,    1},
+    {"air.fast.cosh",       LAGFX_SPV_GLSL_COSH,    1},
+    {"air.fast.tanh",       LAGFX_SPV_GLSL_TANH,    1},
+    {"air.fast.exp2",       LAGFX_SPV_GLSL_EXP2,    1},
+    {"air.fast.log2",       LAGFX_SPV_GLSL_LOG2,    1},
+    {"air.fast.trunc",      LAGFX_SPV_GLSL_TRUNC,   1},
+    {"air.fast.sign",       LAGFX_SPV_GLSL_FSIGN,   1},
+    {"air.fast.radians",    LAGFX_SPV_GLSL_RADIANS, 1},
+    {"air.fast.degrees",    LAGFX_SPV_GLSL_DEGREES, 1},
+    {"air.fast.atan2",      LAGFX_SPV_GLSL_ATAN2,   2},
+    {"air.fast_atan2",      LAGFX_SPV_GLSL_ATAN2,   2},   /* REAL Apple name (observed live: air.fast_atan2.f32) */
+    {"air.fast.ldexp",      LAGFX_SPV_GLSL_LDEXP,   2},
+    {"air.fast.refract",    LAGFX_SPV_GLSL_REFRACT, 3},
+    {"air.precise.tan",     LAGFX_SPV_GLSL_TAN,     1},
+    {"air.precise.asin",    LAGFX_SPV_GLSL_ASIN,    1},
+    {"air.precise.acos",    LAGFX_SPV_GLSL_ACOS,    1},
+    {"air.precise.atan",    LAGFX_SPV_GLSL_ATAN,    1},
+    {"air.precise.sinh",    LAGFX_SPV_GLSL_SINH,    1},
+    {"air.precise.cosh",    LAGFX_SPV_GLSL_COSH,    1},
+    {"air.precise.tanh",    LAGFX_SPV_GLSL_TANH,    1},
+    {"air.precise.exp2",    LAGFX_SPV_GLSL_EXP2,    1},
+    {"air.precise.log2",    LAGFX_SPV_GLSL_LOG2,    1},
+    {"air.precise.trunc",   LAGFX_SPV_GLSL_TRUNC,   1},
+    {"air.precise.sign",    LAGFX_SPV_GLSL_FSIGN,   1},
+    {"air.precise.radians", LAGFX_SPV_GLSL_RADIANS, 1},
+    {"air.precise.degrees", LAGFX_SPV_GLSL_DEGREES, 1},
+    {"air.precise.atan2",   LAGFX_SPV_GLSL_ATAN2,   2},
+    {"air.precise.ldexp",   LAGFX_SPV_GLSL_LDEXP,   2},
+    {"air.precise.refract", LAGFX_SPV_GLSL_REFRACT, 3},
+    /* ===== REAL Apple naming (verified via llvm-dis of xcrun-metal
+     * output, 2026-05-30) =====
+     * The entries above use an `air.fast.<op>` / `air.precise.<op>`
+     * (dot-separated) convention that does NOT match what Apple's
+     * metal compiler actually emits. Real names are `air.<op>` and
+     * `air.fast_<op>` / `air.precise_<op>` (underscore). Prefix-match
+     * still works because the `.v3f32` / `.f32` type suffix follows.
+     * These are the verified math ops from the coverage-audit corpus;
+     * extend as more real shaders are run through the translator.
+     * (air.dot and air.fast_saturate are NOT GLSL ext-insts — handled
+     * as core-op specials below.) */
+    {"air.mix",            LAGFX_SPV_GLSL_FMIX,         3},
+    {"air.fast_clamp",     LAGFX_SPV_GLSL_FCLAMP,       3},
+    {"air.precise_clamp",  LAGFX_SPV_GLSL_FCLAMP,       3},
+    {"air.fast_pow",       LAGFX_SPV_GLSL_POW,          2},
+    {"air.precise_pow",    LAGFX_SPV_GLSL_POW,          2},
+    {"air.fast_rsqrt",     LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
+    {"air.precise_rsqrt",  LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
+    {"air.fast_sqrt",      LAGFX_SPV_GLSL_SQRT,         1},
+    {"air.precise_sqrt",   LAGFX_SPV_GLSL_SQRT,         1},
+    {"air.fast_fmin",      LAGFX_SPV_GLSL_FMIN,         2},
+    {"air.fast_fmax",      LAGFX_SPV_GLSL_FMAX,         2},
+    {"air.fast_floor",     LAGFX_SPV_GLSL_FLOOR,        1},
+    {"air.fast_ceil",      LAGFX_SPV_GLSL_CEIL,         1},
+    {"air.fast_fract",     LAGFX_SPV_GLSL_FRACT,        1},
+    {"air.fast_normalize", LAGFX_SPV_GLSL_NORMALIZE,    1},
+    {"air.fast_length",    LAGFX_SPV_GLSL_LENGTH,       1},
+    {"air.fast_fabs",      LAGFX_SPV_GLSL_FABS,         1},
+    {"air.fast_log2",      LAGFX_SPV_GLSL_LOG2,         1},
+    {"air.fast_exp2",      LAGFX_SPV_GLSL_EXP2,         1},
+    {"air.fast_log",       LAGFX_SPV_GLSL_LOG,          1},
+    {"air.fast_exp",       LAGFX_SPV_GLSL_EXP,          1},
+    /* fma(a,b,c) — REAL Apple name air.fma.<ty> (observed live in the
+     * Xgc login fragment, f16 + f32 variants). */
+    {"air.fma.",           LAGFX_SPV_GLSL_FMA,          3},
+    {"air.fast_fma",       LAGFX_SPV_GLSL_FMA,          3},
+    /* sign(x) — air.sign.<ty> (the GammaLUTs srgb helpers). */
+    {"air.sign.",          LAGFX_SPV_GLSL_FSIGN,        1},
+    {"air.fast_sign",      LAGFX_SPV_GLSL_FSIGN,        1},
+    /* Underscore (air.fast_<op>. / air.precise_<op>.) and plain (air.<op>.) spellings of the remaining float-math families. The dumps carry this naming for
+     * air.fast_atan2 / fast_log2 / fast_exp / fast_pow / fast_ceil ..., and plain air.fma / air.mix / air.sign; none of the families below occurs in the dumps,
+     * so these rows are by analogy only (UNVERIFIED). The dotted rows above are kept. */
+    {"air.fast_sin.", LAGFX_SPV_GLSL_SIN, 1},
+    {"air.precise_sin.", LAGFX_SPV_GLSL_SIN, 1},
+    {"air.fast_cos.", LAGFX_SPV_GLSL_COS, 1},
+    {"air.precise_cos.", LAGFX_SPV_GLSL_COS, 1},
+    {"air.fast_tan.", LAGFX_SPV_GLSL_TAN, 1},
+    {"air.precise_tan.", LAGFX_SPV_GLSL_TAN, 1},
+    {"air.tan.", LAGFX_SPV_GLSL_TAN, 1 | IXF_FLOATSFX},
+    {"air.fast_asin.", LAGFX_SPV_GLSL_ASIN, 1},
+    {"air.precise_asin.", LAGFX_SPV_GLSL_ASIN, 1},
+    {"air.asin.", LAGFX_SPV_GLSL_ASIN, 1 | IXF_FLOATSFX},
+    {"air.fast_acos.", LAGFX_SPV_GLSL_ACOS, 1},
+    {"air.precise_acos.", LAGFX_SPV_GLSL_ACOS, 1},
+    {"air.acos.", LAGFX_SPV_GLSL_ACOS, 1 | IXF_FLOATSFX},
+    {"air.fast_atan.", LAGFX_SPV_GLSL_ATAN, 1},
+    {"air.precise_atan.", LAGFX_SPV_GLSL_ATAN, 1},
+    {"air.atan.", LAGFX_SPV_GLSL_ATAN, 1 | IXF_FLOATSFX},
+    {"air.fast_sinh.", LAGFX_SPV_GLSL_SINH, 1},
+    {"air.precise_sinh.", LAGFX_SPV_GLSL_SINH, 1},
+    {"air.sinh.", LAGFX_SPV_GLSL_SINH, 1 | IXF_FLOATSFX},
+    {"air.fast_cosh.", LAGFX_SPV_GLSL_COSH, 1},
+    {"air.precise_cosh.", LAGFX_SPV_GLSL_COSH, 1},
+    {"air.cosh.", LAGFX_SPV_GLSL_COSH, 1 | IXF_FLOATSFX},
+    {"air.fast_tanh.", LAGFX_SPV_GLSL_TANH, 1},
+    {"air.precise_tanh.", LAGFX_SPV_GLSL_TANH, 1},
+    {"air.tanh.", LAGFX_SPV_GLSL_TANH, 1 | IXF_FLOATSFX},
+    {"air.fast_trunc.", LAGFX_SPV_GLSL_TRUNC, 1},
+    {"air.precise_trunc.", LAGFX_SPV_GLSL_TRUNC, 1},
+    {"air.fast_round.", LAGFX_SPV_GLSL_ROUND, 1},
+    {"air.precise_round.", LAGFX_SPV_GLSL_ROUND, 1},
+    {"air.round.", LAGFX_SPV_GLSL_ROUND, 1 | IXF_FLOATSFX},
+    {"air.fast_step.", LAGFX_SPV_GLSL_STEP, 2},
+    {"air.precise_step.", LAGFX_SPV_GLSL_STEP, 2},
+    {"air.step.", LAGFX_SPV_GLSL_STEP, 2 | IXF_FLOATSFX},
+    {"air.fast_smoothstep.", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
+    {"air.precise_smoothstep.", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
+    {"air.smoothstep.", LAGFX_SPV_GLSL_SMOOTH_STEP, 3 | IXF_FLOATSFX},
+    {"air.fast_distance.", LAGFX_SPV_GLSL_DISTANCE, 2},
+    {"air.precise_distance.", LAGFX_SPV_GLSL_DISTANCE, 2},
+    {"air.distance.", LAGFX_SPV_GLSL_DISTANCE, 2 | IXF_FLOATSFX},
+    {"air.fast_cross.", LAGFX_SPV_GLSL_CROSS, 2},
+    {"air.precise_cross.", LAGFX_SPV_GLSL_CROSS, 2},
+    {"air.cross.", LAGFX_SPV_GLSL_CROSS, 2 | IXF_FLOATSFX},
+    {"air.fast_reflect.", LAGFX_SPV_GLSL_REFLECT, 2},
+    {"air.precise_reflect.", LAGFX_SPV_GLSL_REFLECT, 2},
+    {"air.reflect.", LAGFX_SPV_GLSL_REFLECT, 2 | IXF_FLOATSFX},
+    {"air.fast_refract.", LAGFX_SPV_GLSL_REFRACT, 3},
+    {"air.precise_refract.", LAGFX_SPV_GLSL_REFRACT, 3},
+    {"air.refract.", LAGFX_SPV_GLSL_REFRACT, 3 | IXF_FLOATSFX},
+    {"air.fast_radians.", LAGFX_SPV_GLSL_RADIANS, 1},
+    {"air.precise_radians.", LAGFX_SPV_GLSL_RADIANS, 1},
+    {"air.radians.", LAGFX_SPV_GLSL_RADIANS, 1 | IXF_FLOATSFX},
+    {"air.fast_degrees.", LAGFX_SPV_GLSL_DEGREES, 1},
+    {"air.precise_degrees.", LAGFX_SPV_GLSL_DEGREES, 1},
+    {"air.degrees.", LAGFX_SPV_GLSL_DEGREES, 1 | IXF_FLOATSFX},
+    {"air.fast_ldexp.", LAGFX_SPV_GLSL_LDEXP, 2},
+    {"air.precise_ldexp.", LAGFX_SPV_GLSL_LDEXP, 2},
+    {"air.ldexp.", LAGFX_SPV_GLSL_LDEXP, 2 | IXF_FLOATSFX},
+};
+
+/* Look up an AIR callee name in the table above. Returns true on a hit and fills the GLSL.std.450 number, the operand count and the
+ * chained-3-operand flag (fmax3/fmin3). Exposed (internal) so tests/air2spv-glsl-intrinsic-table-unit.c can audit the table. */
+bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way) {
+    /* Longest matching prefix wins (table order only breaks ties): with first-match-wins, air.fast.sin shadowed air.fast.sinh (Sin instead of Sinh), air.fast.exp
+     * shadowed air.fast.exp2 and air.fast.atan shadowed air.fast.atan2 (wrong opcode AND wrong operand count). */
+    size_t best = (size_t)-1, best_len = 0;
+    for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
+        size_t pl = strlen(intrinsic_table[i].prefix);
+        if (pl <= best_len && best != (size_t)-1) continue;
+        if (strncmp(fn_name, intrinsic_table[i].prefix, pl) != 0) continue;
+        if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
+        best = i; best_len = pl;
+    }
+    if (best == (size_t)-1) return false;
+    if (glsl_inst) *glsl_inst = intrinsic_table[best].glsl_inst;
+    if (num_args) *num_args = intrinsic_table[best].num_args & IXF_NARGS;
+    if (three_way) *three_way = (intrinsic_table[best].num_args & IXF_3WAY) != 0;
+    return true;
+}
+
+
 /* Carrier for a subgroup op: Vulkan only lets 8/16/64-bit values through the group ops with shaderSubgroupExtendedTypes, so 16-bit floats and 8/16-bit ints are
  * widened to 32 bits around the op (exact for every non-NaN value). Returns false for a type with no carrier (64-bit, bool, struct...). */
 typedef struct { uint32_t carrier_ty; uint32_t elem_air; uint32_t lanes; bool widen; bool is_float; } cs_carrier_t;
@@ -3852,171 +4091,11 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
      * Apple uses air.fast.<x> and air.<x> interchangeably; we match by
      * string prefix so "air.fast.sqrt.f32" matches the Sqrt row.
      * Reference: paravirt-re/library/air_intrinsic_spec docs. */
-    enum { IXF_FLOATSFX = 0x80, IXF_3WAY = 0x40, IXF_NARGS = 0x3f };
-    static const struct {
-        const char *prefix;
-        uint32_t    glsl_inst;
-        uint8_t     num_args;
-    } intrinsic_table[] = {
-        /* fmax3/fmin3(a,b,c) = max(max(a,b),c): BEFORE the two-operand air.fast_fmax / air.fast_fmin rows, whose prefix also matches
-         * "air.fast_fmax3." and would silently drop the third operand. IXF_3WAY = chained lowering in the emitter. */
-        {"air.fast_fmax3.",    LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
-        {"air.fast_fmin3.",    LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
-        {"air.precise_fmax3.", LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
-        {"air.precise_fmin3.", LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
-        {"air.fmax3.",         LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
-        {"air.fmin3.",         LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
-        /* Plain (non fast_/precise_) float math: Metal emits these for half operands and for precise math, e.g. air.fmax.f16 / air.clamp.v3f16 / air.fabs.v2f16.
-         * IXF_FLOATSFX: only when the type suffix is a float type (f16/f32/vNf16/vNf32) -- the integer forms are air.max.s.i32 / air.clamp.u.i32. */
-        {"air.fmax.",          LAGFX_SPV_GLSL_FMAX,         2 | IXF_FLOATSFX},
-        {"air.fmin.",          LAGFX_SPV_GLSL_FMIN,         2 | IXF_FLOATSFX},
-        {"air.clamp.",         LAGFX_SPV_GLSL_FCLAMP,       3 | IXF_FLOATSFX},
-        {"air.fabs.",          LAGFX_SPV_GLSL_FABS,         1 | IXF_FLOATSFX},
-        {"air.sqrt.",          LAGFX_SPV_GLSL_SQRT,         1 | IXF_FLOATSFX},
-        {"air.rsqrt.",         LAGFX_SPV_GLSL_INVERSE_SQRT, 1 | IXF_FLOATSFX},
-        {"air.fract.",         LAGFX_SPV_GLSL_FRACT,        1 | IXF_FLOATSFX},
-        {"air.floor.",         LAGFX_SPV_GLSL_FLOOR,        1 | IXF_FLOATSFX},
-        {"air.ceil.",          LAGFX_SPV_GLSL_CEIL,         1 | IXF_FLOATSFX},
-        {"air.trunc.",         LAGFX_SPV_GLSL_TRUNC,        1 | IXF_FLOATSFX},
-        {"air.exp.",           LAGFX_SPV_GLSL_EXP,          1 | IXF_FLOATSFX},
-        {"air.exp2.",          LAGFX_SPV_GLSL_EXP2,         1 | IXF_FLOATSFX},
-        {"air.log.",           LAGFX_SPV_GLSL_LOG,          1 | IXF_FLOATSFX},
-        {"air.log2.",          LAGFX_SPV_GLSL_LOG2,         1 | IXF_FLOATSFX},
-        {"air.sin.",           LAGFX_SPV_GLSL_SIN,          1 | IXF_FLOATSFX},
-        {"air.cos.",           LAGFX_SPV_GLSL_COS,          1 | IXF_FLOATSFX},
-        /* powr(x,y) (x >= 0) = pow(x,y); fast_powr likewise (the dump has air.fast_powr.f32 / .v4f32 and air.powr.f16: all three used to be OpUndef). */
-        {"air.powr.",          LAGFX_SPV_GLSL_POW,          2 | IXF_FLOATSFX},
-        {"air.fast_powr.",     LAGFX_SPV_GLSL_POW,          2},
-        {"air.precise_powr.",  LAGFX_SPV_GLSL_POW,          2},
-        /* Unary intrinsics (num_args=1) */
-        {"air.fast.sqrt",      LAGFX_SPV_GLSL_SQRT,         1},
-        {"air.fast.rsqrt",     LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
-        {"air.fast.exp",       LAGFX_SPV_GLSL_EXP,          1},
-        {"air.fast.log",       LAGFX_SPV_GLSL_LOG,          1},
-        {"air.fast.sin",       LAGFX_SPV_GLSL_SIN,          1},
-        {"air.fast.cos",       LAGFX_SPV_GLSL_COS,          1},
-        {"air.fast.normalize", LAGFX_SPV_GLSL_NORMALIZE,    1},
-        {"air.fast.length",    LAGFX_SPV_GLSL_LENGTH,       1},
-        {"air.fast.fabs",      LAGFX_SPV_GLSL_FABS,         1},
-        {"air.fast.floor",     LAGFX_SPV_GLSL_FLOOR,        1},
-        {"air.fast.ceil",      LAGFX_SPV_GLSL_CEIL,         1},
-        {"air.fast.round",     LAGFX_SPV_GLSL_ROUND,        1},
-        {"air.fast.fract",     LAGFX_SPV_GLSL_FRACT,        1},
-        /* air.precise.* variants (same GLSL insts, num_args=1) */
-        {"air.precise.sqrt",   LAGFX_SPV_GLSL_SQRT,         1},
-        {"air.precise.rsqrt",  LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
-        {"air.precise.exp",    LAGFX_SPV_GLSL_EXP,          1},
-        {"air.precise.log",    LAGFX_SPV_GLSL_LOG,          1},
-        {"air.precise.sin",    LAGFX_SPV_GLSL_SIN,          1},
-        {"air.precise.cos",    LAGFX_SPV_GLSL_COS,          1},
-        {"air.precise.normalize", LAGFX_SPV_GLSL_NORMALIZE, 1},
-        {"air.precise.length", LAGFX_SPV_GLSL_LENGTH,       1},
-        /* Multi-operand intrinsics */
-        {"air.fast.fmin",      LAGFX_SPV_GLSL_FMIN,         2},
-        {"air.fast.fmax",      LAGFX_SPV_GLSL_FMAX,         2},
-        {"air.fast.pow",       LAGFX_SPV_GLSL_POW,          2},
-        {"air.fast.distance",  LAGFX_SPV_GLSL_DISTANCE,     2},
-        {"air.fast.reflect",   LAGFX_SPV_GLSL_REFLECT,      2},
-        {"air.fast.cross",     LAGFX_SPV_GLSL_CROSS,        2},
-        {"air.fast.fclamp",    LAGFX_SPV_GLSL_FCLAMP,       3},
-        {"air.fast.fmix",      LAGFX_SPV_GLSL_FMIX,         3},
-        {"air.fast.step",      LAGFX_SPV_GLSL_STEP,         2},
-        {"air.fast.smoothstep", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
-        /* air.precise.* variants for multi-operand intrinsics */
-        {"air.precise.fmin",      LAGFX_SPV_GLSL_FMIN,         2},
-        {"air.precise.fmax",      LAGFX_SPV_GLSL_FMAX,         2},
-        {"air.precise.pow",       LAGFX_SPV_GLSL_POW,          2},
-        {"air.precise.distance",  LAGFX_SPV_GLSL_DISTANCE,     2},
-        {"air.precise.reflect",   LAGFX_SPV_GLSL_REFLECT,      2},
-        {"air.precise.cross",     LAGFX_SPV_GLSL_CROSS,        2},
-        {"air.precise.fclamp",    LAGFX_SPV_GLSL_FCLAMP,       3},
-        {"air.precise.fmix",      LAGFX_SPV_GLSL_FMIX,         3},
-        {"air.precise.step",      LAGFX_SPV_GLSL_STEP,         2},
-        {"air.precise.smoothstep", LAGFX_SPV_GLSL_SMOOTH_STEP, 3},
-        /* Round 3: trig + misc (GLSL numbers verified vs GLSL.std.450.h). */
-        {"air.fast.tan",        LAGFX_SPV_GLSL_TAN,     1},
-        {"air.fast.asin",       LAGFX_SPV_GLSL_ASIN,    1},
-        {"air.fast.acos",       LAGFX_SPV_GLSL_ACOS,    1},
-        {"air.fast.atan",       LAGFX_SPV_GLSL_ATAN,    1},
-        {"air.fast.sinh",       LAGFX_SPV_GLSL_SINH,    1},
-        {"air.fast.cosh",       LAGFX_SPV_GLSL_COSH,    1},
-        {"air.fast.tanh",       LAGFX_SPV_GLSL_TANH,    1},
-        {"air.fast.exp2",       LAGFX_SPV_GLSL_EXP2,    1},
-        {"air.fast.log2",       LAGFX_SPV_GLSL_LOG2,    1},
-        {"air.fast.trunc",      LAGFX_SPV_GLSL_TRUNC,   1},
-        {"air.fast.sign",       LAGFX_SPV_GLSL_FSIGN,   1},
-        {"air.fast.radians",    LAGFX_SPV_GLSL_RADIANS, 1},
-        {"air.fast.degrees",    LAGFX_SPV_GLSL_DEGREES, 1},
-        {"air.fast.atan2",      LAGFX_SPV_GLSL_ATAN2,   2},
-        {"air.fast_atan2",      LAGFX_SPV_GLSL_ATAN2,   2},   /* REAL Apple name (observed live: air.fast_atan2.f32) */
-        {"air.fast.ldexp",      LAGFX_SPV_GLSL_LDEXP,   2},
-        {"air.fast.refract",    LAGFX_SPV_GLSL_REFRACT, 3},
-        {"air.precise.tan",     LAGFX_SPV_GLSL_TAN,     1},
-        {"air.precise.asin",    LAGFX_SPV_GLSL_ASIN,    1},
-        {"air.precise.acos",    LAGFX_SPV_GLSL_ACOS,    1},
-        {"air.precise.atan",    LAGFX_SPV_GLSL_ATAN,    1},
-        {"air.precise.sinh",    LAGFX_SPV_GLSL_SINH,    1},
-        {"air.precise.cosh",    LAGFX_SPV_GLSL_COSH,    1},
-        {"air.precise.tanh",    LAGFX_SPV_GLSL_TANH,    1},
-        {"air.precise.exp2",    LAGFX_SPV_GLSL_EXP2,    1},
-        {"air.precise.log2",    LAGFX_SPV_GLSL_LOG2,    1},
-        {"air.precise.trunc",   LAGFX_SPV_GLSL_TRUNC,   1},
-        {"air.precise.sign",    LAGFX_SPV_GLSL_FSIGN,   1},
-        {"air.precise.radians", LAGFX_SPV_GLSL_RADIANS, 1},
-        {"air.precise.degrees", LAGFX_SPV_GLSL_DEGREES, 1},
-        {"air.precise.atan2",   LAGFX_SPV_GLSL_ATAN2,   2},
-        {"air.precise.ldexp",   LAGFX_SPV_GLSL_LDEXP,   2},
-        {"air.precise.refract", LAGFX_SPV_GLSL_REFRACT, 3},
-        /* ===== REAL Apple naming (verified via llvm-dis of xcrun-metal
-         * output, 2026-05-30) =====
-         * The entries above use an `air.fast.<op>` / `air.precise.<op>`
-         * (dot-separated) convention that does NOT match what Apple's
-         * metal compiler actually emits. Real names are `air.<op>` and
-         * `air.fast_<op>` / `air.precise_<op>` (underscore). Prefix-match
-         * still works because the `.v3f32` / `.f32` type suffix follows.
-         * These are the verified math ops from the coverage-audit corpus;
-         * extend as more real shaders are run through the translator.
-         * (air.dot and air.fast_saturate are NOT GLSL ext-insts — handled
-         * as core-op specials below.) */
-        {"air.mix",            LAGFX_SPV_GLSL_FMIX,         3},
-        {"air.fast_clamp",     LAGFX_SPV_GLSL_FCLAMP,       3},
-        {"air.precise_clamp",  LAGFX_SPV_GLSL_FCLAMP,       3},
-        {"air.fast_pow",       LAGFX_SPV_GLSL_POW,          2},
-        {"air.precise_pow",    LAGFX_SPV_GLSL_POW,          2},
-        {"air.fast_rsqrt",     LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
-        {"air.precise_rsqrt",  LAGFX_SPV_GLSL_INVERSE_SQRT, 1},
-        {"air.fast_sqrt",      LAGFX_SPV_GLSL_SQRT,         1},
-        {"air.precise_sqrt",   LAGFX_SPV_GLSL_SQRT,         1},
-        {"air.fast_fmin",      LAGFX_SPV_GLSL_FMIN,         2},
-        {"air.fast_fmax",      LAGFX_SPV_GLSL_FMAX,         2},
-        {"air.fast_floor",     LAGFX_SPV_GLSL_FLOOR,        1},
-        {"air.fast_ceil",      LAGFX_SPV_GLSL_CEIL,         1},
-        {"air.fast_fract",     LAGFX_SPV_GLSL_FRACT,        1},
-        {"air.fast_normalize", LAGFX_SPV_GLSL_NORMALIZE,    1},
-        {"air.fast_length",    LAGFX_SPV_GLSL_LENGTH,       1},
-        {"air.fast_fabs",      LAGFX_SPV_GLSL_FABS,         1},
-        {"air.fast_log2",      LAGFX_SPV_GLSL_LOG2,         1},
-        {"air.fast_exp2",      LAGFX_SPV_GLSL_EXP2,         1},
-        {"air.fast_log",       LAGFX_SPV_GLSL_LOG,          1},
-        {"air.fast_exp",       LAGFX_SPV_GLSL_EXP,          1},
-        /* fma(a,b,c) — REAL Apple name air.fma.<ty> (observed live in the
-         * Xgc login fragment, f16 + f32 variants). */
-        {"air.fma.",           LAGFX_SPV_GLSL_FMA,          3},
-        {"air.fast_fma",       LAGFX_SPV_GLSL_FMA,          3},
-        /* sign(x) — air.sign.<ty> (the GammaLUTs srgb helpers). */
-        {"air.sign.",          LAGFX_SPV_GLSL_FSIGN,        1},
-        {"air.fast_sign",      LAGFX_SPV_GLSL_FSIGN,        1},
-    };
 
     uint32_t glsl_inst = 0u;
-    for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
-        size_t pl = strlen(intrinsic_table[i].prefix);
-        if (strncmp(fn_name, intrinsic_table[i].prefix, pl) == 0) {
-            if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
-            glsl_inst = intrinsic_table[i].glsl_inst;
-            break;
-        }
-    }
+    uint32_t entry_num_args = 0u;
+    bool entry_3way = false;
+    (void)lagfx_air2spv_glsl_intrinsic_lookup(fn_name, &glsl_inst, &entry_num_args, &entry_3way);
 
     /* === air.convert.* numeric conversions (core SPIR-V, NOT GLSL.std.450) ===
      *
@@ -4839,17 +4918,6 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     }
 
     /* Find the table entry to get num_args. */
-    uint32_t entry_num_args = 0u;
-    bool entry_3way = false;
-    for (size_t i = 0; i < sizeof(intrinsic_table) / sizeof(intrinsic_table[0]); i++) {
-        size_t pl = strlen(intrinsic_table[i].prefix);
-        if (strncmp(fn_name, intrinsic_table[i].prefix, pl) == 0) {
-            if ((intrinsic_table[i].num_args & IXF_FLOATSFX) && !intrinsic_suffix_is_float(fn_name + pl)) continue;
-            entry_num_args = intrinsic_table[i].num_args & IXF_NARGS;
-            entry_3way = (intrinsic_table[i].num_args & IXF_3WAY) != 0;
-            break;
-        }
-    }
 
     /* The CALL operand layout after callee_rel is [args...], so we need
      * at least one argument. */
