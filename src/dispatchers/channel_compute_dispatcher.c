@@ -106,6 +106,11 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         case 0x01: case 0x02: case 0x08:
             if (lagfx_proto_arm64(p)) {   /* Display ops of the ARM64 protocol: the shell owns them */
                 lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+                static unsigned dseen;
+                if (dseen++ < 8u || (dseen % 256u) == 0u)
+                    LAGFX_LOG("compute: arm64 display op 0x%02x ch=%u forwarded=%d (n=%u)", hdr->opcode, (unsigned)p->current_chan_id,
+                               dev && dev->desc.shell.display_command && hdr->payload, dseen);
+                p->diag2.display_submits++;
                 if (dev && dev->desc.shell.display_command && hdr->payload) {
                     dev->desc.shell.display_command(dev->desc.shell.opaque, p->current_chan_id,
                                                     hdr->payload - LAGFX_CMD_HEADER_BYTES, hdr->length);
@@ -370,6 +375,36 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             }
             break;
         }
+
+        case 0x43: case 0x45:
+            if (lagfx_proto_arm64(p)) {
+                /* ARM64 GPU exec {task, nres, nbuf} + nres*{ref,flags} + nbuf*{u64 off, u64 len}, args after the barrier slots (Apple pvg_metal.m). Decoded and counted only:
+                 * nothing is rendered yet, and the stamp is completed by the drain loop as for every command. The x86 exec_cmdbuf layout does not apply. */
+                static unsigned seen;
+                uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+                unsigned k = seen++;
+                if (hdr->payload && hdr->payload_size >= skip + 12u) {
+                    uint32_t task = lagfx_le32(hdr->payload + skip), nres = lagfx_le32(hdr->payload + skip + 4), nbuf = lagfx_le32(hdr->payload + skip + 8);
+                    bool fits = nres <= 4096u && nbuf <= 64u && 12ull + 8ull * nres + 16ull * nbuf <= (uint64_t)(hdr->payload_size - skip);
+                    if (k < 16u || (k % 256u) == 0u)
+                        LAGFX_LOG("compute: 0x%02x (arm64) exec seen=%u ch=%u task=%u live=%d nres=%u nbuf=%u %s (decode only, not executed)",
+                                   hdr->opcode, k + 1u, (unsigned)p->current_chan_id, task, lagfx_protocol_find_task(p, task) != NULL, nres, nbuf, fits ? "ok" : "BAD-SIZE");
+                } else if (k < 16u) {
+                    LAGFX_WARN("compute: 0x%02x (arm64) payload too short (%u, skip %u)", hdr->opcode, (unsigned)hdr->payload_size, skip);
+                }
+            } else {
+                LAGFX_WARN("compute dispatch: ch=%u unknown opcode 0x%04x stamp=0x%08x", (unsigned)p->current_chan_id, hdr->opcode, hdr->stamp);
+                p->unknown_opcode_count++;
+            }
+            break;
+
+        case 0x0a: case 0x0c:
+            /* Display-side ops the guest sends on ch4 that Henge's own decoder does not act on either (Apple pvg_lite.c handles 1, 2, 8 only): counted by the diag line, no warning. */
+            if (!lagfx_proto_arm64(p)) {
+                LAGFX_WARN("compute dispatch: ch=%u unknown opcode 0x%04x stamp=0x%08x", (unsigned)p->current_chan_id, hdr->opcode, hdr->stamp);
+                p->unknown_opcode_count++;
+            }
+            break;
 
         default:
             LAGFX_WARN("compute dispatch: ch=%u unknown opcode 0x%04x stamp=0x%08x",

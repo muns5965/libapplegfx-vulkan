@@ -242,6 +242,19 @@ int main(void) {
         assert(g_disp_n == n0);
     }
 
+    /* ARM64 0x43/0x45 and display-side 0x0a/0x0c are known (decoded or ignored), not "unknown"; x86 still counts them unknown */
+    {
+        lagfx_protocol_t *d = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        uint32_t w[8] = {0, 0, 0, 0, 0, 0, 0, 0}; w[0] = 0; w[1] = 1; w[2] = 1;      /* arg_count 0: {task=0, nres=1, nbuf=1} ... */
+        uint64_t u0 = d->unknown_opcode_count;
+        submit(d, 0x43, 0, w, 8); submit(d, 0x45, 0, w, 3); submit(d, 0x0a, 0, w, 2); submit(d, 0x0c, 0, w, 2);
+        assert(d->unknown_opcode_count == u0);
+        lagfx_protocol_t *x = mk(LAGFX_PROTO_X86);
+        uint64_t x0 = x->unknown_opcode_count;
+        submit(x, 0x0c, 0, w, 2);
+        assert(x->unknown_opcode_count == x0 + 1);
+    }
+
     puts("protocol-mode-unit: ok");
     return 0;
 }
