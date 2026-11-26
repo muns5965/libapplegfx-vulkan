@@ -540,6 +540,16 @@ typedef struct lagfx_protocol {
         uint64_t op_count[3][256];       /* opcode & 0xff */
         uint64_t exec_20, exec_43_45, unknown_cmds;
         uint64_t display_submits, display_submit_skipped_null, display_submit_ignored_index, display_submit_rendered;
+        /* ARM64 display ops (compute dispatcher, ops 1/2/8), each stage counted separately; see lagfx_a64_res_display_note().
+         * display_submit_rendered above belongs to the legacy/compact vchan_display_submit path only and stays 0 on ARM64. */
+        struct {
+            uint64_t op_setpage, op_ack, op_swap;      /* op 1 / 2 / 8 seen (names as in the Henge shell: set-page, ack, swap) */
+            uint64_t swap_short;                       /* op 8 whose payload is too short to name a mapping: not looked up */
+            uint64_t surface_resolved, surface_unresolved;   /* the swap's mapping id has / has no mirror surface (no exec ever drew into it: no GPU content is possible) */
+            uint64_t gpu_content;                      /* resolved and the mirror holds pixels the GPU produced or the guest uploaded */
+            uint64_t written_back, gpu_unwritten;      /* of those: the guest's pages are current when the command is handed over / the guest still holds older pixels */
+            uint64_t handed_to_shell, not_handed;      /* display_command callback called / no callback or no payload */
+        } disp;
         uint64_t irq_raised;
         uint64_t ignored_known;          /* known-and-ignored commands (arm64 0x0a/0x0c): not "unknown" */
         /* arm64 0x43/0x45 decode-only counters (src/protocol/arm64_exec_decode.c). Nothing is executed. */

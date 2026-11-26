@@ -118,10 +118,13 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                                dev && dev->desc.shell.display_command && hdr->payload, dseen);
                 p->diag2.display_submits++;
                 lagfx_a64_res_display_swap(p);   /* =swap mode: the owed display surfaces reach the guest before the shell looks */
+                lagfx_a64_display_count(p, hdr);
                 if (dev && dev->desc.shell.display_command && hdr->payload) {
                     dev->desc.shell.display_command(dev->desc.shell.opaque, p->current_chan_id,
                                                     hdr->payload - LAGFX_CMD_HEADER_BYTES, hdr->length);
+                    p->diag2.disp.handed_to_shell++;
                 } else {
+                    p->diag2.disp.not_handed++;
                     LAGFX_WARN("compute: arm64 display op 0x%02x ch=%u ignored (no display_command callback or no payload)",
                                hdr->opcode, (unsigned)p->current_chan_id);
                 }
