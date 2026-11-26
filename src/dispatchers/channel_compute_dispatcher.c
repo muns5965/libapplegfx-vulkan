@@ -32,6 +32,7 @@
 #include "protocol/state.h"
 #include "protocol/diag.h"
 #include "protocol/arm64_exec_decode.h"
+#include "protocol/arm64_resources.h"
 #include "protocol/object_resolver.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
@@ -78,6 +79,9 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     }
 
     LAGFX_TRACE("compute dispatch: opcode=0x%04x stamp=0x%08x", hdr->opcode, hdr->stamp);
+
+    /* ARM64 + LAGFX_ARM64_EXEC=1: explicit resource sync/invalidate/purge hints (0x34 0x35 0x3e 0x3f) act on the guest<->host mirror; otherwise unchanged. */
+    if (lagfx_a64_resource_cmd(p, hdr)) return;
 
     switch (hdr->opcode) {
         /* CmdExecIndirect2 on a compute channel — the inner stream is
@@ -172,6 +176,7 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
                     uint32_t ref = lagfx_le32(hdr->payload + skip + 4u);
                     lagfx_task_entry_t *t = lagfx_protocol_find_task(p, tid);
                     uint32_t removed = 0;
+                    if (lagfx_a64_exec_enabled()) lagfx_a64_res_forget(p, tid, ref);   /* the mirror of a removed ref goes too */
                     if (t && t->live) {
                         for (uint32_t i = 0; i < t->active_objects.count; i++) {
                             if (t->active_objects.object_ids[i] == ref) {

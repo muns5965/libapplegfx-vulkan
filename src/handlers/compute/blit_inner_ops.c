@@ -35,6 +35,7 @@
 #include "../protocol/resource_registry.h"
 #include "../protocol/state.h"  /* For lagfx_protocol_t full definition */
 #include "../vulkan/iosurface.h"
+#include "../protocol/arm64_resources.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -59,6 +60,14 @@ static int op_ack_stub(lagfx_protocol_t *p, const uint8_t *payload, size_t len) 
     return 0;
 }
 
+/* === ARM64 (protocol_mode ARM64_VMAPPLE) handlers ================
+ * Same opcode numbers as the wire tags (0x12c == 300 ...), but the payload layout is Apple's (u64 fields, pvg_metal.m blit()), not the x86-era
+ * guess the handlers below parse. They only act when the ARM64 exec path (LAGFX_ARM64_EXEC=1) has an exec open; x86 never reaches them. */
+static int op_a64_copy_buf_tex(lagfx_protocol_t *p, const uint8_t *payload, size_t len) { return lagfx_a64_blit_op(p, 300, payload, len), 0; }  /* 0x12c */
+static int op_a64_copy_buf_buf(lagfx_protocol_t *p, const uint8_t *payload, size_t len) { return lagfx_a64_blit_op(p, 301, payload, len), 0; }  /* 0x12d */
+static int op_a64_copy_tex_buf(lagfx_protocol_t *p, const uint8_t *payload, size_t len) { return lagfx_a64_blit_op(p, 302, payload, len), 0; }  /* 0x12e */
+static int op_a64_fill_buffer(lagfx_protocol_t *p, const uint8_t *payload, size_t len)  { return lagfx_a64_blit_op(p, 306, payload, len), 0; }  /* 0x132 */
+
 /* === Real-parse handlers ========================================= */
 
 /* 0x12f — CopyFromTextureToTexture. Pre-refactor 88-byte payload:
@@ -80,6 +89,7 @@ static int op_ack_stub(lagfx_protocol_t *p, const uint8_t *payload, size_t len) 
  *    show which layout the kext actually sends.)
  */
 static int op_copy_texture_to_texture(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    if (lagfx_proto_arm64(p)) return lagfx_a64_blit_op(p, 303, payload, len), 0;   /* 0x12f, Apple layout */
     if (len < 40) {
         LAGFX_WARN("CopyFromTextureToTexture: payload too short (%zu < 40)", len);
         return 0;
@@ -226,13 +236,13 @@ static int op_fill_texture_with_color(lagfx_protocol_t *p, const uint8_t *payloa
  * from TSV "payload_size" column verbatim.
  */
 static const lagfx_blit_inner_op_desc_t g_table[] = {
-    { 0x12c, "CopyFromBufferToTexture",                  88, 2, op_ack_stub },
-    { 0x12d, "CopyFromBufferToBuffer",                   32, 2, op_ack_stub },
-    { 0x12e, "CopyFromTextureToBuffer",                  88, 2, op_ack_stub },
+    { 0x12c, "CopyFromBufferToTexture",                  88, 2, op_a64_copy_buf_tex },
+    { 0x12d, "CopyFromBufferToBuffer",                   32, 2, op_a64_copy_buf_buf },
+    { 0x12e, "CopyFromTextureToBuffer",                  88, 2, op_a64_copy_tex_buf },
     { 0x12f, "CopyFromTextureToTexture",                 88, 2, op_copy_texture_to_texture },
     { 0x130, "CopyFromTextureToTextureWithOptions",      92, 2, op_ack_stub },
     { 0x131, "CopyIndirectCommandBuffer",                32, 2, op_ack_stub },
-    { 0x132, "FillBuffer",                               24, 1, op_ack_stub },
+    { 0x132, "FillBuffer",                               24, 1, op_a64_fill_buffer },
     { 0x133, "GenerateMipmaps",                           4, 1, op_ack_stub },
     { 0x134, "OptimizeForCPUAccess",                      4, 1, op_ack_stub },
     { 0x135, "OptimizeForGPUAccess",                      4, 1, op_ack_stub },

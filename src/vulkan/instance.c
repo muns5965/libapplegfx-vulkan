@@ -125,6 +125,9 @@ static uint32_t pick_queue_family(VkPhysicalDevice phys) {
 }
 
 /* Debug message callback for validation layers — prints VUIDs and warnings. */
+/* Number of non-verbose validation messages seen (tests assert it stays 0). */
+uint64_t lagfx_vk_validation_msg_count;
+
 static VkBool32 VKAPI_PTR lagfx_debug_callback(
     VkDebugUtilsMessageSeverityFlagBitsEXT messageSeverity,
     VkDebugUtilsMessageTypeFlagsEXT messageType,
@@ -135,6 +138,7 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
     if (messageSeverity == VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT) {
         return VK_FALSE;
     }
+    lagfx_vk_validation_msg_count++;
     LAGFX_WARN("validation: %s", pCallbackData->pMessage);  /* stderr is dropped in-container */
     return VK_FALSE;
 }

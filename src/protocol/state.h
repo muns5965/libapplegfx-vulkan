@@ -593,6 +593,10 @@ typedef struct lagfx_protocol {
     uint8_t  *scratch_exec_heap;
     uint32_t  scratch_exec_heap_size;
 
+    /* ARM64 exec resource mirror (src/protocol/arm64_resources.c); NULL until the first LAGFX_ARM64_EXEC=1 exec. Freed by
+     * lagfx_protocol_free / lagfx_protocol_reset through lagfx_a64_res_destroy. */
+    void     *a64_res;
+
 } lagfx_protocol_t;
 
 /* The command rings' page size and PFN encoding. The shift is 12 unless the device was created with another ring_page_shift (the only accepted

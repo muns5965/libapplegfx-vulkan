@@ -34,6 +34,11 @@
  * or unreadable (nothing partial is promised in dst). */
 bool lagfx_arm64_task_read(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, void *dst, uint64_t n);
 
+/* One byte of task address space -> guest physical address (the page walk of task_read, for a single address). */
+bool lagfx_arm64_task_translate(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, uint64_t *gpa_out);
+/* Same walk, write direction (shell.write_memory); may span pages; false if any page is unmapped (earlier pages are then already written). */
+bool lagfx_arm64_task_write(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, const void *src, uint64_t n);
+
 typedef void (*lagfx_exec_tag_fn)(void *user, uint32_t tag, uint32_t size);
 
 typedef struct {

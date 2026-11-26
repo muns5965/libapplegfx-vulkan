@@ -7,6 +7,7 @@
  */
 
 #include "state.h"
+#include "arm64_resources.h"
 #include "../common/log.h"
 
 #include <stdlib.h>
@@ -36,6 +37,7 @@ void lagfx_protocol_free(lagfx_protocol_t *p) {
               (unsigned long long)p->total_cmds_seen,
               (unsigned long long)p->total_cmds_completed);
 
+    lagfx_a64_res_destroy(p);   /* needs p->dev->vk alive: the device frees the protocol before Vulkan */
     free(p->scratch_exec_heap);
     memset(p, 0, sizeof(*p));
     free(p);
@@ -44,6 +46,7 @@ void lagfx_protocol_free(lagfx_protocol_t *p) {
 void lagfx_protocol_reset(lagfx_protocol_t *p) {
     if (!lagfx_protocol_is_valid(p)) return;
 
+    lagfx_a64_res_destroy(p);   /* the tasks (and so every object ref) go away */
     /* Clear tables and inflight state; preserve ring geometry */
     memset(p->tasks, 0, sizeof(p->tasks));
     memset(p->fifos, 0, sizeof(p->fifos));

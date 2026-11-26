@@ -1380,3 +1380,13 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-decode-unit.c')
   )
   test('arm64 exec 0x43/0x45 decode (unit)', ed_test)
 endif
+
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-blit-unit.c') and vulkan_dep.found()
+  eb_test = executable('arm64-exec-blit-unit',
+    'arm64-exec-blit-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec blit + resource flags on lavapipe (unit)', eb_test, timeout : 120)
+endif
