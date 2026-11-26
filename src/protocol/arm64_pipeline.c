@@ -11,6 +11,7 @@
 #include "../common/log.h"
 
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 
 /* ---- pure decode ---- */
@@ -415,6 +416,8 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 
     /* vertex layout: one Vulkan stream (the builder's limit), fed by the Metal buffer slot the attributes name */
     memset(out, 0, sizeof *out);
+    snprintf(out->vs_name, sizeof out->vs_name, "%s", vf->name), snprintf(out->fs_name, sizeof out->fs_name, "%s", ff->name);   /* diagnostics: names the shader pair in logs */
+    out->vs_hash = lagfx_a64_hash64(vf->bitcode, vf->bitcode_len), out->fs_hash = lagfx_a64_hash64(ff->bitcode, ff->bitcode_len);
     lagfx_spv_vertex_input_t vin[8];
     size_t nvi = lagfx_spv_reflect_vertex_inputs(vspv, vsz, vin, 8);
     if (nvi > 8u) nvi = 8u;

@@ -44,6 +44,7 @@
  * to 8 displays (5..12) with hot-plug headroom. 16 channels keeps
  * the per-channel array dense without burning more than ~256 KiB
  * of scratch. */
+#define LAGFX_A64_TEXWHY_COUNT 20     /* lagfx_a64_texwhy_t entries (arm64_resources.h); a static assert there keeps the two in step */
 #define LAGFX_MAX_CHANNELS     16     /* Root + 4 compute + up to 11 display vchans */
 
 /* Stamp slot mapping (per waitForStamp-mechanism-summary.md) */
@@ -589,7 +590,11 @@ typedef struct lagfx_protocol {
                 uint64_t xlate_air2spv;
                 uint64_t link_mismatch_fixed, link_missing_zeroed, link_unlinked;   /* fragment stage linker (air2spv): input read as the vertex type + converted / input with no vertex output zeroed / left unresolved */
                 uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
+                uint64_t obj_created, obj_destroyed, obj_reused, obj_live, obj_peak_live, obj_high_water, obj_full, obj_lookup_miss, obj_deferred;   /* mirror object table (arm64_resources.c), cumulative per run: destroyed = logically released (0x25, task drop, replaced entry), deferred = of those parked behind an exec in flight, reused = created into a freed slot, high_water = slots ever used, full = refused at 4096 live, lookup_miss = texture-handle lookups of the draw path that found nothing */
                 uint64_t desc_linear_stale;   /* a linear texture whose buffer changed inside the open pass: draw skipped (also counted in desc_unbound_why[4]) */
+                uint64_t desc_tex_why[LAGFX_A64_TEXWHY_COUNT];   /* desc_unbound_why[3] (a sampled texture handle did not resolve) split by reason: lagfx_a64_texwhy_t order, names lagfx_a64_texwhy_name() */
+                uint8_t  desc_tex_nseen[LAGFX_A64_TEXWHY_COUNT];   /* distinct unresolved textures logged per reason (first 8) */
+                struct { uint32_t task, ref, type, mtl_format, w, h, mapping; } desc_tex_seen[LAGFX_A64_TEXWHY_COUNT][8];
                 uint64_t desc_unbound_why[6];   /* desc_unbound by cause: 0 buffer missing/offset, 1 input attachment, 2 storage image, 3 sampled image missing, 4 sampled image view (linear/none), 5 sampler */
                 uint64_t stub_fbfetch_why[5];   /* stub_fbfetch by reason (LAGFX_A64_FBF_*; [0] unused) */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;

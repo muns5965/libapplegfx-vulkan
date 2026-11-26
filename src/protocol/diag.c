@@ -4,6 +4,7 @@
 #include "diag.h"
 #include "state.h"
 #include "arm64_completion.h"
+#include "arm64_resources.h"
 #include "../vulkan/command.h"
 #include "../vulkan/caps.h"
 #include "../common/log.h"
@@ -213,10 +214,10 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             LAGFX_LOG("%s", dl);
         }
     }
-    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
+    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;
 #define U(f) (unsigned long long)Q->f
-        char pl[2600];
+        char pl[4800];
         snprintf(pl, sizeof pl,
                  "g7-gpu-pipe: resolved=%llu failed=%llu[no_blob=%llu bad_tag=%llu no_refs=%llu no_lib=%llu no_stage=%llu module=%llu translate=%llu layout=%llu multi_stream=%llu vertex_res=%llu bindings=%llu no_vk=%llu] "
                  "xlate[air2spv=%llu] stage_link[mismatch_fixed=%llu missing_zeroed=%llu unlinked=%llu] blend[decoded=%llu off=%llu color1=%llu] fbfetch[pipes=%llu draws=%llu stub=%llu(vertex=%llu no_local_read=%llu binding_range=%llu too_many=%llu)] stubs[blend=%llu depth_stencil=%llu color_fmt_from_pass=%llu raster=%llu vertex_tex=%llu] built=%llu build_failed=%llu replaced=%llu topo[%llu %llu %llu %llu %llu] "
@@ -231,6 +232,19 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             size_t po = strlen(pl);
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT && po + 40 < sizeof pl; c++)
                 if (Q->stub_missing_cap[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " stub_missing_cap_%s=%llu", lagfx_vk_cap_name(c), U(stub_missing_cap[c]));
+        }
+        {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
+            size_t po = strlen(pl);
+            if (po + 200 < sizeof pl)
+                snprintf(pl + po, sizeof pl - po, " obj_table[created=%llu destroyed=%llu reused=%llu live=%llu peak_live=%llu high_water=%llu full=%llu lookup_miss=%llu deferred=%llu]",
+                         U(obj_created), U(obj_destroyed), U(obj_reused), U(obj_live), U(obj_peak_live), U(obj_high_water), U(obj_full), U(obj_lookup_miss), U(obj_deferred));
+        }
+        {   /* desc[... tex=N ...] by reason (only the non-zero ones); the first 8 distinct textures of each are logged as g7-gpu-tex-unbound lines when they happen */
+            size_t po = strlen(pl);
+            bool first = true;
+            for (unsigned c = 0; c < LAGFX_A64_TEXWHY_COUNT && po + 40 < sizeof pl; c++)
+                if (Q->desc_tex_why[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, "%s%s=%llu", first ? " texwhy[" : " ", lagfx_a64_texwhy_name(c), U(desc_tex_why[c])), first = false;
+            if (!first && po + 2 < sizeof pl) pl[po++] = ']', pl[po] = 0;
         }
 #undef U
         fprintf(stderr, "%s\n", pl);
