@@ -101,6 +101,17 @@ int main(void) {
         printf("FAIL: could not translate simpletexfrag fixture\n"); rc = 1;
     }
 
+    /* 2b. Contract the pipeline resolver depends on: the return value is the TOTAL number of bindings, also when the output buffer is smaller (cap 1) or
+     * absent; the resolver fails a stage whose total exceeds LAGFX_A64_MAX_REFLECT instead of truncating. */
+    if (translate_fixture("simpletexfrag.air.bc", &spv, &spv_sz) == 0) {
+        size_t total = lagfx_spv_reflect_bindings(spv, spv_sz, binds, 16);
+        lagfx_spv_binding_t one[1];
+        size_t capped = lagfx_spv_reflect_bindings(spv, spv_sz, one, 1);
+        if (total < 2u || capped != total) { printf("FAIL: reflect must return the total (total=%zu with cap 16, %zu with cap 1)\n", total, capped); rc = 1; }
+        else printf("reflect returns the total with a small cap: %zu == %zu\n", capped, total);
+        free(spv); spv = NULL;
+    } else rc = 1;
+
     /* 3. [[buffer]] vertex -> a StorageBuffer binding. */
     if (translate_fixture("simpletexlighting_vertex.air.bc", &spv, &spv_sz) == 0) {
         size_t n = lagfx_spv_reflect_bindings(spv, spv_sz, binds, 16);
