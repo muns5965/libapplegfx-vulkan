@@ -551,6 +551,15 @@ typedef struct lagfx_protocol {
             uint64_t res, res_flag[3], res_flag_hi, obj_missing, obj_kind[32];
             uint64_t inner, inner_bad, tag_hist[4][512], tag_over; /* by segment type 0,1,2,4 then tag; tag >= 512 in tag_over */
             uint32_t tags_logged;
+            /* ARM64 render execution (src/protocol/arm64_exec_run.c, LAGFX_ARM64_EXEC=1 only; all zero otherwise). */
+            struct {
+                uint64_t execs, passes, draws, draws_skipped, submits, submit_failed, submit_pending, pending_leaked;
+                uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
+                uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
+                uint64_t extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported;
+                uint64_t tag_done[512], tag_partial[512], tag_unsup[512];   /* by inner tag; partial = recorded but not applied to Vulkan */
+                uint64_t tag_over;                                   /* tags >= 512, any outcome */
+            } run;
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;
@@ -592,6 +601,10 @@ typedef struct lagfx_protocol {
      * in lagfx_protocol_free. */
     uint8_t  *scratch_exec_heap;
     uint32_t  scratch_exec_heap_size;
+
+    /* ARM64 render execution state (object table + per-exec recording), NULL unless LAGFX_ARM64_EXEC=1 in arm64 mode. Owned by
+     * src/protocol/arm64_exec_run.c; freed in lagfx_protocol_free / reset. */
+    void *a64_exec;
 
 } lagfx_protocol_t;
 

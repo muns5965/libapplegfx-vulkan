@@ -2,6 +2,7 @@
  * libapplegfx-vulkan — ARM64 GPU exec (0x43 / 0x45), decode only. See arm64_exec_decode.h.
  */
 #include "arm64_exec_decode.h"
+#include "arm64_exec_run.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -161,8 +162,9 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     const uint8_t *res = a + 12, *bufs = res + 8ull * nres;
     lagfx_task_entry_t *t = lagfx_protocol_find_task(p, task);
     if (!t || !t->root_page_pfn) E->no_task++, failed = true;
-    sb_add(&sb, "compute: 0x%02x (arm64) exec #%llu ch=%u task=%u live=%d nres=%u nbuf=%u (decode only, not executed)", hdr->opcode, (unsigned long long)(k + 1u),
-           (unsigned)p->current_chan_id, task, t != NULL, nres, nbuf);
+    const bool run = lagfx_a64_exec_enabled(p);   /* LAGFX_ARM64_EXEC=1: record the Render segments on Vulkan as well (arm64_exec_run.c) */
+    sb_add(&sb, "compute: 0x%02x (arm64) exec #%llu ch=%u task=%u live=%d nres=%u nbuf=%u (%s)", hdr->opcode, (unsigned long long)(k + 1u),
+           (unsigned)p->current_chan_id, task, t != NULL, nres, nbuf, run ? "executing" : "decode only, not executed");
 
     /* resources: ref, flags (Apple reads flags & 1, 2, 4; the rest is kept as seen), and the object entry {type | size << 8, addr lo, addr hi} */
     sb_add(&sb, " res[");
@@ -189,6 +191,8 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     }
     if (logit && nres > 12u) sb_add(&sb, " +%u", nres - 12u);
     sb_add(&sb, " ]");
+
+    if (run && t && t->root_page_pfn) lagfx_a64_exec_begin(p, t, res, nres);
 
     /* buffers */
     uint32_t budget = LAGFX_EXEC_READ_CAP_TOTAL;
@@ -243,6 +247,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             if (logit) sb_add(&sb, " b%u[off=0x%llx len=%llu SHORT-HEADER]", b, (unsigned long long)off, (unsigned long long)blen);
             continue;
         }
+        if (run && t && t->root_page_pfn && !s.bad_inner) lagfx_a64_exec_segment(p, t, scratch, want, blen, &s);
         if (s.prot_skipped) E->seg_t[5]++;
         if (s.type == 0 || s.type == 1 || s.type == 2 || s.type == 4) E->seg_t[s.type]++; else E->seg_other++;
         if (s.cont) E->seg_cont++;
@@ -262,6 +267,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         (void)inner_before;
     }
     free(scratch);
+    if (run) lagfx_a64_exec_end(p);
     if (logit) {
         sb_add(&sb, " tags[");
         for (uint32_t i = 0; i < ctx.nd; i++) sb_add(&sb, "%st%u:%u x%u", i ? " " : "", ctx.d[i].type, ctx.d[i].tag, ctx.d[i].n);

@@ -1380,3 +1380,18 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-decode-unit.c')
   )
   test('arm64 exec 0x43/0x45 decode (unit)', ed_test)
 endif
+
+# ARM64 render-segment execution (LAGFX_ARM64_EXEC=1): (task, ref) object table lifetime + real Vulkan recording read back on lavapipe.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
+  er_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    er_deps += [vulkan_dep]
+  endif
+  er_test = executable('arm64-exec-run-unit',
+    'arm64-exec-run-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : er_deps,
+    build_by_default : true,
+  )
+  test('arm64 exec render execution (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif

@@ -120,6 +120,9 @@ typedef struct lagfx_translate_render_state {
      * state. */
     bool render_pass_active;
 
+    /* A caller (the ARM64 exec path) binds real vertex buffers itself: draw / draw_indexed then do NOT rebind the dummy placeholder over them. */
+    bool external_vb;
+
     uint32_t stencil_front_ref;
     uint32_t stencil_back_ref;
     float    depth_bias_constant;
@@ -225,6 +228,12 @@ lagfx_status_t lagfx_translate_render_bind_pipeline(
  * if the pipeline's binding is declared with an immutable
  * sampler — the encoder does not validate that; it only records
  * the push. */
+/* Bind a ready VkPipeline (built by the caller, e.g. lagfx_pipeline_build) instead of the passthrough one. Marks the pipeline bound. */
+lagfx_status_t lagfx_translate_render_bind_vk_pipeline(lagfx_translate_render_state_t *state, VkPipeline pipeline, VkPipelineLayout layout);
+/* Bind one real vertex buffer at Vulkan binding 0; later draws keep it (no dummy placeholder). */
+lagfx_status_t lagfx_translate_render_bind_vertex_buffer(lagfx_translate_render_state_t *state, VkBuffer buffer, VkDeviceSize offset);
+lagfx_status_t lagfx_translate_render_bind_index_buffer(lagfx_translate_render_state_t *state, VkBuffer buffer, VkDeviceSize offset, VkIndexType type);
+
 lagfx_status_t lagfx_translate_render_bind_texture(
     lagfx_translate_render_state_t *state,
     uint32_t binding,

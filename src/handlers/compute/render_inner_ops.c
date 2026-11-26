@@ -30,6 +30,7 @@
  */
 
 #include "render_inner_ops.h"
+#include "protocol/arm64_exec_run.h"
 #include "protocol/render_pass.h"
 #include "protocol/opcodes.h"  /* For LAGFX_HANDLER_OK enum */
 #include "protocol/state.h"
@@ -95,6 +96,8 @@ static int op_draw_primitives_64(lagfx_protocol_t *p, const uint8_t *payload, si
 }
 
 static int op_draw_primitives_16(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 1, payload, len)) return 0;
     (void)p;
     if (len < 8) { LAGFX_WARN("DrawPrimitives16: payload too short (%zu < 8)", len); return 0; }
     uint32_t prim_type    = lagfx_le32(payload + 0);
@@ -161,6 +164,8 @@ static int op_draw_indexed_primitives_64(lagfx_protocol_t *p, const uint8_t *pay
 }
 
 static int op_draw_indexed_primitives_16(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 7, payload, len)) return 0;
     (void)p;
     if (len < 12) { LAGFX_WARN("DrawIndexedPrimitives16: payload too short (%zu < 12)", len); return 0; }
     LAGFX_LOG("DrawIndexedPrimitives16: type=%u count=%u idxBufRef=0x%08x",
@@ -297,6 +302,8 @@ static int op_render_wait_for_fence(lagfx_protocol_t *p, const uint8_t *payload,
  * (render_pass.h) and emits the canonical Stage 20% line. This is the
  * grep target in reference_m5_validation.md. */
 static int op_describe_render_pass(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 26, payload, len)) return 0;
     (void)p;
     if (!payload || len < LAGFX_RENDER_PASS_WIRE_SIZE) {
         /* Coarse-count attachments from a short payload — the kext sent
@@ -515,10 +522,14 @@ static int op_set_buffers_variable(lagfx_protocol_t *p,
 }
 
 static int op_set_fragment_buffers(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 110, payload, len)) return 0;
     return op_set_buffers_variable(p, payload, len, "SetFragmentBuffers", 12);
 }
 
 static int op_set_fragment_buffer_offset(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 111, payload, len)) return 0;
     (void)p;
     if (len < 12) { LAGFX_WARN("SetFragmentBufferOffset: payload too short (%zu < 12)", len); return 0; }
     /* PGCmdSetBufferOffset: [index:u32@0][offset:u64@4] (Apple decoder disasm) */
@@ -528,6 +539,8 @@ static int op_set_fragment_buffer_offset(lagfx_protocol_t *p, const uint8_t *pay
 }
 
 static int op_set_fragment_sampler_states(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 112, payload, len)) return 0;
     return op_set_buffers_variable(p, payload, len, "SetFragmentSamplerStates", 4);
 }
 
@@ -536,6 +549,8 @@ static int op_set_fragment_sampler_states_lod_clamp(lagfx_protocol_t *p, const u
 }
 
 static int op_set_fragment_textures(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 114, payload, len)) return 0;
     return op_set_buffers_variable(p, payload, len, "SetFragmentTextures", 4);
 }
 
@@ -548,6 +563,8 @@ static int op_set_front_facing_winding(lagfx_protocol_t *p, const uint8_t *paylo
 }
 
 static int op_set_render_pipeline_state(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 116, payload, len)) return 0;
     (void)p;
     if (len < 4) { LAGFX_WARN("SetRenderPipelineState: payload too short (%zu < 4)", len); return 0; }
     uint32_t reference = lagfx_le32(payload + 0);
@@ -559,6 +576,8 @@ static int op_set_render_pipeline_state(lagfx_protocol_t *p, const uint8_t *payl
 }
 
 static int op_set_scissor_rect(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 117, payload, len)) return 0;
     (void)p;
     if (len < 32) { LAGFX_WARN("SetScissorRect: payload too short (%zu < 32)", len); return 0; }
     LAGFX_LOG("SetScissorRect: x=%llu y=%llu w=%llu h=%llu",
@@ -621,10 +640,14 @@ static int op_set_triangle_fill_mode(lagfx_protocol_t *p, const uint8_t *payload
 }
 
 static int op_set_vertex_buffers(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 125, payload, len)) return 0;
     return op_set_buffers_variable(p, payload, len, "SetVertexBuffers", 12);
 }
 
 static int op_set_vertex_buffer_offset(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 126, payload, len)) return 0;
     (void)p;
     if (len < 12) { LAGFX_WARN("SetVertexBufferOffset: payload too short (%zu < 12)", len); return 0; }
     /* PGCmdSetBufferOffset: [index:u32@0][offset:u64@4] (Apple decoder disasm) */
@@ -646,6 +669,8 @@ static int op_set_vertex_textures(lagfx_protocol_t *p, const uint8_t *payload, s
 }
 
 static int op_set_viewport(lagfx_protocol_t *p, const uint8_t *payload, size_t len) {
+    /* ARM64 exec (LAGFX_ARM64_EXEC=1): recorded on Vulkan by src/protocol/arm64_exec_run.c; false (and nothing changes) otherwise */
+    if (lagfx_a64_exec_render_op(p, 130, payload, len)) return 0;
     (void)p;
     if (len < 48) { LAGFX_WARN("SetViewport: payload too short (%zu < 48)", len); return 0; }
     LAGFX_LOG("SetViewport: origin=(%g,%g) size=%gx%g znear=%g zfar=%g",
