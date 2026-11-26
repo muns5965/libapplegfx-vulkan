@@ -4859,6 +4859,11 @@ static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
             /* Unresolvable index — substitute uint 0. */
             idx_spv = emit_const_uint32(c, 0u);
         }
+        {   /* A literal index becomes a real OpConstant: struct member indices MUST be an OpConstant, and the module constant for LLVM's i32 0 is an OpConstantNull,
+             * which the Vulkan validation layer's (older) spirv-val rejects ("must be an OpConstant"). */
+            int32_t lit = 0;
+            if (resolve_value_lit_i32(c, idx_id, &lit) && lit >= 0) idx_spv = emit_const_uint32(c, (uint32_t)lit);
+        }
         ops[op_count++] = idx_spv;
     }
 
