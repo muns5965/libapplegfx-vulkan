@@ -419,6 +419,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     if (desc->diag_no_fragment) rsst.rasterizerDiscardEnable = VK_TRUE;   /* DIAGNOSTIC (pipeline-reduce): vertex-only pipeline */
     VkGraphicsPipelineCreateInfo gpci = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .flags = desc->diag_create_flags,
         .pNext = desc->diag_render_pass ? NULL : &rendering_info,
         .stageCount = desc->diag_no_fragment ? 1u : 2u,   /* diag_no_fragment: DIAGNOSTIC, vertex-only pipeline */
         .pStages = stages,

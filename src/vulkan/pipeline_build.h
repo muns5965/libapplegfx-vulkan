@@ -106,6 +106,7 @@ typedef struct {
     uint32_t         diag_subpass;
     /* diag_no_fragment != 0 (pipeline-reduce rows only): no fragment stage (fragment_shader may be VK_NULL_HANDLE) and rasterizerDiscardEnable = VK_TRUE (a vertex-only pipeline). */
     uint8_t          diag_no_fragment;
+    uint32_t         diag_create_flags;   /* DIAGNOSTIC (pipeline-reduce): VkPipelineCreateFlags of the VkGraphicsPipelineCreateInfo; 0 in production */
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
