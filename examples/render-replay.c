@@ -690,19 +690,15 @@ static void check_texture(const rr_scene_t *s, const rr_result_t *r, int wrong, 
 
 /* --- scene: framebuffer fetch (pso 93 = vertexFetch + TsdrA2Xhfcu_Idst: reads colour attachment 0 as an input attachment, binding 40). Target 0 is Loaded with a constant
  *     premultiplied destination d; one big triangle is drawn with stage-in colour c.
- *     CPU MODEL OF THE TRANSLATED SPIR-V (not of Metal): out = G(x) in fp16 arithmetic, G = unpremultiply(rgb / max(a, 1e-4)) * a, NaN/Inf guard, m = max(r, g, b, a, 0x1.a38p-14),
- *     rgb *= a / m, clamp [0, 1]. x = d when the shader's state machine takes the dst-read path, x = c when it does not: the state machine is selected by OpAll(OpUndef) in the
- *     translated module (a Metal function constant the translator does not resolve), so BOTH are accepted here and the path actually taken is reported. This scene proves only that
- *     the input attachment path builds, draws and that the pixels equal G(d) or G(c) bit for bit; it does NOT prove Metal semantics. --- */
+ *     CPU MODEL OF THE TRANSLATED SPIR-V (not of Metal): the shader's state machine is `any(<4 x i1> zeroinitializer)` / `any(<2 x i1> zeroinitializer)` = false, false (constant
+ *     operands in the AIR; they used to be translated to OpUndef, which made the path driver dependent), so the unpremultiply block is skipped and x = the input attachment
+ *     (the destination d) is always used: out = H(d) in fp16 arithmetic, H: NaN/Inf guard on the channel sum, m = max(r, g, b, a, 0x1.a38p-14), rgb *= a / m, clamp [0, 1].
+ *     This scene proves the input attachment path builds, draws and that the pixels equal H(d) bit for bit; it does NOT prove Metal semantics. --- */
 static float g_fv[3][12]; static uint16_t g_fh[4];
 static const float FB_D[4] = { 0.75f, 0.25f, 0.125f, 0.5f };   /* destination, exactly representable in fp16; G(d) != d (a = 0.5 < max channel 0.75), so a draw that did nothing is detected */
 static const float FB_C[4] = { 0.75f, 0.5f, 0.25f, 1.0f };    /* stage-in colour */
-static void model_G(const float in[4], float out[4]) {
-    uint16_t x[4]; for (int i = 0; i < 4; i++) x[i] = f2h(in[i]);
-    float a = h2f(x[3]), m = fmaxf(a, 1e-4f), q[3];
-    for (int i = 0; i < 3; i++) q[i] = h2f(f2h(h2f(f2h(h2f(x[i]) / m)) * a));   /* float divide -> half, half multiply */
-    float sum = h2f(f2h(h2f(f2h(q[0] + h2f(x[1] * 0 + f2h(q[1])))) )); (void)sum;
-    float r = q[0], g = q[1], b = q[2];
+static void model_G(const float in[4], float out[4]) {   /* H, see above (no unpremultiply: that block is skipped) */
+    float r = h2f(f2h(in[0])), g = h2f(f2h(in[1])), b = h2f(f2h(in[2])), a = h2f(f2h(in[3]));
     float mm = fmaxf(fmaxf(fmaxf(r, g), fmaxf(b, a)), 0x1.a38p-14f);
     float f = h2f(f2h(a / mm));
     out[0] = h2f(f2h(f * r)), out[1] = h2f(f2h(f * g)), out[2] = h2f(f2h(f * b)), out[3] = a;
@@ -729,14 +725,12 @@ static bool build_fbfetch(rr_scene_t *s, const dump_t *d) {
 static void check_fbfetch(const rr_scene_t *s, const rr_result_t *r, int wrong, rr_cmp_t *c) {
     (void)s; memset(c, 0, sizeof *c); float gd[4], gc[4]; model_G(FB_D, gd); model_G(FB_C, gc);
     static int reported; float px[4]; get_px(r, 0, 16, 16, px);
-    bool isd = memcmp(px, gd, 16) == 0, isc = memcmp(px, gc, 16) == 0;
-    if (!reported && wrong == 0) { reported = 1; printf("     fbfetch: centre pixel (%g, %g, %g, %g): G(dst) = (%g, %g, %g, %g) G(stage-in) = (%g, %g, %g, %g) -> shader took the %s path\n", px[0], px[1], px[2], px[3], gd[0], gd[1], gd[2], gd[3], gc[0], gc[1], gc[2], gc[3], isd ? "DST-READ (input attachment)" : isc ? "stage-in colour (dst ignored)" : "UNKNOWN"); }
+    if (!reported && wrong == 0) { reported = 1; printf("     fbfetch: centre pixel (%g, %g, %g, %g): H(dst) = (%g, %g, %g, %g) H(stage-in) = (%g, %g, %g, %g) (expected: H(dst), the input attachment path)\n", px[0], px[1], px[2], px[3], gd[0], gd[1], gd[2], gd[3], gc[0], gc[1], gc[2], gc[3]); }
     for (uint32_t y = 0; y < r->h; y++) for (uint32_t x = 0; x < r->w; x++) {
         float got[4]; get_px(r, 0, x, y, got);
-        const float *e = isc && !isd ? gc : gd;
-        float ex[4] = { e[0], e[1], e[2], e[3] };
+        float ex[4] = { gd[0], gd[1], gd[2], gd[3] };
         if (wrong == 1) ex[0] += 0.25f;
-        if (wrong == 2) memcpy(ex, e == gd ? gc : gd, 16);
+        if (wrong == 2) memcpy(ex, gc, 16);
         cmp_px(c, x, y, got, ex, 0.0f);
     }
 }
@@ -904,7 +898,7 @@ static const scene_def_t g_scenes[] = {
     { "gradient", build_gradient, check_gradient, "3e-3 abs (CPU model interpolation, rasterizer dependent; edge pixels skipped)" },
     { "quad", build_quad, check_quad, "0 (indexed draw, constant colour)" },
     { "texture", build_texture, check_texture, "5e-4 abs = 1 fp16 ulp at 0.5..1 (unorm8 -> float -> fp16 rounding is the sampler's; texel-boundary pixels skipped)" },
-    { "fbfetch", build_fbfetch, check_fbfetch, "0 against the CPU model of the translated shader (G(dst) or G(stage-in), see comment)" },
+    { "fbfetch", build_fbfetch, check_fbfetch, "0 against the CPU model of the translated shader (H(dst), see comment)" },
 };
 static char g_dumpdir[512];
 static const char *find_dump(void) {

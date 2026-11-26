@@ -1008,7 +1008,9 @@ static bool air_type_requires_extra_cap(xlate_ctx_t *c, uint32_t air_type_idx,
              * silently dropped, so the REAL runtime mode byte (0) fell to the
              * default = undef-phi = NaN output (offline replay, 2026-07-23).
              * Only i1/i128-style widths still fall back. */
-            return !(w == 8u || w == 16u || w == 32u || w == 64u);
+            /* i1 maps to OpTypeBool (emit_air_type), so it needs no extra capability: i1 / <N x i1> constants (e.g. the `<4 x i1> zeroinitializer`
+             * operand of air.any.v4i1 in TsdrA2Xhfcu_Idst) used to be skipped here and replaced by OpUndef. */
+            return !(w == 1u || w == 8u || w == 16u || w == 32u || w == 64u);
         }
         case LAGFX_AIR_TYPE_VECTOR:
         case LAGFX_AIR_TYPE_ARRAY:
@@ -4625,7 +4627,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             uint32_t rid = lagfx_spv_builder_alloc_id(c->b);
             uint32_t o[] = { b, rid, a_spv };
             lagfx_spv_builder_emit_op(c->b,
-                fn_name[4] == 'n' /* aNy */ ? LAGFX_SPV_OP_ANY
+                fn_name[5] == 'n' /* a-n-y (fn_name = "air.any.*" / "air.all.*": index 5 is 'n' for any, 'l' for all; was [4] == 'n' => every air.any became OpAll) */ ? LAGFX_SPV_OP_ANY
                                             : LAGFX_SPV_OP_ALL, o, 3);
             bind_value_spv(c, result_value_id, rid);
             set_result_air_type(c, result_value_id, LAGFX_AIR_TYPE_BOOL);
@@ -8110,6 +8112,11 @@ static void bind_module_constants(xlate_ctx_t *c) {
                                 h->mod_const_lit[i] = (int32_t)(uint64_t)k->payload.i64;
                                 h->mod_const_lit_valid[i] = true;
                             }
+                        } else if (w == 1u) {
+                            /* i1 true/false -> OpConstantTrue/False (LLVM stores `true` as signed -1 / 1: any non-zero payload is true) */
+                            uint32_t ops[] = { emit_type_bool(c), lagfx_spv_builder_alloc_id(c->b) };
+                            spv_id = ops[1];
+                            lagfx_spv_builder_emit_op(c->b, k->payload.i64 ? 41u : 42u, ops, 2);
                         } else if (w == 64u) {
                             uint32_t ty_spv = emit_type_int_w(c, 64u, 0u);
                             spv_id = lagfx_spv_builder_alloc_id(c->b);
@@ -8223,6 +8230,10 @@ static void bind_local_constants(xlate_ctx_t *c) {
                         uint32_t ops[] = { ty_spv, spv_id,
                                             (uint32_t)(uint64_t)k->payload.i64 };
                         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, ops, 3);
+                    } else if (w == 1u) {
+                        uint32_t ops[] = { emit_type_bool(c), lagfx_spv_builder_alloc_id(c->b) };
+                        spv_id = ops[1];
+                        lagfx_spv_builder_emit_op(c->b, k->payload.i64 ? 41u : 42u, ops, 2);
                     } else if (w == 64u) {
                         uint32_t ty_spv = emit_type_int_w(c, 64u, 0u);
                         spv_id = lagfx_spv_builder_alloc_id(c->b);
@@ -8302,10 +8313,16 @@ static void bind_local_constants(xlate_ctx_t *c) {
                     uint32_t elem_spv = emit_air_type(c, elem_ai);
                     uint32_t lane_ids[16];
                     if (lanes > 16u) break;
+                    bool elem_bool = et->kind == LAGFX_AIR_TYPE_INTEGER && et->num_op >= 1u && et->op[0] == 1u;
                     for (uint32_t l = 0; l < lanes; l++) {
                         uint32_t lane_id = lagfx_spv_builder_alloc_id(c->b);
-                        uint32_t ops[] = { elem_spv, lane_id, raw[l] };
-                        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, ops, 3);
+                        if (elem_bool) {   /* <N x i1> literal lanes: OpConstantTrue/False (an OpConstant of OpTypeBool is invalid) */
+                            uint32_t bops[] = { elem_spv, lane_id };
+                            lagfx_spv_builder_emit_op(c->b, (raw[l] & 1u) ? 41u : 42u, bops, 2);
+                        } else {
+                            uint32_t ops[] = { elem_spv, lane_id, raw[l] };
+                            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, ops, 3);
+                        }
                         lane_ids[l] = lane_id;
                     }
                     uint32_t vec_spv = emit_air_type(c, ty_air);

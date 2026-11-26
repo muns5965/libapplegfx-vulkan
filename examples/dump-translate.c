@@ -52,6 +52,10 @@ int main(int argc, char **argv) {
             if (pass == 1 && fn[k].stage == LAGFX_METALLIB_STAGE_VERTEX && argc > 3) { /* vertex already keyed; still emit below */ }
             const char *st = fn[k].stage == LAGFX_METALLIB_STAGE_VERTEX ? "vs" : fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT ? "fs" : "x";
             lagfx_air_module_t *m = NULL; uint8_t *spv = NULL; size_t sz = 0;
+            if (pass == 1 && getenv("DUMP_BC")) { /* DUMP_BC=<dir>: also write the extracted AIR bitcode (<dir>/<lib>_<fn>.air.bc) for air-bcdump */
+                char bp[1400]; snprintf(bp, sizeof bp, "%s/%.*s_%s.air.bc", getenv("DUMP_BC"), (int)(strlen(e->d_name) - 8), e->d_name + 4, fn[k].name);
+                FILE *bf = fopen(bp, "wb"); if (bf) { fwrite(fn[k].bitcode, 1, fn[k].bitcode_len, bf); fclose(bf); }
+            }
             if (lagfx_air_module_open(fn[k].bitcode, fn[k].bitcode_len, &m) != LAGFX_OK || !m) { fprintf(stderr, "%s %s: module_open failed\n", e->d_name, fn[k].name); bad++; continue; }
             char libh[24]; snprintf(libh, sizeof libh, "%.*s", (int)(strlen(e->d_name) - 8), e->d_name + 4);
             if (pass == 1 && getenv("DUMP_KEYS")) {

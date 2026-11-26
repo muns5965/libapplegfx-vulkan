@@ -1602,3 +1602,16 @@ if fs.is_file(meson.current_source_dir() / 'arm64-replay-unit.c') and vulkan_dep
   )
   test('render-replay self tests (unit; scenes need LAGFX_TEST_DUMP)', rp_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 180)
 endif
+
+# i1 / <N x i1> constants and air.any / air.all (fixture i1const_fragment.air.bc), translated and rendered on a Vulkan 1.3 device (lavapipe): every pixel value-checked. Skips (77) without a device.
+if fs.is_file(meson.current_source_dir() / 'air2spv-i1-const-lavapipe.c') and vulkan_dep.found()
+  air2spv_i1_vk_test = executable('air2spv-i1-const-lavapipe',
+    'air2spv-i1-const-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv i1 constants + any/all on lavapipe', air2spv_i1_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
