@@ -443,6 +443,21 @@ int main(void) {
       assert(*surf_px(32, 40) == GREEN && *surf_px(0, 0) == GREEN && *surf_px(63, 79) == GREEN && CNT(p).mapped_written_back == wbx + 1); }
     printf("PASS: MAPPED_WRITEBACK experiment: off = guest untouched by flag 2, on = rendered surface written back once per exec\n");
 
+    /* (3c) the same experiment on the RGhA (RGBA16Float) display surface: OFF = the guest's half-float pixels stay; ON = the rendered pixels (the 0.5/.25/1/1 clear and
+     * the red draw) are written back as raw half floats, once. */
+    { static const double col[4] = { 0.5, 0.25, 1, 1 };
+      static const uint8_t clear8[8] = { 0x00, 0x38, 0x00, 0x34, 0x00, 0x3c, 0x00, 0x3c };
+      const uint32_t res[1][2] = { { REF_M9, 2 } };
+      uint64_t wbx = CNT(p).mapped_written_back;
+      memset(surf_page(0), SENT, 4u << 14);
+      run_exec(p, 32, REF_M9, 2, col, false, res, 1, true);
+      assert(CNT(p).mapped_written_back == wbx && ((const uint8_t *)half_px(0, 0))[0] == SENT && ((const uint8_t *)half_px(32, 40))[7] == SENT);   /* switch off */
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 33, REF_M9, 2, col, false, res, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      assert(CNT(p).mapped_written_back == wbx + 1 && !memcmp(half_px(0, 0), clear8, 8) && !memcmp(half_px(63, 79), clear8, 8)); }
+    printf("PASS: MAPPED_WRITEBACK experiment on an RGhA surface: off = guest untouched, on = half-float pixels written back once\n");
+
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
     lagfx_arm64_cq_shutdown(p, 0);
