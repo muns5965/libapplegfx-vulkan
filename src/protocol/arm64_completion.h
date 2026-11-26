@@ -18,7 +18,7 @@
  *
  * Semantics
  *  - Order: stamps of one channel (slot) are retired strictly in submission order. A command without work queued behind one with work waits.
- *  - Barriers: the command's `arg_count_8b` leading 8-byte slots are {channel, stamp} pairs (Henge pvg_lite.c). The command's arguments start at
+ *  - Barriers (processing AND completion; see lagfx_arm64_barrier_gate below): the command's `arg_count_8b` leading 8-byte slots are {channel, stamp} pairs (Henge pvg_lite.c). The command's arguments start at
  *    payload + arg_count_8b*8. A barrier makes the command's completion wait until channel's queued entries up to that stamp are retired (a
  *    barrier on a channel with nothing pending up to that stamp is satisfied). Barriers gate COMPLETION only; GPU execution order is the
  *    recorder's business (one graphics queue = submission order).
@@ -100,6 +100,20 @@ bool lagfx_arm64_submit_end(lagfx_protocol_t *p, lagfx_arm64_submit_ctx_t *ctx);
 /* Convenience for the drain: a command that was dropped before dispatch still completes its stamp (queued behind earlier entries). */
 bool lagfx_arm64_submit_dropped(lagfx_protocol_t *p, uint32_t slot, const lagfx_cmd_header_t *hdr);
 
+/* Barriers gate PROCESSING order across channels (Henge pvg_lite.c ~930-960; all work goes through one in-order worker, so everything up to the
+ * stamp must be handed over first or a frame is shown half drawn). `slots` = the command's first n barrier slots {channel, stamp} read from the ring
+ * (n = min(arg_count_8b, LAGFX_A64CQ_MAX_BARRIERS)). A channel's "submitted stamp" is the last stamp it dispatched (set by submit_end). The compute
+ * drain: (1) blocker() names a channel that has not submitted up to the stamp; the drain first drains that channel (guarded against recursion with
+ * chan_enter/leave), (2) gate() decides: GO, HOLD (command stays in the ring; the channel is added to held_channels, retried at the end of any drain
+ * and by lagfx_device_poll_completions) or LET_THROUGH after LAGFX_ARM64_BARRIER_RETRIES (default 20000, as Henge) holds, logged and counted. */
+typedef enum { LAGFX_BARRIER_GO = 0, LAGFX_BARRIER_HOLD, LAGFX_BARRIER_LET_THROUGH } lagfx_barrier_verdict_t;
+uint32_t lagfx_arm64_barrier_blocker(lagfx_protocol_t *p, uint32_t slot, const uint8_t *slots, uint32_t n);   /* 0 = none */
+lagfx_barrier_verdict_t lagfx_arm64_barrier_gate(lagfx_protocol_t *p, uint32_t slot, const uint8_t *slots, uint32_t n);
+void lagfx_arm64_barrier_note_drain(lagfx_protocol_t *p);
+uint32_t lagfx_arm64_held_channels(lagfx_protocol_t *p);
+bool lagfx_arm64_chan_enter(lagfx_protocol_t *p, uint32_t ch);
+void lagfx_arm64_chan_leave(lagfx_protocol_t *p, uint32_t ch);
+
 /* Retire every finished entry in per-channel order. Returns the number of stamps retired (>=0); at most one IRQ is raised for the batch. */
 size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p);
 size_t lagfx_arm64_cq_pending(lagfx_protocol_t *p);
@@ -111,6 +125,7 @@ typedef struct {
     uint64_t fault_rejected;  /* begun while FAULTed: rejected cheaply, stamp completed */
     uint64_t slow;            /* entries that passed the soft bound (kept pending, NOT failed) */
     uint64_t hard_timeouts;   /* entries that hit LAGFX_GPU_HARD_TIMEOUT_MS (-> FAULT) */
+    uint64_t barrier_holds, barrier_drains, barrier_timeouts;   /* processing-order barriers: held, dependency channel drained first, let through after the bound */
     bool fault;
 } lagfx_arm64_cq_stats_t;
 void lagfx_arm64_cq_stats(lagfx_protocol_t *p, lagfx_arm64_cq_stats_t *out);

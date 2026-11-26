@@ -19,6 +19,7 @@
 #include "protocol/state.h"  /* lagfx_protocol_t typedef */
 #include "protocol/diag.h"
 #include "protocol/arm64_completion.h"
+#include "dispatchers/channel_compute_dispatcher.h"
 #include "vulkan/instance.h"
 #include "vulkan/iosurface.h"   /* white_fb teardown */
 #include "shaders/catalog.h"
@@ -425,12 +426,16 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
 
 size_t lagfx_device_poll_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
-    return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);
+    lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
+    channel_compute_retry_held(p);   /* channels held by a barrier (their dependency may have been submitted since) */
+    return lagfx_arm64_poll_completions(p);
 }
 
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
-    return lagfx_arm64_cq_pending((lagfx_protocol_t *)device->protocol_state);
+    lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
+    uint32_t held = lagfx_arm64_held_channels(p);
+    return lagfx_arm64_cq_pending(p) + (size_t)__builtin_popcount(held);   /* keep the shell's timer running while a barrier holds a channel */
 }
 
 void lagfx_device_free(lagfx_device_t *device) {

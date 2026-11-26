@@ -40,6 +40,10 @@ struct lagfx_arm64_cq {
     bool fault;                           /* GPU FAULT: nothing can still touch guest memory; no submits, pending stamps completed as failed */
     bool slow_logged;
     lagfx_arm64_cq_stats_t st;
+    uint32_t submitted[CQ_SLOTS];         /* last stamp handed over (dispatched) per channel */
+    uint32_t barrier_waits[CQ_SLOTS];     /* consecutive holds of the channel's head command */
+    uint32_t held, draining;              /* channel bitmasks: head command held by a barrier / currently inside a drain */
+    uint32_t retry_limit;
 };
 
 static uint64_t now_ns(void) {
@@ -55,6 +59,8 @@ bool lagfx_arm64_cq_enable(lagfx_protocol_t *p) {
     pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&cq->lock, &a); pthread_mutexattr_destroy(&a);
     cq->slow_ns = lagfx_vk_wait_default_ns();
+    {   const char *r = getenv("LAGFX_ARM64_BARRIER_RETRIES");
+        cq->retry_limit = r && *r ? (uint32_t)strtoul(r, NULL, 10) : 20000u; }   /* Henge: ~20000 retries, then let it through */
     const char *t = getenv("LAGFX_GPU_HARD_TIMEOUT_MS");
     cq->hard_ns = t ? strtoull(t, NULL, 10) * 1000000ull : 0;
     p->a64cq = cq;
@@ -258,6 +264,7 @@ bool lagfx_arm64_submit_end(lagfx_protocol_t *p, lagfx_arm64_submit_ctx_t *c) {
     struct lagfx_arm64_cq *cq = p->a64cq;
     pthread_mutex_lock(&cq->lock);
     if (cq->cur == c) cq->cur = NULL;
+    if (c->slot < CQ_SLOTS) cq->submitted[c->slot] = c->stamp;   /* handed over: barriers of other channels may now pass */
     bool immediate = c->slot >= CQ_SLOTS || cq->fault ||
                      (c->nwork == 0 && !cq->head[c->slot] && barriers_ok(cq, c));
     if (immediate) {
@@ -346,3 +353,48 @@ void lagfx_arm64_cq_shutdown(lagfx_protocol_t *p, uint32_t timeout_ms) {
     pthread_mutex_destroy(&cq->lock);
     free(cq);
 }
+
+/* ---- barriers gate PROCESSING (Henge pvg_lite.c ~930-960): a command carrying {channel, stamp} slots is not processed until that channel has
+ * SUBMITTED (dispatched) work up to the stamp (signed compare). Bounded: after retry_limit holds it is let through and counted. ---- */
+static uint32_t first_blocker(struct lagfx_arm64_cq *cq, uint32_t slot, const uint8_t *slots, uint32_t n) {
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t bc = lagfx_le32(slots + 8u * k), bs = lagfx_le32(slots + 8u * k + 4u);
+        if (bc == 0 || bc >= CQ_SLOTS || bc == slot) continue;
+        if ((int32_t)(cq->submitted[bc] - bs) < 0) return bc;
+    }
+    return 0;
+}
+
+uint32_t lagfx_arm64_barrier_blocker(lagfx_protocol_t *p, uint32_t slot, const uint8_t *slots, uint32_t n) {
+    if (!lagfx_protocol_is_valid(p) || !p->a64cq || !slots) return 0;
+    pthread_mutex_lock(&p->a64cq->lock);
+    uint32_t r = first_blocker(p->a64cq, slot, slots, n);
+    pthread_mutex_unlock(&p->a64cq->lock);
+    return r;
+}
+
+lagfx_barrier_verdict_t lagfx_arm64_barrier_gate(lagfx_protocol_t *p, uint32_t slot, const uint8_t *slots, uint32_t n) {
+    if (!lagfx_protocol_is_valid(p) || !p->a64cq || !slots || slot >= CQ_SLOTS) return LAGFX_BARRIER_GO;
+    struct lagfx_arm64_cq *cq = p->a64cq;
+    pthread_mutex_lock(&cq->lock);
+    lagfx_barrier_verdict_t v = LAGFX_BARRIER_GO;
+    uint32_t b = first_blocker(cq, slot, slots, n);
+    if (!b) { cq->barrier_waits[slot] = 0; cq->held &= ~(1u << slot); }
+    else if (cq->barrier_waits[slot] + 1u < cq->retry_limit) {
+        cq->barrier_waits[slot]++; cq->held |= 1u << slot; cq->st.barrier_holds++; v = LAGFX_BARRIER_HOLD;
+    } else {
+        LAGFX_WARN("arm64 barrier: channel %u gave up waiting for channel %u (submitted 0x%x); letting it through", slot, b, cq->submitted[b]);
+        cq->barrier_waits[slot] = 0; cq->held &= ~(1u << slot); cq->st.barrier_timeouts++; v = LAGFX_BARRIER_LET_THROUGH;
+    }
+    pthread_mutex_unlock(&cq->lock);
+    return v;
+}
+
+void lagfx_arm64_barrier_note_drain(lagfx_protocol_t *p) { if (lagfx_protocol_is_valid(p) && p->a64cq) p->a64cq->st.barrier_drains++; }
+uint32_t lagfx_arm64_held_channels(lagfx_protocol_t *p) { return lagfx_protocol_is_valid(p) && p->a64cq ? p->a64cq->held : 0; }
+bool lagfx_arm64_chan_enter(lagfx_protocol_t *p, uint32_t ch) {   /* recursion guard for dependency drains */
+    if (!lagfx_protocol_is_valid(p) || !p->a64cq || ch >= CQ_SLOTS) return true;
+    if (p->a64cq->draining & (1u << ch)) return false;
+    p->a64cq->draining |= 1u << ch; return true;
+}
+void lagfx_arm64_chan_leave(lagfx_protocol_t *p, uint32_t ch) { if (lagfx_protocol_is_valid(p) && p->a64cq && ch < CQ_SLOTS) p->a64cq->draining &= ~(1u << ch); }
