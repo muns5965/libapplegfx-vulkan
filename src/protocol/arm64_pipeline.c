@@ -383,7 +383,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     for (int st = 0; st < 2; st++) {
         lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT];
         size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, LAGFX_A64_MAX_REFLECT);
-        if (nt > 32u) nt = 32u;
+        if (nt > LAGFX_A64_MAX_REFLECT) { CNTP(p).rf_bindings++; goto done; }   /* reflect returns the TOTAL: more than the buffer holds must fail, not be truncated */
         for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
         const lagfx_air_arg_binding_t *ab = st ? fab : vab;
         size_t nab = st ? nfab : nvab;

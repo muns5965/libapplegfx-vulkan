@@ -76,11 +76,12 @@ int main(int argc, char **argv) {
         uint32_t n_bind = 0; int verdict = 0;
         for (int st = 0; st < 2; st++) {
             lagfx_spv_binding_t tmp[LAGFX_A64_MAX_REFLECT]; size_t nt = lagfx_spv_reflect_bindings(blobs[st], lens[st], tmp, LAGFX_A64_MAX_REFLECT);
-            if (nt >= LAGFX_A64_MAX_REFLECT) { printf("  %s: reflection hit the %u-binding cap: bindings stub\n", st ? "fragment" : "vertex", LAGFX_A64_MAX_REFLECT); if (!verdict) verdict = 98; }
+            if (nt > LAGFX_A64_MAX_REFLECT) { printf("  %s: reflection hit the %u-binding cap: bindings stub\n", st ? "fragment" : "vertex", LAGFX_A64_MAX_REFLECT); if (!verdict) verdict = 98; }
+            if (nt > LAGFX_A64_MAX_REFLECT) nt = LAGFX_A64_MAX_REFLECT;   /* only that many were written */
             printf("  %s: %zu bindings (limit %u total):", st ? "fragment" : "vertex", nt, MAXB);
-            for (size_t t = 0; t < nt && t < nt; t++) printf(" %u/%s%u", tmp[t].set, kname((int)tmp[t].kind), tmp[t].binding);
+            for (size_t t = 0; t < nt; t++) printf(" %u/%s%u", tmp[t].set, kname((int)tmp[t].kind), tmp[t].binding);
             printf("\n");
-            for (size_t t = 0; t < nt && t < nt; t++) {
+            for (size_t t = 0; t < nt; t++) {
                 if (tmp[t].set == 0u && tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {
                     int why = lagfx_a64_fbfetch_check(st, local_read, tmp[t].binding, n_bind);
                     printf("  input attachment at binding %u: %s\n", tmp[t].binding, why ? lagfx_a64_fbfetch_reason_name(why) : "ok");
