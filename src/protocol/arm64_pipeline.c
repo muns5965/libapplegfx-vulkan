@@ -210,7 +210,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 
 typedef struct {
     VkDevice dev;
-    VkShaderModule vs, fs;
+    VkShaderModule vs, fs, fs_alt;   /* fs_alt: fs with explicit LOD 0 sampling, for pipelines that are drawn with an unnormalized-coordinates sampler */
     VkDescriptorSetLayout dsl;
     VkPipelineLayout pl;
     char vname[64], fname[64];
@@ -224,6 +224,7 @@ static void pres_release(void *u) {
     if (r->dsl) vkDestroyDescriptorSetLayout(r->dev, r->dsl, NULL);
     if (r->vs) vkDestroyShaderModule(r->dev, r->vs, NULL);
     if (r->fs) vkDestroyShaderModule(r->dev, r->fs, NULL);
+    if (r->fs_alt) vkDestroyShaderModule(r->dev, r->fs_alt, NULL);
     free(r->vspv); free(r->fspv);
     free(r);
 }
@@ -370,7 +371,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
         const lagfx_air_arg_binding_t *ab = st ? fab : vab;
         size_t nab = st ? nfab : nvab;
-        uint32_t nth[4] = { 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
+        uint32_t nth[6] = { 0, 0, 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
         for (size_t t = 0; t < nt; t++) {
             if (tmp[t].set != 0u) continue;
             if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
@@ -380,18 +381,21 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
                 out->n_bind++, CNTP(p).fbfetch_pipes++;
                 continue;
             }
-            if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER) { CNTP(p).rf_bindings++; goto done; }
+            if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER &&
+                tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_IMAGE) { CNTP(p).rf_bindings++; goto done; }
+            if (tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE && (st == 0 || !vk->have_storage_img_write)) { if (st == 0) CNTP(p).rf_vertex_res++; else CNTP(p).rf_bindings++; goto done; }   /* fragment writes only; needs the device features */
             if (out->n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) { CNTP(p).rf_bindings++; goto done; }
-            if (st == 0 && tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER) { CNTP(p).rf_vertex_res++; goto done; }   /* tags 129/127 are not executed */
-            uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE ? 2 : 3;
+            uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : (tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? 2 : 3;
+            uint8_t want_w = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE;   /* textures split by access: written ones are storage images */
             uint32_t n = nth[tmp[t].kind]++, seen = 0;
-            int midx = -1;
-            for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && seen++ == n) { midx = ab[k].metal_index; break; }
+            int midx = -1; uint8_t wr = 0;
+            for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && (want != 2 || ab[k].written == want_w) && seen++ == n) { midx = ab[k].metal_index; wr = ab[k].written; break; }
             if (midx > 31 || (midx < 0 && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER)) { CNTP(p).rf_bindings++; goto done; }   /* a buffer/texture nobody can feed */
             out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding;
             out->bind[out->n_bind].kind = (uint8_t)tmp[t].kind;
             out->bind[out->n_bind].stage = (uint8_t)st;
             out->bind[out->n_bind].metal_index = (int16_t)midx;
+            out->bind[out->n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? wr : 0u;
             out->n_bind++;
         }
     }
@@ -400,10 +404,20 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     if (vkCreateShaderModule(vk->device, &ci, NULL, &r->vs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
     ci.codeSize = fsz, ci.pCode = (const uint32_t *)fspv;
     if (vkCreateShaderModule(vk->device, &ci, NULL, &r->fs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
+    {   /* a fragment shader that samples with implicit LOD cannot be used with an unnormalized sampler: keep a variant with explicit LOD 0 (the exec picks it per draw) */
+        bool fsamp = false;
+        for (uint32_t k = 0; k < out->n_bind; k++) fsamp |= out->bind[k].stage == 1 && out->bind[k].kind == LAGFX_A64_BIND_SAMPLER;
+        uint8_t *alt = NULL; size_t altsz = 0;
+        if (fsamp && lagfx_spv_explicit_lod0(fspv, fsz, &alt, &altsz) == 1) {
+            ci.codeSize = altsz, ci.pCode = (const uint32_t *)alt;
+            if (vkCreateShaderModule(vk->device, &ci, NULL, &r->fs_alt) != VK_SUCCESS) r->fs_alt = VK_NULL_HANDLE;
+            free(alt);
+        }
+    }
     if (!spv_entry_name(vspv, vsz, r->vname, sizeof r->vname)) strcpy(r->vname, "main");
     if (!spv_entry_name(fspv, fsz, r->fname, sizeof r->fname)) strcpy(r->fname, "main");
 
-    out->desc.vertex_shader = r->vs, out->desc.fragment_shader = r->fs;
+    out->desc.vertex_shader = r->vs, out->desc.fragment_shader = r->fs, out->alt_fragment_shader = r->fs_alt;
     out->desc.vertex_entry_point = r->vname, out->desc.fragment_entry_point = r->fname;
     out->desc.layout = r->pl ? r->pl : vk->empty_layout;
     out->dsl = r->dsl;

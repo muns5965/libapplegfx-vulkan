@@ -92,7 +92,12 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
 typedef struct {
     uint8_t kind;
     int16_t metal_index;
+    uint8_t written;    /* arg metadata carries air.write / air.read_write: a texture is a storage image, a buffer may be written by the shader */
 } lagfx_air_arg_binding_t;
+
+/* True when function arg `arg_idx` is a texture whose per-arg metadata carries
+ * "air.write" or "air.read_write" (texture2d<T, access::write/read_write>). */
+bool lagfx_air_arg_is_written_texture(const lagfx_air_module_t *m, uint32_t arg_idx);
 
 /* Walk the entry point's air.vertex / air.fragment per-arg metadata and
  * return the resource args (buffers/textures/samplers) in arg order.

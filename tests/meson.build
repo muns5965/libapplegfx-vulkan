@@ -1549,3 +1549,14 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-compute-lavapipe.c') and vul
   test('air2spv translated tile kernel on lavapipe', air2spv_compute_vk_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# ARM64 render exec: storage images (shader-written textures), vertex-stage textures / samplers, unnormalized samplers, writable storage buffers.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-res-unit.c') and vulkan_dep.found()
+  ex_test = executable('arm64-exec-res-unit',
+    'arm64-exec-res-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec storage images + vertex textures + unnormalized samplers (unit, lavapipe)', ex_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif

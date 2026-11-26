@@ -447,6 +447,9 @@ typedef struct {
      * structurally (verified against spirv-val). */
     uint32_t                  id_ptr_uc_image;
     uint32_t                  id_ptr_uc_sampler;
+    uint32_t                  id_simage_t;       /* the storage OpTypeImage itself */
+    uint32_t                  id_ptr_uc_simage;  /* ptr-UniformConstant to a Sampled=2 storage image (kind 4) */
+    uint8_t                   cap_siw;           /* OpCapability StorageImageWriteWithoutFormat emitted */
 
     /* Generic OpTypeVector dedup cache. SPIR-V forbids duplicate
      * non-aggregate type declarations, and emit_type_vec is also called
@@ -1324,7 +1327,8 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
             /* Apple's opaque resource structs (strip a "struct." prefix). */
             const char *p = nm;
             if (strncmp(p, "struct.", 7u) == 0) p += 7u;
-            if (strstr(p, "_texture") || strstr(p, "_depth")) return 1; /* texture */
+            if (strstr(p, "_texture") || strstr(p, "_depth"))   /* texture; a written one is a storage image */
+                return (strstr(p, "_texture") && lagfx_air_arg_is_written_texture(c->m, arg_idx)) ? 4 : 1;
             if (strstr(p, "_sampler")) return 2;                        /* sampler */
         }
         return 3;                    /* named data struct -> buffer */
@@ -1351,7 +1355,8 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
             default: break;
         }
     }
-    if (addrspace == 1u) return 1;   /* texture (opaque) */
+    if (addrspace == 1u)             /* texture (opaque) */
+        return lagfx_air_arg_is_written_texture(c->m, arg_idx) ? 4 : 1;
     if (addrspace == 2u) return 2;   /* sampler (opaque) */
     return 0;
 }
@@ -1382,6 +1387,21 @@ static uint32_t emit_type_image2d_f(xlate_ctx_t *c) {
                        1u /*Sampled=1*/, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, ops, 8);
     c->id_image_t = id;
+    return id;
+}
+
+/* Pointer to a 2D float Sampled=2 storage image of unknown format: a `texture2d<T, access::write>` arg. Unknown format + OpImageWrite needs
+ * StorageImageWriteWithoutFormat (a per-format list would make the shader depend on the bound texture's pixel format, which AIR does not carry). */
+static uint32_t emit_type_ptr_uc_simage(xlate_ctx_t *c) {
+    if (c->id_ptr_uc_simage) return c->id_ptr_uc_simage;
+    uint32_t img = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t io[] = { img, emit_type_float32(c), LAGFX_SPV_DIM_2D, 0u, 0u, 0u, 2u /*Sampled=2: storage*/, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, io, 8);
+    c->id_simage_t = img;
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t po[] = { id, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT, img };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+    c->id_ptr_uc_simage = id;
     return id;
 }
 
@@ -2488,6 +2508,7 @@ static void emit_arg_resource_vars(xlate_ctx_t *c, uint32_t n_args) {
         }
         /* Shared cached pointer type — helper-fn params must match by ID. */
         uint32_t ptr_id = (rk == 1u) ? emit_type_ptr_uc_image(c)
+                        : (rk == 4u) ? emit_type_ptr_uc_simage(c)
                                      : emit_type_ptr_uc_sampler(c);
         uint32_t var_ops[] = { ptr_id, c->arg_resource_var[i],
                                 LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
@@ -4399,7 +4420,11 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 { uint32_t o[] = { simg_t, sampled, img_val, samp_val };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SAMPLED_IMAGE, o, 4); }
                 uint32_t rgba = lagfx_spv_builder_alloc_id(c->b);
-                { uint32_t o[] = { v4f, rgba, sampled, uv_spv };
+                if (c->stage == LAGFX_XLATE_STAGE_VERTEX) {   /* no derivatives in the vertex stage: implicit LOD is invalid there; Metal samples level 0 */
+                    uint32_t o[] = { v4f, rgba, sampled, uv_spv, 0x2u /* ImageOperands Lod */, emit_const_float32(c, 0.0f) };
+                    lagfx_spv_builder_emit_op(c->b, 88 /* OpImageSampleExplicitLod */, o, 6);
+                } else {
+                uint32_t o[] = { v4f, rgba, sampled, uv_spv };
                   lagfx_spv_builder_emit_op(c->b,
                       LAGFX_SPV_OP_IMAGE_SAMPLE_IMPLICIT_LOD, o, 4); }
 
@@ -4428,6 +4453,55 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                             "(value-id %u)", result_value_id);
                 return;
             }
+        }
+    }
+
+    /* === air.write_texture_2d.* -> OpImageWrite on the arg's storage image ===
+     * (tex_ptr, coord vNi, texel v4 float/half, ...): the texel is converted to the image's float32 sampled type. Integer texels are not modelled. */
+    if (strncmp(fn_name, "air.write_texture_2d", 20u) == 0 && result_value_id == 0u) {
+        uint32_t tex_slot = callee_slot_idx + 1u, coord_slot = callee_slot_idx + 2u, col_slot = callee_slot_idx + 3u;
+        uint32_t tex_var = 0;
+        if (inst->num_ops > col_slot)
+            tex_var = resolve_value_spv(c, resolve_relative((uint32_t)inst->ops[tex_slot], next_val_id));
+        bool tex_ok = false;
+        for (uint32_t a = 0; a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++)
+            if (c->arg_resource_kind[a] == 4u && c->arg_resource_var[a] && tex_var == c->arg_resource_var[a]) tex_ok = true;
+        uint32_t col_id = tex_ok ? resolve_relative((uint32_t)inst->ops[col_slot], next_val_id) : 0u;
+        uint32_t cat = tex_ok ? value_air_type_idx(c, col_id) : 0u, nt = 0;
+        const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+        bool col_ok = tex_ok && cat < nt && ts[cat].kind == LAGFX_AIR_TYPE_VECTOR && ts[cat].num_op >= 2u && ts[cat].op[0] == 4u && ts[cat].op[1] < nt &&
+                      (ts[ts[cat].op[1]].kind == LAGFX_AIR_TYPE_FLOAT || ts[ts[cat].op[1]].kind == LAGFX_AIR_TYPE_HALF);
+        if (col_ok) {
+            uint32_t u32 = emit_type_int_w(c, 32u, 0u), ivec2 = emit_type_vec(c, u32, 2u), v4f = emit_type_vec4_f(c);
+            uint32_t coord_id = resolve_relative((uint32_t)inst->ops[coord_slot], next_val_id);
+            uint32_t coord = resolve_or_undef(c, coord_id, ivec2);
+            uint32_t xat = value_air_type_idx(c, coord_id);
+            if (xat < nt && ts[xat].kind == LAGFX_AIR_TYPE_VECTOR && ts[xat].num_op >= 2u && ts[xat].op[1] < nt &&
+                ts[ts[xat].op[1]].kind == LAGFX_AIR_TYPE_INTEGER && ts[ts[xat].op[1]].num_op >= 1u && ts[ts[xat].op[1]].op[0] < 32u) {
+                uint32_t wid = lagfx_spv_builder_alloc_id(c->b);   /* ushort2 / uchar2 coordinate: image coordinates are 32-bit */
+                uint32_t o[] = { ivec2, wid, coord };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_UCONVERT, o, 3);
+                coord = wid;
+            }
+            uint32_t col = resolve_or_undef(c, col_id, v4f);
+            if (ts[ts[cat].op[1]].kind == LAGFX_AIR_TYPE_HALF) {
+                uint32_t cv = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t o[] = { v4f, cv, col };
+                lagfx_spv_builder_emit_op(c->b, 115 /* OpFConvert */, o, 3);
+                col = cv;
+            }
+            if (!c->cap_siw) {
+                c->cap_siw = 1u;
+                uint32_t cap[] = { 56u /* StorageImageWriteWithoutFormat */ };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1);
+            }
+            uint32_t img_val = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t lo[] = { c->id_simage_t, img_val, tex_var };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, lo, 3);
+            uint32_t wo[] = { img_val, coord, col };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_WRITE, wo, 3);
+            LAGFX_TRACE("call: air.write_texture_2d -> OpImageWrite");
+            return;
         }
     }
 

@@ -623,6 +623,12 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT ro_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, .rasterizationOrderColorAttachmentAccess = VK_TRUE };
     feat2.features.samplerAnisotropy = probe2.features.samplerAnisotropy ? VK_TRUE : VK_FALSE;   /* sampler anisotropy (Metal maxAnisotropy) */
     s->have_sampler_anisotropy = feat2.features.samplerAnisotropy == VK_TRUE;
+    /* Shader stores: storage-image writes without a format (texture2d<T, access::write>) and buffer/image writes from the fragment and vertex stages. */
+    feat2.features.shaderStorageImageWriteWithoutFormat = probe2.features.shaderStorageImageWriteWithoutFormat ? VK_TRUE : VK_FALSE;
+    feat2.features.fragmentStoresAndAtomics = probe2.features.fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;
+    feat2.features.vertexPipelineStoresAndAtomics = probe2.features.vertexPipelineStoresAndAtomics ? VK_TRUE : VK_FALSE;
+    s->have_storage_img_write = feat2.features.shaderStorageImageWriteWithoutFormat && feat2.features.fragmentStoresAndAtomics;
+    s->have_vertex_stores = feat2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
     {   /* Framebuffer-fetch / blend diagnostics, queried only (never enabled here): printed once as the g7-gpu-feat line. Own struct for local read: older headers lack it. */

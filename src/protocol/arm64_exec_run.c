@@ -71,7 +71,7 @@ typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded dept
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* topo: topology | 0x10 for the alt (explicit LOD) fragment shader */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology), owned by THIS object only */
     uint32_t ncache;
     uint32_t ref;
 } a64_pipe_t;
@@ -99,6 +99,8 @@ typedef struct {
     struct { lagfx_a64_obj_t *b; uint64_t off; } fb[A64_MAX_FB];   /* fragment buffers (tags 110/111) */
     lagfx_a64_obj_t *ftex[A64_MAX_FB];                             /* fragment textures (114): mirror textures, GENERAL layout */
     a64_samp_t *fsamp[A64_MAX_FSAMP];                              /* fragment samplers (112) */
+    lagfx_a64_obj_t *vtex[A64_MAX_FB];                             /* vertex textures (129) */
+    a64_samp_t *vsamp[A64_MAX_FSAMP]; VkSampler vvar[A64_MAX_FSAMP];   /* vertex samplers (127) and the LOD-clamp variants of tag 128 */
     VkPipeline bound_vk;                                           /* the VkPipeline bound in the open pass */
     VkSampler defsamp; VkDescriptorPool dpool; VkDescriptorSet last_ds; uint64_t last_ds_key;   /* descriptor sets: one per draw, reused while the binding key is unchanged */
     uint64_t gen_ctr; VkDeviceSize min_sb_align;
@@ -110,6 +112,7 @@ typedef struct {
      * (a new Metal encoder starts from the defaults) and applied as Vulkan dynamic state before each draw */
     lagfx_a64_obj_t *dsobj; VkFormat ds_dfmt, ds_sfmt;
     struct { lagfx_a64_dss_t dss; uint32_t sref[2]; uint32_t cull, winding; float bias[3]; bool dirty; } es;
+    bool wrote_storage;              /* a draw of the open pass may write storage images: pass_end adds a shader-write barrier */
     deferred_t *def; uint32_t ndef, capdef;
 } a64_run_t;
 
@@ -356,7 +359,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     CNT(p).execs++;
     r->vk = get_vk(p);
     r->x = NULL;
-    r->pass_open = r->rendering = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false;
+    r->pass_open = r->rendering = r->wrote_storage = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     if (!r->vk) { CNT(p).no_vulkan++; return false; }
     flush_deferred(r);   /* an earlier submission may have finished */
@@ -389,6 +392,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
 
 static void reset_frag_tables(a64_run_t *r) {
     memset(r->fb, 0, sizeof r->fb), memset(r->ftex, 0, sizeof r->ftex), memset(r->fsamp, 0, sizeof r->fsamp), memset(r->fvar, 0, sizeof r->fvar);
+    memset(r->vtex, 0, sizeof r->vtex), memset(r->vsamp, 0, sizeof r->vsamp), memset(r->vvar, 0, sizeof r->vvar);
 }
 
 /* The guest rewrote the serialized payload under an unchanged object entry: the pipeline built from the old bytes is stale. The (task, ref) object is replaced
@@ -415,9 +419,11 @@ static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
+    const uint32_t key = topo; topo &= 15u;   /* bit 4 of the key: build with the explicit-LOD fragment shader */
     for (uint32_t i = 0; i < pp->ncache; i++)
-        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == topo) return pp->cache[i].pl;
+        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
+    if (key & 16u) d.fragment_shader = pp->src.alt_fragment_shader;
     d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
     if (nslots == 1u && fmts[0] == VK_FORMAT_UNDEFINED) d.no_color = 1;   /* a depth/stencil-only pass: the one colour slot is unused */
     if (vk_core13(r->vk)) {   /* cull / front face / depth bias and the depth / stencil state are encoder state, set dynamically before each draw (see apply_encoder_state) */
@@ -443,12 +449,12 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
         p->diag2.exec.pipe.pipe_build_failed++;
         lagfx_a64_dump_spirv(p, d.vertex_spv, d.vertex_spv_bytes, d.fragment_spv, d.fragment_spv_bytes);   /* LAGFX_ARM64_DUMP=1 + dir: the failing modules, for offline spirv-val */
-        cache_put(pp, fmts, dfm, topo, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
+        cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
         return VK_NULL_HANDLE;
     }
     p->diag2.exec.pipe.pipes_built++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
-    cache_put(pp, fmts, dfm, topo, pl, r);
+    cache_put(pp, fmts, dfm, key, pl, r);
     return pl;
 }
 
@@ -463,8 +469,9 @@ static VkSampler default_sampler(a64_run_t *r) {
 
 static bool descriptor_pool(a64_run_t *r) {
     if (r->dpool) return true;
-    VkDescriptorPoolSize sz[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 }, { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024 } };
-    VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 512, .poolSizeCount = 4, .pPoolSizes = sz };
+    VkDescriptorPoolSize sz[5] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 }, { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024 },
+                                   { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1024 } };
+    VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 512, .poolSizeCount = 5, .pPoolSizes = sz };
     if (vkCreateDescriptorPool(r->vk->device, &ci, NULL, &r->dpool) != VK_SUCCESS) { r->dpool = VK_NULL_HANDLE; return false; }
     VkPhysicalDeviceProperties pr;
     vkGetPhysicalDeviceProperties(r->vk->phys_device, &pr);
@@ -514,6 +521,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++; return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
+            if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
             if (off % r->min_sb_align) {   /* Metal allows any 4-aligned offset, Vulkan only multiples of minStorageBufferOffsetAlignment: bind an aligned copy of the range */
                 dbuf = gather_copy(r, p, b, off, range);
                 if (!dbuf) { p->diag2.exec.pipe.desc_unaligned++; return false; }
@@ -528,8 +536,20 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x1f0u);
-        } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
+        } else if (s->bind[i].kind == LAGFX_A64_BIND_STORAGE_IMAGE) {   /* texture2d<T, access::write>: the mirror texture itself, GENERAL layout */
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
+            if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            bool fb = false;
+            for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
+            if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* writing an attachment being rendered */
+            VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_storage_view(r->x, t);   /* linear (buffer backed) and non-storage formats cannot be written */
+            if (!v) { CNT(p).ext_storage_img_unsupported++; return false; }
+            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, w[i].pImageInfo = &ii[i];
+            MIX(t->gen), MIX(0x57u);
+            r->wrote_storage = true;
+        } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
+            lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? (st ? r->ftex[mi] : r->vtex[mi]) : NULL;
             if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
@@ -540,8 +560,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
             MIX(t->gen);
         } else {
-            a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? r->fsamp[mi] : NULL;
-            VkSampler vs = sm ? (r->fvar[mi] ? r->fvar[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
+            a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? (st ? r->fsamp[mi] : r->vsamp[mi]) : NULL;
+            VkSampler *vvt = st ? r->fvar : r->vvar;
+            VkSampler vs = sm ? (vvt[mi] ? vvt[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
             if (!vs) { p->diag2.exec.pipe.desc_unbound++; return false; }
             ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];
@@ -579,7 +600,15 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++; CNT(p).draws_skipped++; return false; }
     VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
     for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) fmts[i] = r->rts[i]->format;
-    VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim);
+    uint32_t alt = 0;   /* an unnormalized-coordinates sampler in a fragment sampler slot of this pipeline: only explicit-LOD sampling is valid, so the LOD 0 variant of the fragment shader */
+    for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) {
+        const int16_t mi = r->pipe->src.bind[i].metal_index;
+        if (r->pipe->src.bind[i].stage != 1 || r->pipe->src.bind[i].kind != LAGFX_A64_BIND_SAMPLER || mi < 0 || (uint32_t)mi >= A64_MAX_FSAMP) continue;
+        if (r->fsamp[mi] && r->fsamp[mi]->ci.unnormalizedCoordinates) alt = 16u;
+    }
+    if (alt && !r->pipe->src.alt_fragment_shader) { CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
+    if (alt) CNT(p).ext_unnorm_lod0++;
+    VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim | alt);
     if (!vp) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
     if (r->bound_vk != vp) {
         if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
@@ -602,6 +631,11 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
 static void pass_end(a64_run_t *r) {
     if (r->rendering) {
         lagfx_translate_render_end(&r->rs);
+        if (r->wrote_storage) {   /* fragment storage-image writes are not covered by the colour attachment barrier of target_end */
+            VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+            vkCmdPipelineBarrier(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+        }
+        r->wrote_storage = false;
         for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
         if (r->dsobj) lagfx_a64_res_ds_end(r->x, r->dsobj);
     }
@@ -889,16 +923,19 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
             tag_done(p, tag);
         }
         break;
-    case 114: case 112: {                    /* {index, count}, refs: fragment textures / samplers */
+    case 114: case 112: case 129: case 127: {   /* {index, count}, refs: fragment (114 / 112) and vertex (129 / 127) textures / samplers */
         if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
-        uint32_t index = R32(0), count = R32(4), lim = tag == 114 ? A64_MAX_FB : A64_MAX_FSAMP;
+        const bool vs = tag == 129u || tag == 127u, tex = tag == 114u || tag == 129u;
+        lagfx_a64_obj_t **tt = vs ? r->vtex : r->ftex; a64_samp_t **ss = vs ? r->vsamp : r->fsamp; VkSampler *vv = vs ? r->vvar : r->fvar;
+        uint32_t index = R32(0), count = R32(4), lim = tex ? A64_MAX_FB : A64_MAX_FSAMP;
         if (count > lim || (uint64_t)n < 8u + 4ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         for (uint32_t i = 0; i < count && index + i < lim; i++) {
-            if (tag == 114) {   /* only textures the mirror already holds (the exec's resource list): creating + uploading one now would record copies inside the pass */
+            if (tex) {   /* only textures the mirror already holds (the exec's resource list): creating + uploading one now would record copies inside the pass */
                 lagfx_a64_obj_t *t = lagfx_a64_res_lookup(p, r->task->id, R32(8 + i * 4));
-                r->ftex[index + i] = t && t->kind == LAGFX_A64_TEXTURE ? t : NULL;
-            } else r->fsamp[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP), r->fvar[index + i] = VK_NULL_HANDLE;
+                tt[index + i] = t && t->kind == LAGFX_A64_TEXTURE ? t : NULL;
+            } else ss[index + i] = get_kind(r, p, r->task, R32(8 + i * 4), K_SAMP), vv[index + i] = VK_NULL_HANDLE;
         }
+        if (vs) CNT(p).ext_vs_tex_binds++;
         tag_done(p, tag);
         break;
     }
@@ -964,16 +1001,16 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         {
             uint32_t index = R32(0), count = R32(4);
             if (count > A64_MAX_FSAMP || (uint64_t)n < 8u + 12ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
-            if (tag == 128) { tag_unsup(p, tag); break; }   /* vertex-stage samplers are not executed (pipelines that use them are not built) */
+            a64_samp_t **ss = tag == 128 ? r->vsamp : r->fsamp; VkSampler *vv = tag == 128 ? r->vvar : r->fvar;
             for (uint32_t i = 0; i < count && index + i < A64_MAX_FSAMP; i++) {
                 a64_samp_t *sm = get_kind(r, p, r->task, R32(8 + i * 12), K_SAMP);
-                r->fsamp[index + i] = sm, r->fvar[index + i] = VK_NULL_HANDLE;
+                ss[index + i] = sm, vv[index + i] = VK_NULL_HANDLE;
                 if (!sm) continue;
                 uint32_t lo = R32(12 + i * 12), hi = R32(16 + i * 12);
                 float flo, fhi;
                 memcpy(&flo, &lo, 4), memcpy(&fhi, &hi, 4);
                 VkSampler v = sampler_variant(r, sm, flo, fhi);
-                if (v != sm->s) r->fvar[index + i] = v;
+                if (v != sm->s) vv[index + i] = v;
             }
             CNT(p).ext_samp_lod_binds++;
             tag_done(p, tag);
@@ -1013,7 +1050,7 @@ static bool supported_tag(uint32_t tag) {
 static bool hint_tag(uint32_t tag) { return tag == 137u || tag == 27u || tag == 134u || tag == 135u || tag == 24u || tag == 25u; }
 static bool direct_tag(uint32_t tag) {
     switch (tag) {
-    case 0: case 2: case 3: case 4: case 5: case 6: case 8: case 9: case 10: case 11: case 16: case 17: case 113: case 128:
+    case 0: case 2: case 3: case 4: case 5: case 6: case 8: case 9: case 10: case 11: case 16: case 17: case 113: case 128: case 127: case 129:
     case 137: case 27: case 134: case 135: case 24: case 25: case 22: case 23: case 133: return true;
     default: return false;
     }

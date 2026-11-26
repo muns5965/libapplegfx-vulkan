@@ -80,7 +80,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                 }
                 break;
             case OP_TYPE_IMAGE:
-                if (wc >= 4u && W(1) < MAXID) is_image[W(1)] = (W(3) == 6u) ? 2 : 1;   /* Dim SubpassData = input attachment */
+                if (wc >= 4u && W(1) < MAXID) is_image[W(1)] = (W(3) == 6u) ? 2 : (wc >= 8u && W(7) == 2u) ? 3 : 1;   /* Dim SubpassData = input attachment; Sampled=2 = storage image */
                 break;
             case OP_TYPE_SAMPLER:
                 if (wc >= 2u && W(1) < MAXID) is_sampler[W(1)] = 1;
@@ -114,6 +114,8 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
         if (pointee < MAXID) {
             if (is_image[pointee] == 2)
                 kind = LAGFX_SPV_BINDING_INPUT_ATTACHMENT;
+            else if (is_image[pointee] == 3)
+                kind = LAGFX_SPV_BINDING_STORAGE_IMAGE;
             else if (is_image[pointee] || is_sampled_image[pointee])
                 kind = LAGFX_SPV_BINDING_SAMPLED_IMAGE;
             else if (is_sampler[pointee])
@@ -172,6 +174,51 @@ void lagfx_spv_offset_bindings(uint8_t *spv, size_t spv_len, uint32_t base) {
         }
         i += wc;
     }
+}
+
+int lagfx_spv_explicit_lod0(const uint8_t *spv, size_t spv_len, uint8_t **out, size_t *out_len) {
+    if (!spv || !out || !out_len || spv_len < 20u || (spv_len & 3u) || lagfx_le32(spv) != SPV_MAGIC) return -1;
+    size_t nwords = spv_len / 4u, n_impl = 0, extra = 0, first_fn = 0;
+    uint32_t f32 = 0, zero = 0;
+    for (size_t i = 5u; i < nwords;) {
+        uint32_t hdr = lagfx_le32(spv + i * 4u);
+        uint32_t wc = hdr >> 16, op = hdr & 0xFFFFu;
+        if (wc == 0u || i + wc > nwords) return -1;
+        if (op == OP_TYPE_FLOAT && wc >= 3u && lagfx_le32(spv + (i + 2u) * 4u) == 32u && !f32) f32 = lagfx_le32(spv + (i + 1u) * 4u);
+        if (op == 43u && wc == 4u && f32 && lagfx_le32(spv + (i + 1u) * 4u) == f32 && lagfx_le32(spv + (i + 3u) * 4u) == 0u && !zero) zero = lagfx_le32(spv + (i + 2u) * 4u);   /* OpConstant %f32 %id 0.0 */
+        if (op == 54u && !first_fn) first_fn = i;   /* OpFunction */
+        if (op == 87u) {
+            if (wc == 5u) extra += 2u;                                                               /* + mask, Lod */
+            else if (wc == 7u && lagfx_le32(spv + (i + 5u) * 4u) == 0x8u) extra += 1u;               /* ConstOffset: mask |= Lod, + Lod id */
+            else return -1;
+            n_impl++;
+        }
+        i += wc;
+    }
+    if (!n_impl) return 0;
+    if (!f32 || !first_fn) return -1;
+    size_t new_const = zero ? 0u : 4u;
+    uint32_t bound = lagfx_le32(spv + 12u);
+    uint32_t zid = zero ? zero : bound;
+    uint8_t *o = malloc((nwords + extra + new_const) * 4u);
+    if (!o) return -1;
+    size_t w = 0;
+    #define EMIT(v) do { lagfx_put_le32(o + w * 4u, (v)); w++; } while (0)
+    for (size_t i = 0; i < 5u; i++) EMIT(i == 3u ? bound + (zero ? 0u : 1u) : lagfx_le32(spv + i * 4u));
+    for (size_t i = 5u; i < nwords;) {
+        uint32_t hdr = lagfx_le32(spv + i * 4u), wc = hdr >> 16, op = hdr & 0xFFFFu;
+        if (i == first_fn && new_const) { EMIT(4u << 16 | 43u); EMIT(f32); EMIT(zid); EMIT(0u); }   /* OpConstant %f32 %zid 0.0 */
+        if (op == 87u) {
+            EMIT((wc + (wc == 5u ? 2u : 1u)) << 16 | 88u);                                           /* OpImageSampleExplicitLod */
+            for (uint32_t k = 1; k <= 4u; k++) EMIT(lagfx_le32(spv + (i + k) * 4u));                 /* type, result, sampled image, coordinate */
+            if (wc == 5u) { EMIT(0x2u); EMIT(zid); }
+            else { EMIT(0xAu); EMIT(zid); EMIT(lagfx_le32(spv + (i + 6u) * 4u)); }
+        } else for (uint32_t k = 0; k < wc; k++) EMIT(lagfx_le32(spv + (i + k) * 4u));
+        i += wc;
+    }
+    #undef EMIT
+    *out = o, *out_len = w * 4u;
+    return 1;
 }
 
 bool lagfx_spv_has_image_sample(const uint8_t *spv, size_t spv_len) {

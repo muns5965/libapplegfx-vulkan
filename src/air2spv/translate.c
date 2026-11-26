@@ -127,7 +127,7 @@ lagfx_air_arg_bindings(const lagfx_air_module_t *m,
         if (!arg || arg->kind != LAGFX_AIR_MD_NODE) continue;
         uint8_t kind = 0;      /* 1=buffer 2=texture 3=sampler */
         int64_t loc = -1;
-        bool is_stagein = false;
+        bool is_stagein = false, written = false;
         for (uint32_t j = 0; j < arg->num_operands; j++) {
             if (arg->operands[j] == 0u) continue;
             const char *s = md_string(m, arg->operands[j] - 1u);
@@ -135,6 +135,8 @@ lagfx_air_arg_bindings(const lagfx_air_module_t *m,
             if (strcmp(s, "air.buffer") == 0)            kind = kind ? kind : 1u;
             else if (strcmp(s, "air.texture") == 0)      kind = kind ? kind : 2u;
             else if (strcmp(s, "air.sampler") == 0)      kind = kind ? kind : 3u;
+            else if (strcmp(s, "air.write") == 0 || strcmp(s, "air.read_write") == 0)
+                written = true;
             else if (strcmp(s, "air.vertex_input") == 0
                      || strcmp(s, "air.position") == 0
                      || strcmp(s, "air.vertex_id") == 0
@@ -149,9 +151,34 @@ lagfx_air_arg_bindings(const lagfx_air_module_t *m,
         if (is_stagein || kind == 0u) continue;   /* stage-in attr / vid — not a resource */
         out[n_out].kind        = kind;
         out[n_out].metal_index = (loc >= 0 && loc < 0x7fff) ? (int16_t)loc : -1;
+        out[n_out].written     = ((kind == 2u || kind == 1u) && written) ? 1u : 0u;   /* texture: storage image; buffer: the pipeline may write it */
         n_out++;
     }
     return n_out;
+}
+
+bool lagfx_air_arg_is_written_texture(const lagfx_air_module_t *m, uint32_t arg_idx) {
+    if (!m) return false;
+    const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.kernel");
+    if (!named || named->num_operands < 1u) return false;
+    const lagfx_air_metadata_t *ep = md_record(m, named->operands[0]);
+    if (!ep || ep->kind != LAGFX_AIR_MD_NODE || ep->num_operands < 3u || ep->operands[2] == 0u) return false;
+    const lagfx_air_metadata_t *args = md_record(m, ep->operands[2] - 1u);
+    if (!args || args->kind != LAGFX_AIR_MD_NODE || arg_idx >= args->num_operands || args->operands[arg_idx] == 0u)
+        return false;
+    const lagfx_air_metadata_t *arg = md_record(m, args->operands[arg_idx] - 1u);
+    if (!arg || arg->kind != LAGFX_AIR_MD_NODE) return false;
+    bool tex = false, wr = false;
+    for (uint32_t j = 0; j < arg->num_operands; j++) {
+        if (arg->operands[j] == 0u) continue;
+        const char *s = md_string(m, arg->operands[j] - 1u);
+        if (!s) continue;
+        if (strcmp(s, "air.texture") == 0) tex = true;
+        else if (strcmp(s, "air.write") == 0 || strcmp(s, "air.read_write") == 0) wr = true;
+    }
+    return tex && wr;
 }
 
 /* Key of one per-arg / per-output metadata NODE: the Metal link name. The

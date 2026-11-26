@@ -31,6 +31,7 @@ typedef enum {
     LAGFX_SPV_BINDING_SAMPLER        = 2, /* OpTypeSampler           -> VK_DESCRIPTOR_TYPE_SAMPLER */
     LAGFX_SPV_BINDING_STORAGE_BUFFER = 3, /* StorageBuffer Block     -> VK_DESCRIPTOR_TYPE_STORAGE_BUFFER */
     LAGFX_SPV_BINDING_INPUT_ATTACHMENT = 4, /* OpTypeImage Dim=SubpassData -> VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT (framebuffer fetch) */
+    LAGFX_SPV_BINDING_STORAGE_IMAGE  = 5, /* OpTypeImage Sampled=2   -> VK_DESCRIPTOR_TYPE_STORAGE_IMAGE (texture2d<T, access::write>) */
 } lagfx_spv_binding_kind_t;
 
 typedef struct {
@@ -85,6 +86,12 @@ bool lagfx_spv_has_image_sample(const uint8_t *spv, size_t spv_len);
  * demuxes on the same base. Mutates `spv` in place; safe to call once per
  * fragment module before vkCreateShaderModule + reflection. */
 void lagfx_spv_offset_bindings(uint8_t *spv, size_t spv_len, uint32_t base);
+
+/* Rewrites every OpImageSampleImplicitLod of the module into OpImageSampleExplicitLod with Lod 0.0 (an optional ConstOffset operand is kept). Needed
+ * for a fragment shader that samples through a sampler created with unnormalizedCoordinates: Vulkan allows only explicit-LOD sampling there
+ * (VUID-vkCmdDraw-None-08609 / the unnormalized-coordinates sampler rules). Returns 1 and a malloc'ed copy in *out, 0 when the module has no implicit-LOD
+ * sample (nothing to change, *out untouched), -1 when it cannot be rewritten (sample with Bias / Grad / MinLod operands, no float32 type, malformed). */
+int lagfx_spv_explicit_lod0(const uint8_t *spv, size_t spv_len, uint8_t **out, size_t *out_len);
 
 #ifdef __cplusplus
 }
