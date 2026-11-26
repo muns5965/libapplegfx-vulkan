@@ -1409,6 +1409,8 @@ if fs.is_file(meson.current_source_dir() / 'arm64-surface-writeback-unit.c')
     build_by_default : true,
   )
   test('arm64 completion fence + guest surface writeback (lavapipe)', sw_test)
+endif
+
 # ARM64 render-segment execution (LAGFX_ARM64_EXEC=1): (task, ref) object table lifetime + real Vulkan recording read back on lavapipe.
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   er_deps = [libapplegfx_vulkan_dep]
