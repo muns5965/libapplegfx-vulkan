@@ -240,5 +240,14 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
 #undef U
         fprintf(stderr, "%s\n", tl);
         LAGFX_LOG("%s", tl);
+        char gl[900]; int gn = snprintf(gl, sizeof gl, "g7-gpu-tile-detail: gathered=%llu gather_failed=%llu unaligned_written=%llu geom[", (unsigned long long)T->gathered, (unsigned long long)T->gather_failed, (unsigned long long)T->unaligned_written);
+        for (uint32_t i = 0; i < T->n_geom && gn > 0 && (size_t)gn < sizeof gl; i++)
+            gn += snprintf(gl + gn, sizeof gl - (size_t)gn, "%s{%s o=%u,%u r=%ux%u tg=%ux%ux%u tgt=%ux%u}", i ? " " : "", T->geom[i].region ? "region" : "whole", T->geom[i].ox, T->geom[i].oy, T->geom[i].rw, T->geom[i].rh, T->geom[i].tw, T->geom[i].th, T->geom[i].td, T->geom[i].tgt_w, T->geom[i].tgt_h);
+        if (gn > 0 && (size_t)gn < sizeof gl) gn += snprintf(gl + gn, sizeof gl - (size_t)gn, "] unaligned_binds[");
+        for (uint32_t i = 0; i < T->n_unal && gn > 0 && (size_t)gn < sizeof gl; i++)
+            gn += snprintf(gl + gn, sizeof gl - (size_t)gn, "%s{buffer(%u) off=%llu len=%llu align=%llu %s}", i ? " " : "", T->unal[i].metal_index, (unsigned long long)T->unal[i].off, (unsigned long long)T->unal[i].len, (unsigned long long)T->unal[i].align, T->unal[i].written ? "WRITTEN" : "read-only");
+        if (gn > 0 && (size_t)gn < sizeof gl - 1u) strcat(gl, "]");
+        fprintf(stderr, "%s\n", gl);
+        LAGFX_LOG("%s", gl);
     }
 }

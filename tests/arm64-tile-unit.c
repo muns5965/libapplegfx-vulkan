@@ -414,6 +414,26 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         puts("PASS: vertical simd blur (swapped lanes, shuffle along y) equals the CPU model");
     }
 
+    /* (3c) buffers bound at an offset that is not a multiple of minStorageBufferOffsetAlignment (Metal allows any 4-aligned one). Both kernel buffers are read-only per the
+     * arg metadata, so they are bound through aligned host copies and the result still equals the CPU model; the geometry and the unaligned binds land in the diag arrays. */
+    if (vk->phys_props.limits.minStorageBufferOffsetAlignment <= 4u) puts("SKIP: unaligned tile buffer offsets (the device accepts any 4-aligned storage buffer offset)");
+    else {
+        lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+        uint16_t u[8] = { 0, 0, (uint16_t)g_S, 0, 1, f2h(0.5f), 0, 0 }, w16[16] = {0};
+        for (int i = 0; i < 15; i++) w16[i] = f2h(g_w[i]);
+        va_write(((uint64_t)VPN_UBO << 14) + 4, u, sizeof u);      /* the same uniforms / weights, shifted by 4 bytes */
+        va_write(((uint64_t)VPN_WBUF << 14) + 4, w16, sizeof w16);
+        tile_pass_clear(); cb_pipeline(REF_TILE); cb_tile_buf(0, REF_UBO, 4); cb_tile_buf(1, REF_WBUF, 4); cb_tile_tex(0, REF_SRC);
+        cb_dispatch_all(g_S, 4);
+        exec_refs(p, 1, cb_finish());
+        assert(TILE(p).dispatches == 1 && TILE(p).skip_unaligned == 0 && TILE(p).gathered == 2u && TILE(p).gather_failed == 0 && TILE(p).unaligned_written == 0);
+        assert(TILE(p).n_unal == 2u && TILE(p).unal[0].off == 4u && !TILE(p).unal[0].written && TILE(p).unal[0].align == vk->phys_props.limits.minStorageBufferOffsetAlignment);
+        assert(TILE(p).n_geom == 1u && !TILE(p).geom[0].region && TILE(p).geom[0].tw == g_S && TILE(p).geom[0].th == 4u && TILE(p).geom[0].tgt_w == g_W && TILE(p).geom[0].tgt_h == g_H);
+        assert(compare(p, t, REF_DST, all_px, &nc, &nk) == 0);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        puts("PASS: read-only tile buffers at offsets the device cannot bind are bound through aligned copies (result equals the CPU model); geometry + unaligned binds recorded");
+    }
+
     /* (4) fail closed: unbound texture (not set), unbound buffer, and an attachment that is not Rgba16f */
     {
         lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
