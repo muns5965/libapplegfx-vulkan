@@ -38,16 +38,22 @@ bool lagfx_constexpr_sampler_decode(uint64_t raw, lagfx_constexpr_sampler_t *out
     uint16_t hmin = (uint16_t)((raw >> 24) & 0xFFFFu);
     uint16_t hmax = (uint16_t)((raw >> 40) & 0xFFFFu);
     /* Layout check: unknown high bits must be clear, both clamps must be
-     * finite non-negative halves in order, and bit 63 (normalized) set — a
+     * finite non-negative halves in order, and the bit-63 one-word marker set — a
      * word that does not look like the observed ones is not interpreted. */
     if ((raw >> 56) & 0x7Fu) return false;
-    if (!((raw >> 63) & 1u)) return false;
+    if (!((raw >> 63) & 1u)) return false;      /* one-word-form marker */
     if ((hmin & 0x8000u) || (hmax & 0x8000u)) return false;
     if (((hmin >> 10) & 0x1Fu) == 31u || ((hmax >> 10) & 0x1Fu) == 31u) return false;
     float lo = lagfx_half_to_float(hmin), hi = lagfx_half_to_float(hmax);
     if (lo > hi) return false;
     out->valid      = true;
-    out->normalized = true;
+    out->normalized = !((raw >> 15) & 1u);
+    for (int i = 0; i < 3; i++) out->addr[i] = (uint8_t)((raw >> (3 * i)) & 7u);
+    out->mag_filter    = (uint8_t)((raw >> 9) & 3u);
+    out->min_filter    = (uint8_t)((raw >> 11) & 3u);
+    out->mip_filter    = (uint8_t)((raw >> 13) & 3u);
+    out->compare_func  = (uint8_t)((raw >> 16) & 0xFu);
+    out->max_aniso     = (uint8_t)(((raw >> 20) & 0xFu) + 1u);
     out->lod_min    = lo;
     out->lod_max    = hi;
     return true;

@@ -62,15 +62,21 @@ int main(void) {
     CHECK(lagfx_sampler_cache_get(&c, &def) == sdef);
     CHECK(lagfx_sampler_cache_count(&c) == 1);
 
-    /* The four words in the captured modules differ only in undecoded bits:
-     * they all map to the default state -> the same VkSampler. */
+    /* The four captured words decode (external layout) to four distinct states:
+     * pixel+linear+zero, pixel+nearest+zero, normalized nearest repeat, normalized
+     * linear clamp-to-edge. The same word twice -> the same VkSampler. */
     const uint64_t words[4] = { 0x807bff0000088a00ull, 0x807bff0000088000ull,
                                 0x807bff0000080092ull, 0x807bff0000080a49ull };
+    VkSampler ws[4];
     for (int i = 0; i < 4; i++) {
         lagfx_constexpr_sampler_t cs;
         CHECK(lagfx_constexpr_sampler_decode(words[i], &cs));
         lagfx_sampler_state_t st = lagfx_sampler_state_from_constexpr(&cs);
-        CHECK(lagfx_sampler_cache_get(&c, &st) == sdef);
+        CHECK(st.unnormalized == (i < 2));
+        ws[i] = lagfx_sampler_cache_get(&c, &st);
+        CHECK(ws[i] != VK_NULL_HANDLE);
+        CHECK(lagfx_sampler_cache_get(&c, &st) == ws[i]);
+        for (int j = 0; j < i; j++) CHECK(ws[i] != ws[j]);
     }
     /* Undecodable word / NULL -> the default state. */
     lagfx_constexpr_sampler_t bad;
@@ -79,11 +85,11 @@ int main(void) {
     CHECK(lagfx_sampler_cache_get(&c, &sb) == sdef);
     lagfx_sampler_state_t sn = lagfx_sampler_state_from_constexpr(NULL);
     CHECK(lagfx_sampler_cache_get(&c, &sn) == sdef);
-    CHECK(lagfx_sampler_cache_count(&c) == 1);
+    CHECK(lagfx_sampler_cache_count(&c) == 5);
 
     /* A decoded, non-default LOD clamp is a distinct state. */
     lagfx_constexpr_sampler_t cs2;
-    CHECK(lagfx_constexpr_sampler_decode(0x8000000000000000ull | (0x4400ull << 40) | (0x3c00ull << 24), &cs2));  /* [1, 4] */
+    CHECK(lagfx_constexpr_sampler_decode(0x8000000000000000ull | (0x4400ull << 40) | (0x3c00ull << 24) | (1ull << 13), &cs2));  /* [1, 4], mip nearest */
     lagfx_sampler_state_t sl = lagfx_sampler_state_from_constexpr(&cs2);
     CHECK(sl.lod_min == 1.0f && sl.lod_max == 4.0f);
 
@@ -105,9 +111,9 @@ int main(void) {
         CHECK(h[i] != sdef);
         for (int j = 0; j < i; j++) CHECK(h[i] != h[j]);
     }
-    CHECK(lagfx_sampler_cache_count(&c) == 9);
+    CHECK(lagfx_sampler_cache_count(&c) == 13);
     for (int i = 0; i < 8; i++) CHECK(lagfx_sampler_cache_get(&c, &v[i]) == h[i]);
-    CHECK(lagfx_sampler_cache_count(&c) == 9);
+    CHECK(lagfx_sampler_cache_count(&c) == 13);
 
     /* lod_max >= 1000 is the same state as "no clamp". */
     lagfx_sampler_state_t big = def; big.lod_max = 65504.0f;

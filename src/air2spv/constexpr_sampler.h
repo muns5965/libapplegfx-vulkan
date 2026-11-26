@@ -5,24 +5,33 @@
  * Copyright © 2026 Matthew Jackson
  * SPDX-License-Identifier: MIT
  *
- * Encoding as observed in the captured AIR modules (no public spec exists;
- * everything below is derived from the dumps; bits not listed are NOT decoded):
+ * Layout (external, UNVERIFIED on device): field positions come from two
+ * independent published sources (an MIT project that states it derived them
+ * from Apple's compiler output, and Apache-2.0 LuisaCompute, which emits
+ * AIR that runs on Apple GPUs); no Apple documentation exists. Our four
+ * captured words decode consistently with it (tests/air2spv-constexpr-
+ * sampler-unit.c). Field NAMES applied to our shaders are INFER.
  *
  *   - `!air.sampler_states = !{ !{ !"air.sampler_state", ptr @G } ... }`
- *     names one module global per constexpr sampler.
- *   - Each @G is `addrspace(2) constant i64 <word>` (GLOBALVAR record,
- *     isconst=1, explicit type, addrspace 2, initializer = a module i64
- *     constant).
- *   - A sample call's sampler operand is a constant expression
- *     (CST_CODE_CE_CAST) of @G.
+ *     names one module global per constexpr sampler; each @G is
+ *     `addrspace(2) constant i64 <word>`; a sample call's sampler operand
+ *     is a CE_CAST of @G.
  *
- * Decoded from <word> (the layout check requires bits 56..62 == 0):
- *   bit  63      coordinates normalized (set in every observed word)
- *   bits 40..55  max LOD clamp, IEEE binary16 (observed 0x7bff = 65504,
- *                the largest finite half = Metal's default lodMaxClamp)
- *   bits 24..39  min LOD clamp, IEEE binary16 (observed 0x0000 = 0.0)
- * bits 0..23 (filters / address modes / mip / compare / ...) are NOT
- * evidenced and are carried only as raw_low24.
+ *   bits  0..8   address modes s,t,r (3 bits each): 0 clamp_to_zero,
+ *                1 clamp_to_edge, 2 repeat, 3 mirrored_repeat,
+ *                4 clamp_to_border
+ *   bits  9..10  mag filter  (0 nearest, 1 linear, 2 bicubic)
+ *   bits 11..12  min filter  (same values)
+ *   bits 13..14  mip filter  (0 none, 1 nearest, 2 linear)
+ *   bit  15      pixel (unnormalized) coordinates when SET
+ *   bits 16..19  compare function (observed 8 in every word = no compare;
+ *                other values undocumented)
+ *   bits 20..23  max anisotropy - 1
+ *   bits 24..39  min LOD clamp, binary16;  bits 40..55 max LOD clamp, binary16
+ *   bits 56..59  border colour / reduction (undocumented; required 0 here)
+ *   bit  63      one-word-form marker (set in every observed word). It is NOT
+ *                a "normalized coordinates" flag - that was an earlier
+ *                misreading (508dad5); normalized == bit 15 clear.
  */
 
 #ifndef LIBAPPLEGFX_AIR2SPV_CONSTEXPR_SAMPLER_H
@@ -43,10 +52,16 @@ typedef struct {
     uint32_t global_index;   /* module value id of the @__air_sampler_state global */
     uint64_t raw;            /* the i64 initializer */
     bool     valid;          /* layout check passed; the decoded fields below are meaningful */
-    bool     normalized;     /* bit 63 */
+    bool     normalized;     /* bit 15 clear (coordinates normalized) */
+    uint8_t  addr[3];        /* bits 0..8: s,t,r (0 zero,1 edge,2 repeat,3 mirror,4 border) */
+    uint8_t  mag_filter;     /* bits 9..10 (0 nearest,1 linear,2 bicubic) */
+    uint8_t  min_filter;     /* bits 11..12 */
+    uint8_t  mip_filter;     /* bits 13..14 (0 none,1 nearest,2 linear) */
+    uint8_t  compare_func;   /* bits 16..19 (8 = no compare in every observed word) */
+    uint8_t  max_aniso;      /* bits 20..23 + 1 */
     float    lod_min;        /* bits 24..39 as half */
     float    lod_max;        /* bits 40..55 as half */
-    uint32_t raw_low24;      /* bits 0..23, undecoded */
+    uint32_t raw_low24;      /* bits 0..23, as captured */
 } lagfx_constexpr_sampler_t;
 
 /* Decode one word. Always fills raw/raw_low24; returns out->valid. */

@@ -37,12 +37,22 @@ static void part_a(void) {
     for (int i = 0; i < 4; i++) {
         lagfx_constexpr_sampler_t s;
         CHECK(lagfx_constexpr_sampler_decode(k_words[i], &s));
-        CHECK(s.valid && s.normalized);
+        CHECK(s.valid);
+        CHECK(s.compare_func == 8 && s.max_aniso == 1 && s.mip_filter == 0);
         CHECK(s.lod_min == 0.0f && s.lod_max == 65504.0f);
         CHECK(s.raw == k_words[i]);
         CHECK(s.raw_low24 == (uint32_t)(k_words[i] & 0xFFFFFFu));
     }
     lagfx_constexpr_sampler_t s;
+    /* field decode of the four captured words (external layout, see header) */
+    CHECK(lagfx_constexpr_sampler_decode(k_words[0], &s));
+    CHECK(!s.normalized && s.mag_filter == 1 && s.min_filter == 1 && s.addr[0] == 0 && s.addr[1] == 0 && s.addr[2] == 0);
+    CHECK(lagfx_constexpr_sampler_decode(k_words[1], &s));
+    CHECK(!s.normalized && s.mag_filter == 0 && s.min_filter == 0 && s.addr[0] == 0);
+    CHECK(lagfx_constexpr_sampler_decode(k_words[2], &s));
+    CHECK(s.normalized && s.mag_filter == 0 && s.min_filter == 0 && s.addr[0] == 2 && s.addr[1] == 2 && s.addr[2] == 2);
+    CHECK(lagfx_constexpr_sampler_decode(k_words[3], &s));
+    CHECK(s.normalized && s.mag_filter == 1 && s.min_filter == 1 && s.addr[0] == 1 && s.addr[1] == 1 && s.addr[2] == 1);
     CHECK(!lagfx_constexpr_sampler_decode(0x007bff0000088a00ull, &s));   /* bit 63 clear */
     CHECK(!lagfx_constexpr_sampler_decode(0x817bff0000088a00ull, &s));   /* unknown bit 56 */
     CHECK(!lagfx_constexpr_sampler_decode(0x807c000000000000ull, &s));   /* max = +inf */

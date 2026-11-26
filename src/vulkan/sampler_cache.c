@@ -47,10 +47,31 @@ static void canon(lagfx_sampler_state_t *s) {
 lagfx_sampler_state_t lagfx_sampler_state_from_constexpr(const lagfx_constexpr_sampler_t *cs) {
     lagfx_sampler_state_t s = lagfx_sampler_state_default();
     if (cs && cs->valid) {
+        static const VkSamplerAddressMode am[5] = {
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER,   /* 0 clamp_to_zero: transparent-black border (INFER) */
+            VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, VK_SAMPLER_ADDRESS_MODE_REPEAT,
+            VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER };
+        s.addr_u = am[cs->addr[0] % 5u]; s.addr_v = am[cs->addr[1] % 5u]; s.addr_w = am[cs->addr[2] % 5u];
+        s.mag_filter = cs->mag_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;   /* bicubic (2) not mapped */
+        s.min_filter = cs->min_filter ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+        s.mip_mode = cs->mip_filter == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
         s.lod_min = cs->lod_min;
-        s.lod_max = cs->lod_max;
-        /* cs->normalized is true for every valid decode; the unnormalized
-         * layout is not evidenced, so it never reaches here. */
+        s.lod_max = cs->mip_filter ? cs->lod_max : 0.0f;    /* mip filter none: base level only */
+        s.max_anisotropy = (float)cs->max_aniso;
+        s.border = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
+        if (!cs->normalized) {
+            /* Vulkan unnormalized coordinates: edge/border addressing only, no mips,
+             * no anisotropy. Applied only when those hold; otherwise the state stays
+             * normalized and the caller must handle it (not silently remapped). */
+            bool am_ok = true;
+            for (int i = 0; i < 2; i++)
+                if (cs->addr[i] == 2u || cs->addr[i] == 3u) am_ok = false;
+            if (am_ok && cs->mip_filter == 0u && cs->max_aniso == 1u) {
+                s.unnormalized = true; s.lod_min = 0.0f; s.lod_max = 0.0f;
+                s.mip_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+                s.addr_w = s.addr_u;
+            }
+        }
     }
     canon(&s);
     return s;
