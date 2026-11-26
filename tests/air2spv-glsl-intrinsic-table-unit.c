@@ -217,11 +217,35 @@ int main(void) {
         check(name, 1, rows[i].glsl, rows[i].nargs, rows[i].three_way);
         nreal += rows[i].prov == 'V';
     }
-    /* Integer forms of the plain names are NOT float math (air.max.s.i32, air.clamp.u.i32): no row. */
-    check("air.clamp.s.i32", 0, 0, 0, 0);
-    check("air.clamp.u.i32", 0, 0, 0, 0);
+    /* Integer forms: air.<op>.s.<ty> / air.<op>.u.<ty> (sign marker before the type; MIT project vertex-language/air intrinsic.go @3d277d16858a; 'U' = not in the
+     * device dumps). The unsigned forms must not fall into the float rows ("air.clamp." has IXF_FLOATSFX) nor into each other. Official GLSL.std.450 numbers:
+     * UMin 38, SMin 39, UMax 41, SMax 42, UClamp 44, SClamp 45, SAbs 5. */
+    {
+        static const struct { const char *stem; uint32_t glsl; uint32_t nargs; } irows[] = {
+            {"air.min.s.", 39, 2}, {"air.min.u.", 38, 2}, {"air.max.s.", 42, 2}, {"air.max.u.", 41, 2},
+            {"air.clamp.s.", 45, 3}, {"air.clamp.u.", 44, 3}, {"air.abs.s.", 5, 1},
+        };
+        static const char *const tys[] = { "i8", "i16", "i32", "v2i32", "v3i16", "v4i8" };
+        for (size_t i = 0; i < sizeof irows / sizeof irows[0]; i++)
+            for (size_t t = 0; t < sizeof tys / sizeof tys[0]; t++) {
+                char name[64];
+                snprintf(name, sizeof name, "%s%s", irows[i].stem, tys[t]);
+                check(name, 1, irows[i].glsl, irows[i].nargs, 0);
+            }
+    }
+    /* The other integer intrinsics (clz, ctz, popcount, reverse_bits, mul_hi, add_sat, sub_sat, extract_bits, insert_bits, abs.u) are not GLSL.std.450 rows: they are
+     * lowered by their own code (tests/air2spv-int-intrinsics-unit.c), so the table must not claim them. */
+    {
+        static const char *const own[] = { "air.clz.i32", "air.ctz.v2i32", "air.popcount.i16", "air.reverse_bits.i8", "air.mul_hi.s.i32", "air.mul_hi.u.i64", "air.add_sat.s.i8",
+            "air.add_sat.u.v2i32", "air.sub_sat.s.i16", "air.sub_sat.u.i32", "air.extract_bits.s.i32", "air.insert_bits.u.v4i32", "air.abs.u.i32" };
+        for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) check(own[i], 0, 0, 0, 0);
+    }
+    /* Not integer-min/max names: no sign marker (ambiguous) or float suffix after a sign marker. */
+    check("air.min.i32", 0, 0, 0, 0);
+    check("air.max.i32", 0, 0, 0, 0);
+    check("air.abs.i32", 0, 0, 0, 0);
+    check("air.clamp.i32", 0, 0, 0, 0);
     check("air.fabs.i32", 0, 0, 0, 0);
-    check("air.max.s.i32", 0, 0, 0, 0);
     check("air.step.i32", 0, 0, 0, 0);
     check("air.sin.i32", 0, 0, 0, 0);
     /* Non-math AIR names never match. */

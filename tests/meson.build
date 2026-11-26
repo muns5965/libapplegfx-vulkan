@@ -1699,6 +1699,32 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-i1-const-lavapipe.c') and vu
     workdir : meson.current_source_dir() / '..')
 endif
 
+# AIR integer intrinsics (census X11): hand-written AIR fixtures translated, per-op opcode check + spirv-val. Skips (77) without spirv-val.
+if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-unit.c')
+  air2spv_int_test = executable('air2spv-int-intrinsics-unit',
+    'air2spv-int-intrinsics-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv integer intrinsics (unit)', air2spv_int_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
+# The same integer intrinsics executed on a Vulkan 1.3 device (lavapipe), every pixel compared with a CPU reference. Skips (77) without a suitable device.
+if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-lavapipe.c') and vulkan_dep.found()
+  air2spv_int_vk_test = executable('air2spv-int-intrinsics-lavapipe',
+    'air2spv-int-intrinsics-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv integer intrinsics on lavapipe', air2spv_int_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # OpUndef usage report + fail-closed translation (fixtures undefctl_fragment / i1const_fragment).
 if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
   air2spv_undef_test = executable('air2spv-undef-report-unit',
