@@ -20,36 +20,53 @@ uint64_t lagfx_a64_hash64(const void *data, size_t n) {
     return h;
 }
 
-/* Colour attachment 0: the record of the LAST array chunk `0c 00 00 00 <len u32> <count u8>` whose first element is `00 04 <0 u32>` and whose first token after it is
- * `01 04 <pixel format>` (earlier chunks hold the vertex attributes, whose `01 04` value is a vertex format). */
+/* Colour attachment array: the LAST chunk `0c 00 00 00 <len u32> <count u8>` whose first element is `00 04 <0 u32>` (attachment index 0) followed by
+ * `01 04 <pixel format>` (earlier chunks hold vertex attributes, whose `01 04` value is a vertex format). `count` is the number of 6-byte tokens of attachment 0
+ * (index + format + the non-default properties); the real dump (36 descriptors) always satisfies len == 6 * count + 13: the count byte, the tokens, and the
+ * start of the NEXT attachment record (`03 00 04 <idx 1>`, `01 04 <fmt>`, optionally `09 04 <writeMask>`), which `len` ends inside of. A record is only
+ * accepted when len/count/tokens agree, otherwise found stays false (partial decodes are not trusted). */
 static bool is_pixfmt(uint32_t f) { return f == 10u || f == 70u || f == 80u || f == 81u || f == 90u || f == 94u || f == 115u || f == 125u || f == 55u || f == 71u || f == 8u || f == 20u || f == 30u || f == 40u || f == 60u || f == 65u || f == 110u || f == 105u || f == 100u; }
 static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o) {
     memset(o, 0, sizeof *o);
-    o->src_rgb = 1, o->dst_rgb = 0, o->op_rgb = 0, o->src_a = 1, o->dst_a = 0, o->op_a = 0, o->mask = 0xfu;
-    for (uint32_t i = limit < 20u ? 0u : limit - 20u;; i--) {   /* last chunk first */
-        if (i + 20u <= limit && b[i] == 0x0cu && !b[i + 1] && !b[i + 2] && !b[i + 3] && b[i + 9] == 0x00u && b[i + 10] == 0x04u && !lagfx_le32(b + i + 11) &&
+    o->src_rgb = 1, o->dst_rgb = 0, o->op_rgb = 0, o->src_a = 1, o->dst_a = 0, o->op_a = 0, o->mask = 0xfu, o->mask1 = 0xfu;
+    if (limit < 21u) return;
+    for (uint32_t i = limit - 21u;; i--) {   /* last chunk first; every read below is < i + 21 <= limit */
+        if (b[i] == 0x0cu && !b[i + 1] && !b[i + 2] && !b[i + 3] && b[i + 9] == 0x00u && b[i + 10] == 0x04u && !lagfx_le32(b + i + 11) &&
             b[i + 15] == 0x01u && b[i + 16] == 0x04u && is_pixfmt(lagfx_le32(b + i + 17))) {
-            o->found = true;
-            o->pixfmt = lagfx_le32(b + i + 17);
-            uint32_t at = i + 21u, prev = 1u;
-            while (at + 6u <= limit && b[at + 1] == 0x04u && b[at] > prev && b[at] <= 9u) {
-                uint32_t key = b[at], v = lagfx_le32(b + at + 2u);
-                if (v > 0xffu) break;
-                switch (key) {
-                case 2: o->enabled_token = true; break;
-                case 3: o->src_rgb = (uint8_t)v; o->any_blend_token = true; break;
-                case 4: o->dst_rgb = (uint8_t)v; o->any_blend_token = true; break;
-                case 5: o->op_rgb = (uint8_t)v; o->any_blend_token = true; break;
-                case 6: o->src_a = (uint8_t)v; o->any_blend_token = true; break;
-                case 7: o->dst_a = (uint8_t)v; o->any_blend_token = true; break;
-                case 8: o->op_a = (uint8_t)v; o->any_blend_token = true; break;
-                case 9: o->mask = (uint8_t)v; break;
-                default: break;
+            uint32_t len = lagfx_le32(b + i + 4), count = b[i + 8];
+            if (count >= 2u && len == 6u * count + 13u && (uint64_t)i + 8u + len <= limit) {
+                lagfx_a64_blend_t t = *o;
+                t.pixfmt = lagfx_le32(b + i + 17);
+                uint32_t at = i + 21u, prev = 1u, ntok = 2u;
+                bool ok = true;
+                while (ntok < count) {
+                    if (at + 6u > limit || b[at + 1] != 0x04u || b[at] <= prev || b[at] > 9u || lagfx_le32(b + at + 2u) > 0xffu) { ok = false; break; }
+                    uint32_t key = b[at], v = lagfx_le32(b + at + 2u);
+                    switch (key) {
+                    case 2: t.enabled_token = true; t.enabled_value = (uint8_t)v; break;
+                    case 3: t.src_rgb = (uint8_t)v; t.any_blend_token = true; break;
+                    case 4: t.dst_rgb = (uint8_t)v; t.any_blend_token = true; break;
+                    case 5: t.op_rgb = (uint8_t)v; t.any_blend_token = true; break;
+                    case 6: t.src_a = (uint8_t)v; t.any_blend_token = true; break;
+                    case 7: t.dst_a = (uint8_t)v; t.any_blend_token = true; break;
+                    case 8: t.op_a = (uint8_t)v; t.any_blend_token = true; break;
+                    case 9: t.mask = (uint8_t)v; break;
+                    default: break;
+                    }
+                    prev = key; at += 6u; ntok++;
                 }
-                prev = key; at += 6u;
+                if (ok) {
+                    if (t.enabled_token) t.any_blend_token = true;
+                    t.found = true;
+                    /* attachment 1: `03 00 04 01 00 00 00 01 04 <fmt>` [`09 04 <writeMask>`] right after attachment 0 */
+                    if (at + 13u <= limit && b[at] == 0x03u && b[at + 1] == 0x00u && b[at + 2] == 0x04u && lagfx_le32(b + at + 3) == 1u && b[at + 7] == 0x01u && b[at + 8] == 0x04u && is_pixfmt(lagfx_le32(b + at + 9))) {
+                        t.found1 = true, t.pixfmt1 = lagfx_le32(b + at + 9);
+                        if (at + 19u <= limit && b[at + 13] == 0x09u && b[at + 14] == 0x04u && lagfx_le32(b + at + 15) <= 0xfu) t.mask1 = (uint8_t)lagfx_le32(b + at + 15);
+                    }
+                    *o = t;
+                    return;
+                }
             }
-            if (o->enabled_token) o->any_blend_token = true;
-            return;
         }
         if (!i) break;
     }
@@ -375,15 +392,17 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             VK_BLEND_FACTOR_SRC_ALPHA_SATURATE, VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR, VK_BLEND_FACTOR_CONSTANT_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA };
         static const uint8_t ops[5] = { VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN, VK_BLEND_OP_MAX };
         const lagfx_a64_blend_t *b = &d.color0;
-        bool ok_vals = b->found && b->src_rgb < 15u && b->dst_rgb < 15u && b->src_a < 15u && b->dst_a < 15u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
+        /* BlendColor factors (11..14) need vkCmdSetBlendConstants, which the exec path does not issue yet: such a pipeline keeps the fixed state (counted as a stub) */
+        bool ok_vals = b->found && b->src_rgb < 11u && b->dst_rgb < 11u && b->src_a < 11u && b->dst_a < 11u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
         if (ok_vals) {
             out->desc.blend_set = 1;
-            out->desc.blend_enable = b->any_blend_token;   /* no blend token at all = Metal default = off; any token keeps blending on (key 2 is not proven to be the enable) */
+            out->desc.blend_enable = b->any_blend_token && !(b->enabled_token && !b->enabled_value);   /* no blend token = Metal default = off; an explicit key-2 value 0 = off; otherwise any token keeps it on (key 2 is NOT proven to be the enable) */
             out->desc.blend_src_rgb = fac[b->src_rgb], out->desc.blend_dst_rgb = fac[b->dst_rgb], out->desc.blend_op_rgb = ops[b->op_rgb];
             out->desc.blend_src_a = fac[b->src_a], out->desc.blend_dst_a = fac[b->dst_a], out->desc.blend_op_a = ops[b->op_a];
             out->desc.color_write_mask = ((b->mask & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((b->mask & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((b->mask & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((b->mask & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
             CNTP(p).blend_decoded++;
-            if (!b->any_blend_token) CNTP(p).blend_off++;
+            if (!out->desc.blend_enable) CNTP(p).blend_off++;
+            if (b->found1) CNTP(p).color1_seen++;
         } else CNTP(p).stub_blend++;
     }
     r->vspv = vspv, r->vsz = vsz, r->fspv = fspv, r->fsz = fsz;

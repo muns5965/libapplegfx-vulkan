@@ -35,8 +35,9 @@ typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;
  * is blendingEnabled is NOT proven (13 descriptors carry factors without it), so `any_blend_token` is kept apart: blending is only turned OFF when the record has
  * no blend token at all. found = the record was recognised; otherwise every field is the Metal default and the caller keeps its fixed state. */
 typedef struct {
-    bool found, any_blend_token, enabled_token;
-    uint32_t pixfmt;
+    bool found, any_blend_token, enabled_token, found1;
+    uint8_t enabled_value, mask1;                 /* key-2 value; attachment 1's writeMask (default 0xf) */
+    uint32_t pixfmt, pixfmt1;                     /* attachment 1: `03 00 04 01 ...` record that follows attachment 0 (found1) */
     uint8_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a, mask;   /* MTLBlendFactor / MTLBlendOperation / MTLColorWriteMask values (defaults: 1,0,0,1,0,0,0xf) */
 } lagfx_a64_blend_t;
 

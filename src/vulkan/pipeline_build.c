@@ -270,6 +270,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         blend_att.srcAlphaBlendFactor = (VkBlendFactor)desc->blend_src_a, blend_att.dstAlphaBlendFactor = (VkBlendFactor)desc->blend_dst_a;
         blend_att.alphaBlendOp = (VkBlendOp)desc->blend_op_a;
         blend_att.colorWriteMask = (VkColorComponentFlags)desc->color_write_mask;
+        if (!LAGFX_POLICY("M2_SRCOVER")) blend_att.blendEnable = VK_FALSE;   /* LAGFX_DISABLE_M2_SRCOVER stays a diagnostic switch for ALL blending, decoded state included */
     }
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,

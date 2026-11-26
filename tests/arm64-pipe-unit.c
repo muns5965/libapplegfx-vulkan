@@ -695,6 +695,18 @@ static void test_pdesc_blend(void) {
     assert(lagfx_a64_pdesc_decode(b12, sizeof b12, NULL, NULL, &d) && d.color0.found && d.color0.pixfmt == 80u);
     assert(d.color0.any_blend_token && !d.color0.enabled_token && d.color0.src_rgb == 1u && d.color0.dst_rgb == 5u && d.color0.dst_a == 5u && d.color0.mask == 0xfu);
     assert(lagfx_a64_pdesc_decode(b135, sizeof b135, NULL, NULL, &d) && d.color0.found && d.color0.pixfmt == 115u && d.color0.enabled_token && d.color0.dst_rgb == 5u);
+    assert(d.color0.found1 && d.color0.pixfmt1 == 115u);
+    assert(d.color0.mask1 == 0u);   /* the dump's second attachment record carries writeMask 0 */
+    {   /* structural checks: an inconsistent length, a truncated body and an explicit key-2 value 0 are not mis-decoded */
+        uint8_t t[sizeof b135]; memcpy(t, b135, sizeof t);
+        for (size_t k = sizeof t - 30; k > 16; k--) if (t[k] == 0x0c && !t[k + 1] && t[k + 9] == 0 && t[k + 10] == 4) { t[k + 4]++; break; }   /* the LAST chunk: len != 6*count+13 */
+        assert(lagfx_a64_pdesc_decode(t, sizeof t, NULL, NULL, &d) && !d.color0.found);
+        t[12] = (uint8_t)(b135[12] - 40);   /* header says the body is shorter than the record */
+        assert(lagfx_a64_pdesc_decode(t, sizeof t, NULL, NULL, &d) && !d.color0.found);
+        memcpy(t, b135, sizeof t);
+        for (size_t k = sizeof t - 30; k > 16; k--) if (t[k] == 0x02 && t[k + 1] == 0x04 && t[k + 2] == 0x01 && t[k + 3] == 0) { t[k + 2] = 0; break; }
+        assert(lagfx_a64_pdesc_decode(t, sizeof t, NULL, NULL, &d) && d.color0.found && d.color0.enabled_token && d.color0.enabled_value == 0u);
+    }
     /* a descriptor with only the pixel format token: no blend token at all -> blending certainly off */
     static const uint8_t bplain[] = { 0x0e,0,0,0, 0x32,0,0,0, 1,0,0,0, 0x22,0,0,0,  0x0c,0,0,0, 0x19,0,0,0, 0x02, 0x00,0x04,0,0,0,0, 0x01,0x04,0x73,0,0,0, 0x03,0x00,0x04,0x01,0,0,0, 0x01,0x04,0x73,0,0,0 };
     assert(lagfx_a64_pdesc_decode(bplain, sizeof bplain, NULL, NULL, &d) && d.color0.found && d.color0.pixfmt == 115u && !d.color0.any_blend_token);

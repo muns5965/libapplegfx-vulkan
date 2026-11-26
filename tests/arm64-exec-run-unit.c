@@ -13,6 +13,7 @@
 #include "vulkan/instance.h"
 #include <vulkan/vulkan.h>
 #include "arm64-exec-run-shaders.h"
+#include "arm64-exec-blend-shader.h"
 #endif
 #include <assert.h>
 #include <stdio.h>
@@ -240,7 +241,8 @@ static void test_objects(void) {
 
 #ifdef LAGFX_HAVE_VULKAN
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
-static VkShaderModule g_vs, g_fs;
+static VkShaderModule g_vs, g_fs, g_fs_half;
+static struct { int set, enable; uint32_t sf, df, op, saf, daf, aop, mask; } g_blend;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
 static void rel(void *u) { (void)u; g_released++; }
 static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
@@ -256,6 +258,14 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
     out->desc.vertex_shader = g_vs, out->desc.fragment_shader = g_fs, out->desc.layout = vk->empty_layout;
     out->desc.n_vtx_inputs = 1, out->desc.vtx_in_loc[0] = 0, out->desc.vtx_in_comp[0] = 2, out->desc.vtx_stride = 8;
     out->vertex_buffer_index = 0;
+    if (g_blend.set) {
+        if (!g_fs_half) { VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_half_spv, .pCode = k_fs_half_spv }; assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_half) == VK_SUCCESS); }
+        out->desc.fragment_shader = g_fs_half;   /* premultiplied (0.5, 0, 0, 0.5) */
+        out->desc.blend_set = 1, out->desc.blend_enable = (uint8_t)g_blend.enable;
+        out->desc.blend_src_rgb = g_blend.sf, out->desc.blend_dst_rgb = g_blend.df, out->desc.blend_op_rgb = g_blend.op;
+        out->desc.blend_src_a = g_blend.saf, out->desc.blend_dst_a = g_blend.daf, out->desc.blend_op_a = g_blend.aop;
+        out->desc.color_write_mask = g_blend.mask;
+    }
     out->release = rel;
     return true;
 }
@@ -374,6 +384,45 @@ static void test_exec_no_resolver_and_pending(void) {
 }
 #endif
 
+
+/* Blend state reaches the pixels: BGRA8 render target cleared to opaque blue (0,0,1,1), one triangle of the premultiplied colour (0.5,0,0,0.5) drawn over it
+ * with the Vulkan state the resolver hands out. px() words are A R G B. */
+static void blend_case(const char *name, int enable, uint32_t sf, uint32_t df, uint32_t op, uint32_t mask, uint32_t a, uint32_t r, uint32_t g, uint32_t b) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *t = def_task(p, 1);
+    build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    g_blend.set = 1, g_blend.enable = enable, g_blend.sf = sf, g_blend.df = df, g_blend.op = op, g_blend.saf = sf, g_blend.daf = df, g_blend.aop = op, g_blend.mask = mask;
+    static const double blue[4] = { 0, 0, 1, 1 };
+    uint8_t img[RT_W * RT_H * 4]; uint32_t w, h;
+    cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
+    exec(p, 1, cb_finish(), true);
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h));
+    uint32_t v = px(img, 8, 8), ga = v >> 24, gr = (v >> 16) & 255, gg = (v >> 8) & 255, gb = v & 255;
+    int ok = (uint32_t)abs((int)ga - (int)a) <= 1 && (uint32_t)abs((int)gr - (int)r) <= 1 && (uint32_t)abs((int)gg - (int)g) <= 1 && (uint32_t)abs((int)gb - (int)b) <= 1;
+    if (!ok) fprintf(stderr, "blend case %s: got A%u R%u G%u B%u, want A%u R%u G%u B%u\n", name, ga, gr, gg, gb, a, r, g, b);
+    assert(ok);
+    assert(px(img, 0, 0) == 0xff0000ffu || mask != 0xfu || !enable);   /* outside the triangle the clear colour stays */
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    free(p);
+    g_blend.set = 0;
+}
+
+static void test_exec_blend(void) {
+    enum { ZERO = VK_BLEND_FACTOR_ZERO, ONE = VK_BLEND_FACTOR_ONE, OMSA = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA };
+    const uint32_t ALL = 0xfu;   /* VK_COLOR_COMPONENT_R|G|B|A */
+    blend_case("off (overwrite)",             0, ONE, ZERO, VK_BLEND_OP_ADD, ALL, 128, 128, 0, 0);
+    blend_case("source-over premultiplied",   1, ONE, OMSA, VK_BLEND_OP_ADD, ALL, 255, 128, 0, 128);
+    blend_case("additive",                    1, ONE, ONE, VK_BLEND_OP_ADD, ALL, 255, 128, 0, 255);
+    blend_case("reverse subtract",            1, ONE, ONE, VK_BLEND_OP_REVERSE_SUBTRACT, ALL, 128, 0, 0, 255);
+    blend_case("write mask none",             0, ONE, ZERO, VK_BLEND_OP_ADD, 0u, 255, 0, 0, 255);
+    blend_case("write mask RGB (alpha kept)", 0, ONE, ZERO, VK_BLEND_OP_ADD, 0x7u, 255, 128, 0, 0);
+    blend_case("write mask A only",           0, ONE, ZERO, VK_BLEND_OP_ADD, 0x8u, 128, 0, 0, 255);
+    puts("PASS: blend state reaches the pixels (off, source-over, additive, reverse subtract, write masks) on lavapipe");
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -383,9 +432,11 @@ int main(void) {
     if (g_dev->vk && g_dev->vk->initialized) {
         test_exec_disabled();
         test_exec_render();
+        test_exec_blend();
         test_exec_no_resolver_and_pending();
         if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);
         if (g_fs) vkDestroyShaderModule(g_dev->vk->device, g_fs, NULL);
+        if (g_fs_half) vkDestroyShaderModule(g_dev->vk->device, g_fs_half, NULL);
     } else {
         puts("SKIP: no Vulkan device; execution tests not run");
         lagfx_device_free(g_dev); free(g_mem);
