@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel" };
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -136,7 +136,7 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
             case 61: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP); break;                                        /* GroupNonUniform */
             case 65: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE); break; /* GroupNonUniformShuffle */
-            case 66: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE); break; /* GroupNonUniformShuffleRelative */
+            case 66: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE_RELATIVE); break; /* GroupNonUniformShuffleRelative */
             default: break;
             }
         } else if (op != 17u && i > 5u && op >= 71u) {   /* capabilities come first in a module: past the first decoration / type / function we are done */
@@ -156,7 +156,7 @@ uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes) {
 }
 
 const char *lagfx_vk_caps_line(const struct lagfx_vk_state *vk, char *buf, size_t n) {
-    char en[160] = "", ms[160] = "";
+    char en[240] = "", ms[240] = "";
     size_t eo = 0, mo = 0;
     for (unsigned i = 0; vk && i < LAGFX_VK_CAP_COUNT; i++) {
         if (vk->caps_enabled & LAGFX_VK_CAP_BIT(i)) eo += (size_t)snprintf(en + eo, sizeof en - eo, "%s%s", eo ? "," : "", k_names[i]);
@@ -220,4 +220,10 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
     *spv = (uint8_t *)nw;
     *bytes = (n + extra) * 4u;
     return true;
+}
+
+bool lagfx_vk_can_pin_subgroup32(const struct lagfx_vk_state *vk) {
+    if (!vk) return false;
+    if (vk->sg_size == 32u && vk->sg_min <= 32u && vk->sg_max >= 32u && vk->sg_min == vk->sg_max) return true;   /* fixed 32 (a range makes the driver free to choose: pin it) */
+    return vk->sg_control && vk->sg_min <= 32u && vk->sg_max >= 32u;
 }

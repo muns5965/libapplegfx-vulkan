@@ -575,12 +575,20 @@ typedef struct lagfx_protocol {
                 uint64_t resolved, resolve_failed;
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
                 uint64_t xlate_air2spv;
-                uint64_t rf_missing_cap, stub_missing_cap[16];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
+                uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
                 uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
                 uint64_t desc_sets, desc_unbound, desc_unaligned, desc_feedback, desc_failed, samplers, sampler_failed, point_no_size;
                 uint64_t dump_objects, dump_bytes, dump_files, dump_skipped_cap, dump_truncated, dump_draws, dump_table_full;
             } pipe;
+            /* ARM64 tile shaders (src/protocol/arm64_tile.c): tile pipelines, tile binds, dispatches run as compute between two halves of the render pass */
+            struct {
+                uint64_t pipes, pipe_failed, pipe_no_kernel, pipe_missing_cap, pipe_bindings;
+                uint64_t binds_buf, binds_tex, binds_ignored;           /* 0x9d/0x9e, 0xa1 applied; samplers / threadgroup memory / dims (counted, not mapped) */
+                uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override;
+                uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
+                uint64_t skip_no_pass, skip_no_pipe, skip_bad_rec, skip_local, skip_no_sg32, skip_rt, skip_unbound, skip_unaligned, skip_feedback, skip_desc, skip_pipe_build, resume_failed;
+            } tile;
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;

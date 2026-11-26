@@ -522,6 +522,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .sType             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
         .dynamicRendering  = have_dyn_rendering_feature  ? VK_TRUE : VK_FALSE,
         .synchronization2  = have_synchronization2       ? VK_TRUE : VK_FALSE,
+        .subgroupSizeControl = probe13.subgroupSizeControl,   /* request only what the device reports (queried above); lets a compute pipeline pin requiredSubgroupSize */
         .pNext             = want_shader_object ? &feat_so : NULL,
     };
     VkPhysicalDeviceVulkan11Features feat11 = {
@@ -570,12 +571,23 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
     {   /* simd-group (subgroup) operations a compute shader may use: Metal's simd_* intrinsics map to GroupNonUniform*; the device must offer them in the COMPUTE stage */
+        VkPhysicalDeviceVulkan13Properties sgp13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES };
         VkPhysicalDeviceVulkan11Properties sgp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES };
+        const bool core13p = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 3u);
+        if (core13p) sgp.pNext = &sgp13;
         VkPhysicalDeviceProperties2 pp2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sgp };
         vkGetPhysicalDeviceProperties2(s->phys_device, &pp2);
         if ((sgp.subgroupSupportedStages & VK_SHADER_STAGE_COMPUTE_BIT) && (sgp.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_BASIC_BIT)) {
             caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP);
             if (sgp.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_BIT) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE);
+            if (sgp.subgroupSupportedOperations & VK_SUBGROUP_FEATURE_SHUFFLE_RELATIVE_BIT) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE_RELATIVE);
+        }
+        s->sg_size = sgp.subgroupSize, s->sg_min = s->sg_max = sgp.subgroupSize;
+        if (core13p) {   /* VK_EXT_subgroup_size_control (core 1.3): a compute pipeline may pin the subgroup size inside [min, max] when the feature + stage allow it */
+            s->sg_min = sgp13.minSubgroupSize, s->sg_max = sgp13.maxSubgroupSize;
+            s->sg_required_stages = sgp13.requiredSubgroupSizeStages;
+            s->sg_control = probe13.subgroupSizeControl == VK_TRUE && (sgp13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
+            s->sg_full = probe13.computeFullSubgroups == VK_TRUE;
         }
     }
     caps_en &= ~caps_off;
@@ -675,6 +687,19 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
 
     s->caps_enabled = caps_en, s->caps_missing = LAGFX_VK_CAP_ALL & ~caps_en;
+    if (feat13.subgroupSizeControl != VK_TRUE) s->sg_control = false;
+    {   /* printed once per process: Metal's simdgroup is 32 lanes; a kernel that maps lanes to pixels needs a 32-wide subgroup (pinned when the device allows it) */
+        static bool sg_printed;
+        if (!sg_printed) {
+            sg_printed = true;
+            char sl[300];
+            snprintf(sl, sizeof sl, "g7-gpu-feat: subgroup size=%u min=%u max=%u subgroupSizeControl=%d requiredSubgroupSizeStages=0x%x computeFullSubgroups=%d pin32=%s",
+                     s->sg_size, s->sg_min, s->sg_max, (int)s->sg_control, (unsigned)s->sg_required_stages, (int)s->sg_full,
+                     s->sg_size == 32u ? "native" : lagfx_vk_can_pin_subgroup32(s) ? "required_size" : "no(lane-mapped tile kernels are skipped)");
+            fprintf(stderr, "%s\n", sl);
+            LAGFX_LOG("%s", sl);
+        }
+    }
     {   /* printed once per process */
         static bool caps_printed;
         if (!caps_printed) {

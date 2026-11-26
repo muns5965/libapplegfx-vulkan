@@ -35,6 +35,9 @@
 struct lagfx_vk_state {
     /* LAGFX_VK_CAP_* masks (caps.h): what the device was created with / what the generated SPIR-V may use but the physical device does not report. */
     uint32_t caps_enabled, caps_missing;
+    /* Subgroup properties (device creation): size and the VK_EXT_subgroup_size_control range; sg_control = the feature is ENABLED and COMPUTE may carry a required size */
+    uint32_t sg_size, sg_min, sg_max, sg_required_stages;
+    bool sg_control, sg_full;
 #ifdef LAGFX_HAVE_VULKAN
     VkInstance       instance;
     VkPhysicalDevice phys_device;
@@ -235,6 +238,10 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
 #endif
 
 /* The g7-gpu-caps diagnostic line for this device (also printed once by lagfx_vk_init); returns buf. */
+/* Metal's simdgroup is 32 lanes. True when a compute pipeline can run with exactly 32 lanes per subgroup: the device's native size is 32, or
+ * VK_EXT_subgroup_size_control is enabled, COMPUTE accepts a required size and 32 lies in [min, max]. Kernels that map simd lanes to pixels (simd_shuffle on
+ * a tile) are only built when this holds. Fallback documented in arm64_tile.c: otherwise the tile dispatch is skipped and counted (tile_no_sg32). */
+bool lagfx_vk_can_pin_subgroup32(const struct lagfx_vk_state *vk);
 const char *lagfx_vk_caps_line(const struct lagfx_vk_state *vk, char *buf, size_t n);
 /* TEST SEAM ('feature missing'): marks caps as missing on an existing device (the Vulkan device itself is not changed; only the gate sees it).
  * At init the same is possible through LAGFX_VK_CAPS_OFF=int64,int8,... which also keeps those features OFF at vkCreateDevice. */
