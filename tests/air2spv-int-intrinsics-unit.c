@@ -94,6 +94,11 @@ static const want_op_t o_both_mul[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_
 /* abs.s.i8 + abs.s.i32 -> SAbs; abs.u.i16 is an OpCopyObject (no GLSL instruction) */
 static const want_glsl_t g_abs[] = { {LAGFX_SPV_GLSL_SABS, 2}, {0, 0} };
 
+/* extract_bits.s -> OpBitFieldSExtract, .u -> OpBitFieldUExtract, insert_bits (either sign) -> OpBitFieldInsert */
+static const want_op_t o_bf1[] = { {LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT, 2}, {LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT, 1}, {LAGFX_SPV_OP_BIT_FIELD_INSERT, 1}, {0, 0} };
+static const want_op_t o_bf2[] = { {LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT, 0}, {LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT, 1}, {LAGFX_SPV_OP_BIT_FIELD_INSERT, 3}, {0, 0} };
+static const want_op_t o_bf3[] = { {LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT, 1}, {LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT, 1}, {LAGFX_SPV_OP_BIT_FIELD_INSERT, 2}, {0, 0} };
+
 static const case_t cases[] = {
     { "int_bitcount_fragment.air.bc", g_bits, o_bits },
     /* the fixtures executed by the lavapipe test must at least be spirv-val clean */
@@ -112,6 +117,9 @@ static const case_t cases[] = {
     { "rt_sat64b_fragment.air.bc", g_none, o_umul1 },
     { "rt_abs_fragment.air.bc", g_abs, o_none },
     { "rt_minmax_fragment.air.bc", g_none, o_none },
+    { "rt_bitfield_fragment.air.bc", g_none, o_bf1 },
+    { "rt_bitfield2_fragment.air.bc", g_none, o_bf2 },
+    { "rt_bitfield64_fragment.air.bc", g_none, o_bf3 },
     { "int_minmax_fragment.air.bc", g_minmax, o_none },
 };
 

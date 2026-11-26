@@ -176,6 +176,43 @@ static void ref_sat64b(int x, int y, float o[4]) {
     o[3] = (float)(ref_mulhi(gen_in(x, 32), gen_in(y, 32), 32, 0) >> 16);                /* v2i32 mul_hi.u: lane 0 = mul_hi(a, b), high 16 bits */
 }
 
+/* bit-field fixtures: offset = x % (w+1), bits = min(y % (w+1), w - offset) (always defined), operands mixed from x and y */
+static uint64_t fld_mask(unsigned n, unsigned w) { return n >= w ? wmask(~(uint64_t)0, w) : (((uint64_t)1 << n) - 1u); }
+static uint64_t ref_extract(uint64_t v, unsigned off, unsigned n, unsigned w, int sgn) {
+    if (n == 0) return 0;
+    uint64_t f = (off >= 64 ? 0 : v >> off) & fld_mask(n, w);
+    if (sgn && (f >> (n - 1) & 1u)) f |= ~fld_mask(n, 64);
+    return wmask(f, w);
+}
+static uint64_t ref_insert(uint64_t base, uint64_t ins, unsigned off, unsigned n, unsigned w) {
+    if (n == 0) return base;
+    uint64_t m = off >= 64 ? 0 : fld_mask(n, w) << off;
+    return wmask((base & ~m) | ((ins << off) & m), w);
+}
+typedef struct { unsigned off, n; } fld_t;
+static fld_t fld_for(int x, int y, unsigned w) { unsigned o = (unsigned)x % (w + 1u), n0 = (unsigned)y % (w + 1u), av = w - o; return (fld_t){ o, n0 < av ? n0 : av }; }
+static float fold16of32(uint64_t r) { return (float)((r >> 16) ^ (r & 0xffffu)); }
+static void bf_inputs(int x, int y, uint32_t *s32, uint32_t *t32) { uint32_t mx = (uint32_t)x * 0x9E3779B1u + (uint32_t)y * 0x85EBCA6Bu; *s32 = mx; *t32 = mx * 0x27D4EB2Fu; }
+static void ref_bitfield(int x, int y, float o[4]) {
+    uint32_t s, t; bf_inputs(x, y, &s, &t);
+    fld_t f8 = fld_for(x, y, 8), f16 = fld_for(x, y, 16), f32 = fld_for(x, y, 32);
+    o[0] = (float)ref_extract(s & 0xffu, f8.off, f8.n, 8, 1); o[1] = (float)ref_extract(s & 0xffffu, f16.off, f16.n, 16, 0);
+    o[2] = fold16of32(ref_extract(s, f32.off, f32.n, 32, 1)); o[3] = fold16of32(ref_insert(s, t, f32.off, f32.n, 32));
+}
+static void ref_bitfield2(int x, int y, float o[4]) {
+    uint32_t s, t; bf_inputs(x, y, &s, &t);
+    fld_t f8 = fld_for(x, y, 8), f16 = fld_for(x, y, 16), f32 = fld_for(x, y, 32);
+    o[0] = (float)ref_insert(s & 0xffu, t & 0xffu, f8.off, f8.n, 8); o[1] = (float)ref_insert(s & 0xffffu, t & 0xffffu, f16.off, f16.n, 16);
+    o[2] = fold16of32(ref_extract(s, f32.off, f32.n, 32, 0)); o[3] = fold16of32(ref_insert(t, s, f32.off, f32.n, 32));   /* v2i32 lane 1: base = t, insert = s */
+}
+static void ref_bitfield64(int x, int y, float o[4]) {
+    uint32_t s32, t32; bf_inputs(x, y, &s32, &t32);
+    uint64_t s = ((uint64_t)s32 * 0x9E3779B97F4A7C15ull) ^ s32, t = ((uint64_t)t32 * 0xBF58476D1CE4E5B9ull) ^ t32;
+    fld_t f = fld_for(x, y, 64);
+    o[0] = fold64(ref_extract(s, f.off, f.n, 64, 1)); o[1] = fold64(ref_extract(s, f.off, f.n, 64, 0));
+    o[2] = fold64(ref_insert(s, t, f.off, f.n, 64)); o[3] = fold64(ref_insert(t, s, f.off, f.n, 64));
+}
+
 typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); } case_t;
 static const case_t cases[] = {
     { "rt_bits32_fragment.air.bc",     65, 65, ref_bits32 },
@@ -193,6 +230,9 @@ static const case_t cases[] = {
     { "rt_sat64b_fragment.air.bc",     65, 65, ref_sat64b },
     { "rt_abs_fragment.air.bc",        65, 65, ref_abs },
     { "rt_minmax_fragment.air.bc",     65, 65, ref_minmax },
+    { "rt_bitfield_fragment.air.bc",   65, 65, ref_bitfield },
+    { "rt_bitfield2_fragment.air.bc",  65, 65, ref_bitfield2 },
+    { "rt_bitfield64_fragment.air.bc", 65, 65, ref_bitfield64 },
 };
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;

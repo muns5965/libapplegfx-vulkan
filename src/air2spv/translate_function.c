@@ -4185,7 +4185,7 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     p = dot + 1;
     char sign = 0;
     if ((p[0] == 's' || p[0] == 'u') && p[1] == '.') { sign = p[0]; p += 2; }
-    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS, K_MUL_HI, K_ADD_SAT, K_SUB_SAT, K_ABS_U } k = K_NONE;
+    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS, K_MUL_HI, K_ADD_SAT, K_SUB_SAT, K_ABS_U, K_EXTRACT_BITS, K_INSERT_BITS } k = K_NONE;
     uint32_t nargs = 0;
     if (!sign && !strcmp(op, "clz")) { k = K_CLZ; nargs = 1u; }
     else if (!sign && !strcmp(op, "ctz")) { k = K_CTZ; nargs = 1u; }
@@ -4194,6 +4194,8 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     else if (sign && !strcmp(op, "mul_hi")) { k = K_MUL_HI; nargs = 2u; }
     else if (sign && !strcmp(op, "add_sat")) { k = K_ADD_SAT; nargs = 2u; }
     else if (sign && !strcmp(op, "sub_sat")) { k = K_SUB_SAT; nargs = 2u; }
+    else if (sign && !strcmp(op, "extract_bits")) { k = K_EXTRACT_BITS; nargs = 3u; }   /* (x, uint offset, uint bits) */
+    else if (sign && !strcmp(op, "insert_bits")) { k = K_INSERT_BITS; nargs = 4u; }    /* (base, insert, uint offset, uint bits); the sign marker changes nothing */
     else if (sign == 'u' && !strcmp(op, "abs")) { k = K_ABS_U; nargs = 1u; }   /* abs of an unsigned value is the value; abs.s is a GLSL row */
     if (k == K_NONE) return false;
     ix_t x;
@@ -4201,8 +4203,11 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     uint32_t a0 = callee_slot_idx + 1u;
     if (inst->num_ops < a0 + nargs) return false;   /* an extra trailing operand (the i1 flag of clz/ctz) is never read */
     uint32_t arg[4] = { 0 };
-    for (uint32_t i = 0; i < nargs; i++)
-        arg[i] = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[a0 + i], next_val_id), x.ty);
+    for (uint32_t i = 0; i < nargs; i++) {
+        /* offset / bits of the bit-field ops are scalar uints whatever the shape of x */
+        bool scalar_u32 = (k == K_EXTRACT_BITS && i >= 1u) || (k == K_INSERT_BITS && i >= 2u);
+        arg[i] = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[a0 + i], next_val_id), scalar_u32 ? emit_type_int_w(c, 32u, 0u) : x.ty);
+    }
     uint32_t res = resolve_value_spv(c, result_value_id);
     if (!res) res = lagfx_spv_builder_alloc_id(c->b);
     switch (k) {
@@ -4216,6 +4221,11 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     case K_ADD_SAT:      ix_add_sub_sat(&x, sign == 's', true, arg[0], arg[1], res); break;
     case K_SUB_SAT:      ix_add_sub_sat(&x, sign == 's', false, arg[0], arg[1], res); break;
     case K_ABS_U:        ix_1(c, 83 /* OpCopyObject */, x.ty, res, arg[0]); break;
+    /* Metal: extract_bits(x, offset, bits) = bits [offset, offset+bits-1] in the low bits, zero- (unsigned) or sign-extended (signed), 0 when bits == 0;
+     * insert_bits(base, insert, offset, bits): bits [offset, offset+bits-1] from insert's low bits, the rest from base, base when bits == 0. Both undefined when
+     * offset + bits > width. OpBitField{U,S}Extract / OpBitFieldInsert define exactly this (and are undefined in the same case). */
+    case K_EXTRACT_BITS: ix_3(c, sign == 's' ? LAGFX_SPV_OP_BIT_FIELD_S_EXTRACT : LAGFX_SPV_OP_BIT_FIELD_U_EXTRACT, x.ty, res, arg[0], arg[1], arg[2]); break;
+    case K_INSERT_BITS: { uint32_t g4[] = { arg[0], arg[1], arg[2], arg[3] }; ix_e(c, LAGFX_SPV_OP_BIT_FIELD_INSERT, x.ty, res, g4, 4u); break; }
     default: return false;
     }
     bind_value_spv(c, result_value_id, res);
