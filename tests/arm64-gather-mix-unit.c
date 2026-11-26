@@ -272,12 +272,13 @@ static float texv(uint32_t x, uint32_t y, int ch) {
 }
 
 
-/* A serialized graphics pipeline: {0xe, size, ref, length, body}; body = `04 <u32 function ref>` tokens (as in arm64-pipe-unit.c). */
+/* A serialized graphics pipeline: {0xe, size, ref, length, body}; body = the root entry (tag 1 / tag 2 = function refs, as in arm64-pipe-unit.c). */
 static void put_pipeline(uint32_t ref, uint32_t pay_off, const uint32_t *fns, uint32_t nfn) {
     uint8_t b[256]; memset(b, 0, sizeof b);
     uint32_t o = 16;
-    for (uint32_t i = 0; i < nfn; i++) { b[o++] = 0x04; memcpy(b + o, &fns[i], 4); o += 4; b[o++] = 0x00; }
-    b[o++] = 0x05; { uint32_t salt = 2; memcpy(b + o, &salt, 4); o += 4; }
+    b[o++] = (uint8_t)(nfn + 1u);   /* root entry: tag 1 = vertex function, tag 2 = fragment function, tag 8 = a value that names no function */
+    for (uint32_t i = 0; i < nfn; i++) { b[o++] = (uint8_t)(1u + i); b[o++] = 0x04; memcpy(b + o, &fns[i], 4); o += 4; }
+    b[o++] = 0x08; b[o++] = 0x04; { uint32_t salt = 2; memcpy(b + o, &salt, 4); o += 4; }
     uint32_t tag = 0xe, len = o - 16;
     memcpy(b, &tag, 4); memcpy(b + 4, &o, 4); memcpy(b + 8, &ref, 4); memcpy(b + 12, &len, 4);
     va_write(VA_PAY + pay_off, b, o);

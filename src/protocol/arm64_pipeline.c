@@ -168,34 +168,52 @@ static bool decode_vertex_desc(const uint8_t *b, uint32_t limit, lagfx_a64_pdesc
     return true;
 }
 
+const char *lagfx_a64_root_status_name(int st) {
+    static const char *const n[LAGFX_A64_ROOT_N] = { "n/a", "ok", "malformed", "missing", "same", "bad_type" };
+    return st >= 0 && st < LAGFX_A64_ROOT_N ? n[st] : "?";
+}
+
 bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void *ctx, uint32_t ref), void *ctx, lagfx_a64_pdesc_t *out) {
     if (!blob || !out || n < 16u) return false;
     memset(out, 0, sizeof *out);
     out->tag = lagfx_le32(blob), out->size = lagfx_le32(blob + 4), out->ref = lagfx_le32(blob + 8), out->length = lagfx_le32(blob + 12);
     uint32_t limit = out->length && 16ull + out->length <= n ? 16u + out->length : n;   /* the body the header declares, else what we have */
 
-    /* function refs: `04 <u32>` tokens (x86 object_resolver.c scans `04 XX`; ARM64 object numbers are not limited to a byte) naming a function object */
-    for (uint32_t i = 16u; i + 5u <= limit && out->nrefs < LAGFX_A64_PDESC_MAX_REFS; i++) {
+    /* `04 <u32>` tokens naming a function object (x86 object_resolver.c scans `04 XX`; ARM64 object numbers are not limited to a byte). DIAGNOSTIC ONLY for a render
+     * pipeline (tag 0xe): the token scan also hits unrelated fields (the root's tag 0 constant 31 / 25 / 19, a vertex format 29, an offset 32 ...), and once such a number
+     * is a function object in the task (run 20261126-231501: object 31 became a fragment function after it had been a texture) it is a plausible-looking but WRONG stage
+     * function. */
+    uint32_t nscan = 0, scan[LAGFX_A64_PDESC_MAX_REFS];
+    for (uint32_t i = 16u; i + 5u <= limit && nscan < LAGFX_A64_PDESC_MAX_REFS; i++) {
         if (blob[i] != 0x04u) continue;
         uint32_t v = lagfx_le32(blob + i + 1u);
         if (!v || (is_fn && !is_fn(ctx, v))) continue;
         bool seen = false;
-        for (uint32_t k = 0; k < out->nrefs; k++) if (out->refs[k] == v) { seen = true; break; }
-        if (!seen) out->refs[out->nrefs++] = v;
+        for (uint32_t k = 0; k < nscan; k++) if (scan[k] == v) { seen = true; break; }
+        if (!seen) scan[nscan++] = v;
     }
-    /* The root entry (the first entry after the header; for a render pipeline tag 1 = vertex function ref, tag 2 = fragment function ref) names the two stage functions
-     * exactly. The token scan above also hits unrelated fields (tag 0 = 31, a vertex format 29, an offset 32 ...); once such a number is a function object in the task
-     * (run 20261126-231501: object 31 became a fragment function after it had been a texture) the scan listed it first and the resolver took it as the fragment function.
-     * The root's refs go first, vertex then fragment; the scanned tokens stay behind them as the fallback for shapes the root does not describe. */
+    memcpy(out->scan, scan, nscan * sizeof scan[0]);
+    out->nscan = nscan;
+    /* The functions come from the ROOT entry (the first entry after the header; all 37 + 36 tag-0xe PSOs of the device dumps of runs 231501 / 230109 carry tag 1 = vertex
+     * function ref and tag 2 = fragment function ref there, tile PSOs (tag 0x33) tag 1 = kernel). A root that does not name two distinct function objects is NOT repaired from
+     * the scan: root_status says why and the resolver refuses the pipeline. Only descriptors that have no such root (other tags; a tile PSO without tag 1) fall back to the
+     * scanned function tokens, which the is_fn type check already restricts to function objects. */
+    uint32_t rv[4]; uint8_t rh[4];
+    bool rp = entry_fields(blob, limit, 16u, 4u, rv, rh, NULL);
+    out->root_status = LAGFX_A64_ROOT_NA;
+    if (rp) out->root_ref1 = rh[1] ? rv[1] : 0u, out->root_ref2 = rh[2] ? rv[2] : 0u;
     if (out->tag == 0xeu) {
-        uint32_t rv[4]; uint8_t rh[4];
-        if (entry_fields(blob, limit, 16u, 4u, rv, rh, NULL) && rh[1] && rh[2] && rv[1] && rv[2] && rv[1] != rv[2] && (!is_fn || (is_fn(ctx, rv[1]) && is_fn(ctx, rv[2])))) {
-            uint32_t tmp[LAGFX_A64_PDESC_MAX_REFS], n = 0;
-            tmp[n++] = rv[1]; tmp[n++] = rv[2];
-            for (uint32_t k = 0; k < out->nrefs && n < LAGFX_A64_PDESC_MAX_REFS; k++) if (out->refs[k] != rv[1] && out->refs[k] != rv[2]) tmp[n++] = out->refs[k];
-            memcpy(out->refs, tmp, n * sizeof tmp[0]);
-            out->nrefs = n;
-        }
+        if (!rp) out->root_status = LAGFX_A64_ROOT_MALFORMED;
+        else if (!rh[1] || !rh[2] || !rv[1] || !rv[2]) out->root_status = LAGFX_A64_ROOT_MISSING;
+        else if (rv[1] == rv[2]) out->root_status = LAGFX_A64_ROOT_SAME;
+        else if (is_fn && (!is_fn(ctx, rv[1]) || !is_fn(ctx, rv[2]))) out->root_status = LAGFX_A64_ROOT_BAD_TYPE;
+        else out->root_status = LAGFX_A64_ROOT_OK, out->refs[0] = rv[1], out->refs[1] = rv[2], out->nrefs = 2;
+    } else if (out->tag == 0x33u && rp && rh[1] && rv[1]) {
+        if (is_fn && !is_fn(ctx, rv[1])) out->root_status = LAGFX_A64_ROOT_BAD_TYPE;
+        else out->root_status = LAGFX_A64_ROOT_OK, out->refs[0] = rv[1], out->nrefs = 1;
+    } else {
+        memcpy(out->refs, scan, nscan * sizeof scan[0]);
+        out->nrefs = nscan;
     }
     if (!decode_vertex_desc(blob, limit, out)) {   /* not the serialized-descriptor shape: the legacy byte scan */
     out->nattrs = 0, out->stride = 0;
@@ -450,12 +468,17 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     lagfx_a64_fnctx_t fc = { p, task };
     if (!blob || blen < 16u || full > LAGFX_A64_PIPE_MAX_BLOB) { CNTP(p).rf_no_blob++; goto done; }
     if (!lagfx_a64_pdesc_decode(blob, blen, lagfx_a64_is_function_ref, &fc, &d)) { CNTP(p).rf_no_blob++; goto done; }
+    if ((d.tag == 0xeu || d.tag == 0x33u) && d.root_status != LAGFX_A64_ROOT_OK && d.root_status != LAGFX_A64_ROOT_NA) {   /* the root entry does not name the stage functions: refuse, never guess from the token scan */
+        CNTP(p).rf_root[d.root_status]++;
+        LAGFX_WARN("arm64 pipeline %u: descriptor root does not name valid stage functions (%s: tag1=%u tag2=%u; %u scanned function tokens ignored); pipeline refused", ref, lagfx_a64_root_status_name(d.root_status), d.root_ref1, d.root_ref2, d.nscan);
+        goto done;
+    }
     if (d.tag == 0x33u) { ok = lagfx_a64_tile_resolve(p, task, ref, blob, blen, &d, out); goto done; }   /* tile pipeline: a compute kernel (arm64_tile.c) */
     if (d.tag != 0xeu) { CNTP(p).rf_bad_tag++; goto done; }
     if (!d.nrefs) { CNTP(p).rf_no_refs++; goto done; }
 
     const lagfx_metallib_function_t *vf = NULL, *ff = NULL;
-    for (uint32_t i = 0; i < d.nrefs && (!vf || !ff); i++) {
+    for (uint32_t i = 0; i < 2u && i < d.nrefs; i++) {   /* refs[0] = tag 1 must yield a vertex function, refs[1] = tag 2 a fragment function; no other ref is tried */
         lib_t *l = &libs[nlib];
         memset(l, 0, sizeof *l);
         l->lib = lagfx_a64_read_function_lib(p, task, d.refs[i], &l->len, NULL);
@@ -464,12 +487,12 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         if (lagfx_metallib_extract_functions(l->lib, l->len, l->fn, 8, &l->nfn) != LAGFX_OK) continue;
         for (size_t k = 0; k < l->nfn && k < 8; k++) {
             if (!l->fn[k].bitcode || !l->fn[k].bitcode_len) continue;
-            if (!vf && l->fn[k].stage == LAGFX_METALLIB_STAGE_VERTEX) vf = &l->fn[k];
-            if (!ff && l->fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT) ff = &l->fn[k];
+            if (i == 0 && !vf && l->fn[k].stage == LAGFX_METALLIB_STAGE_VERTEX) vf = &l->fn[k];
+            if (i == 1 && !ff && l->fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT) ff = &l->fn[k];
         }
     }
     if (!nlib) { CNTP(p).rf_no_lib++; goto done; }
-    if (!vf || !ff) { CNTP(p).rf_no_stage++; goto done; }
+    if (!vf || !ff) { CNTP(p).rf_no_stage++; CNTP(p).rf_root_stage++; LAGFX_WARN("arm64 pipeline %u: root tag1=%u / tag2=%u name no vertex / fragment function (vertex %s, fragment %s); pipeline refused", ref, d.refs[0], d.refs[1], vf ? "ok" : "wrong stage", ff ? "ok" : "wrong stage"); goto done; }
     lagfx_stage_keys_t vkeys;
     memset(&vkeys, 0, sizeof vkeys);
     if (!translate(p, vf, NULL, &vkeys, &vspv, &vsz, vab, &nvab)) goto done;

@@ -222,8 +222,9 @@ static void put_function(uint32_t ref, uint32_t pay_off, uint32_t vpn, const uin
 static uint32_t put_pipeline(uint32_t ref, uint32_t pay_off, const uint32_t *fns, uint32_t nfn, uint32_t salt) {
     uint8_t b[256]; memset(b, 0, sizeof b);
     uint32_t o = 16;
-    for (uint32_t i = 0; i < nfn; i++) { b[o++] = 0x04; memcpy(b + o, &fns[i], 4); o += 4; b[o++] = 0x00; }   /* a trailing key byte, as in a token stream */
-    b[o++] = 0x05; memcpy(b + o, &salt, 4); o += 4;                                                          /* harmless: a value that names no function */
+    b[o++] = (uint8_t)(nfn + 1u);                                                                              /* the root entry of the device dump: tag 1 = vertex function, tag 2 = fragment function, tag 8 = (here) a value that names no function */
+    for (uint32_t i = 0; i < nfn; i++) { b[o++] = (uint8_t)(1u + i); b[o++] = 0x04; memcpy(b + o, &fns[i], 4); o += 4; }
+    b[o++] = 0x08; b[o++] = 0x04; memcpy(b + o, &salt, 4); o += 4;
     uint32_t tag = 0xe, len = o - 16;
     memcpy(b, &tag, 4); memcpy(b + 4, &o, 4); memcpy(b + 8, &ref, 4); memcpy(b + 12, &len, 4);
     va_write(VA_PAY + pay_off, b, o);
@@ -325,6 +326,7 @@ static uint32_t px(const uint8_t *img, uint32_t x, uint32_t y) { uint32_t v; mem
 #define BLUE  0xff0000ffu
 
 #include "arm64-pipe-psos.h"
+#include "arm64-pipe-psos-231501.h"
 /* The vertex descriptor of two REAL device descriptors. The serializer omits properties at their default, so an attribute at offset 0 has no offset field and one on
  * buffer 0 has no buffer field; the old byte scan needed all three and lost exactly those (device run 20261126-230109: the 4-attribute compositor pipeline decoded 3
  * attributes, the 32-byte quad vertex none, and its stride came out as the unrelated 16 -> every vertex after the first read from the wrong place). */
@@ -372,6 +374,128 @@ static void test_pdesc_function_refs(void) {
     puts("PASS: pipeline descriptor function refs come from the root entry's vertex/fragment fields (real device PSO)");
 }
 
+
+/* ---- hardening: the stage functions come from the root entry only (real descriptors of run 231501) ---- */
+static uint32_t k231501_stage(uint32_t ref) { for (size_t i = 0; i < sizeof k231501_fns / sizeof k231501_fns[0]; i++) if (k231501_fns[i].ref == ref) return k231501_fns[i].stage; return 0; }
+typedef struct { uint32_t deny[2]; uint32_t extra[8], nextra; } k231501_ctx_t;   /* refs that are NOT functions any more (reused as another type) / extra refs that ARE functions (constants that happen to equal a function object) */
+static bool is_fn231501(void *ctx, uint32_t ref) {
+    const k231501_ctx_t *c = ctx;
+    if (c) {
+        if (ref == c->deny[0] || ref == c->deny[1]) return false;
+        for (uint32_t i = 0; i < c->nextra; i++) if (c->extra[i] == ref) return true;
+    }
+    return k231501_stage(ref) != 0;
+}
+static uint8_t *root_field(uint8_t *b, uint32_t tag) { uint32_t nf = b[16]; for (uint32_t i = 0; i < nf; i++) if (b[17 + 6 * i] == tag) return b + 17 + 6 * i; return NULL; }
+static void root_set(uint8_t *b, uint32_t tag, uint32_t v) { uint8_t *f = root_field(b, tag); assert(f); memcpy(f + 2, &v, 4); }
+static void root_drop(uint8_t *b, uint32_t tag) { uint8_t *f = root_field(b, tag); assert(f); f[0] = 0x0f; }   /* an unknown tag: the field is gone for the decoder, the offsets stay */
+static const k231501_pso_t *k231501_find(uint32_t ref) { for (size_t i = 0; i < sizeof k231501_psos / sizeof k231501_psos[0]; i++) if (k231501_psos[i].ref == ref) return &k231501_psos[i]; assert(0); return NULL; }
+static void expect_refused(const uint8_t *b, uint32_t n, void *ctx, uint32_t why) {
+    lagfx_a64_pdesc_t d;
+    assert(lagfx_a64_pdesc_decode(b, n, is_fn231501, ctx, &d));
+    assert(d.tag == 0xe && d.root_status == why && d.nrefs == 0);   /* refused: no stage function is named, the scanned tokens (d.nscan) are not promoted */
+}
+
+#define FIRST_WRONG 26u   /* 23 with tag 0 = 31 (A2Xghfc), 3 more through other constants such as tag 8 = 68; cross-checked with an independent script */
+static void test_pdesc_dump_231501(void) {
+    assert(sizeof k231501_psos / sizeof k231501_psos[0] == 37);
+    uint32_t tag0_31 = 0, first_wrong = 0;
+    for (size_t i = 0; i < sizeof k231501_psos / sizeof k231501_psos[0]; i++) {
+        const k231501_pso_t *k = &k231501_psos[i];
+        lagfx_a64_pdesc_t d;
+        assert(lagfx_a64_pdesc_decode(k->blob, k->len, is_fn231501, NULL, &d));
+        assert(d.tag == 0xe && d.root_status == LAGFX_A64_ROOT_OK && d.nrefs == 2);
+        assert(d.refs[0] == k->exp_vs && d.refs[1] == k->exp_fs);                          /* tag 1 = vertex, tag 2 = fragment, in that order */
+        assert(k231501_stage(d.refs[0]) == 1 && k231501_stage(d.refs[1]) == 2);            /* ... and of the matching stage type */
+        assert(d.root_ref1 == k->exp_vs && d.root_ref2 == k->exp_fs);
+        lagfx_a64_pdesc_t n;                                                               /* without a validator the answer is the same */
+        assert(lagfx_a64_pdesc_decode(k->blob, k->len, NULL, NULL, &n) && n.nrefs == 2 && n.refs[0] == k->exp_vs && n.refs[1] == k->exp_fs && n.root_status == LAGFX_A64_ROOT_OK);
+        if (d.scan[0] == 31u) tag0_31++;                                                   /* the old resolver's first token: object 31, the root's tag 0 constant, = A2Xghfc (a fragment function) */
+        if (d.scan[0] != k->exp_vs) first_wrong++;
+        assert(d.nscan >= 2);
+    }
+    assert(tag0_31 == 23);   /* 23 of the 37 PSOs carry tag 0 = 31; 31 is a function in this run: what the pre-root decoder listed first for each of them */
+    assert(first_wrong == FIRST_WRONG);   /* PSOs whose first scanned function token is NOT their vertex function (the old decoder's refs[0]) */
+    puts("PASS: all 37 tag-0xe PSOs of run 231501 resolve vertex = root tag 1, fragment = root tag 2, with the right stage types");
+}
+
+static void test_pdesc_root_hardening(void) {
+    const k231501_pso_t *k = k231501_find(203);   /* root: tag 0 = 31 (constant), tag 1 = 11 (vertex), tag 2 = 202 (fragment); the other function-looking tokens are formats / offsets */
+    uint8_t b[512];
+    lagfx_a64_pdesc_t d;
+    assert(k->len <= sizeof b && k->exp_vs == 11 && k->exp_fs == 202);
+
+    /* tag 0 constant equal to the valid vertex / fragment ref: still exactly (vs, fs) */
+    uint32_t cs[2] = { k->exp_vs, k->exp_fs };
+    for (int i = 0; i < 2; i++) {
+        memcpy(b, k->blob, k->len); root_set(b, 0, cs[i]);
+        assert(lagfx_a64_pdesc_decode(b, k->len, is_fn231501, NULL, &d) && d.root_status == LAGFX_A64_ROOT_OK && d.nrefs == 2 && d.refs[0] == 11 && d.refs[1] == 202);
+    }
+    /* a real PSO whose tag 0 constant (25) differs and whose FRAGMENT ref is object 31: tag 2 = 31 is a legitimate ref there, the constant is not */
+    k = k231501_find(36);
+    assert(lagfx_a64_pdesc_decode(k->blob, k->len, is_fn231501, NULL, &d) && d.nrefs == 2 && d.refs[0] == 26 && d.refs[1] == 31 && d.root_ref2 == 31);
+    k = k231501_find(203);
+
+    /* constants in NESTED entries (vertex formats 29 / 27, offsets 16 / 24 / 32, stride 48, buffer index 1) equal to function objects: scanned (diagnostic), never a stage function */
+    k231501_ctx_t ctx = { { 0, 0 }, { 29, 27, 16, 24, 32, 48, 1, 4 }, 8 };
+    assert(lagfx_a64_pdesc_decode(k->blob, k->len, is_fn231501, &ctx, &d) && d.root_status == LAGFX_A64_ROOT_OK && d.nrefs == 2 && d.refs[0] == 11 && d.refs[1] == 202 && d.nscan > 2);
+    assert(lagfx_a64_pdesc_decode(k->blob, k->len, NULL, NULL, &d) && d.nrefs == 2 && d.refs[0] == 11 && d.refs[1] == 202 && d.nscan > 5);   /* every nonzero token counts as a function: still only the root's two */
+
+    /* root field ORDER permuted (the fields are looked up by tag): tag 2 first, tag 1 last */
+    {
+        memcpy(b, k->blob, k->len);
+        uint8_t f[5][6];
+        for (int i = 0; i < 5; i++) memcpy(f[i], b + 17 + 6 * i, 6);   /* original order: tags 0, 3, 8, 1, 2 */
+        const int perm[5] = { 4, 2, 0, 1, 3 };
+        for (int i = 0; i < 5; i++) memcpy(b + 17 + 6 * i, f[perm[i]], 6);
+        assert(b[17] == 2 && b[17 + 24] == 1);
+        assert(lagfx_a64_pdesc_decode(b, k->len, is_fn231501, NULL, &d) && d.root_status == LAGFX_A64_ROOT_OK && d.nrefs == 2 && d.refs[0] == 11 && d.refs[1] == 202);
+        assert(d.nattrs == 4 && d.stride == 48);   /* the vertex descriptor offset (tag 3) is found by tag as well */
+    }
+
+    /* the fragment / the vertex ref was REUSED as another object type after the PSO was created (object 31 was a texture before it became a function in this very run):
+     * refused, not repaired from the other function-looking tokens of the descriptor */
+    {
+        k231501_ctx_t reuse_fs = { { 202, 0 }, { 0 }, 0 }, reuse_vs = { { 11, 0 }, { 0 }, 0 };
+        expect_refused(k->blob, k->len, &reuse_fs, LAGFX_A64_ROOT_BAD_TYPE);
+        expect_refused(k->blob, k->len, &reuse_vs, LAGFX_A64_ROOT_BAD_TYPE);
+        const k231501_pso_t *k36 = k231501_find(36);           /* fragment = 31 */
+        k231501_ctx_t no31 = { { 31, 0 }, { 0 }, 0 };
+        expect_refused(k36->blob, k36->len, &no31, LAGFX_A64_ROOT_BAD_TYPE);
+        lagfx_a64_pdesc_t e;
+        assert(lagfx_a64_pdesc_decode(k36->blob, k36->len, is_fn231501, &no31, &e) && e.nscan == 2 && e.scan[0] == 68 && e.scan[1] == 26);   /* the scan still lists what it sees (diagnostics): tag 8 = 68 (a size/offset) is ALSO function object 68 (UberCompositeFragment), listed before the real vertex ref */
+    }
+
+    /* tag 1 / tag 2 missing, zero, equal, corrupted, or a ref that names no object */
+    memcpy(b, k->blob, k->len); root_drop(b, 2); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MISSING);
+    memcpy(b, k->blob, k->len); root_drop(b, 1); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MISSING);
+    memcpy(b, k->blob, k->len); root_set(b, 2, 0); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MISSING);
+    memcpy(b, k->blob, k->len); root_set(b, 1, 0); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MISSING);
+    memcpy(b, k->blob, k->len); root_set(b, 2, 11); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_SAME);
+    memcpy(b, k->blob, k->len); root_set(b, 2, 9999); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_BAD_TYPE);
+    memcpy(b, k->blob, k->len); root_set(b, 1, 9999); expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_BAD_TYPE);
+    memcpy(b, k->blob, k->len); root_field(b, 2)[1] = 0x05; expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MALFORMED);   /* a field that is not `tag 04 u32` */
+    memcpy(b, k->blob, k->len); b[16] = 0x40; expect_refused(b, k->len, NULL, LAGFX_A64_ROOT_MALFORMED);                 /* field count runs past the body */
+    memcpy(b, k->blob, k->len); expect_refused(b, 30, NULL, LAGFX_A64_ROOT_MALFORMED);                                    /* truncated inside the root */
+    assert(!lagfx_a64_pdesc_decode(b, 12, NULL, NULL, &d));
+    /* the scan did see the real functions of the damaged descriptors: this is exactly what must not be used */
+    memcpy(b, k->blob, k->len); root_drop(b, 2);
+    assert(lagfx_a64_pdesc_decode(b, k->len, is_fn231501, NULL, &d) && d.nrefs == 0 && d.nscan >= 2);
+    puts("PASS: a root that does not name two function objects is refused (missing / zero / equal / corrupt / reused type / permuted order handled), the token scan never picks stages");
+}
+
+static void test_pdesc_tile_root(void) {
+    lagfx_a64_pdesc_t d;
+    const uint8_t *tb = k231501_tile89;
+    assert(sizeof k231501_tile89 == 120 && k231501_stage(k231501_tile_kernel) == 3);
+    /* root: tag 0 = 19 (constant), tag 3 = 64, tag 1 = 88 (the kernel). Object 19 is a function here: still not picked */
+    k231501_ctx_t c19 = { { 0, 0 }, { 19 }, 1 };
+    assert(lagfx_a64_pdesc_decode(tb, sizeof k231501_tile89, is_fn231501, &c19, &d) && d.tag == 0x33 && d.root_status == LAGFX_A64_ROOT_OK && d.nrefs == 1 && d.refs[0] == k231501_tile_kernel);
+    k231501_ctx_t reuse = { { k231501_tile_kernel, 0 }, { 0 }, 0 };
+    assert(lagfx_a64_pdesc_decode(tb, sizeof k231501_tile89, is_fn231501, &reuse, &d) && d.root_status == LAGFX_A64_ROOT_BAD_TYPE && d.nrefs == 0);
+    puts("PASS: tile PSO (tag 0x33) kernel comes from root tag 1; a reused ref is refused");
+}
+
 static void test_pdesc(void) {
     uint8_t b[160]; memset(b, 0, sizeof b);
     uint32_t o = 16;
@@ -383,11 +507,11 @@ static void test_pdesc(void) {
     uint32_t at[2][3] = { { 29, 16, 1 }, { 31, 0, 1 } };
     for (int i = 0; i < 2; i++) { a[0] = 1; a[1] = 4; memcpy(a + 2, &at[i][0], 4); a[6] = 2; a[7] = 4; memcpy(a + 8, &at[i][1], 4); a[12] = 3; a[13] = 4; memcpy(a + 14, &at[i][2], 4); a += 18; }
     for (int i = 0; i < 3; i++) { a[0] = 4; uint32_t st = 32; memcpy(a + 1, &st, 4); a[5] = 2; a += 6; }
-    uint32_t tag = 0xe, total = (uint32_t)(a - b), len = total - 16;
+    uint32_t tag = 0x33, total = (uint32_t)(a - b), len = total - 16;   /* a shape with no root entry: the scanned tokens are the only refs */
     memcpy(b, &tag, 4); memcpy(b + 4, &total, 4); memcpy(b + 12, &len, 4);
     lagfx_a64_pdesc_t d;
     assert(lagfx_a64_pdesc_decode(b, total, NULL, NULL, &d));
-    assert(d.tag == 0xe && d.length == len);
+    assert(d.tag == 0x33 && d.length == len && d.root_status == LAGFX_A64_ROOT_NA);
     assert(d.nrefs >= 3 && d.refs[0] == 7 && d.refs[1] == 300 && d.refs[2] == 9);          /* no validator: every token; first-seen order; deduplicated */
     assert(d.nattrs == 2 && d.attrs[0].off == 0 && d.attrs[0].fmt == 31 && d.attrs[1].off == 16 && d.attrs[1].bufidx == 1);   /* sorted by offset */
     assert(d.stride == 32);
@@ -443,8 +567,18 @@ static void test_resolver_triangle_and_topology(void) {
     uint32_t none[1] = { 99 };
     put_pipeline(REF_PIPE_TRI2, 0x800, none, 1, 3);
     tri_exec(p, REF_PIPE_TRI2, 3, 3, false);
-    assert(PIPE(p).rf_no_refs == 1 && RUNC(p).pipeline_unresolved == 1 && RUNC(p).draws == 5);
+    assert(PIPE(p).rf_root[LAGFX_A64_ROOT_MISSING] == 1 && PIPE(p).rf_no_refs == 0 && RUNC(p).pipeline_unresolved == 1 && RUNC(p).draws == 5);   /* the root names no fragment function: refused by cause */
     assert(RUNC(p).no_pipeline_why[1] == 1 && RUNC(p).no_pipeline_why[0] == 0 && RUNC(p).no_pipeline == 1);   /* the cause: tag 116 named a pipeline that did not resolve */
+    /* the root names an object that is not a function (a texture): refused, even though the descriptor ALSO carries valid function tokens (tag 8's neighbours are not scanned) */
+    uint32_t badtype[2] = { REF_FN_TRI_A, REF_TEX };
+    put_pipeline(REF_PIPE_TRI2, 0x800, badtype, 2, REF_FN_TRI_B);   /* the salt (tag 8) is a valid function ref too: the old scan would have used it as the fragment function */
+    tri_exec(p, REF_PIPE_TRI2, 3, 3, false);
+    assert(PIPE(p).rf_root[LAGFX_A64_ROOT_BAD_TYPE] == 1 && PIPE(p).rf_root_stage == 0 && PIPE(p).resolved == 1 && RUNC(p).pipeline_unresolved == 2 && RUNC(p).draws == 5);
+    /* both refs are functions but of the wrong stage (fragment named by tag 1, vertex by tag 2): refused by stage, the other order of the same libraries is not tried */
+    uint32_t swapped[2] = { REF_FN_FRAG, REF_FN_VERT };
+    put_pipeline(REF_PIPE_TEX, 0x700, swapped, 2, REF_FN_TRI_B);   /* a pipeline object this task has not resolved yet (a failed resolution is not retried for the same entry) */
+    tri_exec(p, REF_PIPE_TEX, 3, 3, false);
+    assert(PIPE(p).rf_root_stage == 1 && PIPE(p).rf_no_stage == 1 && PIPE(p).resolved == 1 && RUNC(p).pipeline_unresolved == 3 && RUNC(p).draws == 5);
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);
@@ -1331,7 +1465,7 @@ int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
     assert(g_dev);
-    test_pdesc(); test_pdesc_function_refs(); test_pdesc_vertex_layout(); test_pdesc_blend();
+    test_pdesc(); test_pdesc_function_refs(); test_pdesc_dump_231501(); test_pdesc_root_hardening(); test_pdesc_tile_root(); test_pdesc_vertex_layout(); test_pdesc_blend();
     g_have_fix = load_fixtures();
     if (!g_have_fix) { puts("SKIP: fixtures (triangle.metallib, guest_viewporttondc_vert, login_texturecopy_frag) missing"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_dump();

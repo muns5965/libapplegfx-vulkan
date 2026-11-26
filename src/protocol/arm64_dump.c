@@ -197,18 +197,20 @@ static void dump_object(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uin
     lagfx_a64_pdesc_t d;
     lagfx_a64_fnctx_t fc = { p, task };
     if (tag == 0xeu && lagfx_a64_pdesc_decode(b, (uint32_t)keep, lagfx_a64_is_function_ref, &fc, &d)) {
-        char rs[160], as[200];
-        size_t o = 0, q = 0;
-        rs[0] = as[0] = 0;
+        char rs[160], as[200], ss[160];
+        size_t o = 0, q = 0, w = 0;
+        rs[0] = as[0] = ss[0] = 0;
+        for (uint32_t i = 0; i < d.nscan && w + 12 < sizeof ss; i++) w += (size_t)snprintf(ss + w, sizeof ss - w, "%s%u", i ? "," : "", d.scan[i]);
         for (uint32_t i = 0; i < d.nrefs && o + 12 < sizeof rs; i++) o += (size_t)snprintf(rs + o, sizeof rs - o, "%s%u", i ? "," : "", d.refs[i]);
         for (uint32_t i = 0; i < d.nattrs && q + 28 < sizeof as; i++) q += (size_t)snprintf(as + q, sizeof as - q, "%sfmt%u@%u/buf%u", i ? " " : "", d.attrs[i].fmt, d.attrs[i].off, d.attrs[i].bufidx);
         LAGFX_LOG("arm64-dump pso task=%u ref=%u: header size=%u ref=%u length=%u function_refs=[%s] vertex_attrs=[%s] stride=%u colour_formats=not-decoded", task->id, ref, d.size, d.ref, d.length, rs, as, d.stride);
         index_line("pso task=%u ref=%u function_refs=[%s] vertex_attrs=[%s] stride=%u", task->id, ref, rs, as, d.stride);
-        for (uint32_t i = 0; i < d.nrefs; i++) {
-            uint32_t fe[3];
-            if (lagfx_a64_objects_read_entry(p, task, d.refs[i], fe)) {
-                uint32_t kk[8] = { task->id, d.refs[i], fe[0], fe[1], fe[2], (uint32_t)task->root_page_pfn, 0, 0 };
-                if (seen_add(lagfx_a64_hash64(kk, sizeof kk))) { p->diag2.exec.pipe.dump_objects++; dump_function(p, task, d.refs[i], fe); }
+        index_line("pso_root task=%u ref=%u status=%s tag1=%u tag2=%u scan=[%s]", task->id, ref, lagfx_a64_root_status_name((int)d.root_status), d.root_ref1, d.root_ref2, ss);
+        for (uint32_t i = 0; i < d.nrefs + d.nscan; i++) {   /* the functions the descriptor names, then the scanned tokens (diagnostic: what the old token-scan resolver would have considered) */
+            uint32_t fr = i < d.nrefs ? d.refs[i] : d.scan[i - d.nrefs], fe[3];
+            if (lagfx_a64_objects_read_entry(p, task, fr, fe)) {
+                uint32_t kk[8] = { task->id, fr, fe[0], fe[1], fe[2], (uint32_t)task->root_page_pfn, 0, 0 };
+                if (seen_add(lagfx_a64_hash64(kk, sizeof kk))) { p->diag2.exec.pipe.dump_objects++; dump_function(p, task, fr, fe); }
             }
         }
     }
