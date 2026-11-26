@@ -430,6 +430,19 @@ int main(void) {
       assert(s0[SFIRST + 600] == SENT); }
     printf("PASS: RGhA (RGBA16Float) surface: clear + draw written back as raw half floats at pitch %u, guest upload round trip exact\n", HROW);
 
+    /* (3b) EXPERIMENT switch LAGFX_ARM64_MAPPED_WRITEBACK=1: a flag-2 exec (GPU rendered into the surface) also writes the surface to the guest. OFF: unchanged (the
+     * guest keeps its pixels although the GPU drew GREEN); ON: the guest sees GREEN after that exec, once. */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint64_t wbx = CNT(p).mapped_written_back;
+      run_exec(p, 30, REF_M1, 2, green, false, res, 1, true);
+      surf_fill(SENT);
+      assert(*surf_px(32, 40) == 0xabababab && CNT(p).mapped_written_back == wbx);   /* switch off */
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 31, REF_M1, 2, green, false, res, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      assert(*surf_px(32, 40) == GREEN && *surf_px(0, 0) == GREEN && *surf_px(63, 79) == GREEN && CNT(p).mapped_written_back == wbx + 1); }
+    printf("PASS: MAPPED_WRITEBACK experiment: off = guest untouched by flag 2, on = rendered surface written back once per exec\n");
+
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
     lagfx_arm64_cq_shutdown(p, 0);

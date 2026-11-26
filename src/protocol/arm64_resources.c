@@ -22,6 +22,14 @@ bool lagfx_a64_res_enabled(void) {
     return e && e[0] == '1' && e[1] == 0;
 }
 
+/* EXPERIMENT (default off): write a mapped display surface back to the guest after every exec that rendered into it (flag 2), not only on flag 4 / a
+ * synchronize. Apple's GPU shares memory with the guest, so a rendered surface is visible without a copy; here nothing reaches the guest unless told. Whether the
+ * real guest relies on this is unverified — hence the switch. */
+static bool mapped_wb_on_render(void) {
+    const char *e = getenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+    return e && e[0] == '1' && e[1] == 0;
+}
+
 #ifndef LAGFX_HAVE_VULKAN
 /* No Vulkan: nothing can be executed. */
 lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const uint8_t *res, uint32_t nres) { (void)p; (void)task; (void)res; (void)nres; return NULL; }
@@ -897,6 +905,7 @@ static lagfx_a64_status_t exec_finish(lagfx_a64_rexec_t *x) {
     const lagfx_task_entry_t *t = lagfx_protocol_find_task(x->p, x->t->id);   /* the task may have been torn down while the GPU worked: then there is nowhere to write */
     for (uint32_t i = 0; i < x->nres; i++) {
         lagfx_a64_obj_t *o = x->res[i].o;
+        if (o->ms && (x->res[i].flags & 2u) && mapped_wb_on_render()) { ms_finish_down(x->p, o->ms); continue; }
         if (!(x->res[i].flags & 4u)) continue;
         if (o->ms) { ms_finish_down(x->p, o->ms); continue; }   /* a surface's pixels go through the shell, not through the task */
         if (t && t->root_page_pfn && t == x->t) {
@@ -929,6 +938,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
         if ((x->res[i].flags & 4u) && o->kind == LAGFX_A64_TEXTURE && o->has_pages) tex_record(x->cb, o, true);
         if ((x->res[i].flags & 4u) && o->linear) lin_push_x(x, o);
         if ((x->res[i].flags & 4u) && o->ms) ms_record_down(m, x->cb, o->ms);
+        else if ((x->res[i].flags & 2u) && o->ms && mapped_wb_on_render()) ms_record_down(m, x->cb, o->ms);
     }
     barrier(x->cb);
     m->cur = NULL;   /* recording is over */
