@@ -25,21 +25,10 @@ static VkDescriptorType kind_to_vk(lagfx_spv_binding_kind_t k) {
     }
 }
 
-lagfx_status_t
-lagfx_build_pipeline_layout_from_spv(VkDevice device,
-                                     const uint8_t *const *spv_blobs,
-                                     const size_t *spv_lens,
-                                     uint32_t n_stages,
-                                     VkDescriptorSetLayout *out_dsl,
-                                     VkPipelineLayout *out_pl) {
-    if (!device || !spv_blobs || !spv_lens || !out_dsl || !out_pl)
-        return LAGFX_ERR_INVALID_ARG;
-    *out_dsl = VK_NULL_HANDLE;
-    *out_pl = VK_NULL_HANDLE;
-
+/* The set-0 bindings of the merged layout: union over the stages, deduped by binding number (first wins). Returns the count (<= LAGFX_MAX_DESC_BINDINGS). */
+uint32_t lagfx_layout_bindings_from_spv(const uint8_t *const *spv_blobs, const size_t *spv_lens, uint32_t n_stages, VkDescriptorSetLayoutBinding *binds) {
     /* Accumulate the union of bindings across stages, deduped by binding
      * number (our translator only uses descriptor set 0). */
-    VkDescriptorSetLayoutBinding binds[LAGFX_MAX_DESC_BINDINGS];
     uint32_t n_binds = 0;
 
     for (uint32_t s = 0; s < n_stages; s++) {
@@ -76,6 +65,23 @@ lagfx_build_pipeline_layout_from_spv(VkDevice device,
             };
         }
     }
+    return n_binds;
+}
+
+lagfx_status_t
+lagfx_build_pipeline_layout_from_spv(VkDevice device,
+                                     const uint8_t *const *spv_blobs,
+                                     const size_t *spv_lens,
+                                     uint32_t n_stages,
+                                     VkDescriptorSetLayout *out_dsl,
+                                     VkPipelineLayout *out_pl) {
+    if (!device || !spv_blobs || !spv_lens || !out_dsl || !out_pl)
+        return LAGFX_ERR_INVALID_ARG;
+    *out_dsl = VK_NULL_HANDLE;
+    *out_pl = VK_NULL_HANDLE;
+
+    VkDescriptorSetLayoutBinding binds[LAGFX_MAX_DESC_BINDINGS];
+    uint32_t n_binds = lagfx_layout_bindings_from_spv(spv_blobs, spv_lens, n_stages, binds);
 
     if (n_binds == 0u) {
         /* No descriptors — caller uses the device empty layout. */

@@ -440,6 +440,37 @@ LAGFX_EXPORT int lagfx_version_minor(void);
 LAGFX_EXPORT int lagfx_version_patch(void);
 LAGFX_EXPORT const char *lagfx_build_info(void);  /* short build/ident string */
 
+/* === Pipeline failure repro ===================================
+ *
+ * A failed vkCreateGraphicsPipelines can leave a bundle directory pipefail_<hash>/ (option LAGFX_PIPEFAIL_BUNDLE_DIR=<dir>, or LAGFX_ARM64_DUMP=1 + LAGFX_ARM64_DUMP_DIR;
+ * default off; layout in src/vulkan/pipeline_bundle.h). lagfx_pipeline_repro_run() rebuilds exactly that pipeline from the bundle on a Vulkan device it creates itself
+ * (the library's own device init, so the same enabled features / extensions as in production on the same hardware), repeats the as-is build 3 times, and describes the
+ * result, the driver and any difference between the recorded and the current device / environment in a text report.
+ *
+ * Callable from an Android app: it keeps no process-global state of its own (the library's one-time device-init log lines apart), prints nothing to stdout and returns the
+ * report in a malloc'd buffer (lagfx_pipeline_repro_free_report). It uses its own VkInstance / VkDevice and releases everything before returning. It does not touch an
+ * existing lagfx_device_t.
+ */
+#define LAGFX_PIPELINE_REPRO_MATRIX 0x1u   /* also run the variant matrix: DIAGNOSTIC rebuilds of a COPY of the state / SPIR-V (some change its meaning, each is labelled). Default off. */
+
+typedef struct {
+    uint32_t struct_size;   /* sizeof(lagfx_pipeline_repro_opts_t); 0 = defaults */
+    uint32_t flags;         /* LAGFX_PIPELINE_REPRO_* */
+} lagfx_pipeline_repro_opts_t;
+
+typedef struct {
+    int32_t  vk_result;          /* VkResult of the as-is rebuild (the last of 3; valid when the call returned LAGFX_OK) */
+    int32_t  recorded_result;    /* VkResult recorded in the bundle */
+    uint32_t as_is_consistent;   /* 1 = the 3 as-is rebuilds gave the same VkResult */
+    uint32_t reproduced;         /* 1 = consistent AND equal to the recorded result */
+    uint32_t variants_ok, variants_failed, variants_na;   /* matrix only: variants that built / failed / did not apply */
+} lagfx_pipeline_repro_result_t;
+
+/* Returns LAGFX_OK when the repro ran (the outcome is in *result and the report), LAGFX_ERR_INVALID_ARG, LAGFX_ERR_NOT_FOUND (bundle unreadable, or a build without
+ * Vulkan) or LAGFX_ERR_VULKAN_INIT. `result` and `report` may be NULL; a returned report must be released with lagfx_pipeline_repro_free_report(). */
+LAGFX_EXPORT lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipeline_repro_opts_t *opts, lagfx_pipeline_repro_result_t *result, char **report);
+LAGFX_EXPORT void lagfx_pipeline_repro_free_report(char *report);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

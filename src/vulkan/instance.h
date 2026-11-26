@@ -48,6 +48,9 @@ struct lagfx_vk_state {
     /* Selected physical-device properties, cached at init for logging
      * + later extension decisions. */
     VkPhysicalDeviceProperties phys_props;
+    /* What vkCreateDevice was given, as text (pipeline failure bundles, src/vulkan/pipeline_bundle.c): device extensions, the enabled feature bits that matter to
+     * the generated SPIR-V / pipeline state, and the driver identification (VkPhysicalDeviceDriverProperties). Filled once at init. */
+    char dev_exts[512], dev_features[1024], driver_name[VK_MAX_DRIVER_NAME_SIZE], driver_info[VK_MAX_DRIVER_INFO_SIZE];
 
     /* Feature-enable flags — reflect what was actually requested +
      * accepted at vkCreateDevice time. Used by later phases to decide

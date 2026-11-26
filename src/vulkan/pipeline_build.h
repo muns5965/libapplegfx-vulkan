@@ -23,6 +23,17 @@ typedef void *VkDescriptorSetLayout;
 typedef int   VkFormat;
 #endif
 
+struct lagfx_vk_state;
+/* OPTIONAL failure-bundle inputs (src/vulkan/pipeline_bundle.c). Only read when vkCreateGraphicsPipelines fails AND the bundle option is on (LAGFX_PIPEFAIL_BUNDLE_DIR, or
+ * LAGFX_ARM64_DUMP=1 with a dump dir); never changes what is built. All pointers stay owned by the caller and must outlive the lagfx_pipeline_build() call. */
+typedef struct {
+    const struct lagfx_vk_state *vk;     /* the device the pipeline was built on (properties, enabled extensions / features); NULL = recorded as unknown */
+    const uint8_t *vs_bc, *fs_bc;        /* the AIR bitcode both SPIR-V modules were translated from (NULL = not available) */
+    size_t         vs_bc_bytes, fs_bc_bytes;
+    const char    *vs_fn, *fs_fn;        /* Metal function names */
+    const char    *origin;               /* free text: where the pipeline came from (e.g. "arm64 pso task=2 ref=30") */
+} lagfx_pipeline_diag_t;
+
 /**
  * MVP pipeline descriptor — fields hardcoded to match triangle.metallib
  * for first-pixel work. Will be extended in Stage 70b+ as wire-opcode
@@ -84,6 +95,7 @@ typedef struct {
      * write / compare, stencil test / ops / masks / reference dynamic as well. no_color != 0: the pass has no colour attachment (one unused slot). */
     VkFormat         ds_depth_format, ds_stencil_format;
     uint8_t          dyn_state, no_color;
+    const lagfx_pipeline_diag_t *diag;   /* OPTIONAL, failure bundle only (see lagfx_pipeline_diag_t) */
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
@@ -104,6 +116,12 @@ typedef struct {
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline);
+
+/* VkResult of the calling thread's last vkCreateGraphicsPipelines inside lagfx_pipeline_build() (lagfx_pipeline_build itself only returns LAGFX_ERR_BACKEND). */
+int32_t lagfx_pipeline_build_last_result(void);
+
+/* FNV-1a 64 (historical offset basis 1469598103934665603, see pipeline_build.c) of a byte range = the "hash=" of the "pipeline-build-fail:" device log line (compare it with examples/dump-pairhash on a dump). */
+uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n);
 
 #ifdef __cplusplus
 }

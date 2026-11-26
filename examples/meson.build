@@ -106,3 +106,19 @@ if vulkan_dep.found()
     build_by_default : true,
   )
 endif
+
+# dump-pairhash — per PSO of an arm64 dump: size + FNV-1a-64 hash of the vertex/fragment SPIR-V exactly as the resolver builds them (matches the device "pipeline-build-fail:" line).
+executable('dump-pairhash',
+  'dump-pairhash.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)
+
+# pipeline-repro — rebuilds a failed pipeline from a failure bundle (lagfx_pipeline_repro_run) and prints the report; --matrix adds the DIAGNOSTIC variant matrix.
+executable('pipeline-repro',
+  'pipeline-repro.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

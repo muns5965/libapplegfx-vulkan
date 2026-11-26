@@ -1645,3 +1645,45 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
   test('air2spv undef report + fail closed (unit)', air2spv_undef_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# The hash= of the "pipeline-build-fail:" device log line (FNV-1a 64) + deterministic resolver-order translation of a fixture pair.
+pipeline_spv_hash_test = executable('pipeline-spv-hash-unit',
+  'pipeline-spv-hash-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('pipeline spv hash (unit)', pipeline_spv_hash_test, workdir : meson.current_source_dir() / '..')
+
+# Pipeline failure bundle (LAGFX_PIPEFAIL_BUNDLE_DIR): forced vkCreateGraphicsPipelines failure on lavapipe writes pipefail_<hash>/.
+pipeline_bundle_deps = [libapplegfx_vulkan_dep]
+if vulkan_dep.found()
+  pipeline_bundle_deps += [vulkan_dep]
+endif
+pipeline_bundle_test = executable('pipeline-bundle-unit',
+  'pipeline-bundle-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('pipeline failure bundle (unit, lavapipe)', pipeline_bundle_test)
+
+# DIAGNOSTIC SPIR-V rewrites of the pipeline repro's variant matrix (pure; validated with spirv-val when installed).
+spv_variants_test = executable('spv-variants-unit',
+  'spv-variants-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : [libapplegfx_vulkan_dep],
+  build_by_default : true,
+)
+test('spv diagnostic variants (unit)', spv_variants_test)
+
+# lagfx_pipeline_repro_run: forced failure -> bundle -> repro reproduces the same VkResult; UberComposite fixture pair reproduces OK. LAGFX_TEST_DUMP_DIR=<dump> adds the device pairs.
+pipeline_repro_test = executable('pipeline-repro-unit',
+  'pipeline-repro-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"', '-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('pipeline repro (unit, lavapipe)', pipeline_repro_test, workdir : meson.current_source_dir() / '..')
