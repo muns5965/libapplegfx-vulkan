@@ -1,5 +1,5 @@
 /* Writes one DIAGNOSTIC SPIR-V variant of the pipeline repro's matrix (src/vulkan/spv_variants.c) for a given module, so the variant can be fed to spirv-val / spirv-dis or
- * to another Vulkan implementation. usage: spv-variant <in.spv> <e|f|g|h|i|j> <out.spv>. Exit: 0 = written, 3 = the variant does not apply to this module (nothing written),
+ * to another Vulkan implementation. usage: spv-variant <in.spv> <e|f|g|h|i|j|k|v|b|s> <out.spv> [nia]. Exit: 0 = written, 3 = the variant does not apply to this module (nothing written),
  * 1 = malformed input / I/O error, 2 = usage. Never part of the normal translation path. SPDX-License-Identifier: MIT */
 #include "vulkan/spv_variants.h"
 #include <stdio.h>
@@ -7,7 +7,7 @@
 #include <string.h>
 
 int main(int argc, char **argv) {
-    if (argc != 4 || strlen(argv[2]) != 1) { fprintf(stderr, "usage: %s <in.spv> <e|f|g|h|i|j> <out.spv>\n  e 64-bit dynamic index -> 32-bit | f drop unused capability decls | g OpUndef composites -> null\n  h OpUndef struct/pointer -> null (only) | i drop unreferenced OpUndef | j OpUndef struct -> null (only)\n", argv[0]); return 2; }
+    if ((argc != 4 && argc != 5) || strlen(argv[2]) != 1) { fprintf(stderr, "usage: %s <in.spv> <e|f|g|h|i|j|k|v|b|s> <out.spv> [nia]\n  k only OpReturnValue(OpUndef) -> null | v SPIR-V 1.4 -> 1.3 | b input attachments -> bindings 0..n-1 (others +nia) | s input attachments -> set 1\n  e 64-bit dynamic index -> 32-bit | f drop unused capability decls | g OpUndef composites -> null\n  h OpUndef struct/pointer -> null (only) | i drop unreferenced OpUndef | j OpUndef struct -> null (only)\n", argv[0]); return 2; }
     FILE *f = fopen(argv[1], "rb");
     if (!f) { perror(argv[1]); return 1; }
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
@@ -22,10 +22,13 @@ int main(int argc, char **argv) {
         case 'h': fn = lagfx_spv_variant_undef_struct_ptr; break;
         case 'i': fn = lagfx_spv_variant_drop_dead_undef; break;
         case 'j': fn = lagfx_spv_variant_undef_struct; break;
+        case 'k': fn = lagfx_spv_variant_undef_returns; break;
+        case 'v': fn = lagfx_spv_variant_downgrade13; break;
+        case 'b': case 's': break;
         default: fprintf(stderr, "unknown variant '%s'\n", argv[2]); free(in); return 2;
     }
     uint32_t *o = NULL; size_t on = 0; char info[400] = "";
-    int r = fn(in, (size_t)n / 4, &o, &on, info, sizeof info);
+    int r = fn ? fn(in, (size_t)n / 4, &o, &on, info, sizeof info) : lagfx_spv_variant_ia_rebind(in, (size_t)n / 4, argv[2][0] == 's', argc == 5 ? (uint32_t)atoi(argv[4]) : 2u, &o, &on, info, sizeof info);
     free(in);
     if (r < 0) { fprintf(stderr, "malformed module\n"); return 1; }
     if (r == 0 || !o) { printf("variant %s: %s (nothing written)\n", argv[2], info); return 3; }

@@ -453,6 +453,8 @@ LAGFX_EXPORT const char *lagfx_build_info(void);  /* short build/ident string */
  */
 #define LAGFX_PIPELINE_REPRO_MATRIX 0x1u   /* also run the variant matrix: DIAGNOSTIC rebuilds of a COPY of the state / SPIR-V (some change its meaning, each is labelled). Default off. */
 
+#define LAGFX_PIPELINE_REPRO_M13    0x2u   /* run the -13 matrix (rows M0..M10, src/vulkan/pipeline_matrix.h) on the bundle's pair: one log line per row, "pipeline-matrix: row=<id> result=BUILT|FAIL|n/a ...". Default off. */
+
 typedef struct {
     uint32_t struct_size;   /* sizeof(lagfx_pipeline_repro_opts_t); 0 = defaults */
     uint32_t flags;         /* LAGFX_PIPELINE_REPRO_* */

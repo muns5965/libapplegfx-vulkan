@@ -14,6 +14,8 @@ lagfx_sources += files(
   'pipeline_bundle.c',
   'pipeline_repro.c',
   'spv_variants.c',
+  'spv_iface.c',
+  'pipeline_matrix.c',
   'descriptor_layout.c',
   'render_target.c',
   'cursor.c',

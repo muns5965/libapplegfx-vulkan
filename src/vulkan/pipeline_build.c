@@ -3,6 +3,9 @@
 #include "pipeline_bundle.h"
 #include "common/log.h"
 #include "common/policy.h"
+#ifdef LAGFX_HAVE_VULKAN
+#include "pipeline_matrix.h"
+#endif
 
 #include <stdint.h>
 #include <stdio.h>
@@ -123,6 +126,8 @@ static void describe_state(char *buf, size_t cap, const VkGraphicsPipelineCreate
 
 static _Thread_local int32_t g_last_vr;   /* VkResult of this thread's last vkCreateGraphicsPipelines in lagfx_pipeline_build() (the repro reads it) */
 int32_t lagfx_pipeline_build_last_result(void) { return g_last_vr; }
+static _Thread_local int g_quiet;
+void lagfx_pipeline_build_quiet(int on) { g_quiet = on; }
 
 /* MTLVertexFormat (public Metal enum) -> VkFormat for the formats the PSO attribute decode may carry; VK_FORMAT_UNDEFINED = not handled (the caller falls back to
  * the reflected float tight-pack). 37 is UInt2 (UInt is 36) and 52 is ShortNormalized (UChar4Normalized_BGRA is 42); the earlier table had 37 as a one-component UInt and 52 as
@@ -371,6 +376,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         .pColorAttachmentFormats = ncol > 1u ? color_fmts : &color_fmt,
         .depthAttachmentFormat = desc->dyn_state ? desc->ds_depth_format : VK_FORMAT_UNDEFINED,
         .stencilAttachmentFormat = desc->dyn_state ? desc->ds_stencil_format : VK_FORMAT_UNDEFINED,
+        .pNext = desc->diag_gpci_pnext,   /* DIAGNOSTIC hook of the -13 matrix; NULL in production */
     };
 
     /* Depth/stencil — NULL as in triangle test (no depth) */
@@ -412,7 +418,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     /* Graphics pipeline create info */
     VkGraphicsPipelineCreateInfo gpci = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-        .pNext = &rendering_info,
+        .pNext = desc->diag_render_pass ? NULL : &rendering_info,
         .stageCount = 2,
         .pStages = stages,
         .pVertexInputState = &vin,
@@ -424,14 +430,15 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         .pColorBlendState = &cb,
         .pDynamicState = &dyn,
         .layout = desc->layout,
-        .renderPass = VK_NULL_HANDLE,
-        .subpass = 0,
+        .renderPass = desc->diag_render_pass ? (VkRenderPass)(uintptr_t)desc->diag_render_pass : VK_NULL_HANDLE,   /* DIAGNOSTIC hook of the -13 matrix; VK_NULL_HANDLE in production */
+        .subpass = desc->diag_render_pass ? desc->diag_subpass : 0,
     };
 
     VkPipeline pipe = VK_NULL_HANDLE;
     VkResult vr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci,
                                             NULL, &pipe);
     g_last_vr = (int32_t)vr;
+    if (vr != VK_SUCCESS && g_quiet) return LAGFX_ERR_BACKEND;
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("lagfx_pipeline_build: vkCreateGraphicsPipelines failed (%d)",
                   (int)vr);
@@ -441,6 +448,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
             describe_state(local, sizeof local, &gpci, &rendering_info);
             lagfx_pipeline_bundle_write(desc, vr, local, NULL, 0);
         }
+        lagfx_pipeline_matrix_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_MATRIX, default off: a no-op that returns at once */
         return LAGFX_ERR_BACKEND;
     }
 

@@ -28,6 +28,7 @@ void lagfx_pipeline_repro_free_report(char *report) { free(report); }
 #include "instance.h"
 #include "pipeline_build.h"
 #include "pipeline_bundle.h"
+#include "pipeline_matrix.h"
 #include "spv_variants.h"
 
 #include <stdarg.h>
@@ -160,6 +161,8 @@ static void run_matrix(ctx_t *c, const lagfx_pipeline_desc_t *d0, const uint32_t
     }
 }
 
+static void m13_emit(void *u, const char *l) { rp((rep_t *)u, "%s\n", l); }
+
 lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipeline_repro_opts_t *opts, lagfx_pipeline_repro_result_t *result, char **report) {
     lagfx_pipeline_repro_result_t res;
     memset(&res, 0, sizeof res);
@@ -248,6 +251,16 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
         rp(&rep, "\nAS-IS REBUILD x3: %s, %s, %s -> %s\n", s0, s1, s2, res.as_is_consistent ? "consistent" : "NOT consistent");
         rp(&rep, "RESULT: %s (recorded %d)\n", res.reproduced ? (b.result == 0 ? "the recorded SUCCESS reproduces (the pipeline builds)" : "the recorded failure REPRODUCES") : rr[2] == VK_SUCCESS ? "the pipeline builds here: does NOT reproduce" : (int32_t)rr[2] == b.result ? "same VkResult but not consistent" : "fails differently from the recorded result", b.result);
         if (flags & LAGFX_PIPELINE_REPRO_MATRIX) run_matrix(&c, &b.desc, vs, b.vs_bytes, fs, b.fs_bytes, b.vs_entry, b.fs_entry);
+        if (flags & LAGFX_PIPELINE_REPRO_M13) {
+            const char *m8 = getenv("LAGFX_PIPELINE_MATRIX_DIR");
+            lagfx_matrix_env_t me = { .have_local_read = vk->have_local_read, .have_raster_order = vk->have_raster_order, .max_color_att = vk->phys_props.limits.maxColorAttachments,
+                                      .max_per_stage_input_att = vk->phys_props.limits.maxPerStageDescriptorInputAttachments, .m8_dir = m8 && m8[0] ? m8 : bundle_dir, .emit = m13_emit, .user = &rep };
+            lagfx_pipeline_desc_t md = b.desc;
+            md.layout = c.layout, md.vertex_spv = vs, md.vertex_spv_bytes = b.vs_bytes, md.fragment_spv = fs, md.fragment_spv_bytes = b.fs_bytes, md.vertex_entry_point = b.vs_entry, md.fragment_entry_point = b.fs_entry;
+            rp(&rep, "\n-- the -13 matrix (DIAGNOSTIC: every row builds a COPY; rows M0..M10) --\n");
+            lagfx_matrix_result_t mr;
+            lagfx_pipeline_matrix_run(c.dev, &md, b.dsl, b.n_dsl, &me, &mr);
+        }
         res.variants_ok = c.ok, res.variants_failed = c.fail, res.variants_na = c.na;
         if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "matrix: %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
     }
