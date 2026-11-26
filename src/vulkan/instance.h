@@ -53,6 +53,7 @@ struct lagfx_vk_state {
     bool have_dynamic_rendering;
     bool have_raster_order;        /* rasterizationOrderColorAttachmentAccess enabled: input-attachment reads inside ONE draw see earlier overlapping fragments in primitive order */
     bool have_local_read;          /* VK_KHR_dynamic_rendering_local_read enabled: colour attachments can be read as input attachments (framebuffer fetch) */
+    bool have_sampler_anisotropy;  /* enabled device feature samplerAnisotropy */
     bool have_independent_blend;   /* enabled device feature: per-attachment blend state / write masks may differ */
     bool have_synchronization2;
     bool have_timeline_semaphore;

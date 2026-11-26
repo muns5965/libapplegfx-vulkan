@@ -148,6 +148,20 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             LAGFX_LOG("%s", line);
         }
     }
+    if (X->run.execs) {   /* ARM64 render exec extensions (draw variants, sampler fidelity, misaligned buffer binds, no-op tags) */
+        const __typeof__(X->run) *R = &X->run;
+        char el[600];
+        snprintf(el, sizeof el,
+                 "g7-gpu-ext: draw[instanced=%llu base=%llu wide=%llu indirect=%llu indirect_bad=%llu zero=%llu] noop[hint=%llu fence=%llu barrier_partial=%llu] "
+                 "sampler[compare_ignored=%llu unnorm_ignored=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu]",
+                 (unsigned long long)R->ext_draw_instanced, (unsigned long long)R->ext_draw_base, (unsigned long long)R->ext_draw_wide, (unsigned long long)R->ext_draw_indirect,
+                 (unsigned long long)R->ext_draw_indirect_bad, (unsigned long long)R->ext_draw_zero, (unsigned long long)R->ext_noop_hint, (unsigned long long)R->ext_noop_fence,
+                 (unsigned long long)R->ext_barrier, (unsigned long long)R->ext_samp_compare, (unsigned long long)R->ext_samp_unnorm, (unsigned long long)R->ext_samp_mirror_clamp,
+                 (unsigned long long)R->ext_samp_lod_binds, (unsigned long long)R->ext_samp_lod_dropped, (unsigned long long)R->ext_gathered, (unsigned long long)R->ext_gather_failed,
+                 (unsigned long long)R->ext_range_clamped);
+        fprintf(stderr, "%s\n", el);
+        LAGFX_LOG("%s", el);
+    }
     if (X->run.execs) {   /* ARM64 render execution (LAGFX_ARM64_EXEC=1): totals, then the per-tag outcome of every tag seen */
         const __typeof__(X->run) *R = &X->run;
         char rl[2400], tg[900];

@@ -109,6 +109,8 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
 /* The 2D layer-0 level-0 view of a sampled texture (GENERAL layout, usable as SAMPLED_IMAGE in the shaders); VK_NULL_HANDLE if the format cannot be sampled / 3D. */
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+/* A host-visible storage buffer (zeroed, persistently mapped) owned by the exec and freed with it, e.g. an aligned copy of a misaligned buffer range. */
+bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map);
 /* The task entry's mirror object (NULL if never created); no side effects. For tests / diagnostics. */
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref);
 /* Test / debug: level 0, layer 0 of a mirrored texture as linear rows (width*bpp) via a one-shot copy; false while an exec records / is pending. */

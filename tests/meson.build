@@ -1428,6 +1428,32 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   test('arm64 exec render, raster order forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
 endif
 
+# ARM64 render draw record layouts + serialized sampler decoding (pure, no device).
+if fs.is_file(meson.current_source_dir() / 'arm64-draw-decode-unit.c')
+  dd_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    dd_deps += [vulkan_dep]
+  endif
+  dd_test = executable('arm64-draw-decode-unit',
+    'arm64-draw-decode-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : dd_deps,
+    build_by_default : true,
+  )
+  test('arm64 draw record + sampler decoding (unit)', dd_test)
+endif
+
+# ARM64 render exec extensions (draw variants, indirect, no-op tags, LOD samplers) on lavapipe + validation.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-ext-unit.c') and vulkan_dep.found()
+  ee_test = executable('arm64-exec-ext-unit',
+    'arm64-exec-ext-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec render extensions (unit, lavapipe)', ee_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-blit-unit.c') and vulkan_dep.found()
   eb_test = executable('arm64-exec-blit-unit',
     'arm64-exec-blit-unit.c',

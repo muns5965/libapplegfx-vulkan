@@ -17,6 +17,8 @@ lagfx_sources += files(
   'arm64_objects.c',      # ARM64 per-task (task, ref) object table
   'arm64_pipeline.c',     # ARM64 pipeline-state resolver (serialized pipeline -> SPIR-V, layouts)
   'arm64_dump.c',         # ARM64 bounded capture of real pipeline/library/binding data (LAGFX_ARM64_DUMP=1)
+  'arm64_sampler.c',      # ARM64 serialized sampler (tag 3) -> VkSamplerCreateInfo
+  'arm64_draw_decode.c',  # ARM64 render draw record decoder (tags 0-11, 0x10, 0x11)
   'arm64_exec_run.c',     # ARM64 Render segment execution on Vulkan (LAGFX_ARM64_EXEC=1)
   'diag.c',         # command diagnostics (logging + counters only)
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write

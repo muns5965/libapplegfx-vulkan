@@ -423,17 +423,18 @@ static void test_textured_draw(void) {
     cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, self, 1); cb_draw(4, 0, 4);
     exec(p, 1, cb_finish());
     assert(PIPE(p).desc_feedback == 1 && RUNC(p).draws == 1);
-    /* a misaligned storage-buffer offset: skipped, counted */
+    /* a storage-buffer offset the device cannot bind (4 is not a multiple of minStorageBufferOffsetAlignment): no longer skipped, an aligned copy of the range is bound (ext_gathered) */
     cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
     { uint8_t r[12] = {0}; uint32_t idx = 2; uint64_t off = 4; memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); }
     cb_draw(4, 0, 4);
     exec(p, 1, cb_finish());
-    assert(PIPE(p).desc_unaligned + PIPE(p).desc_unbound + PIPE(p).desc_feedback >= 3);
+    assert(PIPE(p).desc_unaligned == 0 && PIPE(p).desc_unbound == 1 && PIPE(p).desc_feedback == 1);
+    assert(RUNC(p).ext_gathered == 1 && RUNC(p).ext_gather_failed == 0 && RUNC(p).draws == 2);
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);
     g_res_tex = false;
-    puts("PASS: descriptor binding on lavapipe: 3 storage buffers + texture + inline sampler read back, unbound / feedback / unaligned skipped");
+    puts("PASS: descriptor binding on lavapipe: 3 storage buffers + texture + inline sampler read back, unbound / feedback skipped, misaligned offset gathered");
 }
 
 static void test_invalidation(void) {

@@ -890,6 +890,16 @@ void lagfx_a64_res_blit_segment(lagfx_a64_rexec_t *x, const uint8_t *body, uint3
     }
 }
 
+/* A host-visible storage buffer that lives as long as this exec (freed with it); false when the exec's scratch slots are used up or the allocation fails. */
+bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map) {
+    if (!x || !size || x->ntmp >= MAX_TMP) return false;
+    VkBuffer b; VkDeviceMemory m; uint8_t *mp;
+    if (!make_buf(x->vk, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &b, &m, &mp)) return false;
+    x->tmp_b[x->ntmp] = b, x->tmp_m[x->ntmp] = m, x->ntmp++;
+    *buf = b, *map = mp;
+    return true;
+}
+
 /* ---- completion ---- */
 
 static void exec_free(lagfx_a64_rexec_t *x) {
