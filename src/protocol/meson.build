@@ -11,6 +11,7 @@ lagfx_sources += files(
   'ops_misc.c',     # NOP, Debug, GetDeviceInfo handlers
   # ops_display.c removed: uses old protocol state layout (lagfx_display_entry_t renamed to lagfx_display_mode_t)
   # Legacy handlers moved to src/handlers/display/display.c for vchan opcodes (0x01-0x07)
+  'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode-only
   'diag.c',         # command diagnostics (logging + counters only)
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write
    'object_resolver.c',  # Phase B object ID resolver for metallib lookup

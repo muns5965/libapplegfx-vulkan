@@ -1366,3 +1366,17 @@ if fs.is_file(meson.current_source_dir() / 'protocol-mode-unit.c')
   )
   test('protocol mode x86/arm64 compute semantics (unit)', pm_test)
 endif
+
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-decode-unit.c')
+  ed_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    ed_deps += [vulkan_dep]
+  endif
+  ed_test = executable('arm64-exec-decode-unit',
+    'arm64-exec-decode-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : ed_deps,
+    build_by_default : true,
+  )
+  test('arm64 exec 0x43/0x45 decode (unit)', ed_test)
+endif
