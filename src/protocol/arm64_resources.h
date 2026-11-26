@@ -155,6 +155,13 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms);
 extern int lagfx_a64_test_hook;   /* tests only (see arm64_resources.c) */
 uint32_t          lagfx_a64_res_display_swap(lagfx_protocol_t *p);   /* LAGFX_ARM64_MAPPED_WRITEBACK=swap: pay the owed mapped surfaces (before a display command is forwarded) */
 bool              lagfx_a64_res_is_pending(lagfx_protocol_t *p);
+/* Classifies the surface a display swap names (call after lagfx_a64_res_display_swap, before the command is forwarded). Returns a mask of LAGFX_A64_DSP_*; no side effects. */
+#define LAGFX_A64_DSP_RESOLVED 1u   /* the mapping id has a mirror surface */
+#define LAGFX_A64_DSP_GPU      2u   /* ... that holds meaningful pixels (host_valid) */
+#define LAGFX_A64_DSP_WRITTEN  4u   /* ... and the guest's pages are current (no flag-2 render since the last write-back / upload) */
+uint32_t          lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping);
+/* Counts one ARM64 display command (ops 1 / 2 / 8) into p->diag2.disp: op seen, and for a swap whether its surface resolved / holds GPU pixels / is current in the guest. */
+void              lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr);
 
 /* Task teardown (CmdDeleteTask): the task's mirror objects go; their Vulkan objects are freed only after any exec that may use them has finished. */
 void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task);

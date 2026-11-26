@@ -134,6 +134,15 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
              (unsigned long long)X->inner_bad, tags);
     fprintf(stderr, "%s\n", line);
     LAGFX_LOG("%s", line);
+    if (p->diag2.disp.op_setpage || p->diag2.disp.op_ack || p->diag2.disp.op_swap) {   /* arm64 display ops, stage by stage (display_submit_rendered is the legacy vchan path only) */
+        const __typeof__(p->diag2.disp) *D = &p->diag2.disp;
+        snprintf(line, sizeof line, "g7-gpu-display: op_setpage=%llu op_ack=%llu op_swap=%llu swap_short=%llu surface_resolved=%llu surface_unresolved=%llu gpu_content=%llu written_back=%llu gpu_unwritten=%llu handed_to_shell=%llu not_handed=%llu swap_events=%llu",
+                 (unsigned long long)D->op_setpage, (unsigned long long)D->op_ack, (unsigned long long)D->op_swap, (unsigned long long)D->swap_short, (unsigned long long)D->surface_resolved,
+                 (unsigned long long)D->surface_unresolved, (unsigned long long)D->gpu_content, (unsigned long long)D->written_back, (unsigned long long)D->gpu_unwritten,
+                 (unsigned long long)D->handed_to_shell, (unsigned long long)D->not_handed, (unsigned long long)X->run.swap_events);
+        fprintf(stderr, "%s\n", line);
+        LAGFX_LOG("%s", line);
+    }
     {   /* arm64 deferred completion + GPU wait failures (separate line: the line above keeps its format) */
         uint64_t wt = 0, wf = 0, sf = 0;
         lagfx_arm64_cq_stats_t q;

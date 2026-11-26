@@ -476,6 +476,41 @@ int main(void) {
       assert(lagfx_a64_res_display_swap(p) == 0); }
     printf("PASS: MAPPED_WRITEBACK=swap: two execs owe, ONE display swap pays, an empty swap writes nothing, off = no-op\n");
 
+    /* (3d2) display-op counters (diag2.disp): op seen -> surface resolved -> GPU content -> written back, each counted on its own. */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint8_t pl[48];
+      lagfx_cmd_header_t h;
+      #define SWAP_OP(map, op, psz, skipw) do { memset(pl, 0, sizeof pl); memcpy(pl + (skipw) * 8 + 8, &(uint64_t){ (map) }, 8); memset(&h, 0, sizeof h); \
+          h.opcode = (op); h.arg_count_8b = (skipw); h.payload = pl; h.payload_size = (psz); lagfx_a64_display_count(p, &h); } while (0)
+      uint64_t mapping = 0;
+      /* find the mapping id the exec's surface carries */
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "0", 1);
+      surf_fill(SENT);
+      run_exec(p, 36, REF_M1, 2, green, false, res, 1, true);
+      lagfx_a64_obj_t *o = lagfx_a64_res_lookup(p, 1, REF_M1);
+      assert(o); mapping = o->mapping;
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      __typeof__(p->diag2.disp) d0 = p->diag2.disp;
+      SWAP_OP(mapping, 8, 40, 0);   /* rendered by the GPU, not written back (immediate mode off): the guest is stale */
+      assert(p->diag2.disp.op_swap == d0.op_swap + 1 && p->diag2.disp.surface_resolved == d0.surface_resolved + 1 && p->diag2.disp.gpu_content == d0.gpu_content + 1);
+      assert(p->diag2.disp.gpu_unwritten == d0.gpu_unwritten + 1 && p->diag2.disp.written_back == d0.written_back && *surf_px(32, 40) == 0xabababab);
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 37, REF_M1, 2, green, false, res, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      SWAP_OP(mapping, 8, 56, 1);   /* one barrier slot: arguments start 8 bytes later; the surface is now current in the guest */
+      assert(p->diag2.disp.written_back == d0.written_back + 1 && p->diag2.disp.gpu_content == d0.gpu_content + 2 && *surf_px(32, 40) == GREEN);
+      SWAP_OP(0x7777, 8, 40, 0);   /* a mapping no exec ever drew into */
+      assert(p->diag2.disp.surface_unresolved == d0.surface_unresolved + 1 && p->diag2.disp.gpu_content == d0.gpu_content + 2);
+      SWAP_OP(mapping, 8, 24, 0);  /* too short to name a mapping */
+      assert(p->diag2.disp.swap_short == d0.swap_short + 1 && p->diag2.disp.surface_resolved == d0.surface_resolved + 2);
+      SWAP_OP(0, 1, 16, 0); SWAP_OP(0, 2, 16, 0);
+      assert(p->diag2.disp.op_setpage == d0.op_setpage + 1 && p->diag2.disp.op_ack == d0.op_ack + 1 && p->diag2.disp.op_swap == d0.op_swap + 4);
+      /* the legacy counter is not a stage of this path */
+      assert(p->diag2.display_submit_rendered == 0);
+      #undef SWAP_OP
+    }
+    printf("PASS: ARM64 display counters: op seen / surface resolved / GPU content / written back are separate; unknown mapping and short swap counted; display_submit_rendered untouched\n");
+
     /* (3e) swap-mode safety: last exec wins; RGhA; re-mapped surface dropped; unreadable descriptor keeps the debt; synchronize pays it once. */
     setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
     { const uint32_t res[1][2] = { { REF_M1, 2 } };

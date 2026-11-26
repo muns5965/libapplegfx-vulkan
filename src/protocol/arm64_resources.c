@@ -45,6 +45,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) { (void)x; return LAG
 lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t w) { (void)p; (void)w; return LAGFX_A64_DONE; }
 bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { (void)p; return false; }
 uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) { (void)p; return 0; }
+uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) { (void)p; (void)mapping; return 0; }
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return 0; }
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) { (void)p; (void)hdr; return false; }
@@ -1282,6 +1283,19 @@ uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) {
     return (uint32_t)(MRUN(p).swap_flushed - f0);
 }
 
+uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    if (!m || mapping > 0xffffffffull) return 0;
+    for (uint32_t i = m->nms; i-- > 0;) {
+        const msurf_t *ms = m->ms[i];
+        if (!ms || ms->mapping != (uint32_t)mapping) continue;
+        uint32_t r = LAGFX_A64_DSP_RESOLVED;
+        if (ms->host_valid) { r |= LAGFX_A64_DSP_GPU; if (!ms->guest_stale) r |= LAGFX_A64_DSP_WRITTEN; }
+        return r;
+    }
+    return 0;
+}
+
 /* ---- render targets and readback ---- */
 
 static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsageFlags need) {
@@ -1480,3 +1494,24 @@ void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) {
 }
 
 #endif /* LAGFX_HAVE_VULKAN */
+
+/* The payload of an ARM64 display command: arg_count_8b barrier words (8 bytes each) first, then the arguments. Henge's decoder (pvg_lite.c) reads op 8 as 10 words
+ * with the mapping id in words 2..3; ops 1 / 2 need 8 bytes. The meaning of op 1 / 2 / 8 is taken from there; nothing about Apple's behaviour is assumed here. */
+void lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
+    if (!p || !hdr) return;
+    uint32_t op = hdr->opcode & 0xffu;
+    if (op == 1u) p->diag2.disp.op_setpage++;
+    else if (op == 2u) p->diag2.disp.op_ack++;
+    else if (op != 8u) return;
+    else {
+        p->diag2.disp.op_swap++;
+        uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
+        if (!hdr->payload || hdr->payload_size < skip + 40u) { p->diag2.disp.swap_short++; return; }
+        uint32_t r = lagfx_a64_res_display_note(p, lagfx_le64(hdr->payload + skip + 8u));
+        if (!(r & LAGFX_A64_DSP_RESOLVED)) { p->diag2.disp.surface_unresolved++; return; }
+        p->diag2.disp.surface_resolved++;
+        if (!(r & LAGFX_A64_DSP_GPU)) return;
+        p->diag2.disp.gpu_content++;
+        if (r & LAGFX_A64_DSP_WRITTEN) p->diag2.disp.written_back++; else p->diag2.disp.gpu_unwritten++;
+    }
+}
