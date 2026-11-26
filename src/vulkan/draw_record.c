@@ -19,6 +19,89 @@
 
 #ifdef LAGFX_HAVE_VULKAN
 
+/* Record (into an already-begun cb, outside a render pass) the barrier that moves rt to COLOR_ATTACHMENT_OPTIMAL and update rt->layout.
+ * Extracted unchanged from lagfx_vk_draw_record_and_submit_bound so the ARM64 exec path shares it. */
+void lagfx_vk_cmd_rt_to_color(VkCommandBuffer cb, lagfx_vk_render_target_t *rt) {
+    /* Transition render target to COLOR_ATTACHMENT_OPTIMAL for rendering */
+    VkAccessFlags src_access = 0;
+    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+    if (rt->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
+        src_access = VK_ACCESS_TRANSFER_READ_BIT;
+        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    } else if (rt->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+        /* B10: a prior draw left the RT in color-attachment layout — the
+         * WAW hazard against that prior color write must be covered, or a
+         * real GPU (lavapipe hides it) shows ordering artifacts. */
+        src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        src_stage  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    }
+    
+    VkImageMemoryBarrier barrier = {
+        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
+        .srcAccessMask = src_access,
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .oldLayout = rt->layout,
+        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = rt->image,
+        .subresourceRange = {
+            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+            .baseMipLevel = 0,
+            .levelCount = 1,
+            .baseArrayLayer = 0,
+            .layerCount = 1,
+        },
+    };
+    vkCmdPipelineBarrier(cb, src_stage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         0, 0, NULL, 0, NULL, 1, &barrier);
+    rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+
+/* Record dynamic viewport + scissor for rt (Y-flip, region clamp: see body). Extracted unchanged from the one-shot draw path. */
+void lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region) {
+    /* Dynamic viewport/scissor sized to THIS render target (the pipeline no
+     * longer bakes 1920×1080 — that mis-scaled the 1280×1024 per-pass draws).
+     * Y-FLIP via negative height (Metal Y-up → Vulkan Y-down); kill-switch
+     * LAGFX_DISABLE_YFLIP. */
+    {
+        bool yflip = (getenv("LAGFX_DISABLE_YFLIP") == NULL);
+        /* Guest region (KICKOFF-shading-throughput): CA transforms vertices
+         * for the DECLARED viewport rect (pixel->NDC matrix = 2/vp_w etc.)
+         * and clips with the declared scissor. Mapping NDC onto the full RT
+         * stretched small layers across the whole target, and the missing
+         * scissor made full-target wash triangles shade EVERY RT pixel
+         * (2M-8M px of the 73KB Xgc ubershader on lavapipe = the 20-30s
+         * "runaway" draws). Clamp both rects to the RT; zero width = unset. */
+        uint32_t vx = 0, vy = 0, vw = rt->width, vh = rt->height;
+        uint32_t sx = 0, sy = 0, sw = rt->width, sh = rt->height;
+        if (region && region->vp_w && region->vp_x < rt->width
+            && region->vp_y < rt->height) {
+            vx = region->vp_x; vy = region->vp_y;
+            vw = region->vp_w; vh = region->vp_h;
+            if (vx + vw > rt->width)  vw = rt->width - vx;
+            if (vy + vh > rt->height) vh = rt->height - vy;
+        }
+        if (region && region->sc_w && region->sc_x < rt->width
+            && region->sc_y < rt->height) {
+            sx = region->sc_x; sy = region->sc_y;
+            sw = region->sc_w; sh = region->sc_h;
+            if (sx + sw > rt->width)  sw = rt->width - sx;
+            if (sy + sh > rt->height) sh = rt->height - sy;
+        }
+        VkViewport dvp = {
+            .x = (float)vx, .y = yflip ? (float)(vy + vh) : (float)vy,
+            .width = (float)vw,
+            .height = yflip ? -(float)vh : (float)vh,
+            .minDepth = 0.0f, .maxDepth = 1.0f,
+        };
+        VkRect2D dsc = { .offset = {(int32_t)sx, (int32_t)sy},
+                         .extent = { sw, sh } };
+        vkCmdSetViewport(cb, 0, 1, &dvp);
+        vkCmdSetScissor(cb, 0, 1, &dsc);
+    }
+}
+
 /* Thin wrapper: the original substitute-path entry (no descriptor set). */
 lagfx_status_t lagfx_vk_draw_record_and_submit(
     struct lagfx_vk_state *vk,
@@ -84,40 +167,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
         return LAGFX_ERR_BACKEND;
     }
     
-    /* Transition render target to COLOR_ATTACHMENT_OPTIMAL for rendering */
-    VkAccessFlags src_access = 0;
-    VkPipelineStageFlags src_stage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
-    if (rt->layout == VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL) {
-        src_access = VK_ACCESS_TRANSFER_READ_BIT;
-        src_stage = VK_PIPELINE_STAGE_TRANSFER_BIT;
-    } else if (rt->layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
-        /* B10: a prior draw left the RT in color-attachment layout — the
-         * WAW hazard against that prior color write must be covered, or a
-         * real GPU (lavapipe hides it) shows ordering artifacts. */
-        src_access = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-        src_stage  = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    }
-    
-    VkImageMemoryBarrier barrier = {
-        .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-        .srcAccessMask = src_access,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = rt->layout,
-        .newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-        .image = rt->image,
-        .subresourceRange = {
-            .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-            .baseMipLevel = 0,
-            .levelCount = 1,
-            .baseArrayLayer = 0,
-            .layerCount = 1,
-        },
-    };
-    vkCmdPipelineBarrier(cb, src_stage, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                         0, 0, NULL, 0, NULL, 1, &barrier);
-    rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    lagfx_vk_cmd_rt_to_color(cb, rt);
     
     /* Begin dynamic rendering with color attachment (pattern from display.c:519-530) */
     VkRenderingAttachmentInfo color_att = {
@@ -154,46 +204,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     /* Bind the pipeline (pattern from triangle-lavapipe-e2e.c:500) */
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
 
-    /* Dynamic viewport/scissor sized to THIS render target (the pipeline no
-     * longer bakes 1920×1080 — that mis-scaled the 1280×1024 per-pass draws).
-     * Y-FLIP via negative height (Metal Y-up → Vulkan Y-down); kill-switch
-     * LAGFX_DISABLE_YFLIP. */
-    {
-        bool yflip = (getenv("LAGFX_DISABLE_YFLIP") == NULL);
-        /* Guest region (KICKOFF-shading-throughput): CA transforms vertices
-         * for the DECLARED viewport rect (pixel->NDC matrix = 2/vp_w etc.)
-         * and clips with the declared scissor. Mapping NDC onto the full RT
-         * stretched small layers across the whole target, and the missing
-         * scissor made full-target wash triangles shade EVERY RT pixel
-         * (2M-8M px of the 73KB Xgc ubershader on lavapipe = the 20-30s
-         * "runaway" draws). Clamp both rects to the RT; zero width = unset. */
-        uint32_t vx = 0, vy = 0, vw = rt->width, vh = rt->height;
-        uint32_t sx = 0, sy = 0, sw = rt->width, sh = rt->height;
-        if (region && region->vp_w && region->vp_x < rt->width
-            && region->vp_y < rt->height) {
-            vx = region->vp_x; vy = region->vp_y;
-            vw = region->vp_w; vh = region->vp_h;
-            if (vx + vw > rt->width)  vw = rt->width - vx;
-            if (vy + vh > rt->height) vh = rt->height - vy;
-        }
-        if (region && region->sc_w && region->sc_x < rt->width
-            && region->sc_y < rt->height) {
-            sx = region->sc_x; sy = region->sc_y;
-            sw = region->sc_w; sh = region->sc_h;
-            if (sx + sw > rt->width)  sw = rt->width - sx;
-            if (sy + sh > rt->height) sh = rt->height - sy;
-        }
-        VkViewport dvp = {
-            .x = (float)vx, .y = yflip ? (float)(vy + vh) : (float)vy,
-            .width = (float)vw,
-            .height = yflip ? -(float)vh : (float)vh,
-            .minDepth = 0.0f, .maxDepth = 1.0f,
-        };
-        VkRect2D dsc = { .offset = {(int32_t)sx, (int32_t)sy},
-                         .extent = { sw, sh } };
-        vkCmdSetViewport(cb, 0, 1, &dvp);
-        vkCmdSetScissor(cb, 0, 1, &dsc);
-    }
+    lagfx_vk_cmd_set_region(cb, rt, region);
 
     /* Stage 85b: bind the descriptor set for translated resource-using
      * pipelines (set 0 with the guest's buffers). NULL for the substitute path. */

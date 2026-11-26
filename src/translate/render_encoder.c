@@ -246,6 +246,42 @@ lagfx_status_t lagfx_translate_render_bind_pipeline(
     return LAGFX_OK;
 }
 
+lagfx_status_t lagfx_translate_render_bind_vk_pipeline(
+    lagfx_translate_render_state_t *state, VkPipeline pipeline, VkPipelineLayout layout) {
+    if (!state_in_pass(state) || pipeline == VK_NULL_HANDLE) {
+        return LAGFX_ERR_INVALID_ARG;
+    }
+    state->layout         = layout;
+    state->pipeline_bound = true;
+    if (state->render_pass_active && state->cmdbuf != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(state->cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    }
+    return LAGFX_OK;
+}
+
+lagfx_status_t lagfx_translate_render_bind_vertex_buffer(
+    lagfx_translate_render_state_t *state, VkBuffer buffer, VkDeviceSize offset) {
+    if (!state_in_pass(state) || buffer == VK_NULL_HANDLE) {
+        return LAGFX_ERR_INVALID_ARG;
+    }
+    state->external_vb = true;
+    if (state->render_pass_active && state->cmdbuf != VK_NULL_HANDLE) {
+        vkCmdBindVertexBuffers(state->cmdbuf, 0, 1, &buffer, &offset);
+    }
+    return LAGFX_OK;
+}
+
+lagfx_status_t lagfx_translate_render_bind_index_buffer(
+    lagfx_translate_render_state_t *state, VkBuffer buffer, VkDeviceSize offset, VkIndexType type) {
+    if (!state_in_pass(state) || buffer == VK_NULL_HANDLE) {
+        return LAGFX_ERR_INVALID_ARG;
+    }
+    if (state->render_pass_active && state->cmdbuf != VK_NULL_HANDLE) {
+        vkCmdBindIndexBuffer(state->cmdbuf, buffer, offset, type);
+    }
+    return LAGFX_OK;
+}
+
 lagfx_status_t lagfx_translate_render_bind_texture(
     lagfx_translate_render_state_t *state,
     uint32_t binding,
@@ -337,7 +373,7 @@ lagfx_status_t lagfx_translate_render_draw(
     }
 
     if (state->render_pass_active && state->cmdbuf != VK_NULL_HANDLE) {
-        if (state->vk && state->vk->dummy_vb != VK_NULL_HANDLE) {
+        if (!state->external_vb && state->vk && state->vk->dummy_vb != VK_NULL_HANDLE) {
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(state->cmdbuf, 0, 1,
                                    &state->vk->dummy_vb, &offset);
@@ -376,7 +412,7 @@ lagfx_status_t lagfx_translate_render_draw_indexed(
     }
 
     if (state->render_pass_active && state->cmdbuf != VK_NULL_HANDLE) {
-        if (state->vk && state->vk->dummy_vb != VK_NULL_HANDLE) {
+        if (!state->external_vb && state->vk && state->vk->dummy_vb != VK_NULL_HANDLE) {
             VkDeviceSize offset = 0;
             vkCmdBindVertexBuffers(state->cmdbuf, 0, 1,
                                    &state->vk->dummy_vb, &offset);

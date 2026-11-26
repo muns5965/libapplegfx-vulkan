@@ -9,6 +9,7 @@
 #include "../handlers.h"
 #include "common/le.h"
 #include "common/log.h"
+#include "protocol/arm64_exec_run.h"
 
 #include <stdlib.h>
 
@@ -106,6 +107,9 @@ lagfx_handler_status_t lagfx_task_delete_task(lagfx_protocol_t *p, const lagfx_c
     }
 
     LAGFX_LOG("CmdDeleteTask: taskID=%u stamp=0x%08x", task_id, hdr->stamp);
+
+    /* ARM64 exec objects of this task (no-op unless LAGFX_ARM64_EXEC created any). */
+    lagfx_a64_exec_drop_task(p, task_id);
 
     /* Clear task resources and mark slot free. */
     lagfx_resource_clear_task(&p->resources, task_id);

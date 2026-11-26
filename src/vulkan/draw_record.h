@@ -84,6 +84,12 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     uint32_t index_buffer_ref,
     VkBuffer vertex_buffer,    /* VK_NULL_HANDLE = no vertex-input binding */
     const lagfx_draw_region_t *region); /* NULL = full-RT viewport+scissor */
+
+/* Building blocks of the one-shot draw above, usable when the caller records several draws into one command buffer (ARM64 exec path). Both
+ * are the exact code the one-shot path runs. rt_to_color: barrier moving rt->layout to COLOR_ATTACHMENT_OPTIMAL (outside a render pass),
+ * updates rt->layout. set_region: vkCmdSetViewport/Scissor for rt, region may be NULL (full target), Y-flipped unless LAGFX_DISABLE_YFLIP. */
+void lagfx_vk_cmd_rt_to_color(VkCommandBuffer cb, lagfx_vk_render_target_t *rt);
+void lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region);
 #endif /* LAGFX_HAVE_VULKAN */
 
 #endif /* LIBAPPLEGFX_VULKAN_DRAW_RECORD_H */

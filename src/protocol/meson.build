@@ -13,6 +13,9 @@ lagfx_sources += files(
   # Legacy handlers moved to src/handlers/display/display.c for vchan opcodes (0x01-0x07)
   'arm64_completion.c',  # ARM64 deferred stamp completion queue (LAGFX_ARM64_EXEC=1)
   'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode-only
+  'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode (+ optional execution)
+  'arm64_objects.c',      # ARM64 per-task (task, ref) object table
+  'arm64_exec_run.c',     # ARM64 Render segment execution on Vulkan (LAGFX_ARM64_EXEC=1)
   'diag.c',         # command diagnostics (logging + counters only)
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write
    'object_resolver.c',  # Phase B object ID resolver for metallib lookup
