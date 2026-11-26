@@ -420,9 +420,10 @@ lagfx_status_t lagfx_vk_end_frame(struct lagfx_vk_state *vk) {
 static atomic_ullong g_gpu_timeouts, g_gpu_failures, g_gpu_submit_failures;
 
 uint64_t lagfx_vk_wait_default_ns(void) {
-    static uint64_t ns;
-    if (!ns) {
+    uint64_t ns;
+    {
         const char *e = getenv("LAGFX_VK_WAIT_MS");
+        if (!e) e = getenv("LAGFX_GPU_WAIT_MS");   /* alias */
         unsigned long ms = e ? strtoul(e, NULL, 10) : 0;
         ns = (ms ? ms : 2000ul) * 1000000ull;
     }
@@ -433,11 +434,20 @@ void lagfx_vk_note_gpu_failure(bool timeout) {
     atomic_fetch_add(timeout ? &g_gpu_timeouts : &g_gpu_failures, 1);
 }
 
+static atomic_int g_inject = 0x7fffffff;   /* test seam: the VkResult the next fence wait/status reports (0x7fffffff = none, sticky until reset) */
+void lagfx_vk_test_inject_fence_result(int vkresult) { atomic_store(&g_inject, vkresult); }
+
+VkResult lagfx_vk_fence_status_raw(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns) {
+    int inj = atomic_load(&g_inject);
+    if (inj != 0x7fffffff) return (VkResult)inj;
+    return timeout_ns ? vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns) : vkGetFenceStatus(vk->device, fence);
+}
+
 lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns) {
     if (!vk || vk->device == VK_NULL_HANDLE || fence == VK_NULL_HANDLE) return LAGFX_VK_WAIT_FAILED;
-    VkResult r = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns ? timeout_ns : lagfx_vk_wait_default_ns());
+    VkResult r = lagfx_vk_fence_status_raw(vk, fence, timeout_ns ? timeout_ns : lagfx_vk_wait_default_ns());
     if (r == VK_SUCCESS) return LAGFX_VK_WAIT_OK;
-    if (r == VK_TIMEOUT) { lagfx_vk_note_gpu_failure(true); LAGFX_ERR("vk wait: timeout"); return LAGFX_VK_WAIT_TIMEOUT; }
+    if (r == VK_TIMEOUT || r == VK_NOT_READY) { lagfx_vk_note_gpu_failure(true); LAGFX_WARN("vk wait: timeout (slow, not failed)"); return LAGFX_VK_WAIT_TIMEOUT; }
     lagfx_vk_note_gpu_failure(false);
     LAGFX_ERR("vk wait: VkResult %d (device lost?)", (int)r);
     return LAGFX_VK_WAIT_FAILED;

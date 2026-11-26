@@ -55,7 +55,7 @@ lagfx_status_t lagfx_vk_cmdbuf_alloc(struct lagfx_vk_state *vk,
                                      VkCommandBuffer *out);
 
 /* === Bounded GPU waits (use these on the vCPU / dispatcher path instead of vkWaitForFences(UINT64_MAX)) ===
- * A GPU hang must never freeze the VM: every wait is bounded (env LAGFX_VK_WAIT_MS, default 2000 ms; timeout_ns == 0 means that default) and every
+ * A GPU hang must never freeze the VM: every wait is bounded (env LAGFX_VK_WAIT_MS (alias LAGFX_GPU_WAIT_MS), default 2000 ms; timeout_ns == 0 means that default) and every
  * VkResult is checked. Failures are counted process-wide (lagfx_vk_gpu_fail_stats, printed by the g7 diag as g7-gpu-sync) so the caller can mark the
  * work failed and STILL complete the guest's stamp. */
 typedef enum {
@@ -64,7 +64,11 @@ typedef enum {
     LAGFX_VK_WAIT_FAILED       /* VK_ERROR_DEVICE_LOST / out of memory / any other error */
 } lagfx_vk_wait_result_t;
 
-uint64_t lagfx_vk_wait_default_ns(void);
+uint64_t lagfx_vk_wait_default_ns(void);   /* env LAGFX_VK_WAIT_MS (alias LAGFX_GPU_WAIT_MS), default 2000 (an initial test value, to be tuned) */
+/* A TIMEOUT means "not finished yet", NOT "failed": the GPU may still be using the memory, so callers must not complete the guest's stamp or free
+ * resources because of it (the arm64 completion queue keeps the stamp pending). Only LAGFX_VK_WAIT_FAILED (device lost...) means nothing can touch memory. */
+VkResult lagfx_vk_fence_status_raw(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns);  /* timeout_ns 0 = status poll; honours the test seam */
+void lagfx_vk_test_inject_fence_result(int vkresult);   /* tests only: 0x7fffffff restores the real result */
 lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns);
 /* vkQueueSubmit with the result checked and counted. LAGFX_OK or LAGFX_ERR_BACKEND (the fence is then NOT pending). */
 lagfx_status_t lagfx_vk_submit_checked(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence);

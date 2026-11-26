@@ -15,7 +15,6 @@
 #include <time.h>
 
 #define CQ_SLOTS   LAGFX_MAX_CHANNELS
-#define CQ_ZOMBIES 64u
 
 typedef struct { bool done; lagfx_arm64_gpu_work_t w; } cq_work_t;
 
@@ -24,7 +23,9 @@ struct lagfx_arm64_submit_ctx {
     uint32_t slot, stamp;
     uint32_t nwork, nbar;
     bool failed;
-    uint64_t t0_ns, t_head;   /* t_head: when the entry first reached the head of its channel (the watchdog runs from there) */
+    uint64_t t0_ns, t_head;   /* t_head: when the entry first reached the head of its channel (the slow / hard limits run from there) */
+    bool slow;                /* already counted as slow */
+    bool rejected;            /* begun while the GPU was in FAULT: no work may be attached */
     cq_work_t work[LAGFX_A64CQ_MAX_WORK];
     struct { uint32_t slot, stamp; } bar[LAGFX_A64CQ_MAX_BARRIERS];
 };
@@ -35,9 +36,10 @@ struct lagfx_arm64_cq {
     struct lagfx_arm64_submit_ctx *cur;   /* command being dispatched (drain thread only) */
     struct lagfx_arm64_submit_ctx *head[CQ_SLOTS], *tail[CQ_SLOTS];
     size_t pending;
-    cq_work_t zombie[CQ_ZOMBIES];         /* work of timed-out entries that the GPU has not finished yet: cannot be destroyed while in flight */
-    uint64_t timeout_ns;
-    uint64_t retired, failed, timed_out;
+    uint64_t slow_ns, hard_ns;            /* soft bound (a timeout is "not finished", never a failure); hard limit 0 = off */
+    bool fault;                           /* GPU FAULT: nothing can still touch guest memory; no submits, pending stamps completed as failed */
+    bool slow_logged;
+    lagfx_arm64_cq_stats_t st;
 };
 
 static uint64_t now_ns(void) {
@@ -52,11 +54,11 @@ bool lagfx_arm64_cq_enable(lagfx_protocol_t *p) {
     if (!cq) return false;
     pthread_mutexattr_t a; pthread_mutexattr_init(&a); pthread_mutexattr_settype(&a, PTHREAD_MUTEX_RECURSIVE);
     pthread_mutex_init(&cq->lock, &a); pthread_mutexattr_destroy(&a);
-    const char *t = getenv("LAGFX_ARM64_EXEC_TIMEOUT_MS");
-    unsigned long ms = t ? strtoul(t, NULL, 10) : 0;
-    cq->timeout_ns = (ms ? ms : 2000ul) * 1000000ull;
+    cq->slow_ns = lagfx_vk_wait_default_ns();
+    const char *t = getenv("LAGFX_GPU_HARD_TIMEOUT_MS");
+    cq->hard_ns = t ? strtoull(t, NULL, 10) * 1000000ull : 0;
     p->a64cq = cq;
-    LAGFX_LOG("arm64 completion queue enabled (timeout %lu ms)", ms ? ms : 2000ul);
+    LAGFX_LOG("arm64 completion queue enabled (slow after %llu ms, hard limit %llu ms, 0 = off)", (unsigned long long)(cq->slow_ns / 1000000ull), (unsigned long long)(cq->hard_ns / 1000000ull));
     return true;
 }
 
@@ -89,6 +91,7 @@ lagfx_arm64_submit_ctx_t *lagfx_arm64_submit_begin(lagfx_protocol_t *p, uint32_t
         }
     }
     pthread_mutex_lock(&cq->lock);
+    c->rejected = cq->fault;
     cq->cur = c;
     pthread_mutex_unlock(&cq->lock);
     return c;
@@ -101,7 +104,7 @@ lagfx_arm64_submit_ctx_t *lagfx_arm64_submit_current(lagfx_protocol_t *p) {
 
 bool lagfx_arm64_submit_add_work(lagfx_arm64_submit_ctx_t *ctx, const lagfx_arm64_gpu_work_t *w) {
     if (!w) return false;
-    if (!ctx || ctx->nwork >= LAGFX_A64CQ_MAX_WORK || !w->wait) {
+    if (!ctx || ctx->rejected || ctx->nwork >= LAGFX_A64CQ_MAX_WORK || !w->wait) {
         if (w->release) w->release(w->opaque);
         return false;
     }
@@ -118,7 +121,7 @@ typedef struct { struct lagfx_vk_state *vk; VkFence fence; bool owns; VkSemaphor
 
 static bool vkw_fence_wait(void *o, uint64_t timeout_ns, bool *failed) {
     vkw_t *w = o;
-    VkResult r = timeout_ns ? vkWaitForFences(w->vk->device, 1, &w->fence, VK_TRUE, timeout_ns) : vkGetFenceStatus(w->vk->device, w->fence);
+    VkResult r = lagfx_vk_fence_status_raw(w->vk, w->fence, timeout_ns);
     if (r == VK_SUCCESS) return true;
     if (r == VK_NOT_READY || r == VK_TIMEOUT) return false;
     if (failed) *failed = true;
@@ -167,6 +170,7 @@ bool lagfx_arm64_submit_add_vk_timeline(lagfx_arm64_submit_ctx_t *ctx, struct la
 
 static void q_push(struct lagfx_arm64_cq *cq, lagfx_arm64_submit_ctx_t *c) {
     c->next = NULL;
+    if (!cq->head[c->slot]) c->t_head = now_ns();   /* it is the head from the start: the slow / hard limits run from now */
     if (cq->tail[c->slot]) cq->tail[c->slot]->next = c; else cq->head[c->slot] = c;
     cq->tail[c->slot] = c;
     cq->pending++;
@@ -181,43 +185,38 @@ static bool barriers_ok(struct lagfx_arm64_cq *cq, const lagfx_arm64_submit_ctx_
     return true;
 }
 
-static void retire_zombies(struct lagfx_arm64_cq *cq) {
-    for (uint32_t i = 0; i < CQ_ZOMBIES; i++) {
-        cq_work_t *z = &cq->zombie[i];
-        if (!z->w.wait) continue;
-        bool f = false;
-        if (z->w.wait(z->w.opaque, 0, &f)) work_release(z);
-    }
+static void enter_fault(struct lagfx_arm64_cq *cq, const char *why) {
+    if (cq->fault) return;
+    cq->fault = true;
+    cq->st.fault = true;
+    LAGFX_ERR("arm64 cq: GPU FAULT (%s): pending stamps complete as failed, new exec work is rejected", why);
 }
 
-static void to_zombie(struct lagfx_arm64_cq *cq, cq_work_t *w) {
-    for (uint32_t i = 0; i < CQ_ZOMBIES; i++)
-        if (!cq->zombie[i].w.wait) { cq->zombie[i] = *w; memset(w, 0, sizeof *w); return; }
-    LAGFX_WARN("arm64 cq: zombie table full; leaking in-flight GPU work");
-    memset(w, 0, sizeof *w);
-}
-
-/* true when the entry may complete now. `timed` is set when it was forced by the watchdog. */
-static bool entry_ready(struct lagfx_arm64_cq *cq, lagfx_arm64_submit_ctx_t *c, uint64_t now, bool *timed) {
+/* true when the entry may complete now; *failed_out says it completes as failed (device lost / FAULT), *leak that unfinished work must not be released. */
+static bool entry_ready(struct lagfx_arm64_cq *cq, lagfx_arm64_submit_ctx_t *c, uint64_t now, bool *fault_out, bool *leak) {
+    if (cq->fault) { *fault_out = true; return true; }
     bool all = true;
     for (uint32_t i = 0; i < c->nwork; i++) {
         cq_work_t *w = &c->work[i];
         if (!w->w.wait) continue;          /* already released */
         bool f = false;
-        if (w->w.wait(w->w.opaque, 0, &f)) { if (f) c->failed = true; work_release(w); }
-        else all = false;
+        if (w->w.wait(w->w.opaque, 0, &f)) {
+            if (f) { enter_fault(cq, "device lost / work failed"); *fault_out = true; work_release(w); return true; }
+            work_release(w);
+        } else all = false;
     }
     if (all && barriers_ok(cq, c)) return true;
     if (!c->t_head) c->t_head = now;
-    if (now - c->t_head >= cq->timeout_ns) {
-        LAGFX_WARN("arm64 cq: slot %u stamp 0x%x forced after %llu ms (%s)", c->slot, c->stamp, (unsigned long long)((now - c->t_head) / 1000000ull),
-                   all ? "barrier never satisfied" : "GPU work unfinished");
-        for (uint32_t i = 0; i < c->nwork; i++) if (c->work[i].w.wait) to_zombie(cq, &c->work[i]);
-        c->failed = true; *timed = true;
-#ifdef LAGFX_HAVE_VULKAN
-        lagfx_vk_note_gpu_failure(true);
-#endif
+    uint64_t age = now - c->t_head;
+    if (cq->hard_ns && age >= cq->hard_ns) {
+        cq->st.hard_timeouts++;
+        enter_fault(cq, "hard timeout");
+        *fault_out = true; *leak = true;   /* the fence may still be in flight: never destroyed */
         return true;
+    }
+    if (!c->slow && age >= cq->slow_ns) {   /* NOT a failure: the GPU may still be using the memory, so no stamp until it signals */
+        c->slow = true; cq->st.slow++;
+        if (!cq->slow_logged) { cq->slow_logged = true; LAGFX_WARN("arm64 cq: slot %u stamp 0x%x still pending after %llu ms (slow, kept pending)", c->slot, c->stamp, (unsigned long long)(age / 1000000ull)); }
     }
     return false;
 }
@@ -225,7 +224,6 @@ static bool entry_ready(struct lagfx_arm64_cq *cq, lagfx_arm64_submit_ctx_t *c, 
 static size_t retire_locked(lagfx_protocol_t *p, struct lagfx_arm64_cq *cq) {
     if (cq->in_retire) return 0;
     cq->in_retire = true;
-    retire_zombies(cq);
     uint32_t last[CQ_SLOTS]; bool has[CQ_SLOTS]; memset(has, 0, sizeof has);
     size_t n = 0;
     uint64_t now = now_ns();
@@ -234,10 +232,15 @@ static size_t retire_locked(lagfx_protocol_t *p, struct lagfx_arm64_cq *cq) {
         progress = false;
         for (uint32_t s = 0; s < CQ_SLOTS; s++) {
             for (lagfx_arm64_submit_ctx_t *c; (c = cq->head[s]) != NULL; ) {
-                bool timed = false;
-                if (!entry_ready(cq, c, now, &timed)) break;
+                bool fault = false, leak = false;
+                if (!entry_ready(cq, c, now, &fault, &leak)) break;
+                if (fault) {                 /* completed as failed, counted apart from successes */
+                    for (uint32_t i = 0; i < c->nwork; i++) if (c->work[i].w.wait) { if (leak) memset(&c->work[i], 0, sizeof c->work[i]); else work_release(&c->work[i]); }
+                    cq->st.fault_completed++;
+                } else if (c->failed) cq->st.failed_pre++;
+                else cq->st.ok++;
                 cq->head[s] = c->next; if (!c->next) cq->tail[s] = NULL;
-                cq->pending--; cq->retired++; if (c->failed) cq->failed++; if (timed) cq->timed_out++;
+                cq->pending--;
                 last[s] = c->stamp; has[s] = true; n++; progress = true;
                 free(c);
             }
@@ -255,11 +258,12 @@ bool lagfx_arm64_submit_end(lagfx_protocol_t *p, lagfx_arm64_submit_ctx_t *c) {
     struct lagfx_arm64_cq *cq = p->a64cq;
     pthread_mutex_lock(&cq->lock);
     if (cq->cur == c) cq->cur = NULL;
-    bool immediate = c->slot >= CQ_SLOTS ||
+    bool immediate = c->slot >= CQ_SLOTS || cq->fault ||
                      (c->nwork == 0 && !cq->head[c->slot] && barriers_ok(cq, c));
     if (immediate) {
-        if (c->failed) cq->failed++;
-        cq->retired++;
+        if (c->rejected || cq->fault) cq->st.fault_rejected++;   /* cheap rejection while FAULTed: stamp still completes */
+        else if (c->failed) cq->st.failed_pre++;                 /* failure before any submit: completes as failed (as Apple does) */
+        else cq->st.ok++;
         lagfx_protocol_complete_stamp_slot(p, c->slot, c->stamp);   /* exactly the pre-queue behaviour */
         free(c);
     } else {
@@ -281,7 +285,7 @@ size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p) {
     if (!lagfx_protocol_is_valid(p) || !p->a64cq) return 0;
     struct lagfx_arm64_cq *cq = p->a64cq;
     if (pthread_mutex_trylock(&cq->lock) != 0) return 0;
-    size_t n = cq->pending || cq->zombie[0].w.wait ? retire_locked(p, cq) : 0;
+    size_t n = cq->pending ? retire_locked(p, cq) : 0;
     pthread_mutex_unlock(&cq->lock);
     return n;
 }
@@ -294,16 +298,21 @@ size_t lagfx_arm64_cq_pending(lagfx_protocol_t *p) {
     return n;
 }
 
-void lagfx_arm64_cq_stats(lagfx_protocol_t *p, uint64_t *retired, uint64_t *failed, uint64_t *timed_out) {
-    uint64_t r = 0, f = 0, t = 0;
+void lagfx_arm64_cq_stats(lagfx_protocol_t *p, lagfx_arm64_cq_stats_t *out) {
+    memset(out, 0, sizeof *out);
     if (lagfx_protocol_is_valid(p) && p->a64cq) {
         pthread_mutex_lock(&p->a64cq->lock);
-        r = p->a64cq->retired; f = p->a64cq->failed; t = p->a64cq->timed_out;
+        *out = p->a64cq->st;
         pthread_mutex_unlock(&p->a64cq->lock);
     }
-    if (retired) *retired = r;
-    if (failed) *failed = f;
-    if (timed_out) *timed_out = t;
+}
+
+bool lagfx_arm64_gpu_faulted(lagfx_protocol_t *p) {
+    if (!lagfx_protocol_is_valid(p) || !p->a64cq) return false;
+    pthread_mutex_lock(&p->a64cq->lock);
+    bool f = p->a64cq->fault;
+    pthread_mutex_unlock(&p->a64cq->lock);
+    return f;
 }
 
 static void drain_work(cq_work_t *w, uint64_t deadline_ns) {
@@ -330,7 +339,6 @@ void lagfx_arm64_cq_shutdown(lagfx_protocol_t *p, uint32_t timeout_ms) {
         }
         cq->head[s] = cq->tail[s] = NULL;
     }
-    for (uint32_t i = 0; i < CQ_ZOMBIES; i++) drain_work(&cq->zombie[i], deadline);
     if (cq->cur) { for (uint32_t i = 0; i < cq->cur->nwork; i++) drain_work(&cq->cur->work[i], deadline); free(cq->cur); cq->cur = NULL; }
     if (dropped) LAGFX_WARN("arm64 cq: shutdown with %zu uncompleted command(s); their stamps are not written", dropped);
     p->a64cq = NULL;

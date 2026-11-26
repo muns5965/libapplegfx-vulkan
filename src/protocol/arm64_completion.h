@@ -22,8 +22,14 @@
  *    payload + arg_count_8b*8. A barrier makes the command's completion wait until channel's queued entries up to that stamp are retired (a
  *    barrier on a channel with nothing pending up to that stamp is satisfied). Barriers gate COMPLETION only; GPU execution order is the
  *    recorder's business (one graphics queue = submission order).
- *  - Failure: mark_failed() / a fence that reports an error / a watchdog timeout (LAGFX_ARM64_EXEC_TIMEOUT_MS, default 2000, also frees a barrier
- *    cycle) never withhold the stamp: failed entries complete like the others (and are counted), so the guest never hangs.
+ *  - Timeouts are NOT failures. After LAGFX_VK_WAIT_MS (default 2000, an initial test value) without the fence signalling, the entry is counted
+ *    "slow" (logged once) and stays PENDING: no stamp is written, because the GPU may still be using memory the guest would then free or reuse.
+ *    Nothing blocks on it; polls just re-check. Optional hard limit LAGFX_GPU_HARD_TIMEOUT_MS (default 0 = off) puts the GPU into FAULT.
+ *  - FAULT (a work item reports failure, e.g. VK_ERROR_DEVICE_LOST, or the hard limit): nothing can still touch guest memory, so every pending
+ *    stamp completes as failed (fault_completed), and later commands are rejected cheaply (begin marks the ctx rejected, add_work refuses) while
+ *    their stamps still complete (fault_rejected). FAULT lasts until the queue is shut down / the protocol reset. On a hard timeout the possibly
+ *    in-flight fence is leaked, never destroyed.
+ *  - Failure before any submit (mark_failed, dropped command): completes as failed (failed_pre), in order, like Apple's.
  *  - Batch: one retire pass writes, per channel, the highest retired stamp once, then raises the IRQ once.
  *  - Teardown / reset: lagfx_arm64_cq_shutdown waits (bounded) for outstanding work, releases it and writes NO stamps (the guest is going away).
  *
@@ -33,7 +39,11 @@
  *    are made WITH the lock held: retire order and stamp-cell monotonicity depend on that. The lock is a leaf with respect to the library: the
  *    code under it takes no other library lock (display rt_lock, ...), and nothing that holds rt_lock calls into it. A shell callback that re-enters
  *    the library (doorbell read -> poll, drain -> end) on the same thread is safe (recursive lock + in_retire guard); another thread waits.
- *  - No worker thread: shell callbacks such as raise_interrupt need the shell's own context (QEMU BQL). poll() is therefore called on the
+ *  - No worker thread. Henge's pvg_lite.c (hv_pvg_lite_complete) completes from the Metal completion thread with no device lock: an atomic release
+ *    store of the stamp, an atomic OR of the status bit, hv_gicv3_pend (atomic) and a machine wake; so a shell modelled on it may raise the IRQ from
+ *    any thread. That is a property of the SHELL's write_memory / raise_interrupt: if they need a lock (QEMU: BQL for msix_notify) poll must run
+ *    only where the shell already holds it. Library side: the queue mutex is the only lock, p->diag2.irq_raised / last_completed_stamp are plain
+ *    counters (diagnostics only, may race). poll() is therefore called on the
  *    thread the shell already uses for the library: at the end of every compute drain, on guest reads of BAR0+0x1018 / 0x100c, and by the shell
  *    via lagfx_device_poll_completions() from a timer while lagfx_device_pending_completions() > 0. try-lock semantics: if another thread is
  *    inside the queue, poll returns 0 and the next tick retires.
@@ -94,7 +104,18 @@ bool lagfx_arm64_submit_dropped(lagfx_protocol_t *p, uint32_t slot, const lagfx_
 size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p);
 size_t lagfx_arm64_cq_pending(lagfx_protocol_t *p);
 /* Counters (tests / diagnostics): retired, failed (incl. timed out), timed_out. */
-void lagfx_arm64_cq_stats(lagfx_protocol_t *p, uint64_t *retired, uint64_t *failed, uint64_t *timed_out);
+typedef struct {
+    uint64_t ok;              /* completed after the GPU work (or with none) finished */
+    uint64_t failed_pre;      /* failed before any GPU submit (decode / dropped / mark_failed): stamp completed so the guest does not hang */
+    uint64_t fault_completed; /* pending when the GPU entered FAULT: completed as failed */
+    uint64_t fault_rejected;  /* begun while FAULTed: rejected cheaply, stamp completed */
+    uint64_t slow;            /* entries that passed the soft bound (kept pending, NOT failed) */
+    uint64_t hard_timeouts;   /* entries that hit LAGFX_GPU_HARD_TIMEOUT_MS (-> FAULT) */
+    bool fault;
+} lagfx_arm64_cq_stats_t;
+void lagfx_arm64_cq_stats(lagfx_protocol_t *p, lagfx_arm64_cq_stats_t *out);
+/* True once the GPU is in FAULT: handlers should not record/submit (begin() already marks the ctx rejected; add_work then releases and returns false). */
+bool lagfx_arm64_gpu_faulted(lagfx_protocol_t *p);
 /* Wait up to timeout_ms for outstanding work, release everything, free the queue. No stamps are written. Safe on NULL / queue off. */
 void lagfx_arm64_cq_shutdown(lagfx_protocol_t *p, uint32_t timeout_ms);
 

@@ -121,28 +121,89 @@ static void test_order_and_batch(void) {
     free(a); free(b); free(c); free(d); rm(p);
 }
 
+/* (c) failure before any submit: completes as failed_pre, in order, no FAULT */
 static void test_failure_and_dropped(void) {
     lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE); assert(lagfx_arm64_cq_enable(p));
+    lagfx_arm64_cq_stats_t q;
     mock_t *a = mock_new();
-    atomic_store(&a->fail, 1);
     assert(!sub(p, 1, 1, a, NULL, 0, 0));
     lagfx_cmd_header_t dh = H(2); dh.opcode = 0x43;
-    assert(!lagfx_arm64_submit_dropped(p, 1, &dh));          /* dropped behind pending work: still queued in order, completes with it */
+    assert(!lagfx_arm64_submit_dropped(p, 1, &dh));          /* dropped behind pending work: queued in order, completes with it */
     assert(lagfx_arm64_poll_completions(p) == 0);
     atomic_store(&a->done, 1);
     assert(lagfx_arm64_poll_completions(p) == 2 && cell(1) == 2);
-    uint64_t r, f, t; lagfx_arm64_cq_stats(p, &r, &f, &t);
-    assert(r == 2 && f == 2 && t == 0);                      /* device-lost work and the dropped command both count as failed, both completed */
-    mock_t *b = mock_new();
-    assert(!sub(p, 1, 3, b, NULL, 0, 0));
-    lagfx_arm64_submit_ctx_t *c = lagfx_arm64_submit_begin(p, 1, &(lagfx_cmd_header_t){ .stamp = 4 });
-    lagfx_arm64_submit_mark_failed(c);                       /* handler gave up before recording anything */
-    assert(!lagfx_arm64_submit_end(p, c));
-    atomic_store(&b->done, 1);
-    assert(lagfx_arm64_poll_completions(p) == 2 && cell(1) == 4);
-    assert(lagfx_arm64_submit_dropped(p, 3, &dh));           /* dropped on an idle channel: completes now */
-    assert(cell(3) == 2);
-    free(a); free(b); rm(p);
+    lagfx_arm64_cq_stats(p, &q);
+    assert(q.ok == 1 && q.failed_pre == 1 && q.fault_completed == 0 && !q.fault);
+    lagfx_arm64_submit_ctx_t *c = lagfx_arm64_submit_begin(p, 1, &(lagfx_cmd_header_t){ .stamp = 3 });
+    lagfx_arm64_submit_mark_failed(c);                       /* handler gave up before recording anything: immediate, counted failed */
+    assert(lagfx_arm64_submit_end(p, c) && cell(1) == 3);
+    assert(lagfx_arm64_submit_dropped(p, 3, &dh) && cell(3) == 2);
+    lagfx_arm64_cq_stats(p, &q);
+    assert(q.failed_pre == 3 && q.ok == 1 && !q.fault && !lagfx_arm64_gpu_faulted(p));
+    free(a); rm(p);
+}
+
+/* (a) timeout with the device alive: stays pending, no stamp, slow counted once, never failed; completes when the fence signals */
+static void test_slow_stays_pending(void) {
+    setenv("LAGFX_VK_WAIT_MS", "30", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE); assert(lagfx_arm64_cq_enable(p));
+    unsetenv("LAGFX_VK_WAIT_MS");
+    mock_t *m = mock_new();
+    assert(!sub(p, 1, 1, m, NULL, 0, 0));
+    assert(!sub(p, 1, 2, NULL, NULL, 0, 0));
+    usleep(80000);
+    for (int i = 0; i < 5; i++) assert(lagfx_arm64_poll_completions(p) == 0);
+    lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
+    assert(q.slow == 1 && q.fault_completed == 0 && q.failed_pre == 0 && !q.fault);   /* counted once, not failed */
+    assert(cell(1) == 0 && lagfx_arm64_cq_pending(p) == 2 && atomic_load(&m->released) == 0 && atomic_load(&g_irq) == 0);
+    atomic_store(&m->done, 1);                                /* the GPU finally finishes */
+    assert(lagfx_arm64_poll_completions(p) == 2 && cell(1) == 2);
+    lagfx_arm64_cq_stats(p, &q);
+    assert(q.ok == 2 && q.slow == 1 && !q.fault && atomic_load(&m->released) == 1);
+    free(m); rm(p);
+}
+
+/* optional hard limit -> FAULT: pending completes as failed, the possibly in-flight work is not released; later commands rejected */
+static void test_hard_timeout_fault(void) {
+    setenv("LAGFX_VK_WAIT_MS", "10", 1); setenv("LAGFX_GPU_HARD_TIMEOUT_MS", "60", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE); assert(lagfx_arm64_cq_enable(p));
+    unsetenv("LAGFX_VK_WAIT_MS"); unsetenv("LAGFX_GPU_HARD_TIMEOUT_MS");
+    mock_t *m = mock_new();
+    assert(!sub(p, 1, 1, m, NULL, 0, 0));
+    assert(!sub(p, 2, 5, NULL, NULL, 0, 0) == 0);             /* other channel idle: immediate */
+    usleep(30000); assert(lagfx_arm64_poll_completions(p) == 0 && !lagfx_arm64_gpu_faulted(p));   /* slow, but under the hard limit */
+    usleep(60000);
+    assert(lagfx_arm64_poll_completions(p) == 1 && lagfx_arm64_gpu_faulted(p) && cell(1) == 1);
+    lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
+    assert(q.hard_timeouts == 1 && q.fault_completed == 1 && q.slow >= 1 && q.fault);
+    assert(atomic_load(&m->released) == 0);                   /* in flight as far as we know: never destroyed */
+    free(m); rm(p);
+}
+
+/* (b)/(4) device lost: pending stamps complete as failed, new work rejected cheaply but its stamp completes */
+static void test_fault_device_lost(void) {
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE); assert(lagfx_arm64_cq_enable(p));
+    mock_t *a = mock_new(), *b = mock_new(), *c = mock_new();
+    atomic_store(&a->done, 1); atomic_store(&a->fail, 1);    /* reports device lost */
+    assert(!sub(p, 2, 4, c, NULL, 0, 0));
+    assert(!sub(p, 1, 1, a, NULL, 0, 0));
+    assert(!sub(p, 1, 2, b, NULL, 0, 0));
+    assert(lagfx_arm64_poll_completions(p) == 3);             /* one batch: everything pending, even work that did not finish, completes as failed */
+    assert(cell(1) == 2 && cell(2) == 4 && atomic_load(&g_irq) == 1);
+    lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
+    assert(q.fault && lagfx_arm64_gpu_faulted(p) && q.fault_completed == 3 && q.ok == 0 && q.failed_pre == 0);
+    assert(atomic_load(&a->released) == 1 && atomic_load(&b->released) == 1 && atomic_load(&c->released) == 1);
+    /* later exec commands: rejected, work refused (and released at once), stamp completes immediately */
+    mock_t *d = mock_new();
+    lagfx_cmd_header_t h = H(3); lagfx_arm64_submit_ctx_t *x = lagfx_arm64_submit_begin(p, 1, &h);
+    lagfx_arm64_gpu_work_t w = { d, mock_wait, mock_rel };
+    assert(!lagfx_arm64_submit_add_work(x, &w) && atomic_load(&d->released) == 1);
+    assert(lagfx_arm64_submit_end(p, x) && cell(1) == 3 && lagfx_arm64_cq_pending(p) == 0);
+    lagfx_cmd_header_t dh = H(4);
+    assert(lagfx_arm64_submit_dropped(p, 1, &dh) && cell(1) == 4);
+    lagfx_arm64_cq_stats(p, &q);
+    assert(q.fault_rejected == 2 && q.fault_completed == 3 && q.ok == 0);   /* counted apart from successes */
+    free(a); free(b); free(c); free(d); rm(p);
 }
 
 static void test_barrier(void) {
@@ -168,37 +229,6 @@ static void test_barrier(void) {
     memcpy(pl, b5, 8);
     assert(sub(p, 2, 9, NULL, pl, 2, 8));
     free(a); rm(p);
-}
-
-static void test_watchdog_and_cycle(void) {
-    setenv("LAGFX_ARM64_EXEC_TIMEOUT_MS", "40", 1);
-    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE); assert(lagfx_arm64_cq_enable(p));
-    unsetenv("LAGFX_ARM64_EXEC_TIMEOUT_MS");
-    mock_t *stuck = mock_new();
-    assert(!sub(p, 1, 1, stuck, NULL, 0, 0));
-    assert(!sub(p, 1, 2, NULL, NULL, 0, 0));
-    assert(lagfx_arm64_poll_completions(p) == 0);
-    usleep(70000);
-    assert(lagfx_arm64_poll_completions(p) >= 1);            /* the stuck head is forced (failed); the entry behind it gets its own time budget */
-    uint64_t r, f, t; lagfx_arm64_cq_stats(p, &r, &f, &t);
-    assert(t == 1 && f >= 1 && cell(1) >= 1);
-    assert(atomic_load(&stuck->released) == 0);              /* still in flight as far as we know: not destroyed */
-    atomic_store(&stuck->done, 1);
-    lagfx_arm64_poll_completions(p);
-    assert(atomic_load(&stuck->released) == 1);              /* released once the GPU finished it */
-    usleep(70000); lagfx_arm64_poll_completions(p);
-    assert(lagfx_arm64_cq_pending(p) == 0 && cell(1) == 2);
-    /* a barrier on a channel whose head never finishes: the watchdog frees both (ch1's work stuck, ch2 waits for it) */
-    mock_t *st2 = mock_new();
-    assert(!sub(p, 1, 10, st2, NULL, 0, 0));
-    uint32_t w2[2] = { 1, 10 }; uint8_t pl[8]; memcpy(pl, w2, 8);
-    assert(!sub(p, 2, 20, NULL, pl, 1, 8));
-    assert(lagfx_arm64_poll_completions(p) == 0 && lagfx_arm64_cq_pending(p) == 2);
-    usleep(70000);
-    for (int i = 0; i < 4 && lagfx_arm64_cq_pending(p); i++) { lagfx_arm64_poll_completions(p); usleep(50000); }
-    assert(lagfx_arm64_cq_pending(p) == 0 && cell(1) == 10 && cell(2) == 20);
-    atomic_store(&st2->done, 1); lagfx_arm64_poll_completions(p); free(st2);
-    free(stuck); rm(p);
 }
 
 static void test_teardown(void) {
@@ -314,7 +344,9 @@ int main(void) {
     test_order_and_batch();
     test_failure_and_dropped();
     test_barrier();
-    test_watchdog_and_cycle();
+    test_slow_stays_pending();
+    test_hard_timeout_fault();
+    test_fault_device_lost();
     test_teardown();
     test_reentrancy();
     test_threads();

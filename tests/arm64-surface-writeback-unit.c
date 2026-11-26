@@ -179,6 +179,31 @@ static void test_vulkan(struct lagfx_vk_state *vk) {
         assert(lagfx_vk_wait_default_ns() == 2000ull * 1000000ull);
     }
 
+    /* 3c. injected fence results through the real VkFence work item (the test seam in command.c):
+     *     NOT_READY/TIMEOUT -> stays pending (slow, no fault); DEVICE_LOST -> FAULT, pending completes failed, later work rejected */
+    {
+        assert(lagfx_arm64_cq_enable(p) || p->a64cq);
+        VkFence nf; VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+        vkCreateFence(vk->device, &fci, NULL, &nf);
+        lagfx_cmd_header_t hh = { .opcode = 0x43, .length = 12, .stamp = 20 };
+        lagfx_arm64_submit_ctx_t *cc = lagfx_arm64_submit_begin(p, 3, &hh);
+        assert(lagfx_arm64_submit_add_vk_fence(cc, vk, nf, true));
+        assert(!lagfx_arm64_submit_end(p, cc));
+        lagfx_vk_test_inject_fence_result(VK_NOT_READY);
+        assert(lagfx_arm64_poll_completions(p) == 0 && !lagfx_arm64_gpu_faulted(p));
+        assert(lagfx_vk_wait_bounded(vk, nf, 1000000) == LAGFX_VK_WAIT_TIMEOUT);
+        lagfx_vk_test_inject_fence_result(VK_ERROR_DEVICE_LOST);
+        assert(lagfx_vk_wait_bounded(vk, nf, 1000000) == LAGFX_VK_WAIT_FAILED);
+        assert(lagfx_arm64_poll_completions(p) == 1 && lagfx_arm64_gpu_faulted(p));
+        lagfx_vk_test_inject_fence_result(0x7fffffff);
+        lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
+        assert(q.fault_completed == 1 && q.fault);
+        hh.stamp = 21; cc = lagfx_arm64_submit_begin(p, 3, &hh);
+        assert(lagfx_arm64_submit_end(p, cc));               /* rejected cheaply, stamp completes */
+        lagfx_arm64_cq_shutdown(p, 0);
+        assert(lagfx_arm64_cq_enable(p));                    /* a fresh queue clears FAULT (reset/re-realize) */
+    }
+
     /* 4. timeline semaphore (when the device has it): work that never finishes is dropped at teardown without a stamp, without hanging */
     if (vk->have_timeline_semaphore) {
         VkSemaphoreTypeCreateInfo ti = { .sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO, .semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE };
