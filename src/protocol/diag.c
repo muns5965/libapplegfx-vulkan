@@ -160,10 +160,10 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
     }
     if (X->run.execs) {   /* ARM64 render exec extensions (draw variants, sampler fidelity, misaligned buffer binds, no-op tags) */
         const __typeof__(X->run) *R = &X->run;
-        char el[1200];
+        char el[1400];
         snprintf(el, sizeof el,
                  "g7-gpu-ext: draw[instanced=%llu base=%llu wide=%llu indirect=%llu indirect_bad=%llu zero=%llu] noop[hint=%llu fence=%llu barrier_partial=%llu] "
-                 "sampler[compare_ignored=%llu unnorm_applied=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu writable_skipped=%llu] storage_img_unsupported=%llu vs_tex_binds=%llu unnorm_lod0=%llu unnorm_skipped=%llu gather_why[nomap=%llu range=%llu cache=%llu scratch=%llu budget=%llu] gather[bytes=%llu reused=%llu] no_pipeline_why[none=%llu unresolved=%llu build=%llu bind=%llu] linear_stale=%llu",
+                 "sampler[compare_ignored=%llu unnorm_applied=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu writable_skipped=%llu] storage_img_unsupported=%llu vs_tex_binds=%llu unnorm_lod0=%llu unnorm_skipped=%llu gather_why[nomap=%llu range=%llu cache=%llu scratch=%llu budget=%llu] gather[bytes=%llu reused=%llu] no_pipeline_why[none=%llu unresolved=%llu build=%llu bind=%llu] linear_stale=%llu tex_prepared=%llu",
                  (unsigned long long)R->ext_draw_instanced, (unsigned long long)R->ext_draw_base, (unsigned long long)R->ext_draw_wide, (unsigned long long)R->ext_draw_indirect,
                  (unsigned long long)R->ext_draw_indirect_bad, (unsigned long long)R->ext_draw_zero, (unsigned long long)R->ext_noop_hint, (unsigned long long)R->ext_noop_fence,
                  (unsigned long long)R->ext_barrier, (unsigned long long)R->ext_samp_compare, (unsigned long long)R->ext_samp_unnorm, (unsigned long long)R->ext_samp_mirror_clamp,
@@ -171,7 +171,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->ext_range_clamped, (unsigned long long)R->ext_wsb_skipped, (unsigned long long)R->ext_storage_img_unsupported,
                  (unsigned long long)R->ext_vs_tex_binds, (unsigned long long)R->ext_unnorm_lod0, (unsigned long long)R->ext_unnorm_skipped,
                  (unsigned long long)R->ext_gather_why[0], (unsigned long long)R->ext_gather_why[1], (unsigned long long)R->ext_gather_why[2], (unsigned long long)R->ext_gather_why[3], (unsigned long long)R->ext_gather_why[4], (unsigned long long)R->ext_gather_bytes, (unsigned long long)R->ext_gather_reused,
-                 (unsigned long long)R->no_pipeline_why[0], (unsigned long long)R->no_pipeline_why[1], (unsigned long long)R->no_pipeline_why[2], (unsigned long long)R->no_pipeline_why[3], (unsigned long long)X->pipe.desc_linear_stale);
+                 (unsigned long long)R->no_pipeline_why[0], (unsigned long long)R->no_pipeline_why[1], (unsigned long long)R->no_pipeline_why[2], (unsigned long long)R->no_pipeline_why[3], (unsigned long long)X->pipe.desc_linear_stale, (unsigned long long)R->ext_tex_prepared);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);
     }
@@ -244,6 +244,14 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             bool first = true;
             for (unsigned c = 0; c < LAGFX_A64_TEXWHY_COUNT && po + 40 < sizeof pl; c++)
                 if (Q->desc_tex_why[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, "%s%s=%llu", first ? " texwhy[" : " ", lagfx_a64_texwhy_name(c), U(desc_tex_why[c])), first = false;
+            if (!first && po + 2 < sizeof pl) pl[po++] = ']', pl[po] = 0;
+        }
+        {   /* desc[... buf=N ...] by cause (non-zero only): the first 8 distinct are logged as g7-gpu-buf-unbound lines */
+            size_t po = strlen(pl);
+            static const char *const bn[7] = { "no_metal_slot", "slot_range", "never_bound", "unresolved", "not_buffer", "?", "offset" };
+            bool first = true;
+            for (unsigned c = 0; c < 7u && po + 40 < sizeof pl; c++)
+                if (Q->desc_buf_why[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, "%s%s=%llu", first ? " bufwhy[" : " ", bn[c], U(desc_buf_why[c])), first = false;
             if (!first && po + 2 < sizeof pl) pl[po++] = ']', pl[po] = 0;
         }
 #undef U

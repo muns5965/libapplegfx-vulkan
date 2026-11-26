@@ -582,6 +582,7 @@ typedef struct lagfx_protocol {
                 uint64_t ext_gather_why[5]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather copy count full (A64_GATHER_CACHE), 3 scratch allocation, 4 per-exec byte budget (A64_GATHER_BUDGET) */
                 uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
+                uint64_t ext_tex_prepared;   /* textures a pass bound for sampling that the mirror did not hold yet (not in the resource list): created before the pass opened */
             } run;
             /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */
             struct {
@@ -595,6 +596,9 @@ typedef struct lagfx_protocol {
                 uint64_t desc_tex_why[LAGFX_A64_TEXWHY_COUNT];   /* desc_unbound_why[3] (a sampled texture handle did not resolve) split by reason: lagfx_a64_texwhy_t order, names lagfx_a64_texwhy_name() */
                 uint8_t  desc_tex_nseen[LAGFX_A64_TEXWHY_COUNT];   /* distinct unresolved textures logged per reason (first 8) */
                 struct { uint32_t task, ref, type, mtl_format, w, h, mapping; } desc_tex_seen[LAGFX_A64_TEXWHY_COUNT][8];
+                uint64_t desc_buf_why[7];   /* desc_unbound_why[0] by cause: 0 no Metal slot, 1 slot beyond table, 2 slot never bound in the pass, 3 ref did not resolve, 4 not a buffer, 6 offset past the end */
+                uint8_t  desc_buf_nseen[7];
+                struct { uint32_t ref, slot, stage; } desc_buf_seen[7][8];
                 uint64_t desc_unbound_why[6];   /* desc_unbound by cause: 0 buffer missing/offset, 1 input attachment, 2 storage image, 3 sampled image missing, 4 sampled image view (linear/none), 5 sampler */
                 uint64_t stub_fbfetch_why[5];   /* stub_fbfetch by reason (LAGFX_A64_FBF_*; [0] unused) */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;

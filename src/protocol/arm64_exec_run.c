@@ -112,6 +112,7 @@ typedef struct {
     lagfx_a64_obj_t *ftex[A64_MAX_FB];                             /* fragment textures (114): mirror textures, GENERAL layout */
     a64_samp_t *fsamp[A64_MAX_FSAMP];                              /* fragment samplers (112) */
     lagfx_a64_obj_t *vtex[A64_MAX_FB];                             /* vertex textures (129) */
+    struct { uint32_t ref, why, type; } vbmiss[A64_MAX_VB], fbmiss[A64_MAX_FB];   /* why vb / fb slot i holds no buffer (why 0 = never named since the encoder began, 1 ref did not resolve, 2 not a buffer; type = guest entry type) */
     a64_texmiss_t fmiss[A64_MAX_FB], vmiss[A64_MAX_FB];            /* why ftex / vtex slot i is NULL (0 = never named since the encoder began): split of desc_unbound_why[3] */
     a64_samp_t *vsamp[A64_MAX_FSAMP]; VkSampler vvar[A64_MAX_FSAMP];   /* vertex samplers (127) and the LOD-clamp variants of tag 128 */
     VkPipeline bound_vk;                                           /* the VkPipeline bound in the open pass */
@@ -414,7 +415,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
 static void reset_frag_tables(a64_run_t *r) {
     memset(r->fb, 0, sizeof r->fb), memset(r->ftex, 0, sizeof r->ftex), memset(r->fsamp, 0, sizeof r->fsamp), memset(r->fvar, 0, sizeof r->fvar);
     memset(r->vtex, 0, sizeof r->vtex), memset(r->vsamp, 0, sizeof r->vsamp), memset(r->vvar, 0, sizeof r->vvar);
-    memset(r->fmiss, 0, sizeof r->fmiss), memset(r->vmiss, 0, sizeof r->vmiss);   /* TEXWHY_SLOT_UNBOUND = 0 */
+    memset(r->fmiss, 0, sizeof r->fmiss), memset(r->vmiss, 0, sizeof r->vmiss), memset(r->fbmiss, 0, sizeof r->fbmiss), memset(r->vbmiss, 0, sizeof r->vbmiss);   /* TEXWHY_SLOT_UNBOUND = 0 */
     lagfx_a64_tile_reset(r->tile);
 }
 
@@ -565,6 +566,34 @@ static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, ui
     LAGFX_LOG("%s", l);
 }
 
+/* A buffer slot of a draw holds no usable buffer: count it by reason (desc_buf_why) and log the first 8 distinct (stage, slot, ref, reason). Facts at the failure only. */
+static void buf_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, uint32_t bind_i, const lagfx_a64_obj_t *b, uint64_t off) {
+    const lagfx_a64_pipeline_src_t *s = &pp->src;
+    int16_t mi_s = s->bind[bind_i].metal_index; uint32_t st = s->bind[bind_i].stage, mi = (uint32_t)mi_s;
+    uint32_t why, ref = 0, type = 0;
+    if (mi_s < 0) why = 0;                                                   /* the shader's binding has no Metal slot */
+    else if (mi >= (st ? A64_MAX_FB : A64_MAX_VB)) why = 1;                  /* slot beyond the table */
+    else {
+        const __typeof__(r->vbmiss[0]) *m = st ? &r->fbmiss[mi] : &r->vbmiss[mi];
+        ref = m->ref, type = m->type;
+        why = b ? 6u : m->why == 0 ? 2u : m->why == 1 ? 3u : 4u;             /* 6: bound, but the offset is past the buffer's end */
+        if (why == 6u) type = LAGFX_A64_OBJ_BUFFER;
+    }
+    __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
+    Q->desc_buf_why[why]++;
+    for (unsigned k = 0; k < Q->desc_buf_nseen[why]; k++) if (Q->desc_buf_seen[why][k].ref == ref && Q->desc_buf_seen[why][k].slot == mi && Q->desc_buf_seen[why][k].stage == st) return;
+    if (Q->desc_buf_nseen[why] >= 8u) return;
+    __typeof__(Q->desc_buf_seen[0][0]) *e = &Q->desc_buf_seen[why][Q->desc_buf_nseen[why]++];
+    e->ref = ref, e->slot = mi, e->stage = st;
+    static const char *const nm[] = { "no_metal_slot", "slot_range", "slot_never_bound", "ref_unresolved", "not_a_buffer", "?", "offset_past_end" };
+    char l[420];
+    snprintf(l, sizeof l, "g7-gpu-buf-unbound: why=%s task=%u stage=%s slot=%d ref=%u entry_type=%u offset=%llu length=%llu | draw=%u pass=%llu pipeline_ref=%u vs=%s fs=%s vk_binding=%u writable=%d",
+             nm[why], (unsigned)r->task->id, st ? "fragment" : "vertex", (int)mi_s, (unsigned)ref, (unsigned)type, (unsigned long long)off, (unsigned long long)(b ? b->length : 0),
+             (unsigned)r->exec_draw, (unsigned long long)CNT(p).passes, (unsigned)pp->ref, s->vs_name[0] ? s->vs_name : "?", s->fs_name[0] ? s->fs_name : "?", (unsigned)s->bind[bind_i].binding, (int)s->bind[bind_i].writable);
+    fprintf(stderr, "%s\n", l);
+    LAGFX_LOG("%s", l);
+}
+
 /* Fills and binds the set-0 descriptor set of the pipeline from the Metal tables recorded by tags 125/126/110/111/114/112. Anything unbound / misaligned /
  * a feedback loop skips the draw (counted): Metal leaves those undefined. The key (pipeline gen, then per binding the object gen and offset) lets consecutive
  * draws share one set; a replaced object has a new gen, so a stale set is never reused. Mirror textures stay in GENERAL layout (valid for sampling), so no
@@ -587,7 +616,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
         if (s->bind[i].kind == LAGFX_A64_BIND_BUFFER) {
             lagfx_a64_obj_t *b = mi_s < 0 ? NULL : st ? (mi < A64_MAX_FB ? r->fb[mi].b : NULL) : (mi < A64_MAX_VB ? r->vb[mi].b : NULL);
             uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
-            if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; return false; }
+            if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; buf_miss(r, p, pp, i, b, off); return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
             if (s->bind[i].writable) lagfx_a64_res_buf_written(b);   /* the shader may write it: a linear texture over it is stale from here on */
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
@@ -1140,8 +1169,13 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         uint32_t index = R32(0), count = R32(4);
         if (count > A64_MAX_VB || (uint64_t)n < 8u + 12ull * count) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         for (uint32_t i = 0; i < count && index + i < A64_MAX_VB; i++) {
-            lagfx_a64_obj_t *b = lagfx_a64_res_object(r->x, R32(8 + i * 12));
+            uint32_t bref = R32(8 + i * 12);
+            lagfx_a64_obj_t *b = lagfx_a64_res_object(r->x, bref);
+            uint32_t bwhy = b ? (b->kind != LAGFX_A64_BUFFER ? 2u : 3u) : 1u, e3[3] = { 0, 0, 0 };
             if (b && b->kind != LAGFX_A64_BUFFER) b = NULL;
+            if (!b) (void)lagfx_a64_objects_read_entry(p, r->task, bref, e3);
+            if (tag == 125 && index + i < A64_MAX_VB) r->vbmiss[index + i].ref = bref, r->vbmiss[index + i].why = b ? 3u : bwhy, r->vbmiss[index + i].type = e3[0] & 0xffu;
+            else if (tag == 110 && index + i < A64_MAX_FB) r->fbmiss[index + i].ref = bref, r->fbmiss[index + i].why = b ? 3u : bwhy, r->fbmiss[index + i].type = e3[0] & 0xffu;
             uint64_t off = lagfx_le64(rec + 12 + i * 12);
             if (tag == 125) r->vb[index + i].b = b, r->vb[index + i].off = off;
             else if (index + i < A64_MAX_FB) r->fb[index + i].b = b, r->fb[index + i].off = off;
@@ -1288,6 +1322,30 @@ bool lagfx_a64_exec_render_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *
     return true;
 }
 
+/* Textures a pass binds for sampling (tags 114 / 129 up to the next pass descriptor) that the exec's resource list did not name are created and made current NOW,
+ * before the pass opens: creating one inside the pass would record copies into it. Whether the real guest lists the linear textures it samples is not known from the
+ * device log (117 draws had type 8 textures with no mirror object and no creation failure, i.e. creation was never attempted); this makes the mirror independent of it.
+ * Only records of the segment in hand are seen: a pass that continues into a later segment binds its textures there, after the pass opened (those stay as before). */
+static void prescan_pass_textures(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *recs, uint64_t lim) {
+    uint64_t q = 0; uint32_t guard = 0;
+    while (q + 8u <= lim && guard++ < LAGFX_EXEC_MAX_INNER) {
+        uint32_t tag = lagfx_le32(recs + q), sz = lagfx_le32(recs + q + 4);
+        if (sz < 8u || q + sz > lim) break;
+        if (tag == 26u) break;
+        if (tag == 114u || tag == 129u) {
+            const uint8_t *rec = recs + q + 8u; uint32_t n = sz - 8u;
+            uint32_t count = n >= 8u ? lagfx_le32(rec + 4) : 0u;
+            if (count > A64_MAX_FB || (uint64_t)n < 8ull + 4ull * count) { q += sz; continue; }
+            for (uint32_t i = 0; i < count; i++) {
+                uint32_t ref = lagfx_le32(rec + 8 + 4 * i);
+                if (ref && !lagfx_a64_res_lookup(p, r->task->id, ref)) CNT(p).ext_tex_prepared++;
+                if (ref) (void)lagfx_a64_res_prepare_sampled(r->x, ref);
+            }
+        }
+        q += sz;
+    }
+}
+
 static bool supported_tag(uint32_t tag) {
     switch (tag) { case 26: case 116: case 125: case 110: case 126: case 111: case 114: case 112: case 117: case 130: case 7: case 1: case 104: case 107: case 108: case 115: case 119: return true; default: return false; }
 }
@@ -1325,6 +1383,7 @@ void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const
         if (sz < 8u || q + sz > lim) break;
         const uint8_t *rec = buf + pos + q + 8u;
         uint32_t n = sz - 8u;
+        if (tag == 26u) { pass_end(r); prescan_pass_textures(r, p, buf + pos + q + sz, lim - q - sz); }   /* outside any pass: the textures this pass samples */
         if (tag >= 30u && tag <= 36u) {                         /* these describe the pass that follows */
             if (tag == 32u || tag == 33u) tag_unsup(p, tag); else tag_partial(p, tag);
         } else if (!supported_tag(tag) && !direct_tag(tag)) {

@@ -61,6 +61,7 @@ bool lagfx_a64_res_busy(lagfx_protocol_t *p) { (void)p; return false; }
 void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *l, uint64_t *c, uint64_t *d) { (void)p; if (l) *l = 0; if (c) *c = 0; if (d) *d = 0; }
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref) { (void)p; (void)task; (void)ref; return NULL; }
 bool lagfx_a64_res_diagnose(lagfx_protocol_t *p, uint32_t task, uint32_t ref, lagfx_a64_texdiag_t *o) { (void)p; (void)task; (void)ref; if (o) memset(o, 0, sizeof *o); return false; }
+bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref) { (void)x; (void)ref; return false; }
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) { (void)x; }
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { (void)x; (void)o; return false; }
 void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { (void)b; }
@@ -241,6 +242,7 @@ static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
         return;
     }
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
+    if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);
@@ -311,6 +313,7 @@ static void guest_upload(lagfx_protocol_t *p, mgr2_t *m, const lagfx_task_entry_
         if (!lagfx_arm64_task_read(p, t, (o->vpage << 14) + off, d, 0x4000u)) memset(d, 0, 0x4000u), m->st.unmapped_pages++;
     }
     o->wgen++;
+    o->rd_epoch = m->epoch, o->gpu_dirty = false;
     m->st.uploads++;
 }
 
@@ -858,7 +861,7 @@ static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!o->linear) return true;
     lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
     bool ok = lin_xfer(x->cb, b, o, x->m, false);
-    if (ok) { b->host_valid = true; b->wgen++; o->lin_pulled = true, o->lin_seen = b->wgen; }   /* the pushing image is the buffer's new content; another image over it is now stale */
+    if (ok) { b->host_valid = true; b->wgen++, b->gpu_dirty = true; o->lin_pulled = true, o->lin_seen = b->wgen; }   /* the pushing image is the buffer's new content; another image over it is now stale */
     return ok;
 }
 
@@ -898,7 +901,7 @@ static bool buf_tex_copy(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, lagfx_a64_obj
         .imageOffset = { (int32_t)bx->x, (int32_t)bx->y, (int32_t)bx->z }, .imageExtent = { (uint32_t)bx->w, (uint32_t)bx->h, (uint32_t)bx->d } };
     if (!to_tex && !lin_pull_x(x, t)) return false;   /* a linear texture is read: take the buffer's current bytes first */
     lagfx_translate_blit_cmd_buffer_image(x->cb, b->buf, t->img, &r, to_tex);
-    if (!to_tex) b->wgen++;
+    if (!to_tex) b->wgen++, b->gpu_dirty = true;
     if (to_tex) lin_push_x(x, t);                       /* ... written: back into the buffer (and so the guest pages of the buffer) */
     return true;
 }
@@ -927,7 +930,7 @@ static bool blit_301(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (a == b && so < dof + n && dof < so + n) return false;   /* overlapping copy within one buffer */
     VkBufferCopy c = { so, dof, n };
     lagfx_translate_blit_cmd_buffer_buffer(x->cb, a->buf, b->buf, &c);
-    b->wgen++;
+    b->wgen++, b->gpu_dirty = true;
     return true;
 }
 
@@ -959,7 +962,7 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
     uint64_t end = loc + n, a0 = (loc + 3) & ~3ull, a1 = end & ~3ull;
     if (a0 >= a1) a0 = a1 = end;   /* no aligned middle: everything goes through the staging copy (n < 8 then) */
     uint64_t head = a0 - loc, tail = end - a1;
-    b->wgen++;
+    b->wgen++, b->gpu_dirty = true;
     if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
     if (head || tail) {
         if (x->ntmp >= MAX_TMP) return false;
@@ -983,7 +986,7 @@ static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (!b || b->kind != LAGFX_A64_BUFFER || loc % 4u || loc > b->length || n > b->length - loc) return false;
     if (!n) return true;
     uint64_t mid = n & ~3ull, tail = n & 3ull;
-    b->wgen++;
+    b->wgen++, b->gpu_dirty = true;
     if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
     if (tail) {
         if (x->ntmp >= MAX_TMP) return false;
@@ -1347,7 +1350,18 @@ static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsa
     return o->view;
 }
 
-VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { return tex_view(x, o, VK_IMAGE_USAGE_SAMPLED_BIT); }
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    VkImageView v = tex_view(x, o, VK_IMAGE_USAGE_SAMPLED_BIT);
+    if (!v || o->mtl_format != 1u || o->ms) return v;
+    /* MTLPixelFormatA8Unorm (1) samples as (0, 0, 0, a) (Metal's documented read of an alpha-only format); the image is R8_UNORM, so the view moves red into alpha.
+     * From Metal's documentation, not checked against a device. */
+    if (!o->sview) {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
+            .components = { VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->sview) != VK_SUCCESS) { o->sview = VK_NULL_HANDLE; return v; }
+    }
+    return o->sview;
+}
 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { return tex_view(x, o, VK_IMAGE_USAGE_STORAGE_BIT); }
@@ -1580,7 +1594,7 @@ bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
 }
 
 /* ---- linear texture sampling support (see arm64_resources.h) ---- */
-void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { if (b) b->wgen++; }
+void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { if (b) b->wgen++, b->gpu_dirty = true; }
 
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!x || !o) return false;
@@ -1598,6 +1612,21 @@ void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) {
         any |= lin_pull_x(x, o);
     }
     if (any) x->m->st.linear_resync++;
+}
+
+bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref) {
+    if (!x) return false;
+    lagfx_a64_obj_t *o = lagfx_a64_res_object(x, ref);   /* created + first-use upload (+ first pull of a linear texture) */
+    if (!o || o->kind != LAGFX_A64_TEXTURE) return false;
+    if (o->linear) {
+        lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
+        /* The backing buffer is shared guest memory (as Apple's linear textures / buffers are). A listed buffer was re-read by begin(); one the list did not name is
+         * re-read here, once per exec, unless the GPU wrote it since its last read (then the GPU's bytes are newer, as for a listed buffer marked stale).
+         * Unverified on a device: that the guest changes unlisted buffers between execs. */
+        if (b && b->has_pages && !b->guest_stale && !b->gpu_dirty && b->rd_epoch != x->m->epoch) guest_upload(x->p, x->m, x->t, b), b->host_valid = true;
+        if (b && !lagfx_a64_res_linear_fresh(x, o)) { if (lin_pull_x(x, o)) x->m->st.linear_resync++; }
+    }
+    return true;
 }
 
 #endif /* LAGFX_HAVE_VULKAN */
