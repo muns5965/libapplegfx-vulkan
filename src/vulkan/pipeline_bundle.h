@@ -34,7 +34,8 @@ const char *lagfx_pipeline_bundle_dir(void);
 /* Writes the bundle for a failed lagfx_pipeline_build(); `derived` = informational text (the Vulkan create-info state), may be NULL. The layout bindings are derived from
  * the SPIR-V exactly as lagfx_build_pipeline_layout_from_spv() does. Returns true and the directory name when a NEW bundle was written. */
 bool lagfx_pipeline_bundle_write(const lagfx_pipeline_desc_t *desc, VkResult vr, const char *derived, char *out_dir, size_t out_cap);
-void lagfx_pipeline_bundle_reset(void);   /* test seam: forgets the distinct-failure set */
+void lagfx_pipeline_bundle_reset(void);
+void lagfx_pipeline_bundle_suppress(int on);   /* this thread writes no bundle while on (the repro rebuilds failing pipelines on purpose) */   /* test seam: forgets the distinct-failure set */
 
 /* A parsed bundle (lagfx_bundle_load). desc has its scalar fields set, every pointer NULL. */
 typedef struct {

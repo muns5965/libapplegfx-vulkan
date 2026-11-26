@@ -182,8 +182,9 @@ int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_
         free(b.w);
         b.w = nw, b.n += hoist.n;
     }
+    size_t hoist_n = hoist.n;
     free(hoist.w);
     *out = b.w, *out_words = b.n;
-    note(info, cap, "%u OpUndef of a composite type replaced by OpConstantNull (%u of them hoisted out of a function)", (unsigned)changes, 0);
+    note(info, cap, "%u OpUndef of a composite type replaced by OpConstantNull (%u of them hoisted out of a function)", (unsigned)changes, (unsigned)(hoist_n / 3u));
     return changes;
 }

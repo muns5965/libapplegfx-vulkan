@@ -61,6 +61,8 @@ const char *lagfx_pipeline_bundle_dir(void) {
 }
 
 static struct { uint64_t key[LAGFX_BUNDLE_MAX_FAILURES]; uint32_t n; } g_seen;   /* the writer's bound: process-wide on purpose (it limits disk use); the REPRO keeps no global state */
+static _Thread_local int g_suppress;
+void lagfx_pipeline_bundle_suppress(int on) { g_suppress = on; }
 void lagfx_pipeline_bundle_reset(void) { memset(&g_seen, 0, sizeof g_seen); }
 
 typedef struct { char *p; size_t n, cap; } sb_t;
@@ -104,6 +106,7 @@ static bool write_file(const char *dir, const char *name, const void *data, size
 
 bool lagfx_pipeline_bundle_write(const lagfx_pipeline_desc_t *desc, VkResult vr, const char *derived, char *out_dir, size_t out_cap) {
     const char *base = lagfx_pipeline_bundle_dir();
+    if (g_suppress) return false;
     if (!base || !desc || !desc->vertex_spv || !desc->fragment_spv || !desc->vertex_spv_bytes || !desc->fragment_spv_bytes) return false;
     if (desc->vertex_spv_bytes > SPV_MAX || desc->fragment_spv_bytes > SPV_MAX) return false;
     char *st = malloc(STATE_MAX);

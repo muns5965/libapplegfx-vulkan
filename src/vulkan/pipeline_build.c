@@ -121,6 +121,9 @@ static void describe_state(char *buf, size_t cap, const VkGraphicsPipelineCreate
     buf[o < cap ? o : cap - 1u] = 0;
 }
 
+static _Thread_local int32_t g_last_vr;   /* VkResult of this thread's last vkCreateGraphicsPipelines in lagfx_pipeline_build() (the repro reads it) */
+int32_t lagfx_pipeline_build_last_result(void) { return g_last_vr; }
+
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
@@ -423,6 +426,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     VkPipeline pipe = VK_NULL_HANDLE;
     VkResult vr = vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gpci,
                                             NULL, &pipe);
+    g_last_vr = (int32_t)vr;
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("lagfx_pipeline_build: vkCreateGraphicsPipelines failed (%d)",
                   (int)vr);

@@ -1660,3 +1660,13 @@ spv_variants_test = executable('spv-variants-unit',
   build_by_default : true,
 )
 test('spv diagnostic variants (unit)', spv_variants_test)
+
+# lagfx_pipeline_repro_run: forced failure -> bundle -> repro reproduces the same VkResult; UberComposite fixture pair reproduces OK. LAGFX_TEST_DUMP_DIR=<dump> adds the device pairs.
+pipeline_repro_test = executable('pipeline-repro-unit',
+  'pipeline-repro-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"', '-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('pipeline repro (unit, lavapipe)', pipeline_repro_test, workdir : meson.current_source_dir() / '..')

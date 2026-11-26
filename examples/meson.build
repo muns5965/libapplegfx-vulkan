@@ -114,3 +114,11 @@ executable('dump-pairhash',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# pipeline-repro — rebuilds a failed pipeline from a failure bundle (lagfx_pipeline_repro_run) and prints the report; --matrix adds the DIAGNOSTIC variant matrix.
+executable('pipeline-repro',
+  'pipeline-repro.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)
