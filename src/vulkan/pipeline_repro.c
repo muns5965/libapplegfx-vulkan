@@ -29,6 +29,7 @@ void lagfx_pipeline_repro_free_report(char *report) { free(report); }
 #include "pipeline_build.h"
 #include "pipeline_bundle.h"
 #include "pipeline_matrix.h"
+#include "pipeline_reduce.h"
 #include "spv_variants.h"
 
 #include <stdarg.h>
@@ -163,6 +164,18 @@ static void run_matrix(ctx_t *c, const lagfx_pipeline_desc_t *d0, const uint32_t
 
 static void m13_emit(void *u, const char *l) { rp((rep_t *)u, "%s\n", l); }
 
+static void reduce_cfg_from(lagfx_reduce_cfg_t *cfg, const lagfx_pipeline_repro_opts_t *opts, const lagfx_bundle_t *b, const char *bundle_dir, rep_t *rep, lagfx_reduce_target_t *t) {
+    const char *m8 = getenv("LAGFX_PIPELINE_MATRIX_DIR");
+    memset(cfg, 0, sizeof *cfg);
+    memset(t, 0, sizeof *t);
+    t->d0 = b->desc, t->d0.layout = VK_NULL_HANDLE, t->bind = b->n_sets && b->n_dsl ? b->dsl : NULL, t->nbind = b->n_sets ? b->n_dsl : 0, t->push = b->push, t->npush = b->n_sets && b->n_dsl ? b->n_push : 0, t->fs_entry = b->fs_entry;
+    cfg->fs = (const uint32_t *)b->fs_spv, cfg->fs_bytes = b->fs_bytes, cfg->vs = (const uint32_t *)b->vs_spv, cfg->vs_bytes = b->vs_bytes;
+    cfg->file_dir = m8 && m8[0] ? m8 : NULL, cfg->file_dir2 = bundle_dir, cfg->emit = m13_emit, cfg->user = rep, cfg->target = t;
+    if (opts && opts->struct_size >= sizeof *opts) cfg->only = opts->reduce_only, cfg->from = opts->reduce_from, cfg->timeout_ms = opts->reduce_timeout_ms, cfg->list_only = (int)opts->reduce_list_only;
+    lagfx_pipeline_reduce_cfg_env(cfg);
+}
+
+
 lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipeline_repro_opts_t *opts, lagfx_pipeline_repro_result_t *result, char **report) {
     lagfx_pipeline_repro_result_t res;
     memset(&res, 0, sizeof res);
@@ -178,6 +191,18 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
     if (!lagfx_bundle_load(bundle_dir, &b, err, sizeof err)) {
         rp(&rep, "cannot load the bundle: %s\n", err);
         status = LAGFX_ERR_NOT_FOUND;
+        goto out;
+    }
+    if ((flags & LAGFX_PIPELINE_REPRO_REDUCE) && (flags & LAGFX_PIPELINE_REPRO_ISOLATE)) {   /* the parent creates NO Vulkan object: every row runs in a forked child with its own instance */
+        lagfx_reduce_cfg_t cfg;
+        lagfx_reduce_target_t tg;
+        rp(&rep, "recorded: result=%d (%s) translator=\"%s\" origin=\"%s\" fs_fn=%s; isolated reduction ladder (fork per row, own Vulkan instance in each child)\n", b.result, lagfx_vk_result_name((VkResult)b.result), b.translator, b.origin, b.fs_fn);
+        reduce_cfg_from(&cfg, opts, &b, bundle_dir, &rep, &tg);
+        cfg.isolate = 1;
+        lagfx_reduce_result_t rr;
+        lagfx_pipeline_reduce_run(&cfg, &rr);
+        res.recorded_result = b.result, res.vk_result = rr.r0 == 0 ? 0 : -13;
+        lagfx_bundle_free(&b);
         goto out;
     }
     struct lagfx_vk_state *vk = NULL;
@@ -260,6 +285,15 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
             rp(&rep, "\n-- the -13 matrix (DIAGNOSTIC: every row builds a COPY; rows M0..M10) --\n");
             lagfx_matrix_result_t mr;
             lagfx_pipeline_matrix_run(c.dev, &md, b.dsl, b.n_dsl, &me, &mr);
+        }
+        if (flags & LAGFX_PIPELINE_REPRO_REDUCE) {
+            lagfx_reduce_cfg_t cfg;
+            lagfx_reduce_target_t tg;
+            reduce_cfg_from(&cfg, opts, &b, bundle_dir, &rep, &tg);
+            cfg.dev = c.dev, cfg.layout = c.layout, cfg.isolate = 0;
+            rp(&rep, "\n-- the fragment-module reduction ladder (DIAGNOSTIC: every row builds a rewritten COPY; in-process: a compiler crash ends the process, use ISOLATE) --\n");
+            lagfx_reduce_result_t rr;
+            lagfx_pipeline_reduce_run(&cfg, &rr);
         }
         res.variants_ok = c.ok, res.variants_failed = c.fail, res.variants_na = c.na;
         if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "matrix: %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
