@@ -12,7 +12,7 @@ lagfx_sources += files(
   # ops_display.c removed: uses old protocol state layout (lagfx_display_entry_t renamed to lagfx_display_mode_t)
   # Legacy handlers moved to src/handlers/display/display.c for vchan opcodes (0x01-0x07)
   'arm64_completion.c',  # ARM64 deferred stamp completion queue (LAGFX_ARM64_EXEC=1)
-  'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode-only
+  'arm64_resources.c',    # ARM64 exec: guest-memory-backed buffer/texture mirror + blit executor
   'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode (+ optional execution)
   'arm64_objects.c',      # ARM64 per-task (task, ref) object table
   'arm64_exec_run.c',     # ARM64 Render segment execution on Vulkan (LAGFX_ARM64_EXEC=1)

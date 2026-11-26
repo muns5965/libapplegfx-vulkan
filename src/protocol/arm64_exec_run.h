@@ -18,7 +18,7 @@
  *   110/111/114/112 fragment buffers/offset/textures/samplers -> recorded and counted as "partial": not bound (the pipeline layouts the
  *       existing builder produces for stage-in pipelines have no descriptor sets)
  *   30,34,35,36 pre-pass descriptors -> counted as partial; 32,33 and every other tag -> counted as unsupported.
- * Objects (buffers, 2D colour textures, pipelines) come from the (task, ref) table of arm64_objects.h.
+ * Pipelines come from the (task, ref) table of arm64_objects.h; buffers and textures (render targets included) are the resource mirror objects of arm64_resources.h, shared with Blit.
  */
 #ifndef LAGFX_PROTOCOL_ARM64_EXEC_RUN_H
 #define LAGFX_PROTOCOL_ARM64_EXEC_RUN_H
@@ -49,14 +49,20 @@ typedef bool (*lagfx_a64_pipeline_resolver_t)(void *ctx, lagfx_protocol_t *p, co
 /* Installs the resolver (creates the exec state if needed). NULL = every pipeline is unresolved: draws are skipped and counted. */
 void lagfx_a64_exec_set_pipeline_resolver(lagfx_protocol_t *p, lagfx_a64_pipeline_resolver_t fn, void *ctx);
 
-/* Per-exec bracket, called by the decoder. begin: touches the resources (creating their objects, refreshing buffers the guest changed).
- * segment: one buffer's segment (every type; only type 0 is executed). end: ends an open pass, submits, waits, releases deferred objects. */
-void lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const uint8_t *res, uint32_t nres);
+/* Per-exec bracket, called by the decoder. ONE exec context and ONE command buffer per exec, owned by the resource mirror (arm64_resources.h):
+ * begin: applies the resource-flag rules through the mirror (upload only for flag 0x01 / first use, never over a stale GPU result); returns false when nothing
+ *   executes (and, if the GPU is still on the previous exec, marks the command's stamp failed).
+ * segment: one buffer's segment: Render (type 0) and Blit (type 2) both record into that command buffer; the render target / textures / buffers are the
+ *   mirror objects the blits use, with layout + memory barriers between a Render pass and a following Blit and back.
+ * end: ends an open pass, submits ONCE, waits bounded. DONE -> flag-0x04 write-backs to the guest pages are done. PENDING -> the fence has not signalled:
+ *   NOT failed, every object stays alive, and the command's stamp is queued behind it in the completion queue (arm64_completion.h) so it completes only
+ *   after lagfx_a64_res_poll reported DONE. FAILED (before submit) -> the stamp completes as failed. */
+bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const uint8_t *res, uint32_t nres);
 void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const uint8_t *buf, uint32_t avail, uint64_t len, const lagfx_exec_seg_t *seg);
 typedef enum {
     LAGFX_A64_EXEC_NONE = 0,   /* nothing was recorded (no Render pass with a target) */
     LAGFX_A64_EXEC_DONE,       /* submitted and the fence signalled within LAGFX_GPU_WAIT_MS */
-    LAGFX_A64_EXEC_PENDING,    /* submitted, fence NOT yet signalled: still running, not failed. Everything it uses stays alive until lagfx_a64_exec_poll reaps it */
+    LAGFX_A64_EXEC_PENDING,    /* submitted, fence NOT yet signalled: still running, not failed. Everything it uses stays alive until the fence signalled (lagfx_a64_exec_poll / the completion queue) */
     LAGFX_A64_EXEC_FAILED      /* failed before the work reached the queue (record / submit error) */
 } lagfx_a64_exec_status_t;
 lagfx_a64_exec_status_t lagfx_a64_exec_end(lagfx_protocol_t *p);
