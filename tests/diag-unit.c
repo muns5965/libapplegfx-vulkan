@@ -65,20 +65,21 @@ int main(void) {
     assert(t && t->root_page_pfn == 0x2000 && t->lists_set && t->objects_addr == 0x11);
     assert(file_lines(path, "REDEFINED old_root_pfn=0x1000 new_root_pfn=0x2000") == 1);
 
-    free(p); remove(path); close(fd);
-    puts("diag-unit OK");
     /* idle guest: no MMIO at all, only the timer tick -> the 10 s statistics line still appears; the final one is printed at teardown */
     {
-        long before = file_lines(path, "g7-gpu: t=");
+        long nb = file_lines(path, "g7-gpu: t=");
         lagfx_diag_tick(p);   /* not due yet */
-        assert(file_lines(path, "g7-gpu: t=") == before);
+        assert(file_lines(path, "g7-gpu: t=") == nb);
         p->diag2.last_stats_ns -= 11ull * 1000000000ull;
         lagfx_diag_tick(p);
-        assert(file_lines(path, "g7-gpu: t=") == before + 1);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 1);
         lagfx_diag_tick(p);   /* once per interval, however many callers */
-        assert(file_lines(path, "g7-gpu: t=") == before + 1);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 1);
         lagfx_diag_final(p);
-        assert(file_lines(path, "g7-gpu: t=") == before + 2 && file_lines(path, "g7-gpu-final:") == 1);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 2 && file_lines(path, "g7-gpu-final:") == 1);
     }
+
+    free(p); remove(path); close(fd);
+    puts("diag-unit OK");
     return 0;
 }
