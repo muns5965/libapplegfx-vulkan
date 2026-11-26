@@ -3720,11 +3720,21 @@ static const struct {
     {"air.fmax3.",         LAGFX_SPV_GLSL_FMAX,         3 | IXF_3WAY},
     {"air.fmin3.",         LAGFX_SPV_GLSL_FMIN,         3 | IXF_3WAY},
     /* Plain (non fast_/precise_) float math: Metal emits these for half operands and for precise math, e.g. air.fmax.f16 / air.clamp.v3f16 / air.fabs.v2f16.
-     * IXF_FLOATSFX: only when the type suffix is a float type (f16/f32/vNf16/vNf32) -- the integer forms are air.max.s.i32 / air.clamp.u.i32. */
+     * IXF_FLOATSFX: only when the type suffix is a float type (f16/f32/vNf16/vNf32) -- the integer forms are air.max.s.i32 / air.clamp.u.i32 (own rows below). */
     {"air.fmax.",          LAGFX_SPV_GLSL_FMAX,         2 | IXF_FLOATSFX},
     {"air.fmin.",          LAGFX_SPV_GLSL_FMIN,         2 | IXF_FLOATSFX},
     {"air.clamp.",         LAGFX_SPV_GLSL_FCLAMP,       3 | IXF_FLOATSFX},
     {"air.fabs.",          LAGFX_SPV_GLSL_FABS,         1 | IXF_FLOATSFX},
+    /* Integer forms: air.<op>.s.<ty> / air.<op>.u.<ty> (sign marker before the type; intrinsic.go of the MIT project vertex-language/air, @3d277d16858a, builds
+     * the names as "air."+op+"."+{s|u}+"."+type; none occurs in the device dumps of runs 231501 / 230109). Plain GLSL.std.450 SMin/UMin/SMax/UMax/SClamp/UClamp/SAbs.
+     * air.abs.s may carry a trailing i1 operand (is-int-min-poison flavour); only operand 0 is consumed (num_args), the flag changes nothing for a defined input. */
+    {"air.min.s.",         LAGFX_SPV_GLSL_SMIN,         2},
+    {"air.min.u.",         LAGFX_SPV_GLSL_UMIN,         2},
+    {"air.max.s.",         LAGFX_SPV_GLSL_SMAX,         2},
+    {"air.max.u.",         LAGFX_SPV_GLSL_UMAX,         2},
+    {"air.clamp.s.",       LAGFX_SPV_GLSL_SCLAMP,       3},
+    {"air.clamp.u.",       LAGFX_SPV_GLSL_UCLAMP,       3},
+    {"air.abs.s.",         LAGFX_SPV_GLSL_SABS,         1},
     {"air.sqrt.",          LAGFX_SPV_GLSL_SQRT,         1 | IXF_FLOATSFX},
     {"air.rsqrt.",         LAGFX_SPV_GLSL_INVERSE_SQRT, 1 | IXF_FLOATSFX},
     {"air.fract.",         LAGFX_SPV_GLSL_FRACT,        1 | IXF_FLOATSFX},

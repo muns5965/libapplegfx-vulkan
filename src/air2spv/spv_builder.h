@@ -295,6 +295,7 @@ enum {
 enum {
     LAGFX_SPV_GLSL_ROUND                = 1,
     LAGFX_SPV_GLSL_FABS                 = 4,
+    LAGFX_SPV_GLSL_SABS                 = 5,    /* GLSLstd450SAbs */
     LAGFX_SPV_GLSL_FLOOR                = 8,
     LAGFX_SPV_GLSL_CEIL                 = 9,
     LAGFX_SPV_GLSL_FRACT                = 10,
@@ -306,8 +307,14 @@ enum {
     LAGFX_SPV_GLSL_SQRT                 = 31,
     LAGFX_SPV_GLSL_INVERSE_SQRT         = 32,
     LAGFX_SPV_GLSL_FMIN                 = 37,
+    LAGFX_SPV_GLSL_UMIN                 = 38,   /* GLSLstd450UMin */
+    LAGFX_SPV_GLSL_SMIN                 = 39,   /* GLSLstd450SMin */
     LAGFX_SPV_GLSL_FMAX                 = 40,
+    LAGFX_SPV_GLSL_UMAX                 = 41,   /* GLSLstd450UMax */
+    LAGFX_SPV_GLSL_SMAX                 = 42,   /* GLSLstd450SMax */
     LAGFX_SPV_GLSL_FCLAMP               = 43,
+    LAGFX_SPV_GLSL_UCLAMP               = 44,   /* GLSLstd450UClamp */
+    LAGFX_SPV_GLSL_SCLAMP               = 45,   /* GLSLstd450SClamp */
     LAGFX_SPV_GLSL_FMIX                 = 46,
     LAGFX_SPV_GLSL_STEP                 = 48,
     LAGFX_SPV_GLSL_SMOOTH_STEP          = 49,
