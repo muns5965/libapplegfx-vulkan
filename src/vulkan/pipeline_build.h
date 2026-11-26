@@ -119,7 +119,8 @@ typedef struct {
  * @param desc    populated descriptor; both shader modules required
  * @param out_pipeline  receives the new VkPipeline on success
  * @return LAGFX_OK on success; LAGFX_ERR_INVALID_ARG on NULL inputs;
- *         LAGFX_ERR_BACKEND on Vulkan failures.
+ *         LAGFX_ERR_BACKEND on Vulkan failures;
+ *         LAGFX_ERR_PROTOCOL when a decoded vertex attribute has an unsupported Metal vertex format.
  */
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
@@ -135,6 +136,15 @@ int32_t lagfx_pipeline_build_last_result(void);
 uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n);
 
 VkFormat lagfx_pso_vertex_format_to_vk(uint32_t mtl_vertex_format);   /* VK_FORMAT_UNDEFINED = not handled */
+
+#ifdef LAGFX_HAVE_VULKAN
+#include <stdbool.h>
+/* Vertex-input state of desc (n_vtx_inputs > 0): binding 0 into *vbind, up to 8 attributes into vattr, their count into *out_n. Returns false (and the index of the first
+ * attribute in *bad_attr) when a decoded PSO attribute has a Metal vertex format that is not in the table; that attribute's format is VK_FORMAT_UNDEFINED, the others
+ * are filled normally. lagfx_pipeline_build() fails the pipeline with LAGFX_ERR_PROTOCOL in that case. */
+bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
+                                 VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr);
+#endif
 
 #ifdef __cplusplus
 }

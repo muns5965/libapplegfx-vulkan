@@ -148,6 +148,65 @@ VkFormat lagfx_pso_vertex_format_to_vk(uint32_t f) {
     }
 }
 
+/* Vertex-input state for desc (n_vtx_inputs > 0). Returns false and sets *bad_attr when the PSO descriptor was decoded for every reflected attribute
+ * (n_pso_attrs >= the attribute count) but attribute *bad_attr has a Metal vertex format lagfx_pso_vertex_format_to_vk does not know: that attribute gets
+ * VK_FORMAT_UNDEFINED in vattr[] and is NOT given a guessed format; every other attribute keeps its own PSO format and offset. With no decoded PSO
+ * attributes (n_pso_attrs < count) the reflected float tight-pack is used for all of them, as before. */
+bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
+                                 VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr) {
+    uint32_t nvi = desc->n_vtx_inputs > 8u ? 8u : desc->n_vtx_inputs;
+    uint32_t off = 0u;
+    bool ok = true;
+    bool use_pso_attrs = desc->n_pso_attrs >= nvi;
+    for (uint32_t a = 0; a < nvi; a++) {
+        uint32_t c = desc->vtx_in_comp[a]; if (c < 1u) c = 1u; if (c > 4u) c = 4u;
+        VkFormat fmt = (c == 1u) ? VK_FORMAT_R32_SFLOAT :
+                       (c == 2u) ? VK_FORMAT_R32G32_SFLOAT :
+                       (c == 3u) ? VK_FORMAT_R32G32B32_SFLOAT :
+                                   VK_FORMAT_R32G32B32A32_SFLOAT;
+        uint32_t aoff = off;
+        if (use_pso_attrs) {
+            aoff = desc->pso_attr_off[a];
+            fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);
+            if (fmt == VK_FORMAT_UNDEFINED && ok) { ok = false; if (bad_attr) *bad_attr = a; }
+        }
+        vattr[a] = (VkVertexInputAttributeDescription){
+            .location = desc->vtx_in_loc[a], .binding = 0u, .format = fmt, .offset = aoff,
+        };
+        off += c * 4u;
+    }
+    /* Vertex stride, in priority order:
+     *  1. desc->vtx_stride — the REAL stride decoded from the PSO's serialized
+     *     MTLVertexDescriptor (lagfx_parse_pso_vertex_stride). Authoritative
+     *     and per-pipeline (CoreAnimation composites = 48, fullscreen quad = 24).
+     *  2. LAGFX_VTX_STRIDE env override (diagnostic / global probe).
+     *  3. round8(sum of attr sizes) — the legacy heuristic; correct only when
+     *     there is no trailing padding, and WRONG for the CA composites (tight
+     *     sum rounds to 24 while the real stride is 48 → every other vertex
+     *     misread → horizontal-band smear). Fallback of last resort. */
+    uint32_t stride = (off + 7u) & ~7u;
+    /* The decoded PSO stride is AUTHORITATIVE whenever present and sane.
+     * lldb ground truth (GOAL-M2x, 2026-07-21, WindowServer
+     * PGSerializerRenderCommandEncoder): the indexed-quad composite draws
+     * (0x23/0x28/0x2c) bind a 48-byte-stride pool buffer — float4
+     * SCREEN-SPACE pos@0 (w=1), float2 normalized texcoord@16, rgba8
+     * color@32 — while the shader reflects only 2 attrs (extent 32). The
+     * former "+8 B of the reflected extent" clamp rejected the real 48 →
+     * stride 32 → v0 correct, v1/v2 read from attr padding → the
+     * degenerate (v1==v2) triangles. The reflected extent is the shader's
+     * VIEW of the vertex, not the buffer stride; only the PSO's serialized
+     * MTLVertexDescriptor knows the buffer layout. */
+    if (desc->vtx_stride >= off && desc->vtx_stride <= 256u)
+        stride = desc->vtx_stride;
+    const char *vs = getenv("LAGFX_VTX_STRIDE");
+    if (vs) { unsigned long s = strtoul(vs, NULL, 0); if (s >= off && s <= 256u) stride = (uint32_t)s; }
+    *vbind = (VkVertexInputBindingDescription){
+        .binding = 0u, .stride = stride, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
+    };
+    *out_n = nvi;
+    return ok;
+}
+
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
@@ -170,77 +229,29 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
      * (= 0 = degenerate = black). Gated by the caller setting n_vtx_inputs. */
     VkVertexInputBindingDescription   vbind = {0};
     VkVertexInputAttributeDescription vattr[8];
+    uint32_t nvi_out = 0u;
     VkPipelineVertexInputStateCreateInfo vin = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO,
     };
     if (desc->n_vtx_inputs > 0u) {
-        uint32_t nvi = desc->n_vtx_inputs > 8u ? 8u : desc->n_vtx_inputs;
-        uint32_t off = 0u;
-        /* GOAL-M2z: PSO-decoded attribute formats+offsets are authoritative
-         * when present for every reflected attr (matched by order — both are
-         * offset/location ordered). MTLVertexFormat -> VkFormat for the
-         * observed set; unknown formats fall back to the reflected SFLOAT
-         * tight-pack (and log, gated). The killer this fixes: fmt 9
-         * (UChar4Normalized rgba8 color @32) was bound R32G32B32A32_SFLOAT ->
-         * NaN color/alpha -> invisible panel fills. */
-        bool use_pso_attrs = desc->n_pso_attrs >= nvi;
-        for (uint32_t a = 0; use_pso_attrs && a < nvi; a++) {
-            if (lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]) == VK_FORMAT_UNDEFINED) use_pso_attrs = false;
+        uint32_t bad_attr = 0u;
+        if (!lagfx_pipeline_vertex_input(desc, &vbind, vattr, &nvi_out, &bad_attr)) {
+            /* Hardening (P06): an attribute whose MTLVertexFormat is not in the table is an explicit error for THIS pipeline. It is not re-interpreted
+             * (no guess at the Apple GPU's reading of the format) and the other attributes are not re-packed as float either. Callers already treat a
+             * non-OK status as "this PSO is unusable": the arm64 path caches the failure and skips its draws, the x86 path skips the draw. */
+            if (!g_quiet) LAGFX_WARN("pipeline-build: vertex attribute %u has unsupported Metal vertex format %u; pipeline not built", bad_attr, (unsigned)desc->pso_attr_fmt[bad_attr]);
+            return LAGFX_ERR_PROTOCOL;
         }
-        for (uint32_t a = 0; a < nvi; a++) {
-            uint32_t c = desc->vtx_in_comp[a]; if (c < 1u) c = 1u; if (c > 4u) c = 4u;
-            VkFormat fmt = (c == 1u) ? VK_FORMAT_R32_SFLOAT :
-                           (c == 2u) ? VK_FORMAT_R32G32_SFLOAT :
-                           (c == 3u) ? VK_FORMAT_R32G32B32_SFLOAT :
-                                       VK_FORMAT_R32G32B32A32_SFLOAT;
-            uint32_t aoff = off;
-            if (use_pso_attrs) {
-                aoff = desc->pso_attr_off[a];
-                fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);   /* the gate above guarantees a known format */
-            }
-            vattr[a] = (VkVertexInputAttributeDescription){
-                .location = desc->vtx_in_loc[a], .binding = 0u, .format = fmt, .offset = aoff,
-            };
-            off += c * 4u;
-        }
-        /* Vertex stride, in priority order:
-         *  1. desc->vtx_stride — the REAL stride decoded from the PSO's serialized
-         *     MTLVertexDescriptor (lagfx_parse_pso_vertex_stride). Authoritative
-         *     and per-pipeline (CoreAnimation composites = 48, fullscreen quad = 24).
-         *  2. LAGFX_VTX_STRIDE env override (diagnostic / global probe).
-         *  3. round8(sum of attr sizes) — the legacy heuristic; correct only when
-         *     there is no trailing padding, and WRONG for the CA composites (tight
-         *     sum rounds to 24 while the real stride is 48 → every other vertex
-         *     misread → horizontal-band smear). Fallback of last resort. */
-        uint32_t stride = (off + 7u) & ~7u;
-        /* The decoded PSO stride is AUTHORITATIVE whenever present and sane.
-         * lldb ground truth (GOAL-M2x, 2026-07-21, WindowServer
-         * PGSerializerRenderCommandEncoder): the indexed-quad composite draws
-         * (0x23/0x28/0x2c) bind a 48-byte-stride pool buffer — float4
-         * SCREEN-SPACE pos@0 (w=1), float2 normalized texcoord@16, rgba8
-         * color@32 — while the shader reflects only 2 attrs (extent 32). The
-         * former "+8 B of the reflected extent" clamp rejected the real 48 →
-         * stride 32 → v0 correct, v1/v2 read from attr padding → the
-         * degenerate (v1==v2) triangles. The reflected extent is the shader's
-         * VIEW of the vertex, not the buffer stride; only the PSO's serialized
-         * MTLVertexDescriptor knows the buffer layout. */
-        if (desc->vtx_stride >= off && desc->vtx_stride <= 256u)
-            stride = desc->vtx_stride;
-        const char *vs = getenv("LAGFX_VTX_STRIDE");
-        if (vs) { unsigned long s = strtoul(vs, NULL, 0); if (s >= off && s <= 256u) stride = (uint32_t)s; }
-        vbind = (VkVertexInputBindingDescription){
-            .binding = 0u, .stride = stride, .inputRate = VK_VERTEX_INPUT_RATE_VERTEX,
-        };
         vin.vertexBindingDescriptionCount   = 1u;
         vin.pVertexBindingDescriptions      = &vbind;
-        vin.vertexAttributeDescriptionCount = nvi;
+        vin.vertexAttributeDescriptionCount = nvi_out;
         vin.pVertexAttributeDescriptions    = vattr;
         if (getenv("LAGFX_DUMP_SPV")) {
             char ab[128]; size_t an = 0;
-            for (uint32_t a = 0; a < nvi && an + 24 < sizeof(ab); a++)
+            for (uint32_t a = 0; a < nvi_out && an + 24 < sizeof(ab); a++)
                 an += (size_t)snprintf(ab+an, sizeof(ab)-an, "loc%u:c%u@%u ",
                                        vattr[a].location, desc->vtx_in_comp[a], vattr[a].offset);
-            LAGFX_LOG("VTXINPUT n=%u stride=%u attrs: %s", nvi, stride, ab);
+            LAGFX_LOG("VTXINPUT n=%u stride=%u attrs: %s", nvi_out, vbind.stride, ab);
         }
     }
 
