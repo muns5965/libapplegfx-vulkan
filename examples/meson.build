@@ -72,3 +72,11 @@ if vulkan_dep.found()
     build_by_default : true,
   )
 endif
+
+# dump-translate — re-translates the metallib blobs of an arm64 dump with the current translator (check fixes with spirv-val against real guest shaders).
+executable('dump-translate',
+  'dump-translate.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

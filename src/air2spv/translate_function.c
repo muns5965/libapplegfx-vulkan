@@ -2976,6 +2976,24 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
     return true;
 }
 
+/* The colour member (field 0) of a texture sample / read result struct { vecN T, i8 }: the sample itself yields float32 (images are float-sampled), so when the
+ * AIR result says half (air.sample_texture_2d.v4f16 ...) the colour is converted with OpFConvert. Without it OpCompositeConstruct got a v4float for a v4half member
+ * (spirv-val: "Expected Constituent type to be equal to the corresponding member type"). Returns rgba itself when no conversion is needed. */
+static uint32_t sample_colour_for_struct(xlate_ctx_t *c, uint32_t rgba_f32, uint32_t struct_air_ty) {
+    uint32_t n_t = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_t);
+    if (struct_air_ty >= n_t || (ts[struct_air_ty].kind != LAGFX_AIR_TYPE_STRUCT_ANON && ts[struct_air_ty].kind != LAGFX_AIR_TYPE_STRUCT_NAMED) || ts[struct_air_ty].num_op < 2u) return rgba_f32;
+    uint32_t f0 = ts[struct_air_ty].op[1];
+    if (f0 >= n_t || ts[f0].kind != LAGFX_AIR_TYPE_VECTOR || ts[f0].num_op < 2u) return rgba_f32;
+    uint32_t e = ts[f0].op[1];
+    if (e >= n_t || ts[e].kind != LAGFX_AIR_TYPE_HALF || ts[f0].op[0] != 4u) return rgba_f32;
+    uint32_t v4h = emit_air_type(c, f0);
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { v4h, id, rgba_f32 };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o, 3);
+    return id;
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -3291,6 +3309,25 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 cond_fallback);
             uint32_t one = emit_const_float32(c, 1.0f);
             uint32_t zero = emit_const_float32(c, 0.0f);
+            {   /* half destination (scalar or vector element): the 1.0/0.0
+                 * constituents must be half too (spirv-val: CompositeConstruct
+                 * constituents must match the result component type). */
+                uint32_t nt0 = 0;
+                const lagfx_air_type_t *t0 = lagfx_air_module_types(c->m, &nt0);
+                uint32_t el = result_ty_air;
+                if (el < nt0 && t0[el].kind == LAGFX_AIR_TYPE_VECTOR &&
+                    t0[el].num_op >= 2u) el = t0[el].op[1];
+                if (el < nt0 && t0[el].kind == LAGFX_AIR_TYPE_HALF) {
+                    uint32_t ht = emit_type_half(c);
+                    uint32_t o1 = lagfx_spv_builder_alloc_id(c->b);
+                    uint32_t o0 = lagfx_spv_builder_alloc_id(c->b);
+                    uint32_t a1[] = { ht, o1, one };
+                    uint32_t a0[] = { ht, o0, zero };
+                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, a1, 3);
+                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, a0, 3);
+                    one = o1; zero = o0;
+                }
+            }
             /* If the destination is a float vector, the OpSelect needs the
              * 1.0/0.0 (and the condition) broadcast to that width. */
             uint32_t n_types = 0;
@@ -3552,7 +3589,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 if (!res) res = lagfx_spv_builder_alloc_id(c->b);
                 if (struct_spv) {
                     uint32_t status = emit_undef(c, emit_type_int_w(c, 8u, 0u));
-                    uint32_t o[] = { struct_spv, res, rgba, status };
+                    uint32_t colour = sample_colour_for_struct(c, rgba, result_ty_air);
+                    uint32_t o[] = { struct_spv, res, colour, status };
                     lagfx_spv_builder_emit_op(c->b,
                         LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 4);
                     bind_value_spv(c, result_value_id, res);
@@ -3614,7 +3652,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 if (!res) res = lagfx_spv_builder_alloc_id(c->b);
                 if (struct_spv) {
                     uint32_t status = emit_undef(c, emit_type_int_w(c, 8u, 0u));
-                    uint32_t o[] = { struct_spv, res, rgba, status };
+                    uint32_t colour = sample_colour_for_struct(c, rgba, result_ty_air);
+                    uint32_t o[] = { struct_spv, res, colour, status };
                     lagfx_spv_builder_emit_op(c->b,
                         LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 4);
                     bind_value_spv(c, result_value_id, res);
@@ -3671,11 +3710,37 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                                              next_val_id);
             uint32_t a_spv = resolve_or_undef(c, a_id, rt);
             uint32_t rid = lagfx_spv_builder_alloc_id(c->b);
-            uint32_t o[] = { rt, rid, a_spv };
-            lagfx_spv_builder_emit_op(c->b,
-                fn_name[4] == 'f' ? LAGFX_SPV_OP_FWIDTH
-                : fn_name[7] == 'x' ? LAGFX_SPV_OP_DPDX : LAGFX_SPV_OP_DPDY,
-                o, 3);
+            /* Derivatives require 32-bit float operands (spirv-val "Result
+             * type component width must be 32 bits"): a half operand is
+             * widened, differentiated, and narrowed back. */
+            uint32_t nt = 0;
+            const lagfx_air_type_t *dts = lagfx_air_module_types(c->m, &nt);
+            bool dhalf = false; uint32_t dlanes = 1u;
+            if (result_ty_air < nt) {
+                const lagfx_air_type_t *t = &dts[result_ty_air];
+                if (t->kind == LAGFX_AIR_TYPE_HALF) dhalf = true;
+                else if (t->kind == LAGFX_AIR_TYPE_VECTOR && t->num_op >= 2u &&
+                         t->op[1] < nt && dts[t->op[1]].kind == LAGFX_AIR_TYPE_HALF) {
+                    dhalf = true; dlanes = t->op[0];
+                }
+            }
+            uint32_t dop = fn_name[4] == 'f' ? LAGFX_SPV_OP_FWIDTH
+                : fn_name[7] == 'x' ? LAGFX_SPV_OP_DPDX : LAGFX_SPV_OP_DPDY;
+            if (dhalf) {
+                uint32_t ft = dlanes > 1u ? emit_type_vec(c, emit_type_float32(c), dlanes)
+                                          : emit_type_float32(c);
+                uint32_t wid = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t did = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t o1[] = { ft, wid, a_spv };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o1, 3);
+                uint32_t o2[] = { ft, did, wid };
+                lagfx_spv_builder_emit_op(c->b, dop, o2, 3);
+                uint32_t o3[] = { rt, rid, did };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_F_CONVERT, o3, 3);
+            } else {
+                uint32_t o[] = { rt, rid, a_spv };
+                lagfx_spv_builder_emit_op(c->b, dop, o, 3);
+            }
             bind_value_spv(c, result_value_id, rid);
             set_result_air_type(c, result_value_id, result_ty_air);
             set_value_spv_type(c, result_value_id, rt);
@@ -4048,19 +4113,21 @@ static void emit_inst_load(xlate_ctx_t *c, uint32_t inst_idx,
  * Returns LAGFX_AIR_TYPE_NONE if the module declares no such type. Used to
  * give shuffle/other results a concrete vector AIR type so downstream
  * BINOP/etc. result-type inference doesn't default to vec4. */
-static uint32_t find_air_float_vec_type(xlate_ctx_t *c, uint32_t lanes) {
+static uint32_t find_air_vec_type_k(xlate_ctx_t *c, uint32_t lanes, int want_half) {
     uint32_t n_types = 0;
     const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
     for (uint32_t i = 0; i < n_types; i++) {
         if (ts[i].kind == LAGFX_AIR_TYPE_VECTOR && ts[i].num_op >= 2u
             && ts[i].op[0] == lanes) {
             uint32_t elem = ts[i].op[1];
-            if (elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_FLOAT)
+            if (elem < n_types && ts[elem].kind == (want_half ? LAGFX_AIR_TYPE_HALF : LAGFX_AIR_TYPE_FLOAT))
                 return i;
         }
     }
     return LAGFX_AIR_TYPE_NONE;
 }
+
+static uint32_t find_air_float_vec_type(xlate_ctx_t *c, uint32_t lanes) { return find_air_vec_type_k(c, lanes, 0); }
 
 static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
                                    const lagfx_air_inst_t *inst,
@@ -4099,6 +4166,27 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
      * to vec4 undef instead. */
     if (v1_spv == vec2_f_undef) v1_spv = vec4_f_undef;
     if (v2_spv == vec2_f_undef) v2_spv = vec4_f_undef;
+
+    /* A HALF source vector (the <4 x half> of a half texture sample or varying): sources AND result are half vectors. The float-only typing made
+     * `OpVectorShuffle %v3float <half4> ...` (spirv-val: "Component Type of Vector 1 must be the same as ResultType"). Both sources take the first
+     * operand's type; an operand of another type becomes an undef of it. */
+    bool src_half = false;
+    {
+        uint32_t n_t = 0;
+        const lagfx_air_type_t *tys = lagfx_air_module_types(c->m, &n_t);
+        uint32_t t1 = value_air_type_idx(c, v1_id);
+        if (t1 < n_t && tys[t1].kind == LAGFX_AIR_TYPE_VECTOR && tys[t1].num_op >= 2u) {
+            uint32_t e = tys[t1].op[1];
+            uint32_t lanes = tys[t1].op[0];
+            if (e < n_t && tys[e].kind == LAGFX_AIR_TYPE_HALF && lanes >= 2u && lanes <= 4u) {
+                uint32_t srcvec = emit_type_vec(c, emit_type_half(c), lanes);
+                src_half = true;
+                uint32_t t2 = value_air_type_idx(c, v2_id);
+                v1_spv = resolve_or_undef(c, v1_id, srcvec);
+                v2_spv = (t2 == t1) ? resolve_or_undef(c, v2_id, srcvec) : emit_undef(c, srcvec);
+            }
+        }
+    }
 
     /* Resolve the mask vector via the function-local AGGREGATE
      * constants. Each AGGREGATE's payload is a u32 array of value-ids
@@ -4176,6 +4264,7 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
     uint32_t result_ty = (shuf_n == 2u) ? vec2_f
                        : (shuf_n == 3u) ? emit_type_vec3_f(c)
                        : vec4_f;
+    if (src_half) result_ty = emit_type_vec(c, emit_type_half(c), shuf_n);
     uint32_t result_id = lagfx_spv_builder_alloc_id(c->b);
     uint32_t ops[8] = {
         result_ty, result_id, v1_spv, v2_spv,
@@ -4186,7 +4275,7 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
     /* Record the result's vector AIR type (float vecN) so a downstream
      * BINOP (e.g. the `v3 * splat` in normalize()) infers the right result
      * width instead of defaulting to vec4. */
-    set_result_air_type(c, result_value_id, find_air_float_vec_type(c, shuf_n));
+    set_result_air_type(c, result_value_id, src_half ? find_air_vec_type_k(c, shuf_n, 1) : find_air_float_vec_type(c, shuf_n));
 }
 
 static void emit_inst_insertval(xlate_ctx_t *c, uint32_t inst_idx,
@@ -4444,7 +4533,7 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
      * falls back to the RHS operand's type — SPIR-V arithmetic requires
      * BOTH operands to match the result type, and a v4float-default undef
      * next to a resolved scalar float RHS is a spirv-val reject (Xgc). */
-    if (lhs_ty == LAGFX_AIR_TYPE_NONE && !resolve_value_spv(c, lhs_id))
+    if (lhs_ty == LAGFX_AIR_TYPE_NONE)
         lhs_ty = value_air_type_idx(c, rhs_id);
 
     /* Default to float if we can't resolve the LHS type. */
