@@ -455,9 +455,16 @@ LAGFX_EXPORT const char *lagfx_build_info(void);  /* short build/ident string */
 
 #define LAGFX_PIPELINE_REPRO_M13    0x2u   /* run the -13 matrix (rows M0..M10, src/vulkan/pipeline_matrix.h) on the bundle's pair: one log line per row, "pipeline-matrix: row=<id> result=BUILT|FAIL|n/a ...". Default off. */
 
+#define LAGFX_PIPELINE_REPRO_REDUCE  0x4u   /* run the fragment-module reduction ladder (src/vulkan/pipeline_reduce.h): one `pipeline-reduce: row=<id> result=BUILT|FAIL|CRASH|TIMEOUT|INVALID|n/a ...` line per row. Default off. */
+#define LAGFX_PIPELINE_REPRO_ISOLATE 0x8u   /* with REDUCE: every row runs in a forked child that opens its OWN Vulkan instance (the parent never creates one: Vulkan after fork is not safe), 20 s timeout, so a compiler crash costs one row. */
+
 typedef struct {
-    uint32_t struct_size;   /* sizeof(lagfx_pipeline_repro_opts_t); 0 = defaults */
+    uint32_t struct_size;   /* sizeof(lagfx_pipeline_repro_opts_t); 0 = defaults. Older (smaller) sizes stay valid: the fields below are read only when struct_size covers them */
     uint32_t flags;         /* LAGFX_PIPELINE_REPRO_* */
+    const char *reduce_only;   /* REDUCE: comma list of row ids to run (resume / re-run one row) ; NULL = env LAGFX_PIPELINE_REDUCE_ONLY or all */
+    const char *reduce_from;   /* REDUCE: start at this row id (resume) ; NULL = env LAGFX_PIPELINE_REDUCE_FROM */
+    uint32_t reduce_timeout_ms;   /* isolated rows; 0 = 20000 */
+    uint32_t reduce_list_only;    /* 1 = print the static row ids and exit */
 } lagfx_pipeline_repro_opts_t;
 
 typedef struct {

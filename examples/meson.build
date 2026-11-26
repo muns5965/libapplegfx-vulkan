@@ -138,3 +138,11 @@ executable('spv-variant',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# reduce-rows — DRY run of the pipeline-reduce ladder: writes every row's SPIR-V + manifest.tsv (offline spirv-val / hashing of the rows the device builds).
+executable('reduce-rows',
+  'reduce-rows.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

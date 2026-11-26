@@ -1838,6 +1838,16 @@ pipeline_matrix_test = executable('pipeline-matrix-unit',
 )
 test('pipeline -13 matrix (unit, lavapipe)', pipeline_matrix_test)
 
+# The fragment-module reduction ladder (opt-in diagnostics): rows + spirv-val, crash isolation (fork per row), in-process on lavapipe, the LAGFX_PIPELINE_REDUCE hook.
+pipeline_reduce_test = executable('pipeline-reduce-unit',
+  'pipeline-reduce-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('pipeline reduction ladder (unit, lavapipe)', pipeline_reduce_test, timeout : 300)
+
 # Constexpr sampler extraction (AIR global -> i64 word -> decoded state).
 if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
   constexpr_sampler_test = executable('air2spv-constexpr-sampler-unit',

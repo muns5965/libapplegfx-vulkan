@@ -5,6 +5,7 @@
 #include "common/policy.h"
 #ifdef LAGFX_HAVE_VULKAN
 #include "pipeline_matrix.h"
+#include "pipeline_reduce.h"
 #endif
 
 #include <stdint.h>
@@ -210,7 +211,7 @@ bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInpu
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
-    if (!device || !desc || !desc->vertex_shader || !desc->fragment_shader
+    if (!device || !desc || !desc->vertex_shader || (!desc->fragment_shader && !desc->diag_no_fragment)
         || !out_pipeline) {
         return LAGFX_ERR_INVALID_ARG;
     }
@@ -427,10 +428,12 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     };
 
     /* Graphics pipeline create info */
+    if (desc->diag_no_fragment) rsst.rasterizerDiscardEnable = VK_TRUE;   /* DIAGNOSTIC (pipeline-reduce): vertex-only pipeline */
     VkGraphicsPipelineCreateInfo gpci = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
+        .flags = desc->diag_create_flags,
         .pNext = desc->diag_render_pass ? NULL : &rendering_info,
-        .stageCount = 2,
+        .stageCount = desc->diag_no_fragment ? 1u : 2u,   /* diag_no_fragment: DIAGNOSTIC, vertex-only pipeline */
         .pStages = stages,
         .pVertexInputState = &vin,
         .pInputAssemblyState = &ia,
@@ -460,6 +463,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
             lagfx_pipeline_bundle_write(desc, vr, local, NULL, 0);
         }
         lagfx_pipeline_matrix_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_MATRIX, default off: a no-op that returns at once */
+        lagfx_pipeline_reduce_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_REDUCE, default off: a no-op that returns at once */
         return LAGFX_ERR_BACKEND;
     }
 
