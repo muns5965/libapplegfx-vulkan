@@ -76,6 +76,31 @@ lagfx_status_t lagfx_air2spv_translate_function(
     uint8_t                 **out_blob,
     size_t                   *out_size_bytes);
 
+/* Stage-interface keys. Metal links a vertex output to a fragment input BY
+ * NAME ("generated(10texcoord0ADv2_f)", "air.position", ...), not by
+ * position. `key[i]` is the key of the i-th vertex-output struct member (for
+ * a vertex module) or of the i-th function argument (for a fragment module);
+ * "" = no key. */
+#define LAGFX_STAGE_KEYS_MAX 32
+#define LAGFX_STAGE_KEY_LEN  72
+typedef struct {
+    uint32_t n;
+    char     key[LAGFX_STAGE_KEYS_MAX][LAGFX_STAGE_KEY_LEN];
+} lagfx_stage_keys_t;
+
+/* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
+ * Locations follow `vs_out` (the paired vertex module's output keys) via
+ * `own_in` (this module's per-argument keys). Either may be NULL → legacy
+ * sequential locations. */
+lagfx_status_t lagfx_air2spv_translate_function_ex(
+    const lagfx_air_module_t *m,
+    uint32_t                  fn_idx,
+    lagfx_xlate_stage_t       stage,
+    const lagfx_stage_keys_t *own_in,
+    const lagfx_stage_keys_t *vs_out,
+    uint8_t                 **out_blob,
+    size_t                   *out_size_bytes);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

@@ -194,11 +194,12 @@ typedef struct {
 } lib_t;
 
 /* Translates one function (AIR bitcode) with the in-process air2spv translator; also returns its Metal resource map. */
-static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, uint8_t **spv, size_t *sz, lagfx_air_arg_binding_t *ab, size_t *nab) {
+static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, const lagfx_stage_keys_t *vs_keys, lagfx_stage_keys_t *keys_out, uint8_t **spv, size_t *sz, lagfx_air_arg_binding_t *ab, size_t *nab) {
     lagfx_air_module_t *m = NULL;
     *nab = 0;
     if (lagfx_air_module_open(f->bitcode, f->bitcode_len, &m) != LAGFX_OK || !m) { CNTP(p).rf_module++; return false; }
-    lagfx_status_t st = lagfx_air2spv_translate_module(m, spv, sz);
+    if (keys_out && !lagfx_air_stage_keys(m, true, keys_out)) memset(keys_out, 0, sizeof *keys_out);   /* vertex: its output keys, for the paired fragment */
+    lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys */
     if (st == LAGFX_OK && *spv) {
         *nab = lagfx_air_arg_bindings(m, ab, 16);
         if (*nab > 16u) *nab = 16u;
@@ -248,7 +249,9 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     }
     if (!nlib) { CNTP(p).rf_no_lib++; goto done; }
     if (!vf || !ff) { CNTP(p).rf_no_stage++; goto done; }
-    if (!translate(p, vf, &vspv, &vsz, vab, &nvab) || !translate(p, ff, &fspv, &fsz, fab, &nfab)) goto done;
+    lagfx_stage_keys_t vkeys;
+    memset(&vkeys, 0, sizeof vkeys);
+    if (!translate(p, vf, NULL, &vkeys, &vspv, &vsz, vab, &nvab) || !translate(p, ff, &vkeys, NULL, &fspv, &fsz, fab, &nfab)) goto done;
     {   /* device-capability gate: a module that declares a capability the device was not created with must not reach vkCreateShaderModule / a pipeline */
         uint32_t need = lagfx_spv_required_caps(vspv, vsz) | lagfx_spv_required_caps(fspv, fsz);
         uint32_t miss = need & ~vk->caps_enabled;

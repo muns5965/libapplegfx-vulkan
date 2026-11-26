@@ -417,6 +417,8 @@ typedef struct {
      * Xgc login fragment shader). Keyed on (elem type id, lanes). */
     struct { uint32_t elem, lanes, id; } vec_cache[32];
     uint32_t                  n_vec_cache;
+    const lagfx_stage_keys_t *iface_own_in;   /* fragment: per-argument keys */
+    const lagfx_stage_keys_t *iface_vs_out;   /* fragment: paired VS output keys */
 } xlate_ctx_t;
 
 /* Copy the MODULE-scope mutable state between function contexts. Helper
@@ -1769,6 +1771,27 @@ static uint32_t emit_type_arrayed_block_ptr(xlate_ctx_t *c, uint32_t pointee_ty)
  * Prologue
  * =================================================================== */
 
+/* A fragment arg that is Metal's [[position]] (window-space FragCoord) — only
+ * known when the module's per-arg keys were supplied. */
+static bool frag_arg_is_fragcoord(xlate_ctx_t *c, uint32_t i) {
+    const lagfx_stage_keys_t *own = c->iface_own_in;
+    if (!own || i >= own->n || strcmp(own->key[i], "air.position") != 0) return false;
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    uint32_t at = c->arg_air_type_ids[i];
+    return at < nt && ts[at].kind == LAGFX_AIR_TYPE_VECTOR && ts[at].num_op >= 2u &&
+           ts[at].op[0] == 4u && ts[at].op[1] < nt &&
+           ts[ts[at].op[1]].kind == LAGFX_AIR_TYPE_FLOAT;
+}
+
+/* Two [[position]] args share ONE FragCoord variable (SPIR-V allows a single
+ * FragCoord input per entry point): later aliases are not re-declared. */
+static bool input_var_is_dup(const xlate_ctx_t *c, uint32_t i) {
+    for (uint32_t j = 0; j < i; j++)
+        if (c->arg_input_var_ids[j] && c->arg_input_var_ids[j] == c->arg_input_var_ids[i]) return true;
+    return false;
+}
+
 static void emit_prologue(xlate_ctx_t *c) {
     /* 1. OpCapability Shader + Int64 (LLVM/AIR uses i64 for GEP
      *    indices, lifetime sizes, etc.; lavapipe supports shaderInt64
@@ -1935,9 +1958,15 @@ static void emit_prologue(xlate_ctx_t *c) {
         uint32_t n_fa = c->num_args < LAGFX_MAX_VERTEX_ARGS
                             ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
         for (uint32_t i = 0; i < n_fa; i++) {
-            if (vertex_arg_kind(c, i) == LAGFX_VARG_ATTR)
+            if (vertex_arg_kind(c, i) == LAGFX_VARG_ATTR) {
                 c->arg_input_var_ids[i] = lagfx_spv_builder_alloc_id(c->b);
-            else {
+                if (frag_arg_is_fragcoord(c, i))
+                    for (uint32_t j = 0; j < i; j++)
+                        if (c->arg_input_var_ids[j] && frag_arg_is_fragcoord(c, j)) {
+                            c->arg_input_var_ids[i] = c->arg_input_var_ids[j];
+                            break;
+                        }
+            } else {
                 int rk = frag_resource_kind(c, i);
                 /* Skip a buffer whose struct layout we can't model — it
                  * stays unbound (no var, no interface entry) rather than
@@ -1963,7 +1992,7 @@ static void emit_prologue(xlate_ctx_t *c) {
             suffix[n_iface++] = c->id_color_vars[k];
         for (uint32_t i = 0; i < n_fa; i++) {
             /* SPIR-V 1.4: list ALL used globals (Input + UniformConstant). */
-            if (c->arg_input_var_ids[i]) suffix[n_iface++] = c->arg_input_var_ids[i];
+            if (c->arg_input_var_ids[i] && !input_var_is_dup(c, i)) suffix[n_iface++] = c->arg_input_var_ids[i];
             if (c->arg_resource_var[i])  suffix[n_iface++] = c->arg_resource_var[i];
         }
         if (c->id_default_sampler_var) suffix[n_iface++] = c->id_default_sampler_var;
@@ -2022,11 +2051,49 @@ static void emit_prologue(xlate_ctx_t *c) {
         }
         /* OpDecorate each stage-in Input %arg Location N (input Location
          * space is separate from the output color's). */
+        /* With the paired vertex module's output keys, a stage-in argument
+         * takes the Location of the vertex output carrying the SAME Metal
+         * key (that is how Metal links the stages); an argument with no
+         * counterpart gets a Location beyond every vertex output. Without a
+         * pair: the legacy sequential numbering. */
         uint32_t loc = 0u;
+        const lagfx_stage_keys_t *vso = (c->iface_vs_out && c->iface_vs_out->n) ? c->iface_vs_out : NULL;
+        const lagfx_stage_keys_t *own = c->iface_own_in;
+        uint32_t next_free = vso ? vso->n : 0u;
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_input_var_ids[i]) continue;
+            if (input_var_is_dup(c, i)) continue;
+            uint32_t use = loc++;
+            /* A fragment [[position]] is the window-space FragCoord, NOT a
+             * vertex output: BuiltIn FragCoord (no Location). Only for the
+             * float4 case, and only when the pair keys are known. */
+            if (own && i < own->n && strcmp(own->key[i], "air.position") == 0) {
+                uint32_t nt2 = 0;
+                const lagfx_air_type_t *t2 = lagfx_air_module_types(c->m, &nt2);
+                uint32_t at = c->arg_air_type_ids[i];
+                if (at < nt2 && t2[at].kind == LAGFX_AIR_TYPE_VECTOR &&
+                    t2[at].num_op >= 2u && t2[at].op[0] == 4u &&
+                    t2[at].op[1] < nt2 && t2[t2[at].op[1]].kind == LAGFX_AIR_TYPE_FLOAT) {
+                    uint32_t bops[] = { c->arg_input_var_ids[i],
+                                        LAGFX_SPV_DECORATION_BUILTIN,
+                                        LAGFX_SPV_BUILTIN_FRAG_COORD };
+                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, bops, 3);
+                    loc--;
+                    continue;
+                }
+            }
+            if (vso && own && i < own->n && own->key[i][0]) {
+                bool hit = false;
+                for (uint32_t k = 0; k < vso->n; k++)
+                    if (vso->key[k][0] && strcmp(vso->key[k], own->key[i]) == 0) {
+                        use = k; hit = true; break;
+                    }
+                if (!hit) use = next_free++;
+            } else if (vso) {
+                use = next_free++;
+            }
             uint32_t ops[] = { c->arg_input_var_ids[i],
-                                LAGFX_SPV_DECORATION_LOCATION, loc++ };
+                                LAGFX_SPV_DECORATION_LOCATION, use };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
         }
     }
@@ -2196,6 +2263,7 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                             ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
         for (uint32_t i = 0; i < n_fa; i++) {
             if (vertex_arg_kind(c, i) != LAGFX_VARG_ATTR) continue;
+            if (input_var_is_dup(c, i)) continue;
             uint32_t elem_spv = iface_var_type(c, c->arg_air_type_ids[i],
                                     emit_air_type(c, c->arg_air_type_ids[i]));
             uint32_t ptr_id = lagfx_spv_builder_alloc_id(c->b);
@@ -7906,6 +7974,18 @@ lagfx_air2spv_translate_function(const lagfx_air_module_t *m,
                                   lagfx_xlate_stage_t       stage,
                                   uint8_t                 **out_blob,
                                   size_t                   *out_size_bytes) {
+    return lagfx_air2spv_translate_function_ex(m, fn_idx, stage, NULL, NULL,
+                                               out_blob, out_size_bytes);
+}
+
+lagfx_status_t
+lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
+                                  uint32_t                  fn_idx,
+                                  lagfx_xlate_stage_t       stage,
+                                  const lagfx_stage_keys_t *own_in,
+                                  const lagfx_stage_keys_t *vs_out,
+                                  uint8_t                 **out_blob,
+                                  size_t                   *out_size_bytes) {
     if (!m || !out_blob || !out_size_bytes) return LAGFX_ERR_INVALID_ARG;
     *out_blob = NULL;
     *out_size_bytes = 0u;
@@ -7915,6 +7995,8 @@ lagfx_air2spv_translate_function(const lagfx_air_module_t *m,
     if (!c.b) return LAGFX_ERR_OUT_OF_MEMORY;
     c.m = m;
     c.stage = stage;
+    c.iface_own_in = own_in;
+    c.iface_vs_out = vs_out;
 
     lagfx_status_t st = xlate_ctx_init_fn(&c, fn_idx);
     if (st != LAGFX_OK) goto fail;

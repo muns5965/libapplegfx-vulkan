@@ -34,6 +34,7 @@
 #include "air/bitcode_reader.h"
 #include "libapplegfx-vulkan.h"  /* lagfx_status_t */
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -57,6 +58,22 @@ lagfx_status_t
 lagfx_air2spv_translate_module(const lagfx_air_module_t *m,
                                 uint8_t                 **out_blob,
                                 size_t                   *out_size_bytes);
+
+/* Stage-interface link keys (see translate_function.h). */
+#include "translate_function.h"
+
+/* Fills `out` with the entry point's keys: outputs=true → the vertex output
+ * struct members (in member order), outputs=false → the function arguments.
+ * Returns false when the module has no usable entry-point metadata. */
+bool lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys_t *out);
+
+/* Like lagfx_air2spv_translate_module; for a FRAGMENT module `vs_out` (the
+ * paired vertex module's output keys) drives the stage-in Locations. */
+lagfx_status_t
+lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
+                                  const lagfx_stage_keys_t *vs_out,
+                                  uint8_t                 **out_blob,
+                                  size_t                   *out_size_bytes);
 
 /* One resource argument of the module's entry point, in FUNCTION-ARG ORDER
  * (the same order the translator assigns sequential SPIR-V bindings), with
