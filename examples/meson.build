@@ -130,3 +130,11 @@ executable('pipeline-repro',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# spv-variant — writes one DIAGNOSTIC SPIR-V variant (pipeline repro matrix e..i) of a module to a file.
+executable('spv-variant',
+  'spv-variant.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

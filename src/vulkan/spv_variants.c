@@ -22,6 +22,7 @@ const uint32_t lagfx_stub_fs_spv[32] = {
 #define OP_TYPE_MATRIX 24u
 #define OP_TYPE_ARRAY 28u
 #define OP_TYPE_STRUCT 30u
+#define OP_TYPE_POINTER 32u
 #define OP_CONST_NULL 46u
 #define OP_FUNCTION 54u
 #define OP_FUNCTION_END 56u
@@ -144,7 +145,9 @@ int lagfx_spv_variant_strip_caps(const uint32_t *in, size_t words, uint32_t **ou
     return removed;
 }
 
-int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+/* kinds of OpUndef result type that undef_rewrite() converts: bit 0 = vector / matrix / array, bit 1 = struct, bit 2 = pointer */
+enum { UK_ARRAYLIKE = 1, UK_STRUCT = 2, UK_POINTER = 4 };
+static int undef_rewrite(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap, unsigned kinds, const char *what) {
     if (out) *out = NULL;
     if (!walk_ok(in, words)) return -1;
     uint32_t bound = in[3];
@@ -152,7 +155,10 @@ int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_
     if (!comp) return -1;
     for (size_t w = 5; w < words; w += in[w] >> 16) {
         uint32_t op = in[w] & 0xffffu;
-        if ((op == OP_TYPE_VECTOR || op == OP_TYPE_MATRIX || op == OP_TYPE_ARRAY || op == OP_TYPE_STRUCT) && in[w + 1] < bound) comp[in[w + 1]] = 1;
+        if ((in[w] >> 16) < 2u || in[w + 1] >= bound) continue;
+        if ((op == OP_TYPE_VECTOR || op == OP_TYPE_MATRIX || op == OP_TYPE_ARRAY) && (kinds & UK_ARRAYLIKE)) comp[in[w + 1]] = 1;
+        else if (op == OP_TYPE_STRUCT && (kinds & UK_STRUCT)) comp[in[w + 1]] = 1;
+        else if (op == OP_TYPE_POINTER && (kinds & UK_POINTER)) comp[in[w + 1]] = 1;
     }
     size_t ff = first_function(in, words);
     int changes = 0, inside = 0;
@@ -173,7 +179,7 @@ int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_
     }
     free(comp);
     if (rc < 0) { free(b.w); free(hoist.w); return -1; }
-    if (!changes) { free(b.w); free(hoist.w); if (info && cap) snprintf(info, cap, "no OpUndef of a composite type"); return 0; }
+    if (!changes) { free(b.w); free(hoist.w); if (info && cap) snprintf(info, cap, "no OpUndef of %s", what); return 0; }
     if (hoist.n) {   /* insert before the first OpFunction of the NEW buffer */
         size_t at = first_function(b.w, b.n);
         uint32_t *nw = malloc((b.n + hoist.n) * 4);
@@ -185,6 +191,48 @@ int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_
     size_t hoist_n = hoist.n;
     free(hoist.w);
     *out = b.w, *out_words = b.n;
-    note(info, cap, "%u OpUndef of a composite type replaced by OpConstantNull (%u of them hoisted out of a function)", (unsigned)changes, (unsigned)(hoist_n / 3u));
+    if (info && cap) snprintf(info, cap, "%u OpUndef of %s replaced by OpConstantNull (%u of them hoisted out of a function)", (unsigned)changes, what, (unsigned)(hoist_n / 3u));
     return changes;
+}
+
+/* (g) every composite type */
+int lagfx_spv_variant_undef_composites(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    return undef_rewrite(in, words, out, out_words, info, cap, UK_ARRAYLIKE | UK_STRUCT, "a composite type");
+}
+/* (h) ONLY the struct- and pointer-typed ones (the vector / scalar ones are left alone) */
+int lagfx_spv_variant_undef_struct_ptr(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    return undef_rewrite(in, words, out, out_words, info, cap, UK_STRUCT | UK_POINTER, "a struct or pointer type");
+}
+
+/* (j) ONLY the struct-typed ones (no pointer): with (h) and (i) this separates "pointer-typed OpUndef" from "struct-typed OpUndef" */
+int lagfx_spv_variant_undef_struct(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    return undef_rewrite(in, words, out, out_words, info, cap, UK_STRUCT, "a struct type");
+}
+
+/* (i) drops every OpUndef whose id no other instruction mentions (any word equal to the id counts as a mention, so a literal that collides keeps the OpUndef: conservative).
+ * Value-preserving: nothing consumed those values. */
+int lagfx_spv_variant_drop_dead_undef(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    if (out) *out = NULL;
+    if (!walk_ok(in, words)) return -1;
+    uint32_t bound = in[3];
+    uint8_t *ref = calloc((size_t)bound + 1, 1);
+    if (!ref) return -1;
+    for (size_t w = 5; w < words; w += in[w] >> 16) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        for (uint32_t k = 1; k < wc; k++) if (in[w + k] < bound && !(op == OP_UNDEF && k == 2)) ref[in[w + k]] = 1;
+    }
+    wbuf_t b = { 0 };
+    int dropped = 0, rc = wput(&b, in, 5);
+    for (size_t w = 5; w < words && rc >= 0;) {
+        uint32_t wc = in[w] >> 16, op = in[w] & 0xffffu;
+        if (op == OP_UNDEF && wc == 3 && in[w + 2] < bound && !ref[in[w + 2]]) dropped++;
+        else rc = wput(&b, in + w, wc);
+        w += wc;
+    }
+    free(ref);
+    if (rc < 0) { free(b.w); return -1; }
+    if (!dropped) { free(b.w); if (info && cap) snprintf(info, cap, "no unreferenced OpUndef"); return 0; }
+    *out = b.w, *out_words = b.n;
+    if (info && cap) snprintf(info, cap, "%d unreferenced OpUndef dropped", dropped);
+    return dropped;
 }

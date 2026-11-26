@@ -140,12 +140,15 @@ static void run_matrix(ctx_t *c, const lagfx_pipeline_desc_t *d0, const uint32_t
     variant(c, "d0", "both stages stubbed (does the STATE alone build?)", "DIAGNOSTIC: changes meaning (no real shader)", build_once(c, d0, lagfx_stub_vs_spv, sizeof lagfx_stub_vs_spv, lagfx_stub_fs_spv, sizeof lagfx_stub_fs_spv, "main", "main"), true, NULL);
     variant(c, "d1", "real VERTEX + stub fragment (the VS fails if this fails)", "DIAGNOSTIC: changes meaning (stub stage)", build_once(c, d0, vs, vsn, lagfx_stub_fs_spv, sizeof lagfx_stub_fs_spv, ve, "main"), true, NULL);
     variant(c, "d2", "stub vertex + real FRAGMENT (the FS fails if this fails)", "DIAGNOSTIC: changes meaning (stub stage)", build_once(c, d0, lagfx_stub_vs_spv, sizeof lagfx_stub_vs_spv, fs, fsn, "main", fe), true, NULL);
-    /* (e) (f) (g): rewrites of both modules */
-    struct { const char *id, *what, *tag; int (*fn)(const uint32_t *, size_t, uint32_t **, size_t *, char *, size_t); } rw[3] = {
+    /* (e) .. (i): rewrites of both modules */
+    struct { const char *id, *what, *tag; int (*fn)(const uint32_t *, size_t, uint32_t **, size_t *, char *, size_t); } rw[6] = {
         { "e", "64-bit dynamic vector index -> 32-bit", "DIAGNOSTIC: rewrites instructions, value-preserving for an in-range index", lagfx_spv_variant_index32 },
         { "f", "drop unused Int8/16/Float16/Int64 capability decls", "DIAGNOSTIC: only removes what nothing uses", lagfx_spv_variant_strip_caps },
-        { "g", "OpUndef composites -> OpConstantNull", DIAG_MEANING " (undef -> zero)", lagfx_spv_variant_undef_composites } };
-    for (int i = 0; i < 3; i++) {
+        { "g", "OpUndef composites -> OpConstantNull", DIAG_MEANING " (undef -> zero)", lagfx_spv_variant_undef_composites },
+        { "h", "OpUndef struct / pointer ONLY -> OpConstantNull", DIAG_MEANING " (undef -> zero, struct / pointer typed only)", lagfx_spv_variant_undef_struct_ptr },
+        { "i", "drop unreferenced OpUndef", "DIAGNOSTIC: value-preserving (nothing used them)", lagfx_spv_variant_drop_dead_undef },
+        { "j", "OpUndef struct ONLY -> OpConstantNull", DIAG_MEANING " (undef -> zero, struct typed only)", lagfx_spv_variant_undef_struct } };
+    for (int i = 0; i < 6; i++) {
         uint32_t *vo = NULL, *fo = NULL;
         size_t von = 0, fon = 0;
         char vi[160] = "", fi[160] = "", note[400];
