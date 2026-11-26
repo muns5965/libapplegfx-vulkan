@@ -1854,3 +1854,16 @@ if fs.is_file(meson.current_source_dir() / 'vulkan-sampler-cache-unit.c')
   test('vulkan sampler cache (unit)', sampler_cache_test,
        workdir : meson.current_source_dir() / '..')
 endif
+
+# Fragment [[position]]: BuiltIn FragCoord only with the pair keys (translate_module_ex), Location fallback without. Hand-written fixture.
+if fs.is_file(meson.current_source_dir() / 'air2spv-fragment-position-unit.c')
+  air2spv_fpos_test = executable('air2spv-fragment-position-unit',
+    'air2spv-fragment-position-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv fragment [[position]] binding (unit)', air2spv_fpos_test,
+    workdir : meson.current_source_dir() / '..')
+endif
