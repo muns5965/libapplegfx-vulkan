@@ -140,6 +140,14 @@ typedef struct {
      * the barrier slots, then the arguments. `len` is the header's length. The shell owns the shared display page and the swapped-surface state for these
      * ops. The library still completes the stamp cell and raises the interrupt (raise_interrupt) after the callback returns, as for every command. NULL: the ops are logged and ignored. */
     void (*display_command)(void *opaque, uint32_t chan_id, const uint8_t *cmd, uint32_t len);
+
+    /* OPTIONAL, protocol_mode == LAGFX_PROTO_ARM64_VMAPPLE with LAGFX_ARM64_EXEC=1 only. Copies the shell's surface descriptor for `mapping_id` (the id a type-11
+     * "mapped texture" object names; the shell learned the descriptor from the Display set-page op, see display_command) into `out` (`cap` bytes) and stores
+     * the number of bytes copied in *len_out. The descriptor must be at least 0x70 bytes: +0 u32 page list (bit 0 present, pfn << 12), +4 u32 fourcc, +0x18 u64 alloc,
+     * +0x20 u64 width, +0x28 u64 height, +0x30 u64 row bytes, +0x3e u8 (>= 2: IOSurface backed), +0x60 u32 first-page byte offset (see vulkan/surface_writeback.h).
+     * Returns true on success, false if the id is unknown (the texture is then unusable and counted, never fatal). Called on the exec thread; must not re-enter
+     * the library. NULL: mapped textures are unsupported. */
+    bool (*get_surface_desc)(void *opaque, uint32_t mapping_id, uint8_t *out, size_t cap, size_t *len_out);
 } lagfx_shell_callbacks_t;
 
 /* === Direct task memory API ===================================
