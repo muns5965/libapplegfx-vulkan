@@ -49,6 +49,7 @@ typedef struct {
     bool no_point_size;             /* the vertex shader does not write PointSize: a point-list draw is invalid in Vulkan (VUID-...-topology-08773) and is skipped */
     uint64_t blob_hash;             /* hash of the serialized payload this was resolved from (0 = unknown): a changed payload under an unchanged entry replaces the pipeline */
     uint32_t vertex_buffer_index;   /* the Metal vertex buffer slot that feeds Vulkan binding 0 (lagfx_pipeline_build has one stream) */
+    struct lagfx_a64_tile_pipe *tile;   /* non-NULL = a tile pipeline (descriptor tag 0x33, arm64_tile.c): none of the graphics fields above is used, draws are ignored while it is bound */
     void (*release)(void *user);    /* optional, called when the pipeline object dies (shader modules etc. belong to the resolver) */
     void *user;
 } lagfx_a64_pipeline_src_t;

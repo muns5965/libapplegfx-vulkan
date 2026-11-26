@@ -16,6 +16,7 @@ lagfx_sources += files(
   'arm64_exec_decode.c',  # ARM64 0x43/0x45 decode (+ optional execution)
   'arm64_objects.c',      # ARM64 per-task (task, ref) object table
   'arm64_pipeline.c',     # ARM64 pipeline-state resolver (serialized pipeline -> SPIR-V, layouts)
+  'arm64_tile.c',         # ARM64 tile shaders: tag 0x33 tile pipelines, tile binds, compute dispatch between two halves of a render pass
   'arm64_depth_stencil.c', # ARM64 depth/stencil state object (tag 4) decoder
   'arm64_dump.c',         # ARM64 bounded capture of real pipeline/library/binding data (LAGFX_ARM64_DUMP=1)
   'arm64_sampler.c',      # ARM64 serialized sampler (tag 3) -> VkSamplerCreateInfo

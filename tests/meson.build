@@ -1513,6 +1513,18 @@ if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   test('arm64 pipeline resolver / bindings / invalidation / capture (lavapipe)', pu_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# ARM64 tile shaders (tag 0x33 pipeline, 0x9d / 0xa1 binds, 0x9b / 0xa2 dispatch) on lavapipe: real tile_simd_blur_15, every pixel vs a CPU model.
+if fs.is_file(meson.current_source_dir() / 'arm64-tile-unit.c') and vulkan_dep.found()
+  tile_unit_test = executable('arm64-tile-unit',
+    'arm64-tile-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DLAGFX_TEST_FIXTURE_DIR="' + (meson.current_source_dir() / 'fixtures') + '"'],
+    build_by_default : true,
+  )
+  test('arm64 tile shader pipeline + dispatch between render pass halves (lavapipe)', tile_unit_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # ARM64 depth/stencil state object (serialized tag 4) decoder: pure, synthetic records.
 if fs.is_file(meson.current_source_dir() / 'arm64-depth-stencil-unit.c')
   ds_test = executable('arm64-depth-stencil-unit',

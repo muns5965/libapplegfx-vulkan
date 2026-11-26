@@ -198,6 +198,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 #else
 
 #include "../device.h"
+#include "arm64_tile.h"
 #include "../vulkan/instance.h"
 #include "../vulkan/descriptor_layout.h"
 #include "../air/bitcode_reader.h"
@@ -302,7 +303,8 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     lagfx_a64_fnctx_t fc = { p, task };
     if (!blob || blen < 16u || full > LAGFX_A64_PIPE_MAX_BLOB) { CNTP(p).rf_no_blob++; goto done; }
     if (!lagfx_a64_pdesc_decode(blob, blen, lagfx_a64_is_function_ref, &fc, &d)) { CNTP(p).rf_no_blob++; goto done; }
-    if (d.tag != 0xeu) { CNTP(p).rf_bad_tag++; goto done; }   /* 0x33 tile pipelines are not executed */
+    if (d.tag == 0x33u) { ok = lagfx_a64_tile_resolve(p, task, ref, blob, blen, &d, out); goto done; }   /* tile pipeline: a compute kernel (arm64_tile.c) */
+    if (d.tag != 0xeu) { CNTP(p).rf_bad_tag++; goto done; }
     if (!d.nrefs) { CNTP(p).rf_no_refs++; goto done; }
 
     const lagfx_metallib_function_t *vf = NULL, *ff = NULL;

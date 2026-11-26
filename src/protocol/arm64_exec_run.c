@@ -9,6 +9,7 @@
 #include "arm64_draw_decode.h"
 #include "arm64_sampler.h"
 #include "arm64_resources.h"
+#include "arm64_tile.h"
 #include "arm64_completion.h"
 #include "arm64_dump.h"
 #include "../device.h"
@@ -114,6 +115,8 @@ typedef struct {
     struct { lagfx_a64_dss_t dss; uint32_t sref[2]; uint32_t cull, winding; float bias[3]; bool dirty; } es;
     bool wrote_storage;              /* a draw of the open pass may write storage images: pass_end adds a shader-write barrier */
     deferred_t *def; uint32_t ndef, capdef;
+    lagfx_a64_tile_t *tile;          /* tile shader stage (arm64_tile.c), created by the first tile record */
+    struct { VkRenderingAttachmentInfo ca[4], dai, sai; bool has_d, has_s; VkImage img; } rsnap;   /* how the open pass began: a tile dispatch ends and resumes it (LOAD ops) */
 } a64_run_t;
 
 #define RUN(p) ((a64_run_t *)(p)->a64_exec)
@@ -174,6 +177,7 @@ static void obj_destroy_cb(void *ctx, void *obj) {
 /* Only once no exec records and none is in flight (its fence signalled). */
 static void flush_deferred(a64_run_t *r) {
     if (lagfx_a64_res_busy(r->p)) return;
+    lagfx_a64_tile_flush(r->tile);   /* its descriptor sets are no longer referenced */
     for (uint32_t i = 0; i < r->ndef; i++) {
         if (r->def[i].kind == 2) { if (r->vk && r->dpool) vkFreeDescriptorSets(r->vk->device, r->dpool, 1, &r->def[i].ds); }
         else if (r->def[i].kind) destroy_pipeline_vk(r->vk, r->def[i].pipe);
@@ -322,6 +326,7 @@ void lagfx_a64_exec_free(lagfx_protocol_t *p) {
     if (r->vk) {   /* gpu_busy leaves r->vk NULL: with work in flight these are leaked, never destroyed under the GPU */
         if (r->dpool) vkDestroyDescriptorPool(r->vk->device, r->dpool, NULL);
         if (r->defsamp) vkDestroySampler(r->vk->device, r->defsamp, NULL);
+        lagfx_a64_tile_free(r->tile);
     }
     free(r->def);
     free(r);
@@ -393,6 +398,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
 static void reset_frag_tables(a64_run_t *r) {
     memset(r->fb, 0, sizeof r->fb), memset(r->ftex, 0, sizeof r->ftex), memset(r->fsamp, 0, sizeof r->fsamp), memset(r->fvar, 0, sizeof r->fvar);
     memset(r->vtex, 0, sizeof r->vtex), memset(r->vsamp, 0, sizeof r->vsamp), memset(r->vvar, 0, sizeof r->vvar);
+    lagfx_a64_tile_reset(r->tile);
 }
 
 /* The guest rewrote the serialized payload under an unchanged object entry: the pipeline built from the old bytes is stale. The (task, ref) object is replaced
@@ -760,6 +766,8 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
+    memcpy(r->rsnap.ca, ca, sizeof ca), r->rsnap.dai = dai, r->rsnap.sai = sai, r->rsnap.img = first ? first->img : dso->img;
+    r->rsnap.has_d = dso && (dso->ds_aspects & 1u), r->rsnap.has_s = dso && (dso->ds_aspects & 2u);
     tag_done(p, 26);
 }
 
@@ -774,6 +782,7 @@ static void set_pipeline(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, 
 
 static bool draw_ready(a64_run_t *r, lagfx_protocol_t *p) {
     if (!r->pipe_set || !r->pipe) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }   /* Apple: no pipeline, no draw */
+    if (r->pipe->src.tile) { p->diag2.exec.tile.draws_ignored++; CNT(p).draws_skipped++; return false; }   /* a tile pipeline draws nothing */
     if (!r->rendering) { CNT(p).no_target++; CNT(p).draws_skipped++; return false; }
     return true;
 }
@@ -893,6 +902,59 @@ static void draw_cmd(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint
     if (st != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); return; }
     CNT(p).draws++;
     tag_done(p, tag);
+}
+
+/* Tile records (arm64_tile.c). A dispatch cannot run inside a dynamic-rendering instance: tile_suspend ends it (attachments -> GENERAL), the compute dispatch is
+ * recorded by arm64_tile.c, tile_resume begins the same instance again with the original attachments but LOAD ops, so their contents are preserved. */
+static void tile_suspend(void *c) {
+    a64_run_t *r = c;
+    lagfx_translate_render_end(&r->rs);
+    for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);
+    if (r->dsobj) lagfx_a64_res_ds_end(r->x, r->dsobj);
+    r->rendering = false;
+}
+static bool tile_resume(void *c) {
+    a64_run_t *r = c;
+    VkRenderingAttachmentInfo ca[4], dai = r->rsnap.dai, sai = r->rsnap.sai;
+    memcpy(ca, r->rsnap.ca, sizeof ca);
+    uint32_t begun = 0;
+    bool ok = true;
+    for (uint32_t i = 0; ok && i < 4u; i++) {
+        if (!ca[i].imageView || !r->rts[i]) continue;
+        VkImageView v; uint32_t w, h;
+        if (!lagfx_a64_res_target_begin(r->x, r->rts[i], &v, &w, &h)) { ok = false; break; }
+        ca[i].imageView = v, ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, begun |= 1u << i;
+    }
+    bool dbegun = false;
+    if (ok && r->dsobj) {
+        VkImageView v; uint32_t w, h;
+        if (lagfx_a64_res_ds_begin(r->x, r->dsobj, &v, &w, &h)) { dbegun = true, dai.imageView = sai.imageView = v, dai.loadOp = sai.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; }
+        else ok = false;
+    }
+    if (ok && lagfx_translate_render_begin_ds(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), r->rsnap.img, r->rt_w, r->rt_h, NULL, ca, r->nslots,
+                                              r->rsnap.has_d ? &dai : NULL, r->rsnap.has_s ? &sai : NULL) == LAGFX_OK) {
+        r->rendering = true, r->bound_vk = VK_NULL_HANDLE, r->last_fetch = false, r->es.dirty = true;
+        return true;
+    }
+    for (uint32_t i = 0; i < 4u; i++) if (begun & (1u << i)) lagfx_a64_res_target_end(r->x, r->rts[i]);
+    if (dbegun) lagfx_a64_res_ds_end(r->x, r->dsobj);
+    return false;   /* the pass goes on without rendering: its draws are counted as no_target */
+}
+static void tile_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+    if (!r->tile) r->tile = lagfx_a64_tile_new(r->vk);
+    if (!r->tile) { tag_unsup(p, tag); return; }
+    if (tag == LAGFX_A64_TAG_TILE_DISPATCH || tag == LAGFX_A64_TAG_TILE_REGION || tag == LAGFX_A64_TAG_TILE_REGION_RT) {
+        lagfx_a64_tile_disp_t d;
+        if (!lagfx_a64_tile_decode_dispatch(tag, rec, n, &d)) { CNT(p).bad_rec++; p->diag2.exec.tile.skip_bad_rec++; tag_unsup(p, tag); return; }
+        if (!r->rendering) { p->diag2.exec.tile.skip_no_pass++; tag_partial(p, tag); return; }
+        if (!r->pipe_set || !r->pipe || !r->pipe->src.tile) { p->diag2.exec.tile.skip_no_pipe++; tag_partial(p, tag); return; }
+        lagfx_a64_tile_env_t e = { .p = p, .x = r->x, .nslots = r->nslots, .tgt_w = r->rt_w, .tgt_h = r->rt_h, .ctx = r, .suspend = tile_suspend, .resume = tile_resume };
+        memcpy(e.rts, r->rts, sizeof e.rts);
+        if (lagfx_a64_tile_dispatch(r->tile, r->pipe->src.tile, &e, &d)) tag_done(p, tag); else tag_partial(p, tag);
+        return;
+    }
+    int rc = lagfx_a64_tile_bind_tag(r->tile, p, r->x, r->task->id, tag, rec, n);
+    if (rc == 0) tag_done(p, tag); else if (rc == 1) tag_partial(p, tag); else { CNT(p).bad_rec++; tag_unsup(p, tag); }
 }
 
 /* One supported tag, already inside an open pass. Reached from the existing render_inner_ops.c handlers through lagfx_a64_exec_render_op. */
@@ -1016,6 +1078,9 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
             tag_done(p, tag);
         }
         break;
+    case 155: case 156: case 157: case 158: case 159: case 160: case 161: case 162: case 163: case 164:   /* tile shader binds / dispatches (arm64_tile.c) */
+        tile_tag(r, p, tag, rec, n);
+        break;
     case 137: case 27: case 134: case 135:   /* useResource / useHeap / useHeaps / useResources: residency hints, nothing to do (every mirror object is resident) */
         CNT(p).ext_noop_hint++;
         tag_done(p, tag);
@@ -1052,6 +1117,7 @@ static bool direct_tag(uint32_t tag) {
     switch (tag) {
     case 0: case 2: case 3: case 4: case 5: case 6: case 8: case 9: case 10: case 11: case 16: case 17: case 113: case 128: case 127: case 129:
     case 137: case 27: case 134: case 135: case 24: case 25: case 22: case 23: case 133: return true;
+    case 155: case 156: case 157: case 158: case 159: case 160: case 161: case 162: case 163: case 164: return true;
     default: return false;
     }
 }
