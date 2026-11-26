@@ -1089,6 +1089,16 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-uni
     workdir : meson.current_source_dir() / '..')
 endif
 
+# air.sample_texture_3d -> Dim3D image sampled with a 3-component coordinate (real device module A2Xghfc).
+air2spv_t3d_test = executable('air2spv-texture3d-translate-unit',
+  'air2spv-texture3d-translate-unit.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('air2spv texture3d translate (unit)', air2spv_t3d_test, workdir : meson.current_source_dir() / '..')
+
 # [[buffer(n)]] argument -> StorageBuffer Block (std430) lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-buffer-arg-unit.c')
   air2spv_bua_deps = [libapplegfx_vulkan_dep]
