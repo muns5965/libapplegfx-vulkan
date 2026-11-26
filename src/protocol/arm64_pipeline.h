@@ -31,15 +31,17 @@ typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;
 /* Colour attachment 0 of the serialized descriptor (record `00 04 <idx 0>` followed by `kk 04 <u32>` tokens, keys in MTLRenderPipelineColorAttachmentDescriptor
  * declaration order: 1 pixelFormat, 2 blendingEnabled, 3 sourceRGB, 4 destinationRGB, 5 rgbOp, 6 sourceAlpha, 7 destinationAlpha, 8 alphaOp, 9 writeMask; a
  * property at its Metal default is not serialized). Evidence: all 43 descriptors of the device dump (pixelFormat values 70/80/115 are RGBA8Unorm/BGRA8Unorm/
- * RGBA16Float, the blend values are valid MTLBlendFactor values and the common 4=5,7=5 pair is the premultiplied source-over the compositor uses). Whether key 2
- * is blendingEnabled is NOT proven (13 descriptors carry factors without it), so `any_blend_token` is kept apart: blending is only turned OFF when the record has
- * no blend token at all. found = the record was recognised; otherwise every field is the Metal default and the caller keeps its fixed state. */
+ * RGBA16Float, the blend values are valid MTLBlendFactor values and the common 4=5,7=5 pair is the premultiplied source-over the compositor uses). Key 2 is blendingEnabled and an absent key means disabled
+ * (13 descriptors carry factors without it): this matches an independent implementation of the same serialization that renders macOS screens (medfa12/
+ * apple-silicon-anyos-project, GPL: only the token meanings were compared, no code taken). found = the record was recognised; otherwise every field is the Metal default and the caller keeps its fixed state. */
 typedef struct {
     bool found, any_blend_token, enabled_token, found1;
     uint8_t enabled_value, mask1;                 /* key-2 value; attachment 1's writeMask (default 0xf) */
     uint32_t pixfmt, pixfmt1;                     /* attachment 1: `03 00 04 01 ...` record that follows attachment 0 (found1) */
     uint8_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a, mask;   /* MTLBlendFactor / MTLBlendOperation / MTLColorWriteMask values (defaults: 1,0,0,1,0,0,0xf) */
 } lagfx_a64_blend_t;
+
+static inline bool lagfx_a64_blend_on(const lagfx_a64_blend_t *b) { return b->enabled_token && b->enabled_value != 0u; }
 
 typedef struct {
     uint32_t tag, size, ref, length;             /* header words 0..3 */

@@ -396,7 +396,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         bool ok_vals = b->found && b->src_rgb < 11u && b->dst_rgb < 11u && b->src_a < 11u && b->dst_a < 11u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
         if (ok_vals) {
             out->desc.blend_set = 1;
-            out->desc.blend_enable = b->any_blend_token && !(b->enabled_token && !b->enabled_value);   /* no blend token = Metal default = off; an explicit key-2 value 0 = off; otherwise any token keeps it on (key 2 is NOT proven to be the enable) */
+            out->desc.blend_enable = lagfx_a64_blend_on(b);   /* key 2 = blendingEnabled; absent = Metal default = off (factors can be serialized without it: 13 of the 36 dump descriptors) */
             out->desc.blend_src_rgb = fac[b->src_rgb], out->desc.blend_dst_rgb = fac[b->dst_rgb], out->desc.blend_op_rgb = ops[b->op_rgb];
             out->desc.blend_src_a = fac[b->src_a], out->desc.blend_dst_a = fac[b->dst_a], out->desc.blend_op_a = ops[b->op_a];
             out->desc.color_write_mask = ((b->mask & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((b->mask & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((b->mask & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((b->mask & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
