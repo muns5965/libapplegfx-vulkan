@@ -178,7 +178,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             }
         }
         if (have) E->obj_kind[(e[0] & 0xffu) < 31u ? (e[0] & 0xffu) : 31u]++;
-        else if (ref) E->obj_missing++;
+        else if (ref) E->obj_missing++, failed = true;   /* 'decoded' means complete: a missing object makes the command incomplete */
         if (logit && i < 12u) {
             if (have) sb_add(&sb, " %u:%02x(k%u/%u)", ref, fl, e[0] & 0xffu, e[0] >> 8);
             else sb_add(&sb, " %u:%02x(?)", ref, fl);
@@ -205,7 +205,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         uint32_t want = blen > LAGFX_EXEC_READ_CAP_BUF ? LAGFX_EXEC_READ_CAP_BUF : (uint32_t)blen;
         if (want > budget) want = budget;
         if (want < blen) E->bytes_capped += blen - want;
-        if (want < 8u) { E->truncated++; if (logit) sb_add(&sb, " b%u[off=0x%llx len=%llu CAPPED]", b, (unsigned long long)off, (unsigned long long)blen); continue; }
+        if (want < 8u) { E->truncated++, failed = true; if (logit) sb_add(&sb, " b%u[off=0x%llx len=%llu CAPPED]", b, (unsigned long long)off, (unsigned long long)blen); continue; }
         if (want > scratch_cap) {
             uint8_t *n2 = realloc(scratch, want);
             if (!n2) { E->read_failed++, failed = true; continue; }
@@ -235,7 +235,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         ctx.type = pt;
         int r = lagfx_exec_walk_segment(scratch, want, blen, &s, on_tag, &ctx);
         if (r != LAGFX_SEG_OK) {
-            if (s.truncated) E->truncated++;
+            if (s.truncated) E->truncated++, failed = true;
             else E->bad_seg++, failed = true;
             if (logit) sb_add(&sb, " b%u[off=0x%llx len=%llu SHORT-HEADER]", b, (unsigned long long)off, (unsigned long long)blen);
             continue;
@@ -245,7 +245,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         if (s.cont) E->seg_cont++;
         if (s.more) E->seg_more++;
         if (s.clamped) E->seg_clamped++;
-        if (s.truncated) E->truncated++;
+        if (s.truncated) E->truncated++, failed = true;
         E->tail_bytes += s.tail;
         if (s.bad_inner) E->inner_bad++, E->bad_seg++, failed = true;
         if (logit) {

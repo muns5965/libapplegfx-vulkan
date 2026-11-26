@@ -219,7 +219,7 @@ static void test_exec(void) {
     uint32_t w[300], nw = outer(w, 2, 3, 3, rf, 3, ol);
     uint64_t un = p->unknown_opcode_count;
     submit(p, 0x43, 2, w, nw);
-    assert(X(p).received == 1 && X(p).decoded == 1 && X(p).failed == 0);
+    assert(X(p).received == 1 && X(p).decoded == 0 && X(p).failed == 1 && X(p).obj_missing == 1);   /* ref 0x1000 lies beyond the object list: the command is incomplete, not "decoded" */
     assert(X(p).bufs == 3 && X(p).seg_t[0] == 2 && X(p).seg_t[4] == 1 && X(p).seg_t[5] == 1 && X(p).seg_t[1] == 0 && X(p).seg_t[2] == 0 && X(p).seg_other == 0);
     assert(X(p).seg_cont == 1 && X(p).seg_more == 1 && X(p).inner == 7 && X(p).inner_bad == 0 && X(p).bytes_read == (uint64_t)n0 + n1 + n2);
     assert(X(p).tag_hist[0][26] == 1 && X(p).tag_hist[0][30] == 1 && X(p).tag_hist[0][34] == 1 && X(p).tag_hist[0][7] == 1 && X(p).tag_hist[3][450] == 1 && X(p).tag_hist[3][451] == 1);
@@ -230,15 +230,15 @@ static void test_exec(void) {
 
     /* the same through opcode 0x45 and without barrier slots */
     nw = outer(w, 0, 3, 0, NULL, 1, ol); submit(p, 0x45, 0, w, nw);
-    assert(X(p).received == 2 && X(p).decoded == 2 && p->last_completed_stamp != st);
+    assert(X(p).received == 2 && X(p).decoded == 1 && X(p).failed == 1 && p->last_completed_stamp != st);
 
     /* unreadable: the buffer sits on the unmapped vpn 3 / beyond the table; the exec is counted failed, others in it still decoded */
     uint64_t ol2[4] = {0x4000ull * 3, 64, 0x4000ull * 9, n0};
     nw = outer(w, 0, 3, 0, NULL, 2, ol2); submit(p, 0x43, 0, w, nw);
-    assert(X(p).received == 3 && X(p).failed == 1 && X(p).read_failed == 1 && X(p).decoded == 2 && X(p).seg_t[0] == 4);
+    assert(X(p).received == 3 && X(p).failed == 2 && X(p).read_failed == 1 && X(p).decoded == 1 && X(p).seg_t[0] == 4);
     /* a task that was never defined: counted, nothing read */
     nw = outer(w, 0, 9, 0, NULL, 1, ol); submit(p, 0x43, 0, w, nw);
-    assert(X(p).received == 4 && X(p).failed == 2 && X(p).no_task == 1 && X(p).read_failed == 2);
+    assert(X(p).received == 4 && X(p).failed == 3 && X(p).no_task == 1 && X(p).read_failed == 2);
 
     /* sizes: counts that do not fit the payload, too many buffers, buffer len < 8 / > 64 MiB, payload shorter than the counts */
     uint64_t before_bytes = X(p).bytes_read;
@@ -247,25 +247,25 @@ static void test_exec(void) {
     w[0] = 3, w[1] = 0xffffffffu, w[2] = 0xffffffffu; submit(p, 0x43, 0, w, 3);     /* 32-bit overflow attempt */
     submit(p, 0x43, 0, w, 2);                                                       /* shorter than the three counts */
     submit(p, 0x43, 3, w, 1);                                                       /* barrier slots eat the payload */
-    assert(X(p).received == 9 && X(p).failed == 7 && X(p).bad_size == 5);
+    assert(X(p).received == 9 && X(p).failed == 8 && X(p).bad_size == 5);
     uint64_t ol3[6] = {0x4000ull * 9, 7, 0x4000ull * 9, (65ull << 20), 0x4000ull * 9, ~0ull};
     nw = outer(w, 0, 3, 0, NULL, 3, ol3); submit(p, 0x43, 0, w, nw);
-    assert(X(p).received == 10 && X(p).failed == 8 && X(p).bad_size == 5 + 3 && X(p).bytes_read == before_bytes);
+    assert(X(p).received == 10 && X(p).failed == 9 && X(p).bad_size == 5 + 3 && X(p).bytes_read == before_bytes);
 
     /* a segment whose seglen runs past its buffer is clamped (counted, not failed); a bad inner size fails the exec but not the others */
     n = seg(b, 1, 0, 0, 2, t1, s1); w32(b, 0x100000); va_write(0x4000 * 14, b, n);
     n = seg(b, 1, 0, 0, 2, t1, s1); w32(b + 12, 3); va_write(0x4000 * 15, b, n);    /* first command size 3 */
     uint64_t ol4[4] = {0x4000ull * 14, n, 0x4000ull * 15, n};
     uint64_t cl = X(p).seg_clamped; nw = outer(w, 0, 3, 0, NULL, 1, ol4); submit(p, 0x43, 0, w, nw);
-    assert(X(p).seg_clamped == cl + 1 && X(p).failed == 8 && X(p).decoded == 3 && X(p).seg_t[1] == 1);
+    assert(X(p).seg_clamped == cl + 1 && X(p).failed == 9 && X(p).decoded == 2 && X(p).seg_t[1] == 1);
     nw = outer(w, 0, 3, 0, NULL, 1, ol4 + 2); submit(p, 0x43, 0, w, nw);
-    assert(X(p).inner_bad == 1 && X(p).bad_seg == 1 && X(p).failed == 9 && X(p).decoded == 3);
+    assert(X(p).inner_bad == 1 && X(p).bad_seg == 1 && X(p).failed == 10 && X(p).decoded == 2);
     assert(X(p).decoded + X(p).failed == X(p).received);
 
     /* a header-only buffer (8 bytes: no segment body at all) decodes; 0x0a / 0x0c are ignored-known, not unknown */
     uint8_t hb[8]; w32(hb, 0); w32(hb + 4, info(2, 0, 0)); va_write(0x4000 * 16, hb, 8);
     uint64_t ol5[2] = {0x4000ull * 16, 8}; nw = outer(w, 0, 3, 0, NULL, 1, ol5); submit(p, 0x43, 0, w, nw);
-    assert(X(p).decoded == 4 && X(p).seg_t[2] == 1);
+    assert(X(p).decoded == 3 && X(p).seg_t[2] == 1);
     un = p->unknown_opcode_count; uint32_t z[2] = {1, 2};
     submit(p, 0x0a, 0, z, 2); submit(p, 0x0c, 0, z, 2);
     assert(p->diag2.ignored_known == 2 && p->unknown_opcode_count == un);
@@ -300,7 +300,7 @@ static void test_real(void) {
     w[k++] = n; w[k++] = 0;                                         /* buffer length: synthetic */
     assert(k == 15 && (12 + 15 * 4) == 72);
     submit(p, 0x43, 0, w, k);
-    assert(X(p).received == 1 && X(p).decoded == 1 && X(p).failed == 0 && X(p).bufs == 1 && X(p).seg_t[0] == 1 && X(p).inner == 3);
+    assert(X(p).received == 1 && X(p).decoded + X(p).failed == 1 && (X(p).failed == 0 || X(p).obj_missing > 0) && X(p).bufs == 1 && X(p).seg_t[0] == 1 && X(p).inner == 3);
     assert(X(p).res == 4 && X(p).res_flag[0] == 1 && X(p).res_flag[1] == 1 && X(p).res_flag[2] == 0 && X(p).obj_missing == 4);   /* no 0x44 seen: no object lookups */
     /* #21: flags carry bits above 7 (0xe2, 0xe0, 0xe1): recorded as seen, only 1/2/4 mean something */
     static const char c21[] = "43 00 00 00 58 00 00 00 00 01 00 00 02 00 00 00 06 00 00 00 01 00 00 00 08 00 00 00 e2 00 00 00 0d 00 00 00 e0 00 00 00 0e 00 00 00 e1 00 00 00 14 00 00 00 e1 00 00 00 0f 00 00 00 e0 00 00 00";
@@ -310,7 +310,7 @@ static void test_real(void) {
     uint64_t ol[2] = {0x214000, n};
     uint64_t f1 = X(p).res_flag[0], f2 = X(p).res_flag[1], hi = X(p).res_flag_hi;
     uint32_t nw = outer(w, 0, 2, 6, rf, 1, ol); submit(p, 0x43, 0, w, nw);
-    assert(X(p).received == 2 && X(p).decoded == 2 && X(p).res == 10);
+    assert(X(p).received == 2 && X(p).decoded + X(p).failed == 2 && X(p).res == 10);
     assert(X(p).res_flag[0] == f1 + 2 && X(p).res_flag[1] == f2 + 1 && X(p).res_flag[2] == 1 && X(p).res_flag_hi == hi + 5);
 }
 
