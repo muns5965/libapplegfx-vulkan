@@ -1712,6 +1712,19 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-unit.c')
     workdir : meson.current_source_dir() / '..')
 endif
 
+# air.sample_texture_{2d,3d} option operands (census X04): bias / explicit level / constant offset / min_lod, checked per call at the SPIR-V level + spirv-val.
+if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-options-unit.c')
+  air2spv_tso_test = executable('air2spv-texture-sample-options-unit',
+    'air2spv-texture-sample-options-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv texture sample options (unit)', air2spv_tso_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # The same integer intrinsics executed on a Vulkan 1.3 device (lavapipe), every pixel compared with a CPU reference. Skips (77) without a suitable device.
 if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-lavapipe.c') and vulkan_dep.found()
   air2spv_int_vk_test = executable('air2spv-int-intrinsics-lavapipe',
@@ -1722,6 +1735,19 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-lavapipe.c') 
     build_by_default : true,
   )
   test('air2spv integer intrinsics on lavapipe', air2spv_int_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
+# The same sampling options executed on a Vulkan 1.3 device (lavapipe): mip-mapped texture, explicit level / bias / constant offset compared with the expected texel. Skips (77) without a device.
+if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-lavapipe.c') and vulkan_dep.found()
+  air2spv_tso_vk_test = executable('air2spv-texture-sample-lavapipe',
+    'air2spv-texture-sample-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv texture sample options on lavapipe', air2spv_tso_vk_test,
     workdir : meson.current_source_dir() / '..')
 endif
 
