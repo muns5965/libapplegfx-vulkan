@@ -517,6 +517,27 @@ int main(void) {
       run_exec(p, 43, REF_M9, 2, col, false, res, 1, true);
       assert(((const uint8_t *)half_px(0, 0))[0] == SENT);
       assert(lagfx_a64_res_display_swap(p) == 1 && !memcmp(half_px(0, 0), clear8, 8) && !memcmp(half_px(63, 79), clear8, 8)); }
+    /* same page-list address, other pfn entries behind it: dropped; image no longer valid; row pitch change is a remap too */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint32_t *l = (uint32_t *)(g_mem + ((uint64_t)PFN_LIST << 14));
+      uint32_t keep = l[1];
+      uint64_t dr = CNT(p).swap_dropped, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      run_exec(p, 44, REF_M1, 2, green, false, res, 1, true);
+      l[1] = ((PFN_SURF0 + 7u) << 2) | 1u;   /* the guest swapped the second page of the run */
+      uint32_t rr = lagfx_a64_res_display_swap(p);
+      assert(rr == 0 && CNT(p).swap_dropped == dr + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      l[1] = keep; }
+    /* injected faults: submit failure keeps the debt; a timed-out swap copy is parked (pending) and finishes later without losing the pixels */
+    { const uint32_t res[1][2] = { { REF_M1, 2 } };
+      uint64_t df = CNT(p).swap_deferred;
+      surf_fill(SENT);
+      run_exec(p, 45, REF_M1, 2, blue, false, res, 1, true);
+      lagfx_a64_test_hook = 1;
+      assert(lagfx_a64_res_display_swap(p) == 0 && CNT(p).swap_deferred > df && *surf_px(32, 40) == 0xabababab && !lagfx_a64_res_is_pending(p));
+      lagfx_a64_test_hook = 2;
+      assert(lagfx_a64_res_display_swap(p) == 0 && lagfx_a64_res_is_pending(p) && lagfx_a64_res_busy(p) && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_DONE && !lagfx_a64_res_is_pending(p) && *surf_px(32, 40) == 0xff0000ffu); }
     unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
     printf("PASS: MAPPED_WRITEBACK=swap safety: last exec wins, re-mapped surface dropped (not retried), unreadable descriptor keeps the debt, synchronize pays once, RGhA exact\n");
 
