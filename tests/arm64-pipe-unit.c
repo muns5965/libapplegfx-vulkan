@@ -438,13 +438,42 @@ static void test_textured_draw(void) {
     exec(p, 1, cb_finish());
     assert(PIPE(p).desc_unaligned == 0 && PIPE(p).desc_unbound == 1 && PIPE(p).desc_feedback == 1);
     assert(RUNC(p).ext_gathered == 1 && RUNC(p).ext_gather_failed == 0 && RUNC(p).draws == 2);
-    /* gather failure classification: ten distinct unaligned offsets in ONE exec; the exec keeps 8 aligned copies, the rest fail with cause 2 (cache full), counted and skipped */
-    uint64_t g0 = RUNC(p).ext_gathered, u0 = PIPE(p).desc_unaligned;
-    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
-    for (uint32_t k = 0; k < 10; k++) { uint8_t r[12] = {0}; uint32_t idx = 2; uint64_t off = 4 + 8ull * k; memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
-    exec(p, 1, cb_finish());
-    assert(RUNC(p).ext_gathered - g0 == 8 && RUNC(p).ext_gather_failed == 2 && RUNC(p).ext_gather_why[2] == 2 && RUNC(p).ext_gather_why[0] + RUNC(p).ext_gather_why[1] + RUNC(p).ext_gather_why[3] == 0);
-    assert(PIPE(p).desc_unaligned - u0 == 2);
+    VkPhysicalDeviceProperties gpr; vkGetPhysicalDeviceProperties(g_dev->vk->phys_device, &gpr);
+    const uint64_t al = gpr.limits.minStorageBufferOffsetAlignment;
+    /* many distinct copies in ONE exec: 3 buffers x offsets 4 / 8 / 12 (all unaligned when al >= 16; distinct residues, so none can reuse another) = 9 > the old limit of 8: every draw renders */
+    uint64_t g0 = RUNC(p).ext_gathered, u0 = PIPE(p).desc_unaligned, d0 = RUNC(p).draws;
+    if (al >= 16) {
+        cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+        for (uint32_t k = 0; k < 9; k++) { uint8_t r[12] = {0}; uint32_t idx = k % 3, off4 = 4 * (1 + k / 3); uint64_t off = off4; memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
+        exec(p, 1, cb_finish());
+        assert(RUNC(p).ext_gathered - g0 == 9 && RUNC(p).ext_gather_failed == 0 && RUNC(p).draws - d0 == 9 && PIPE(p).desc_unaligned == u0);
+        assert(RUNC(p).ext_gather_bytes >= 9 * 0x3000);   /* each copy is the rest of a 0x4000 buffer */
+        /* equivalent copies are shared: offsets 4 and 4 + al of the same buffer are one copy (the second binds it at descriptor offset al), 4 + al + 4 is another */
+        g0 = RUNC(p).ext_gathered; uint64_t ru0 = RUNC(p).ext_gather_reused; d0 = RUNC(p).draws;
+        cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+        const uint64_t offs[4] = { 4, 4 + al, 4 + 2 * al, 8 };
+        for (uint32_t k = 0; k < 4; k++) { uint8_t r[12] = {0}; uint32_t idx = 2; memcpy(r, &idx, 4); memcpy(r + 4, &offs[k], 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
+        exec(p, 1, cb_finish());
+        assert(RUNC(p).ext_gathered - g0 == 2 && RUNC(p).ext_gather_reused - ru0 == 2 && RUNC(p).ext_gather_failed == 0 && RUNC(p).draws - d0 == 4);
+        /* byte budget: room for ONE ~16 KiB copy only; the 2nd and 3rd distinct ones fail with cause 4 (budget), not 2 (count) */
+        setenv("LAGFX_A64_GATHER_BUDGET", "20000", 1);
+        g0 = RUNC(p).ext_gathered; d0 = RUNC(p).draws; u0 = PIPE(p).desc_unaligned;
+        uint64_t f0 = RUNC(p).ext_gather_failed, c0 = RUNC(p).ext_gather_why[2], w0 = RUNC(p).ext_gather_why[4];
+        cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+        for (uint32_t k = 0; k < 3; k++) { uint8_t r[12] = {0}; uint32_t idx = 2; uint64_t off = 4 * (1 + k); memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
+        exec(p, 1, cb_finish());
+        unsetenv("LAGFX_A64_GATHER_BUDGET");
+        assert(RUNC(p).ext_gathered - g0 == 1 && RUNC(p).ext_gather_failed - f0 == 2 && RUNC(p).ext_gather_why[4] - w0 == 2 && RUNC(p).ext_gather_why[2] == c0);
+        assert(PIPE(p).desc_unaligned - u0 == 2 && RUNC(p).draws - d0 == 1);
+        /* the copy-count limit is a different cause (2): cap 2 copies, 3 distinct offsets of one buffer: 2 gathered, the 3rd fails with cause 2 and the budget counter stays */
+        setenv("LAGFX_A64_GATHER_CACHE", "2", 1);
+        g0 = RUNC(p).ext_gathered; d0 = RUNC(p).draws; f0 = RUNC(p).ext_gather_failed; c0 = RUNC(p).ext_gather_why[2]; w0 = RUNC(p).ext_gather_why[4];
+        cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+        for (uint32_t k = 0; k < 3; k++) { uint8_t r[12] = {0}; uint32_t idx = 2; uint64_t off = 4 * (1 + k); memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
+        exec(p, 1, cb_finish());
+        unsetenv("LAGFX_A64_GATHER_CACHE");
+        assert(RUNC(p).ext_gathered - g0 == 2 && RUNC(p).ext_gather_failed - f0 == 1 && RUNC(p).ext_gather_why[2] - c0 == 1 && RUNC(p).ext_gather_why[4] == w0 && RUNC(p).draws - d0 == 2);
+    }
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);

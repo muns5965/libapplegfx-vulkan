@@ -568,7 +568,8 @@ typedef struct lagfx_protocol {
                 /* arm64_exec_run.c extensions: draw variants / sampler fidelity / misaligned buffer binds (printed as g7-gpu-ext) */
                 uint64_t ext_draw_instanced, ext_draw_base, ext_draw_wide, ext_draw_indirect, ext_draw_indirect_bad, ext_draw_zero, ext_noop_hint, ext_noop_fence, ext_barrier;
                 uint64_t ext_samp_compare, ext_samp_unnorm, ext_samp_mirror_clamp, ext_samp_lod_dropped, ext_samp_lod_binds;
-                uint64_t ext_gather_why[4]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather cache full (8), 3 scratch allocation */
+                uint64_t ext_gather_why[5]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather copy count full (A64_GATHER_CACHE), 3 scratch allocation, 4 per-exec byte budget (A64_GATHER_BUDGET) */
+                uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
             } run;
             /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */

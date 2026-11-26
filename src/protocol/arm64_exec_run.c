@@ -56,7 +56,12 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #define A64_MAX_FSAMP 16u
 #define A64_PIPE_CACHE 8u
 #define A64_GATHER_MAX (8ull << 20)
-#define A64_GATHER_CACHE 8u
+/* Gather limits per exec. A64_GATHER_CACHE bounds the number of private copies (each is one of the exec's MAX_TMP=64 scratch slots, which blit tail staging also
+ * uses: 32 leaves 32 for those). A64_GATHER_BUDGET bounds their total bytes: 64 MiB = the worst case the old limits allowed (8 copies x A64_GATHER_MAX 8 MiB), so
+ * host memory per exec does not grow; the copies are host-visible mirror-sized scratch, freed with the exec. Each copy is a range "to the end of the buffer"
+ * (the shader's real extent is unknown), so copies are usually far smaller than A64_GATHER_MAX. */
+#define A64_GATHER_CACHE 32u
+#define A64_GATHER_BUDGET (64ull << 20)
 
 enum { K_PIPE = 3, K_SAMP = 4, K_DSS = 5 };
 
@@ -110,7 +115,7 @@ typedef struct {
     uint64_t gen_ctr; VkDeviceSize min_sb_align;
     VkSampler fvar[A64_MAX_FSAMP];                                 /* fragment sampler slot overridden by a LOD-clamp bind (0x71): a variant owned by fsamp[i], else NULL */
     VkDeviceSize max_sb_range;
-    struct { uint64_t gen, off, range; VkBuffer buf; } gc[8]; uint32_t ngc;   /* aligned copies made in this exec (gather_copy) */
+    struct { uint64_t gen, off, range; VkBuffer buf; } gc[A64_GATHER_CACHE]; uint32_t ngc; uint64_t gc_bytes, gc_budget; uint32_t gc_cap;   /* aligned copies made in this exec (gather_copy) */
     lagfx_draw_region_t region;
     /* depth / stencil attachment of the open pass (NULL / UNDEFINED = none) and the encoder state Metal keeps outside the pipeline; all of it is reset by a new pass
      * (a new Metal encoder starts from the defaults) and applied as Vulkan dynamic state before each draw */
@@ -376,7 +381,9 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     memset(&r->region, 0, sizeof r->region);
     reset_frag_tables(r);
     r->last_ds = VK_NULL_HANDLE, r->bound_vk = VK_NULL_HANDLE;
-    r->ngc = 0;
+    r->ngc = 0, r->gc_bytes = 0, r->gc_budget = A64_GATHER_BUDGET, r->gc_cap = A64_GATHER_CACHE;
+    { const char *e = getenv("LAGFX_A64_GATHER_BUDGET"); if (e && *e) { char *end; unsigned long long v = strtoull(e, &end, 10); if (!*end && v <= A64_GATHER_BUDGET) r->gc_budget = v; } }   /* test / tuning hook: may only LOWER the budget */
+    { const char *e = getenv("LAGFX_A64_GATHER_CACHE"); if (e && *e) { char *end; unsigned long v = strtoul(e, &end, 10); if (!*end && v <= A64_GATHER_CACHE) r->gc_cap = (uint32_t)v; } }   /* same, for the copy count */
     if (!task || (nres && !res)) return false;
     /* ONE exec context + ONE command buffer for Render and Blit segments; the resource-flag rules (0x01 / 0x02 uploads, stale guard) are applied inside */
     r->x = lagfx_a64_res_begin(p, task->id, res, nres);
@@ -494,17 +501,28 @@ static bool descriptor_pool(a64_run_t *r) {
  * mirror buffer are copied (host side, at record time) into an exec-owned scratch buffer and that is bound at offset 0. Reference: the independent pvg-vulkan
  * runtime does the same ("gather") for guest binds that are not zero-copyable. Limits: the copy is a snapshot of the mirror at this draw (GPU writes of the same
  * exec to that buffer, e.g. by an earlier blit, or writes by the shader itself, are not seen / not written back), and ranges above A64_GATHER_MAX are refused.
- * One copy per (buffer generation, offset) and exec. NULL = not possible (the draw is skipped, counted as desc_unaligned). */
-static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t range) {
+ * One copy per (buffer generation, offset) and exec; a later bind whose range lies inside an earlier copy at an alignment-multiple distance reuses it (*doff). NULL = not possible (the draw is skipped, counted as desc_unaligned). */
+static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t range, VkDeviceSize *doff) {
+    *doff = 0;
     if (!b->map) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[0]++; return VK_NULL_HANDLE; }
     if (range > A64_GATHER_MAX) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[1]++; return VK_NULL_HANDLE; }   /* range = the whole rest of the buffer, not what the shader reads */
-    for (uint32_t i = 0; i < r->ngc; i++) if (r->gc[i].gen == b->gen && r->gc[i].off == off && r->gc[i].range == range) return r->gc[i].buf;
+    /* An existing copy of the same buffer generation that starts at c->off <= off and covers [off, off + range) serves this bind too when the distance is a multiple of
+     * the device alignment: bind it at that offset (the same bytes, the same snapshot, the same descriptor range). Equal (off, range) is the distance 0 case. */
+    for (uint32_t i = 0; i < r->ngc; i++) {
+        const __typeof__(r->gc[0]) *c = &r->gc[i];
+        if (c->gen != b->gen || c->off > off || off + range > c->off + c->range || (off - c->off) % r->min_sb_align) continue;
+        *doff = off - c->off;
+        if (*doff) CNT(p).ext_gather_reused++;
+        return c->buf;
+    }
     VkBuffer sb; uint8_t *mp;
-    if (r->ngc == A64_GATHER_CACHE) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[2]++; return VK_NULL_HANDLE; }   /* 8 distinct (offset, range) copies per exec */
+    if (r->ngc >= r->gc_cap) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[2]++; return VK_NULL_HANDLE; }   /* A64_GATHER_CACHE distinct copies per exec */
+    if (range > r->gc_budget - r->gc_bytes) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[4]++; return VK_NULL_HANDLE; }   /* total bytes of this exec's copies would exceed A64_GATHER_BUDGET */
     if (!lagfx_a64_res_scratch(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
     memcpy(mp, b->map + off, (size_t)range);
     r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
-    CNT(p).ext_gathered++;
+    r->gc_bytes += range;
+    CNT(p).ext_gathered++, CNT(p).ext_gather_bytes += range;
     return sb;
 }
 
@@ -536,13 +554,12 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
             if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
             if (off % r->min_sb_align) {   /* Metal allows any 4-aligned offset, Vulkan only multiples of minStorageBufferOffsetAlignment: bind an aligned copy of the range */
-                dbuf = gather_copy(r, p, b, off, range);
+                dbuf = gather_copy(r, p, b, off, range, &doff);
                 if (!dbuf) { p->diag2.exec.pipe.desc_unaligned++; return false; }
-                doff = 0;
             }
             bi[i] = (VkDescriptorBufferInfo){ dbuf, doff, range };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, w[i].pBufferInfo = &bi[i];
-            MIX(b->gen), MIX(off), MIX((uint64_t)(uintptr_t)dbuf);
+            MIX(b->gen), MIX(off), MIX((uint64_t)(uintptr_t)dbuf), MIX(doff);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_INPUT) {   /* framebuffer fetch: colour attachment mi of the open pass */
             lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
             if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; return false; }
