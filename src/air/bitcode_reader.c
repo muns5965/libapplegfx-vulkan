@@ -167,6 +167,12 @@ struct lagfx_air_module {
      * <4 x i32> <0,1,2,undef> mask resolved its constituents to the
      * wrong constants when this was assumed zero. */
     uint32_t                     num_globalvars;
+    /* Per-GLOBALVAR [type_index, isconst/flags word, initid] (heap, NOT
+     * arena: tiny, and never invalidated by arena growth). Capacity is
+     * grown on demand; num_globalvars counts every record even if the
+     * allocation failed (then globalvar_info stops being filled). */
+    lagfx_air_globalvar_t       *globalvar_info;
+    uint32_t                     globalvar_cap;
     /* Arena OFFSETS for the three tables above (0 = unset). The table
      * pointers are raw arena addresses and a later arena_reserve() may
      * realloc the arena out from under them (e.g. a CONSTANTS block
@@ -323,6 +329,16 @@ lagfx_air_module_functions(const lagfx_air_module_t *m, uint32_t *count) {
 uint32_t
 lagfx_air_module_num_globalvars(const lagfx_air_module_t *m) {
     return m->num_globalvars;
+}
+
+bool
+lagfx_air_module_globalvar(const lagfx_air_module_t *m, uint32_t idx,
+                           lagfx_air_globalvar_t *out) {
+    if (!m || !out || idx >= m->num_globalvars || idx >= m->globalvar_cap ||
+        !m->globalvar_info)
+        return false;
+    *out = m->globalvar_info[idx];
+    return true;
 }
 
 const lagfx_air_metadata_t *
@@ -805,8 +821,21 @@ lagfx_air_module_open(const uint8_t *blob, size_t blob_len,
                                     break;
                                 default:
                                     c->kind = LAGFX_AIR_CONST_UNKNOWN;
+                                    /* Keep the raw record (constant expressions,
+                                     * e.g. CE_CAST = 11: [opc, opty, opval]) so a
+                                     * consumer can follow it; kind stays UNKNOWN. */
+                                    {
+                                        uint32_t u32_buf[LAGFX_RECORD_MAX_OPS];
+                                        for (uint32_t i = 0; i < crec.num_ops; i++) u32_buf[i] = (uint32_t)crec.ops[i];
+                                        uint32_t off = arena_intern_u32_array(&m->arena, u32_buf, crec.num_ops);
+                                        consts = (lagfx_air_constant_t *)(m->arena.base + consts_off);
+                                        c = &consts[num_consts];
+                                        c->payload.bytes.offset = off;
+                                        c->payload.bytes.len = crec.num_ops * sizeof(uint32_t);
+                                    }
                                     break;
                             }
+                            c->raw_code = crec.code;
                             num_consts++;
                         }
                         m->constants = consts;
@@ -1598,6 +1627,21 @@ lagfx_air_module_open(const uint8_t *blob, size_t blob_len,
                          * functions in LLVM's enumeration). Count it so
                          * the absolute-value-id base lines up — see
                          * num_globalvars doc comment. */
+                        {
+                            const uint32_t go = m->has_strtab ? 2u : 0u;
+                            if (m->num_globalvars == m->globalvar_cap) {
+                                uint32_t nc = m->globalvar_cap ? m->globalvar_cap * 2u : 8u;
+                                lagfx_air_globalvar_t *g = (lagfx_air_globalvar_t *)
+                                    realloc(m->globalvar_info, (size_t)nc * sizeof(*g));
+                                if (g) { m->globalvar_info = g; m->globalvar_cap = nc; }
+                            }
+                            if (m->num_globalvars < m->globalvar_cap) {
+                                lagfx_air_globalvar_t *g = &m->globalvar_info[m->num_globalvars];
+                                g->type_index = rec.num_ops > go ? (uint32_t)rec.ops[go] : 0u;
+                                g->flags      = rec.num_ops > go + 1u ? (uint32_t)rec.ops[go + 1u] : 0u;
+                                g->initid     = rec.num_ops > go + 2u ? (uint32_t)rec.ops[go + 2u] : 0u;
+                            }
+                        }
                         m->num_globalvars++;
                         break;
                     default:
@@ -1777,6 +1821,7 @@ void
 lagfx_air_module_free(lagfx_air_module_t *module) {
     if (!module) return;
     free(module->blockinfo);
+    free(module->globalvar_info);
     arena_free(&module->arena);
     free(module);
 }
@@ -2038,8 +2083,22 @@ lagfx_air_function_body_open(const lagfx_air_module_t   *module,
                             break;
                         default:
                             c->kind = LAGFX_AIR_CONST_UNKNOWN;
+                            {
+                                uint32_t u32_buf[LAGFX_RECORD_MAX_OPS];
+                                for (uint32_t i = 0; i < crec.num_ops; i++)
+                                    u32_buf[i] = (uint32_t)crec.ops[i];
+                                uint32_t off = arena_intern_u32_array(&body->arena,
+                                                                       u32_buf, crec.num_ops);
+                                body->instructions =
+                                    (lagfx_air_inst_t *)(body->arena.base + insts_off);
+                                lc = (lagfx_air_constant_t *)(body->arena.base + lc_off);
+                                c = &lc[lc_count];
+                                c->payload.bytes.offset = off;
+                                c->payload.bytes.len = crec.num_ops * sizeof(uint32_t);
+                            }
                             break;
                     }
+                    c->raw_code = crec.code;
                     lc_count++;
                 }
                 /* Store the OFFSET, not lc (the raw pointer): subsequent

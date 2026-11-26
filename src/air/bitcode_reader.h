@@ -112,6 +112,10 @@ typedef enum {
 typedef struct {
     lagfx_air_constant_kind_t kind;
     uint32_t type_index;         /* index into module->types[] */
+    /* Raw LLVM CST_CODE_* of the record. For kind UNKNOWN the record's
+     * operands are kept as a u32 array in payload.bytes (offset/len), e.g.
+     * CST_CODE_CE_CAST (11) = [opcode, src type, src ABSOLUTE value id]. */
+    uint32_t raw_code;
     /* Inline payload for small constants (INTEGER, FLOAT). For larger
      * payloads (STRING, DATA, AGGREGATE) data_offset / data_len index
      * into the module string arena. */
@@ -207,6 +211,18 @@ const lagfx_air_function_t   *lagfx_air_module_functions(const lagfx_air_module_
  * constituents, module-constant references) must add this to their
  * module-value base. Relative-encoded operands are unaffected. */
 uint32_t                      lagfx_air_module_num_globalvars(const lagfx_air_module_t *m);
+
+/* Raw per-GLOBALVAR record fields (global value-id == record index).
+ * initid is the LLVM "initializer value id + 1" (0 = no initializer);
+ * for a module-constant initializer the constants[] index is
+ * initid - 1 - num_globalvars - num_functions. */
+typedef struct {
+    uint32_t type_index;   /* value type (explicit-type records) */
+    uint32_t flags;        /* isconst | explicit_type<<1 | addrspace<<2 */
+    uint32_t initid;
+} lagfx_air_globalvar_t;
+bool lagfx_air_module_globalvar(const lagfx_air_module_t *m, uint32_t idx,
+                                lagfx_air_globalvar_t *out);
 const lagfx_air_metadata_t   *lagfx_air_module_metadata(const lagfx_air_module_t *m, uint32_t *count);
 /* Module-level metadata strings pool. Each entry is a NUL-terminated
  * string in the module arena, ordered by LLVM metadata-ID (0..count-1).
