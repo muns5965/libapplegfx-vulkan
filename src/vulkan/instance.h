@@ -51,6 +51,7 @@ struct lagfx_vk_state {
      * whether to take a fast path (shader_object, dynamic_rendering)
      * or fall back. */
     bool have_dynamic_rendering;
+    bool have_independent_blend;   /* enabled device feature: per-attachment blend state / write masks may differ */
     bool have_synchronization2;
     bool have_timeline_semaphore;
     bool have_descriptor_indexing;

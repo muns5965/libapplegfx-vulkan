@@ -113,6 +113,8 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_VB  2u
 #define REF_PIPE 3u
 #define REF_IB  4u
+#define REF_TEX2 5u
+#define VPN_TEX2 13u
 #define RT_W 16u
 #define RT_H 16u
 
@@ -153,6 +155,23 @@ static void build_objects(void) {
     uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
     va_write(VA_PAY + 0x300, pl, 16);
     entry(REF_PIPE, LAGFX_A64_OBJ_SERIALIZED, 16, VA_PAY + 0x300);
+    {   /* a second render target: RGBA16Float (pixel format 115), 8 bytes per pixel */
+        uint8_t t2[220]; memset(t2, 0, sizeof t2);
+        uint64_t len2 = RT_W * RT_H * 8u; uint32_t vp2 = VPN_TEX2;
+        memcpy(t2, &len2, 8); memcpy(t2 + 8, &vp2, 4);
+        t2[12] = 1;
+        { uint8_t *mp = t2 + 12 + 0x18; uint64_t row = RT_W * 8u; uint32_t mw = RT_W, mh = RT_H, md = 1; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+        uint32_t rec2 = 12 + 0x18 + 36, tag2 = 0x14;
+        memcpy(t2 + rec2, &tag2, 4);
+        uint8_t *d2 = t2 + rec2 + 12;
+        d2[0] = 2; d2[2] = 115;
+        uint32_t w2 = RT_W, h2 = RT_H, one2 = 1;
+        memcpy(d2 + 4, &w2, 4); memcpy(d2 + 8, &h2, 4); memcpy(d2 + 12, &one2, 4);
+        d2[16] = 1; d2[18] = 1;
+        uint32_t ts2 = rec2 + 12 + 28;
+        va_write(VA_PAY + 0x400, t2, ts2);
+        entry(REF_TEX2, LAGFX_A64_OBJ_TEXTURE, ts2, VA_PAY + 0x400);
+    }
 }
 
 /* ---- command buffer builder ---- */
@@ -174,6 +193,19 @@ static void cb_pass(uint32_t ref, uint16_t load, const double clear[4]) {
     memcpy(c + 0x1c, clear, 32);
     cb_cmd(26, r, sizeof r);
 }
+/* a pass whose colour attachments are given per slot (0 = unused): texture ref, load action (2 clear), clear colour */
+static void cb_pass_n(const uint32_t ref[2], const uint16_t load[2], const double clear[2][4]) {
+    uint8_t r[584]; memset(r, 0, sizeof r);
+    for (int k = 0; k < 2; k++) {
+        if (!ref[k]) continue;
+        uint8_t *c = r + 0x4c + 0x3c * k;
+        memcpy(c, &ref[k], 4);
+        memcpy(c + 20, &load[k], 2);
+        uint16_t store = 1; memcpy(c + 22, &store, 2);
+        memcpy(c + 0x1c, clear[k], 32);
+    }
+    cb_cmd(26, r, sizeof r);
+}
 static void cb_viewport(double w, double h) { double v[6] = { 0, 0, w, h, 0, 1 }; cb_cmd(130, v, sizeof v); }
 static void cb_pipeline(uint32_t ref) { cb_cmd(116, &ref, 4); }
 static void cb_vbuf(uint32_t ref, uint64_t off) { uint8_t r[20]; uint32_t idx = 0, cnt = 1; memcpy(r, &idx, 4); memcpy(r + 4, &cnt, 4); memcpy(r + 8, &ref, 4); memcpy(r + 12, &off, 8); cb_cmd(125, r, 20); }
@@ -185,10 +217,11 @@ static uint32_t cb_finish(void) {
     va_write(VA_CMD, g_cb, g_cbn);
     return g_cbn;
 }
+static bool g_res_tex2;   /* also list the second render target in the exec's resource list */
 static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len, bool with_res) {
-    uint32_t w[3 + 8 + 4], n = 0;
-    w[n++] = task; w[n++] = with_res ? 4 : 0; w[n++] = 1;
-    if (with_res) { w[n++] = REF_TEX; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0; w[n++] = REF_IB; w[n++] = 1; }
+    uint32_t w[3 + 10 + 4], n = 0;
+    w[n++] = task; w[n++] = with_res ? (g_res_tex2 ? 5 : 4) : 0; w[n++] = 1;
+    if (with_res) { w[n++] = REF_TEX; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0; w[n++] = REF_IB; w[n++] = 1; if (g_res_tex2) { w[n++] = REF_TEX2; w[n++] = 2; } }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
     submit(p, 0x43, 0, w, n);
@@ -241,8 +274,8 @@ static void test_objects(void) {
 
 #ifdef LAGFX_HAVE_VULKAN
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
-static VkShaderModule g_vs, g_fs, g_fs_half;
-static struct { int set, enable; uint32_t sf, df, op, saf, daf, aop, mask; } g_blend;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
+static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt;
+static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; } g_blend;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
 static void rel(void *u) { (void)u; g_released++; }
 static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
@@ -265,6 +298,11 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
         out->desc.blend_src_rgb = g_blend.sf, out->desc.blend_dst_rgb = g_blend.df, out->desc.blend_op_rgb = g_blend.op;
         out->desc.blend_src_a = g_blend.saf, out->desc.blend_dst_a = g_blend.daf, out->desc.blend_op_a = g_blend.aop;
         out->desc.color_write_mask = g_blend.mask;
+        out->desc.color_write_masks[0] = g_blend.mask, out->desc.color_write_masks[1] = g_blend.mask1, out->desc.color_write_masks[2] = out->desc.color_write_masks[3] = 0xfu;
+        if (g_blend.mrt) {
+            if (!g_fs_mrt) { VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_mrt_spv, .pCode = k_fs_mrt_spv }; assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_mrt) == VK_SUCCESS); }
+            out->desc.fragment_shader = g_fs_mrt;
+        }
     }
     out->release = rel;
     return true;
@@ -423,6 +461,52 @@ static void test_exec_blend(void) {
     puts("PASS: blend state reaches the pixels (off, source-over, additive, reverse subtract, write masks) on lavapipe");
 }
 
+/* Two colour attachments (slot 0 BGRA8, slot 1 RGBA16Float) rendered by ONE draw whose fragment shader writes o0 = (0.5,0,0,0.5), o1 = (0,1,0,1). */
+static uint16_t half_at(const uint8_t *img, uint32_t x, uint32_t y, uint32_t c) { uint16_t v; memcpy(&v, img + ((y * RT_W + x) * 4u + c) * 2u, 2); return v; }
+static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, uint32_t mask1) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *t = def_task(p, 1);
+    build_objects();
+    lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    g_blend.set = 1, g_blend.mrt = 1, g_blend.enable = 0, g_blend.sf = VK_BLEND_FACTOR_ONE, g_blend.df = VK_BLEND_FACTOR_ZERO, g_blend.op = VK_BLEND_OP_ADD;
+    g_blend.saf = g_blend.sf, g_blend.daf = g_blend.df, g_blend.aop = g_blend.op, g_blend.mask = mask0, g_blend.mask1 = mask1;
+    g_res_tex2 = slot1;
+    const uint32_t refs[2] = { slot0 ? REF_TEX : 0u, slot1 ? REF_TEX2 : 0u };
+    const uint16_t loads[2] = { 2, 2 };
+    const double clr[2][4] = { { 0, 0, 1, 1 }, { 0, 0, 0, 1 } };
+    cb_reset(); cb_pass_n(refs, loads, clr); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
+    exec(p, 1, cb_finish(), true);
+    uint8_t img[RT_W * RT_H * 8]; uint32_t w, h;
+    __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
+    if (slot0) {
+        assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, RT_W * RT_H * 4, &w, &h));
+        uint32_t v = px(img, 8, 8), want = (mask0 & 1u) ? 0x80000080u : 0xff0000ffu;   /* R mask bit 0: A R G B = 128 128 0 0 vs the blue clear */
+        (void)want;
+        if (mask0 == 0xfu) assert((v >> 24) >= 127 && (v >> 24) <= 129 && ((v >> 16) & 255) >= 127 && ((v >> 16) & 255) <= 129 && (v & 255) == 0 && ((v >> 8) & 255) == 0);
+    }
+    if (slot1) {
+        assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, RT_W * RT_H * 8, &w, &h));
+        if (mask1 == 0xfu) assert(half_at(img, 8, 8, 0) == 0 && half_at(img, 8, 8, 1) == 0x3c00 && half_at(img, 8, 8, 2) == 0 && half_at(img, 8, 8, 3) == 0x3c00);
+        else if (mask1 == 0u) assert(half_at(img, 8, 8, 1) == 0 && half_at(img, 8, 8, 3) == 0x3c00);   /* clear colour (0,0,0,1) stays */
+    }
+    if (slot0 && slot1) assert(R->multi_attach >= 1);
+    if (!slot0) assert(R->multi_attach >= 1 && R->submit_failed == 0);
+    assert(R->submit_failed == 0 && R->draws == 1);
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    free(p);
+    g_blend.set = 0, g_blend.mrt = 0, g_res_tex2 = false;
+    (void)name;
+}
+
+static void test_exec_mrt(void) {
+    mrt_case("both attachments written", true, true, 0xfu, 0xfu);
+    mrt_case("attachment 1 write mask 0", true, true, 0xfu, 0u);
+    mrt_case("only slot 1 attached (slot 0 unused)", false, true, 0xfu, 0xfu);
+    puts("PASS: two colour attachments (BGRA8 + RGBA16Float, original slots, per-slot write masks, unused slot 0) on lavapipe");
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -433,10 +517,12 @@ int main(void) {
         test_exec_disabled();
         test_exec_render();
         test_exec_blend();
+        test_exec_mrt();
         test_exec_no_resolver_and_pending();
         if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);
         if (g_fs) vkDestroyShaderModule(g_dev->vk->device, g_fs, NULL);
         if (g_fs_half) vkDestroyShaderModule(g_dev->vk->device, g_fs_half, NULL);
+        if (g_fs_mrt) vkDestroyShaderModule(g_dev->vk->device, g_fs_mrt, NULL);
     } else {
         puts("SKIP: no Vulkan device; execution tests not run");
         lagfx_device_free(g_dev); free(g_mem);

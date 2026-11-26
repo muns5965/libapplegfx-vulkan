@@ -167,8 +167,9 @@ typedef struct {
     uint16_t stencil_store_action;
     uint32_t stencil_clear_value;
 
-    uint32_t color_attachment_count;
+    uint32_t color_attachment_count;   /* compacted: entries with a null texture_ref are skipped; `slot` keeps the ORIGINAL index (the fragment output location) */
     struct {
+        uint8_t  slot;
         uint32_t texture_ref;
         uint32_t resolve_texture_ref;
         uint16_t load_action;

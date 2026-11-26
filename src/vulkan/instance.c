@@ -579,7 +579,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     VkPhysicalDeviceFeatures2 feat2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .features = { .shaderInt64 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) ? VK_TRUE : VK_FALSE,
-                      .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE },
+                      .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE,
+                      .independentBlend = probe2.features.independentBlend ? VK_TRUE : VK_FALSE },
         .pNext = &feat12,
     };
 
@@ -599,6 +600,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .enabledExtensionCount   = wanted_dev_n,
         .ppEnabledExtensionNames = wanted_dev_n ? wanted_dev_exts : NULL,
     };
+    s->have_independent_blend = probe2.features.independentBlend == VK_TRUE;
     vr = vkCreateDevice(s->phys_device, &dci, NULL, &s->device);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("vk_init: vkCreateDevice failed (VkResult=%d)", (int)vr);

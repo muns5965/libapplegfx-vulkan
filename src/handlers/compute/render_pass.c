@@ -95,6 +95,7 @@ int lagfx_parse_render_pass_descriptor(const uint8_t *payload,
             continue;
         }
         unsigned idx = out->color_attachment_count;
+        out->colors[idx].slot                = (uint8_t)i;
         out->colors[idx].texture_ref         = rd32(wire.colors[i].texture_ref);
         out->colors[idx].resolve_texture_ref = rd32(wire.colors[i].resolve_texture_ref);
         out->colors[idx].load_action         = rd16(wire.colors[i].load_action);

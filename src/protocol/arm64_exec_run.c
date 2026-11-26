@@ -59,7 +59,7 @@ typedef struct { objhdr_t h; VkSampler s; } a64_samp_t;
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour format, topology), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* one VkPipeline per (colour formats of slots 0..3, topology), owned by THIS object only */
     uint32_t ncache;
     uint32_t ref;
 } a64_pipe_t;
@@ -76,7 +76,8 @@ typedef struct {
     lagfx_a64_rexec_t *x;            /* the exec being recorded (mirror context), NULL outside an exec */
     bool pass_open;                  /* a tag 26 was seen and the segment chain has not ended it */
     bool rendering;                  /* the render encoder has a vkCmdBeginRendering open (pass_open without it = a pass with no usable target) */
-    lagfx_a64_obj_t *rt; uint32_t rt_w, rt_h;   /* the mirror texture being drawn into */
+    lagfx_a64_obj_t *rt; uint32_t rt_w, rt_h;   /* the first mirror texture being drawn into (rts[first used slot]) */
+    lagfx_a64_obj_t *rts[4]; uint32_t nslots;   /* colour attachments by their ORIGINAL slot (fragment output location); a null entry = unused slot; nslots = highest used slot + 1 */
     a64_pipe_t *pipe; bool pipe_set;
     const lagfx_task_entry_t *task;  /* the exec's task */
     bool dispatching, consumed;      /* inside lagfx_render_inner_dispatch for a tag of this module */
@@ -312,6 +313,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     r->vk = get_vk(p);
     r->x = NULL;
     r->pass_open = r->rendering = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false;
+    memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     if (!r->vk) { CNT(p).no_vulkan++; return false; }
     flush_deferred(r);   /* an earlier submission may have finished */
     r->task = task;
@@ -359,10 +361,16 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
 }
 
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
-static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, VkFormat fmt, uint32_t topo) {
-    for (uint32_t i = 0; i < pp->ncache; i++) if (pp->cache[i].fmt == fmt && pp->cache[i].topo == topo) return pp->cache[i].pl;
+static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
+    for (uint32_t i = 0; i < pp->ncache; i++) if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && pp->cache[i].topo == topo) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
-    d.color_format = fmt;
+    d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
+    if (nslots > 1u) {   /* several colour attachments (or a gap before the first): one format per slot, write mask per slot from the descriptor */
+        d.n_color = (uint8_t)nslots;
+        d.independent_blend = r->vk->have_independent_blend;
+        for (uint32_t i = 0; i < 4u; i++) d.color_formats[i] = (uint32_t)fmts[i];
+        if (!d.color_write_masks[0] && !d.color_write_masks[1] && !d.color_write_masks[2] && !d.color_write_masks[3]) for (uint32_t i = 0; i < 4u; i++) d.color_write_masks[i] = 0xfu;
+    }
     d.topology_plus1 = (uint8_t)(topo + 1u);
     VkPipeline pl = VK_NULL_HANDLE;
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
@@ -373,7 +381,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     p->diag2.exec.pipe.pipes_built++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, pp->cache[pp->ncache].fmt = fmt, pp->cache[pp->ncache].topo = (uint8_t)topo;
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
     pp->ncache++;
     return pl;
 }
@@ -428,7 +436,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
         } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
             if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
-            if (t == r->rt) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling the attachment being rendered */
+            bool fb = false;
+            for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
+            if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
             VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_sample_view(r->x, t);   /* a linear texture needs a buffer pull recorded outside a pass: not sampled */
             if (!v) { p->diag2.exec.pipe.desc_unbound++; return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
@@ -469,7 +479,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
 static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (prim > 4u) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; return false; }
     if (prim == 0u && r->pipe->src.no_point_size) { p->diag2.exec.pipe.point_no_size++; CNT(p).draws_skipped++; return false; }   /* Metal needs [[point_size]] too */
-    VkPipeline vp = pipeline_for(r, p, r->pipe, r->rt->format, prim);
+    VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
+    for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) fmts[i] = r->rts[i]->format;
+    VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim);
     if (!vp) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
     if (r->bound_vk != vp) {
         if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
@@ -482,9 +494,10 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
 static void pass_end(a64_run_t *r) {
     if (r->rendering) {
         lagfx_translate_render_end(&r->rs);
-        lagfx_a64_res_target_end(r->x, r->rt);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
+        for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
     }
     r->pass_open = r->rendering = false;
+    memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->bound_vk = VK_NULL_HANDLE;
 }
 
@@ -504,26 +517,47 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     reset_frag_tables(r);
     lagfx_render_pass_full_desc_t d;
     if (n < LAGFX_RENDER_PASS_WIRE_SIZE || lagfx_parse_render_pass_descriptor(rec, n, &d) != 0) { CNT(p).bad_rec++; tag_unsup(p, 26); return; }
-    if (d.color_attachment_count > 1u || d.has_depth || d.has_stencil) CNT(p).extra_attach_ignored++;
-    /* the SAME mirror object a blit / sync / write-back of this exec resolves for this ref */
-    uint64_t lin0 = lagfx_a64_res_stats(p)->linear_unsupported;
-    lagfx_a64_obj_t *t = R32(0x4c) ? lagfx_a64_res_object(r->x, d.colors[0].texture_ref) : NULL;   /* the parser compacts: only index 0 counts here */
-    if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
-    if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; tag_partial(p, 26); return; }
-    uint32_t load = d.colors[0].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
-    VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    VkClearValue cv;
-    memset(&cv, 0, sizeof cv);
-    if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) for (int c = 0; c < 4; c++) cv.color.float32[c] = (float)d.colors[0].clear_color[c];
-    VkImageView view; uint32_t w, h;
-    if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; tag_partial(p, 26); return; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
-    VkRenderingAttachmentInfo ca = { .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = lop, .storeOp = VK_ATTACHMENT_STORE_OP_STORE, .clearValue = cv };
-    if (lagfx_translate_render_begin(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), t->img, w, h, NULL, &ca, 1) != LAGFX_OK) {
-        lagfx_a64_res_target_end(r->x, t);
+    if (d.has_depth || d.has_stencil) CNT(p).extra_attach_ignored++;
+    /* colour attachments by their ORIGINAL slot (the fragment output location); up to 4. The SAME mirror object a blit / sync / write-back of this exec
+     * resolves for the ref. A slot whose target cannot be built is left unused (and counted), the others still render. */
+    VkRenderingAttachmentInfo ca[4];
+    memset(ca, 0, sizeof ca);
+    for (int k = 0; k < 4; k++) ca[k] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = VK_NULL_HANDLE,
+        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
+    lagfx_a64_obj_t *first = NULL;
+    uint32_t fw = 0, fh = 0, nslots = 0;
+    for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++) {
+        uint32_t slot = d.colors[k].slot;
+        if (slot >= 4u) { CNT(p).extra_attach_ignored++; continue; }
+        uint64_t lin0 = lagfx_a64_res_stats(p)->linear_unsupported;
+        lagfx_a64_obj_t *t = lagfx_a64_res_object(r->x, d.colors[k].texture_ref);
+        if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
+        if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; continue; }
+        uint32_t load = d.colors[k].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
+        VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        VkClearValue cv;
+        memset(&cv, 0, sizeof cv);
+        if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) for (int c = 0; c < 4; c++) cv.color.float32[c] = (float)d.colors[k].clear_color[c];
+        VkImageView view; uint32_t w, h;
+        if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
+        if (first && (w != fw || h != fh)) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* one render area for all attachments */
+        bool dup = false;
+        for (uint32_t q = 0; q < 4u; q++) dup |= r->rts[q] == t;
+        if (dup) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* the same image twice is not a valid attachment set */
+        if (!first) first = t, fw = w, fh = h;
+        r->rts[slot] = t;
+        ca[slot].imageView = view, ca[slot].loadOp = lop, ca[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE, ca[slot].clearValue = cv;
+        if (slot + 1u > nslots) nslots = slot + 1u;
+        if (slot > 0u) CNT(p).multi_attach++;
+    }
+    if (!first) { CNT(p).no_target++; tag_partial(p, 26); return; }
+    r->nslots = nslots;
+    if (lagfx_translate_render_begin(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first->img, fw, fh, NULL, ca, nslots) != LAGFX_OK) {
+        for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
+        memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
         CNT(p).no_target++; tag_partial(p, 26); return;
     }
-    r->rendering = true, r->rt = t, r->rt_w = w, r->rt_h = h;
+    r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
     tag_done(p, 26);
 }
 

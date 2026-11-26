@@ -400,6 +400,12 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             out->desc.blend_src_rgb = fac[b->src_rgb], out->desc.blend_dst_rgb = fac[b->dst_rgb], out->desc.blend_op_rgb = ops[b->op_rgb];
             out->desc.blend_src_a = fac[b->src_a], out->desc.blend_dst_a = fac[b->dst_a], out->desc.blend_op_a = ops[b->op_a];
             out->desc.color_write_mask = ((b->mask & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((b->mask & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((b->mask & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((b->mask & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
+            for (uint32_t i = 0; i < 4u; i++) out->desc.color_write_masks[i] = 0xfu;
+            out->desc.color_write_masks[0] = out->desc.color_write_mask;
+            if (b->found1) {   /* attachment 1's write mask (the dump's second attachment record carries writeMask 0) */
+                uint8_t m1 = b->mask1;
+                out->desc.color_write_masks[1] = ((m1 & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((m1 & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((m1 & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((m1 & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
+            }
             CNTP(p).blend_decoded++;
             if (!out->desc.blend_enable) CNTP(p).blend_off++;
             if (b->found1) CNTP(p).color1_seen++;

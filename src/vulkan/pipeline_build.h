@@ -67,6 +67,12 @@ typedef struct {
     uint8_t          blend_set, blend_enable;
     uint32_t         blend_src_rgb, blend_dst_rgb, blend_op_rgb, blend_src_a, blend_dst_a, blend_op_a;   /* VkBlendFactor / VkBlendOp */
     uint32_t         color_write_mask;   /* VkColorComponentFlags */
+    /* Several colour attachments: n_color 0/1 = the single attachment above (color_format, blend_*). n_color 2..4: attachment i has format color_formats[i]
+     * (VK_FORMAT_UNDEFINED = an unused slot: nothing written) and the blend state above with write mask color_write_masks[i] (when independent_blend == 0 every
+     * mask is forced to color_write_mask: without the device feature all attachments must be identical). */
+    uint8_t          n_color, independent_blend;
+    uint32_t         color_formats[4];
+    uint32_t         color_write_masks[4];
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;

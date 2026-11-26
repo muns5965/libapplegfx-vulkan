@@ -272,10 +272,22 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         blend_att.colorWriteMask = (VkColorComponentFlags)desc->color_write_mask;
         if (!LAGFX_POLICY("M2_SRCOVER")) blend_att.blendEnable = VK_FALSE;   /* LAGFX_DISABLE_M2_SRCOVER stays a diagnostic switch for ALL blending, decoded state included */
     }
+    VkPipelineColorBlendAttachmentState blend_multi[4];
+    VkFormat color_fmts[4];
+    const uint32_t ncol = (desc->n_color >= 2u && desc->n_color <= 4u) ? desc->n_color : 1u;
+    if (ncol > 1u) {
+        for (uint32_t i = 0; i < ncol; i++) {
+            blend_multi[i] = blend_att;
+            color_fmts[i] = (VkFormat)desc->color_formats[i];
+            if (!desc->independent_blend) continue;   /* without the feature every element must be identical (VUID 00605), unused slots included */
+            if (color_fmts[i] == VK_FORMAT_UNDEFINED) { blend_multi[i].blendEnable = VK_FALSE; blend_multi[i].colorWriteMask = 0; }
+            else blend_multi[i].colorWriteMask = (VkColorComponentFlags)desc->color_write_masks[i];
+        }
+    }
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
-        .attachmentCount = 1,
-        .pAttachments = &blend_att,
+        .attachmentCount = ncol,
+        .pAttachments = ncol > 1u ? blend_multi : &blend_att,
     };
 
     /* Shader stages — entry-point names default to "main" but can be
@@ -305,8 +317,8 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                : VK_FORMAT_B8G8R8A8_UNORM;
     VkPipelineRenderingCreateInfo rendering_info = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
-        .colorAttachmentCount = 1,
-        .pColorAttachmentFormats = &color_fmt,
+        .colorAttachmentCount = ncol,
+        .pColorAttachmentFormats = ncol > 1u ? color_fmts : &color_fmt,
     };
 
     /* Depth/stencil — NULL as in triangle test (no depth) */

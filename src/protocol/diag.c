@@ -159,7 +159,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                                       (unsigned long long)R->tag_partial[g], (unsigned long long)R->tag_unsup[g]);
         snprintf(rl, sizeof rl,
                  "g7-gpu-run: execs=%llu passes=%llu draws=%llu draws_skipped=%llu submits=%llu submit_failed=%llu submit_pending=%llu seg_render=%llu seg_unsupported=%llu no_vulkan=%llu "
-                 "bad_rec=%llu no_pass=%llu no_target=%llu no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu "
+                 "bad_rec=%llu no_pass=%llu no_target=%llu no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu multi_attach=%llu "
                  "load_uninit_cleared=%llu pipeline_unresolved=%llu obj_unsupported=%llu tag_over=%llu "
                  "mapped_created=%llu mapped_shared=%llu mapped_uploaded=%llu mapped_written_back=%llu mapped_unsupported=%llu mapped_no_desc=%llu mapped_bytes_up=%llu mapped_bytes_down=%llu mapped_pages_skipped=%llu "
                  "tags(done/partial/unsupported)[%s]",
@@ -167,7 +167,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->submits, (unsigned long long)R->submit_failed, (unsigned long long)R->submit_pending, (unsigned long long)R->seg_render, (unsigned long long)R->seg_unsupported,
                  (unsigned long long)R->no_vulkan, (unsigned long long)R->bad_rec, (unsigned long long)R->no_pass, (unsigned long long)R->no_target,
                  (unsigned long long)R->no_pipeline, (unsigned long long)R->no_vertex_buf, (unsigned long long)R->no_index_buf,
-                 (unsigned long long)R->prim_unsupported, (unsigned long long)R->extra_attach_ignored, (unsigned long long)R->load_uninit_cleared,
+                 (unsigned long long)R->prim_unsupported, (unsigned long long)R->extra_attach_ignored, (unsigned long long)R->multi_attach, (unsigned long long)R->load_uninit_cleared,
                  (unsigned long long)R->pipeline_unresolved, (unsigned long long)R->obj_unsupported, (unsigned long long)R->tag_over,
                  (unsigned long long)R->mapped_created, (unsigned long long)R->mapped_shared, (unsigned long long)R->mapped_uploaded, (unsigned long long)R->mapped_written_back,
                  (unsigned long long)R->mapped_unsupported, (unsigned long long)R->mapped_no_desc, (unsigned long long)R->mapped_bytes_up, (unsigned long long)R->mapped_bytes_down,
