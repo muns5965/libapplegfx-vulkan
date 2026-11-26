@@ -71,7 +71,7 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) { (void)p; }
 #define MAX_OBJS 4096u
 #define MAX_TMP  64u
 
-typedef struct { lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; lagfx_a64_rexec_t *cur;      /* recording */
+typedef struct { lagfx_protocol_t *p; lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; lagfx_a64_rexec_t *cur;      /* recording */
     lagfx_a64_rexec_t *pending;  /* submitted, fence not signalled yet: its resources stay alive and untouched */
     lagfx_a64_obj_t **dead; uint32_t ndead, capdead;   /* replaced / forgotten / dropped while an exec was recording or in flight: freed after its fence signalled */
     bool quiet_kinds;            /* begin(): refs of the resource list that are not buffers/textures (pipelines...) are not 'bad objects' */
@@ -85,6 +85,7 @@ int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = th
 #define MRUN(p) ((p)->diag2.exec.run)
 #define BUSY(m) ((m)->cur || (m)->pending || (m)->sw_fence)
 #define MAX_MS 256u
+#define OT(m) ((m)->p->diag2.exec.pipe)   /* object table counters */
 #define MKFAIL(w) do { m->mk_why = (w); } while (0)
 
 /* One guest display surface (mapping id) mirrored as ONE device image + a host-visible staging buffer in the guest's pixel layout (tight rows, w * h * 4 bytes).
@@ -101,7 +102,7 @@ typedef struct lagfx_a64_msurf {
 } msurf_t;
 
 static mgr2_t *mgr_get(lagfx_protocol_t *p, bool create) {
-    if (!p->a64_res && create) p->a64_res = calloc(1, sizeof(mgr2_t));
+    if (!p->a64_res && create) { p->a64_res = calloc(1, sizeof(mgr2_t)); if (p->a64_res) ((mgr2_t *)p->a64_res)->p = p; }
     return p->a64_res;
 }
 
@@ -276,7 +277,9 @@ const lagfx_a64_stats_t *lagfx_a64_res_stats(lagfx_protocol_t *p) {
  * a submission whose fence has not signalled, so they are parked and destroyed only after that fence signalled (exec_finish / destroy). */
 static void obj_release(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (!o) return;
+    OT(m).obj_destroyed++; if (OT(m).obj_live) OT(m).obj_live--;
     if (BUSY(m)) {
+        OT(m).obj_deferred++;
         if (m->ndead == m->capdead) {
             uint32_t nc = m->capdead ? m->capdead * 2u : 16u;
             lagfx_a64_obj_t **n = realloc(m->dead, nc * sizeof *n);
@@ -705,7 +708,7 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
     uint8_t eb[12];
     if (!lagfx_arm64_task_read(p, t, t->objects_addr + (uint64_t)ref * 12u, eb, 12)) return NULL;
     uint32_t e[3] = { lagfx_le32(eb), lagfx_le32(eb + 4), lagfx_le32(eb + 8) };
-    uint32_t slot = m->n;
+    uint32_t slot = m->n, reused = 0;
     for (uint32_t i = 0; i < m->n; i++)
         if (m->objs[i] && m->objs[i]->task == t->id && m->objs[i]->ref == ref) { slot = i; break; }
     if (slot < m->n) {
@@ -717,8 +720,8 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
     } else {
         /* A slot freed by a release (0x25 forget, task drop, a replaced entry whose new object failed) is a hole: reuse it. Without this the table only grew, and after
          * MAX_OBJS creations over a run every new object was refused (silently) although few were alive. */
-        for (uint32_t i = 0; i < m->n; i++) if (!m->objs[i]) { slot = i; break; }
-        if (slot == m->n && m->n >= MAX_OBJS) { m->st.obj_table_full++; memo_fail(m, t->id, ref, e, TEXWHY_TABLE_FULL); return NULL; }
+        for (uint32_t i = 0; i < m->n; i++) if (!m->objs[i]) { slot = i; reused = 1; break; }
+        if (slot == m->n && m->n >= MAX_OBJS) { m->st.obj_table_full++, OT(m).obj_full++; memo_fail(m, t->id, ref, e, TEXWHY_TABLE_FULL); return NULL; }
     }
     lagfx_a64_obj_t *o = obj_make(p, m, vk, t, ref, e);
     if (!o) { if (m->mk_why) memo_fail(m, t->id, ref, e, m->mk_why); return NULL; }   /* nothing remembered but the memo: a later exec retries (the entry may be filled in later) */
@@ -733,6 +736,9 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
     }
     m->objs[slot] = o;
     m->st.obj_slots = m->n;
+    OT(m).obj_created++, OT(m).obj_live++, OT(m).obj_reused += reused;
+    if (OT(m).obj_live > OT(m).obj_peak_live) OT(m).obj_peak_live = OT(m).obj_live;
+    if (m->n > OT(m).obj_high_water) OT(m).obj_high_water = m->n;
     for (uint32_t i = 0; i < 128u && i < m->nfail; i++) if (m->fail[i].task == t->id && m->fail[i].ref == ref) m->fail[i].task = UINT32_MAX;   /* created now: the failure memo is obsolete */
     o->gen = ++m->st.created;
     return o;
@@ -1447,7 +1453,9 @@ void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *live, uint64_t *created
 
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref) {
     mgr2_t *m = p ? p->a64_res : NULL;
-    return m ? obj_find(m, task, ref) : NULL;
+    lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
+    if (m && !o) OT(m).obj_lookup_miss++;
+    return o;
 }
 
 /* Names the reason texture handle (task, ref) has no usable mirror object. Read-only: the guest's object table entry is re-read and its payload peeked (format /

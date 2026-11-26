@@ -578,6 +578,7 @@ typedef struct lagfx_protocol {
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
                 uint64_t xlate_air2spv;
                 uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
+                uint64_t obj_created, obj_destroyed, obj_reused, obj_live, obj_peak_live, obj_high_water, obj_full, obj_lookup_miss, obj_deferred;   /* mirror object table (arm64_resources.c), cumulative per run: destroyed = logically released (0x25, task drop, replaced entry), deferred = of those parked behind an exec in flight, reused = created into a freed slot, high_water = slots ever used, full = refused at 4096 live, lookup_miss = texture-handle lookups of the draw path that found nothing */
                 uint64_t desc_linear_stale;   /* a linear texture whose buffer changed inside the open pass: draw skipped (also counted in desc_unbound_why[4]) */
                 uint64_t desc_tex_why[LAGFX_A64_TEXWHY_COUNT];   /* desc_unbound_why[3] (a sampled texture handle did not resolve) split by reason: lagfx_a64_texwhy_t order, names lagfx_a64_texwhy_name() */
                 uint8_t  desc_tex_nseen[LAGFX_A64_TEXWHY_COUNT];   /* distinct unresolved textures logged per reason (first 8) */

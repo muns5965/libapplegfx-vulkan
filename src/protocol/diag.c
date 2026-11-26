@@ -205,7 +205,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             LAGFX_LOG("%s", dl);
         }
     }
-    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
+    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;
 #define U(f) (unsigned long long)Q->f
         char pl[3600];
@@ -223,6 +223,12 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             size_t po = strlen(pl);
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT && po + 40 < sizeof pl; c++)
                 if (Q->stub_missing_cap[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " stub_missing_cap_%s=%llu", lagfx_vk_cap_name(c), U(stub_missing_cap[c]));
+        }
+        {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
+            size_t po = strlen(pl);
+            if (po + 200 < sizeof pl)
+                snprintf(pl + po, sizeof pl - po, " obj_table[created=%llu destroyed=%llu reused=%llu live=%llu peak_live=%llu high_water=%llu full=%llu lookup_miss=%llu deferred=%llu]",
+                         U(obj_created), U(obj_destroyed), U(obj_reused), U(obj_live), U(obj_peak_live), U(obj_high_water), U(obj_full), U(obj_lookup_miss), U(obj_deferred));
         }
         {   /* desc[... tex=N ...] by reason (only the non-zero ones); the first 8 distinct textures of each are logged as g7-gpu-tex-unbound lines when they happen */
             size_t po = strlen(pl);

@@ -92,6 +92,7 @@ typedef struct {
     lagfx_a64_rexec_t *x;            /* the exec being recorded (mirror context), NULL outside an exec */
     lagfx_a64_cap_t *cap; bool cap_pass;   /* render replay capture (LAGFX_ARM64_DUMP_DATA=1): the exec's recorder (owned by the mirror's finish hook once the exec ended) and an open captured pass */
     uint32_t fsref[A64_MAX_FSAMP], vsref[A64_MAX_FSAMP];   /* object refs of the bound fragment / vertex samplers (capture only) */
+    uint32_t exec_draw;              /* draw records seen in this exec so far (log context of an unresolved texture) */
     bool pass_open;                  /* a tag 26 was seen and the segment chain has not ended it */
     bool last_fetch;                 /* the previous draw of this pass read input attachments (framebuffer fetch) */
     bool rendering;                  /* the render encoder has a vkCmdBeginRendering open (pass_open without it = a pass with no usable target) */
@@ -379,7 +380,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     memset(&r->region, 0, sizeof r->region);
     reset_frag_tables(r);
     r->last_ds = VK_NULL_HANDLE, r->bound_vk = VK_NULL_HANDLE;
-    r->ngc = 0;
+    r->ngc = 0, r->exec_draw = 0;
     if (!task || (nres && !res)) return false;
     /* ONE exec context + ONE command buffer for Render and Blit segments; the resource-flag rules (0x01 / 0x02 uploads, stale guard) are applied inside */
     r->x = lagfx_a64_res_begin(p, task->id, res, nres);
@@ -514,7 +515,7 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
 
 /* A sampled texture slot is empty at a draw: count it by reason (desc_tex_why) and log the first 8 distinct textures of each reason, so a device log names them.
  * Distinct = (task, ref, entry type, format, extent). The reason was fixed when the texture record named the slot (a64_texmiss_t), or is slot_unbound / slot_range. */
-static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, uint32_t stage, int16_t mi_s) {
+static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, uint32_t bind_i, uint32_t stage, int16_t mi_s) {
     a64_texmiss_t none; memset(&none, 0, sizeof none);
     const a64_texmiss_t *mm = &none;
     if (mi_s < 0 || (uint32_t)mi_s >= A64_MAX_FB) none.dg.why = TEXWHY_SLOT_RANGE;
@@ -530,10 +531,17 @@ static void tex_miss(a64_run_t *r, lagfx_protocol_t *p, uint32_t stage, int16_t 
     __typeof__(Q->desc_tex_seen[0][0]) *e = &Q->desc_tex_seen[why][Q->desc_tex_nseen[why]++];
     e->task = r->task->id, e->ref = mm->ref, e->type = mm->dg.type, e->mtl_format = mm->dg.mtl_format, e->w = mm->dg.width, e->h = mm->dg.height, e->mapping = mm->dg.mapping;
     static const char *const kind[] = { "?", "buffer", "texture", "?", "?", "?", "function", "serialized", "linear_texture", "linear_texture", "?", "mapped_texture" };
-    char l[320];
-    snprintf(l, sizeof l, "g7-gpu-tex-unbound: why=%s task=%u ref=%u stage=%s slot=%d entry_type=%u kind=%s mtl_format=%u size=%ux%u mapping=%u (distinct %u/8)", lagfx_a64_texwhy_name(why), (unsigned)r->task->id,
+    /* draw context (facts at the failure, no interpretation): the exec's draw index, pass number, the pipeline object and its shader pair, which Vulkan binding / Metal slot,
+     * and colour attachment 0. Whether the shader really samples the slot is not known here: the binding exists because the translated SPIR-V declares the texture. */
+    char rt[96] = "none";
+    if (r->rts[0]) snprintf(rt, sizeof rt, "ref=%u mapping=%u mtl_format=%u size=%ux%u", (unsigned)r->rts[0]->ref, (unsigned)(r->rts[0]->ms ? r->rts[0]->mapping : 0u), (unsigned)r->rts[0]->mtl_format,
+                            (unsigned)r->rts[0]->width, (unsigned)r->rts[0]->height);
+    char l[640];
+    snprintf(l, sizeof l, "g7-gpu-tex-unbound: why=%s task=%u ref=%u stage=%s slot=%d entry_type=%u kind=%s mtl_format=%u size=%ux%u mapping=%u (distinct %u/8) | draw=%u pass=%llu pipeline_ref=%u vs=%s/%016llx fs=%s/%016llx vk_binding=%u declared_in_shader=yes sampled=unknown rt0[%s]",
+             lagfx_a64_texwhy_name(why), (unsigned)r->task->id,
              (unsigned)mm->ref, stage ? "fragment" : "vertex", (int)mi_s, (unsigned)mm->dg.type, mm->dg.type < sizeof kind / sizeof *kind ? kind[mm->dg.type] : "?", (unsigned)mm->dg.mtl_format,
-             (unsigned)mm->dg.width, (unsigned)mm->dg.height, (unsigned)mm->dg.mapping, (unsigned)Q->desc_tex_nseen[why]);
+             (unsigned)mm->dg.width, (unsigned)mm->dg.height, (unsigned)mm->dg.mapping, (unsigned)Q->desc_tex_nseen[why], (unsigned)r->exec_draw, (unsigned long long)CNT(p).passes, (unsigned)pp->ref,
+             pp->src.vs_name[0] ? pp->src.vs_name : "?", (unsigned long long)pp->src.vs_hash, pp->src.fs_name[0] ? pp->src.fs_name : "?", (unsigned long long)pp->src.fs_hash, (unsigned)pp->src.bind[bind_i].binding, rt);
     fprintf(stderr, "%s\n", l);
     LAGFX_LOG("%s", l);
 }
@@ -593,7 +601,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             r->wrote_storage = true;
         } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? (st ? r->ftex[mi] : r->vtex[mi]) : NULL;
-            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[3]++; tex_miss(r, p, st, mi_s); return false; }
+            if (!t) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[3]++; tex_miss(r, p, pp, i, st, mi_s); return false; }
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
@@ -922,6 +930,7 @@ typedef struct { bool have; lagfx_a64_draw_t d; uint32_t index_start; lagfx_a64_
 
 static void draw_cmd_inner(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n, cap_dinfo_t *di) {
     lagfx_a64_draw_t d;
+    r->exec_draw++;   /* 1-based index of this draw record in the exec (diagnostics) */
     if (lagfx_a64_draw_decode(tag, rec, n, &d) != LAGFX_A64_DRAW_OK) { CNT(p).bad_rec++; tag_unsup(p, tag); return; }
     if (!draw_ready(r, p)) { tag_partial(p, tag); return; }
     uint32_t index_start = 0;

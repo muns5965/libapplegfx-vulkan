@@ -470,6 +470,8 @@ static void put_texture_ex(uint32_t ref, uint32_t pay_off, uint32_t fmt, uint32_
     uint16_t sm = (uint16_t)samples; memcpy(d + 18, &sm, 2);
     (void)tsize;
 }
+void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final);
+static char *capture_stats(lagfx_protocol_t *p);
 static void test_tex_unbound_reasons(void) {
     g_res_tex = true;
     setenv("LAGFX_ARM64_EXEC", "1", 1);
@@ -528,6 +530,13 @@ static void test_tex_unbound_reasons(void) {
     exec(p, 1, cb_finish());
     g_nextra = 0;
     assert(RUNC(p).draws == 1 && PIPE(p).desc_unbound == NDRAW);            /* once the entry is filled in and listed, it resolves and draws */
+    {   /* the log line carries the draw context: draw index, pipeline ref, shader names / hashes, binding, colour attachment 0 */
+        char *st = capture_stats(p);
+        assert(strstr(st, "obj_table[created=") && strstr(st, "texwhy[slot_unbound=1 record_bad=1 ref_zero=1 no_table=1"));
+        free(st);
+        const char *pn = "viewport_to_ndc";
+        assert(strlen(pn) < sizeof ((lagfx_a64_pipeline_src_t *)0)->vs_name);
+    }
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);
@@ -557,6 +566,139 @@ static void test_object_slots_reused(void) {
     pfree(p);
     g_res_tex = false;
     puts("PASS: released object slots of the mirror table are reused (no growth over forget / recreate cycles)");
+}
+
+void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final);
+/* the statistics block the diagnostics print for p, captured from stderr */
+static char *capture_stats(lagfx_protocol_t *p) {
+    fflush(stderr);
+    char path[] = "/tmp/lagfx-stats-XXXXXX";
+    int fd = mkstemp(path), save = dup(2);
+    assert(fd >= 0 && save >= 0);
+    dup2(fd, 2);
+    lagfx_diag_stats(p, 1, true);
+    fflush(stderr);
+    dup2(save, 2); close(save);
+    off_t n = lseek(fd, 0, SEEK_END);
+    char *b = calloc(1, (size_t)n + 1);
+    lseek(fd, 0, SEEK_SET);
+    assert(read(fd, b, (size_t)n) == n);
+    close(fd); unlink(path);
+    return b;
+}
+static void res_cycle(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) {   /* one mirror exec listing refs, ended and waited for (no GPU work recorded) */
+    uint32_t res[64];
+    assert(n <= 32);
+    for (uint32_t i = 0; i < n; i++) res[2 * i] = refs[i], res[2 * i + 1] = 0;
+    lagfx_a64_rexec_t *x = lagfx_a64_res_begin(p, task, (const uint8_t *)res, n);
+    assert(x);
+    (void)lagfx_a64_res_end(x);
+    while (lagfx_a64_res_poll(p, 100) == LAGFX_A64_PENDING) {}
+}
+
+/* Slot reuse safety. Objects are found by (task, ref) stored IN the object, never by a slot index, and every object is its own heap block with a unique `gen`: a
+ * slot that is reused cannot make an old ref hit the new object, the same ref of another task is a different object, an object released while an exec records or is in
+ * flight is parked (m->dead) and freed only after that exec finished, and a new object is calloc'ed (no residual state). */
+static void test_slot_reuse_safety(void) {
+    g_res_tex = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t1;
+    lagfx_protocol_t *p = new_task(&t1);
+    lagfx_task_entry_t *t2 = def_task(p, 2);
+    (void)t2;
+    /* (a) same ref number in two tasks stays two objects; a stale ref misses even when its slot holds another object now */
+    const uint32_t both[2] = { REF_TEX, REF_BUF_POS };
+    res_cycle(p, 1, both, 2); res_cycle(p, 2, both, 2);
+    lagfx_a64_obj_t *a1 = lagfx_a64_res_lookup(p, 1, REF_TEX), *a2 = lagfx_a64_res_lookup(p, 2, REF_TEX);
+    assert(a1 && a2 && a1 != a2 && a1->gen != a2->gen && a1->task == 1 && a2->task == 2);
+    lagfx_a64_res_forget(p, 1, REF_TEX);
+    assert(lagfx_a64_res_lookup(p, 1, REF_TEX) == NULL && lagfx_a64_res_lookup(p, 2, REF_TEX) == a2);
+    const uint32_t other[1] = { REF_TEX2 };
+    uint64_t reused0 = PIPE(p).obj_reused;
+    res_cycle(p, 1, other, 1);                                             /* a new object takes the freed slot */
+    assert(PIPE(p).obj_reused == reused0 + 1);
+    assert(lagfx_a64_res_lookup(p, 1, REF_TEX) == NULL);                    /* the stale ref is a miss, not the new object */
+    assert(lagfx_a64_res_lookup(p, 1, REF_TEX2) && lagfx_a64_res_lookup(p, 2, REF_TEX) == a2);
+    uint64_t miss0 = PIPE(p).obj_lookup_miss;
+    (void)lagfx_a64_res_lookup(p, 1, REF_TEX);
+    assert(PIPE(p).obj_lookup_miss == miss0 + 1);
+    /* (b)(c) release while an exec records: parked, still readable, freed only after the exec; the same ref recreated meanwhile is a distinct, fresh object */
+    tri_exec(p, REF_PIPE_TRI, 3, 3, false);                                 /* task 1: REF_TEX is rendered into: it has a view and is host_valid */
+    lagfx_a64_obj_t *old = lagfx_a64_res_lookup(p, 1, REF_TEX);
+    assert(old && old->view != VK_NULL_HANDLE && old->host_valid);
+    uint64_t gen0 = old->gen, dest0 = lagfx_a64_res_stats(p)->destroyed, def0 = lagfx_a64_res_stats(p)->deferred_frees;
+    uint32_t res[2] = { REF_BUF_POS, 0 };
+    lagfx_a64_rexec_t *x = lagfx_a64_res_begin(p, 1, (const uint8_t *)res, 1);
+    assert(x);
+    lagfx_a64_res_forget(p, 1, REF_TEX);
+    assert(lagfx_a64_res_stats(p)->deferred_frees == def0 + 1 && lagfx_a64_res_stats(p)->destroyed == dest0);   /* logically released, physically alive */
+    assert(old->gen == gen0 && old->img != VK_NULL_HANDLE && old->view != VK_NULL_HANDLE);
+    lagfx_a64_obj_t *nw = lagfx_a64_res_object(x, REF_TEX);                 /* the same ref again inside this exec, in the freed slot */
+    assert(nw && nw != old && nw->gen > gen0 && nw->img != old->img);
+    assert(nw->view == VK_NULL_HANDLE && !nw->guest_stale && nw->wgen == 0 && !nw->leak && nw->ms == NULL && !nw->linear);   /* calloc'ed: nothing of the old record */
+    assert(old->gen == gen0);
+    (void)lagfx_a64_res_end(x);
+    while (lagfx_a64_res_poll(p, 100) == LAGFX_A64_PENDING) {}
+    assert(lagfx_a64_res_stats(p)->destroyed == dest0 + 1);                 /* freed only now: the exec that could use it has finished (its fence signalled) */
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_drop_task(p, 2);
+    lagfx_a64_exec_free(p);
+    pfree(p);
+    g_res_tex = false;
+    puts("PASS: slot reuse safety: refs are per task and matched by (task, ref), a stale ref misses, a released object is parked until its exec finished, a recreated one is fresh");
+}
+
+/* More than MAX_OBJS (4096) create / release cycles with a few objects alive never fill the table; and when 4096 objects really are alive the next creation is
+ * refused, counted (obj_table.full), named table_full for a texture, and logged in the statistics block; releasing one makes room again. */
+static void test_object_table_stress_and_full(void) {
+    g_res_tex = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    const uint32_t two[2] = { REF_BUF_POS, REF_BUF_UV };
+    for (unsigned i = 0; i < 4200; i++) {
+        res_cycle(p, 1, two, 2);
+        lagfx_a64_res_forget(p, 1, REF_BUF_POS);
+        lagfx_a64_res_forget(p, 1, REF_BUF_UV);
+    }
+    assert(PIPE(p).obj_created >= 8400 && PIPE(p).obj_full == 0 && PIPE(p).obj_high_water <= 4u && PIPE(p).obj_peak_live <= 4u);
+    assert(PIPE(p).obj_reused >= 8390 && PIPE(p).obj_live == 0 && PIPE(p).obj_destroyed == PIPE(p).obj_created);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+
+    /* a real full table: task 3's object table (64 KiB at VA 0x20000) names 4096 buffers and one texture, all listed in one exec */
+    p = new_task(&t);
+    lagfx_task_entry_t *t3 = def_task(p, 3);
+    t3->objects_addr = 0x20000;
+    put_buffer_object(REF_BUF_POS, 0x200, 0x4000, 0);                       /* the payload shared by all the entries */
+    uint32_t e[3] = { LAGFX_A64_OBJ_BUFFER | 16u << 8, (uint32_t)(VA_PAY + 0x200), 0 };
+    for (uint32_t r = 1; r <= 4096; r++) va_write(0x20000u + r * 12u, e, 12);
+    put_texture(2, 0x100);
+    {   /* the texture entry of ref 4097 (types and payload of ref 2 of the first object table) */
+        uint8_t eb[12]; memcpy(eb, g_mem + ((uint64_t)DATA_PFN0 << 14) + 0x100 + 2 * 12, 12);
+        va_write(0x20000u + 4097u * 12u, eb, 12);
+    }
+    uint32_t *res = malloc(8u * 4097u);
+    for (uint32_t i = 0; i < 4097; i++) res[2 * i] = i + 1u, res[2 * i + 1] = 0;
+    lagfx_a64_rexec_t *x = lagfx_a64_res_begin(p, 3, (const uint8_t *)res, 4097);
+    assert(x);
+    (void)lagfx_a64_res_end(x);
+    while (lagfx_a64_res_poll(p, 1000) == LAGFX_A64_PENDING) {}
+    free(res);
+    assert(PIPE(p).obj_live == 4096 && PIPE(p).obj_peak_live == 4096 && PIPE(p).obj_high_water == 4096);
+    assert(PIPE(p).obj_full == 1 && lagfx_a64_res_stats(p)->obj_table_full == 1);
+    assert(lagfx_a64_res_lookup(p, 3, 4097) == NULL && lagfx_a64_res_lookup(p, 3, 4096) != NULL);
+    lagfx_a64_texdiag_t dg;
+    assert(lagfx_a64_res_diagnose(p, 3, 4097, &dg) && dg.why == TEXWHY_TABLE_FULL && dg.type == 2);
+    char *st = capture_stats(p);
+    assert(strstr(st, "obj_table[created=4096 destroyed=0 reused=0 live=4096 peak_live=4096 high_water=4096 full=1 lookup_miss=1 "));
+    free(st);
+    lagfx_a64_res_forget(p, 3, 7);                                          /* room again: the texture is created in the freed slot */
+    uint32_t again[1] = { 4097 };
+    res_cycle(p, 3, again, 1);
+    assert(lagfx_a64_res_lookup(p, 3, 4097) != NULL && PIPE(p).obj_full == 1 && PIPE(p).obj_reused == 1 && PIPE(p).obj_live == 4096);
+    lagfx_a64_exec_drop_task(p, 3); lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+    g_res_tex = false;
+    puts("PASS: object table: 8400 create / release cycles never fill it; with 4096 live objects the next creation is refused, counted (full), named table_full and printed in obj_table[...]");
 }
 
 /* A linear (buffer backed) texture is sampled: Metal shows later changes of the buffer in the texture, so the mirror image is re-pulled when the buffer changed.
@@ -1020,6 +1162,8 @@ int main(void) {
         test_linear_sampled();
         test_tex_unbound_reasons();
         test_object_slots_reused();
+        test_slot_reuse_safety();
+        test_object_table_stress_and_full();
         test_invalidation();
         test_missing_caps();
     } else {
