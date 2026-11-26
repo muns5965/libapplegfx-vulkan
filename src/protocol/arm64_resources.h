@@ -64,7 +64,7 @@ typedef struct {
     uint64_t sync_cmds, sync_objs, sync_skipped, inv_cmds, inv_objs, inv_missing, hint_cmds, res_cmd_bad;   /* ops 0x35/0x3e, 0x34, 0x3f */
     uint64_t gpu_timeout, gpu_fail, busy_skipped;   /* gpu_timeout: bounded wait ran out (pending, not failed); gpu_fail: a Vulkan call failed or the device was lost; busy_skipped: begin refused while the previous exec was still pending */
     uint64_t blit_seen, blit_done, blit_rejected, blit_noop, blit_unsupported;   /* per command */
-    uint64_t linear_made, linear_unsupported;   /* type 8/9 linear textures mirrored (device image only) / that could not be */
+    uint64_t linear_made, linear_unsupported, linear_resync;   /* type 8/9 linear textures mirrored (device image only) / that could not be */
     uint64_t created, destroyed, deferred_frees;   /* mirror objects built / destroyed; frees parked until the in-flight fence signalled */
     uint64_t blit_tag[16];   /* done, indexed tag - 300 (300..315) */
 } lagfx_a64_stats_t;
@@ -90,6 +90,8 @@ struct lagfx_a64_obj {
     bool     has_pages;                 /* vpage != 0 */
     struct lagfx_a64_msurf *ms; uint32_t mapping;       /* type 11: the shared surface image (host_valid / guest_stale of the object live in ms); has_pages stays false */
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
+    uint64_t wgen;                      /* buffer: bumped at every write the mirror knows of (guest upload, blit / fill / texture->buffer copy, linear push, shader-writable bind, tile kernel) */
+    uint64_t lin_seen; bool lin_pulled; /* linear texture: wgen of the backing buffer when the image last took (pulled) or gave (pushed) the buffer's bytes; image is current iff lin_pulled && lin_seen == buffer wgen */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
     uint64_t vpage;                     /* guest VA = vpage << 14 */
     VkBuffer buf; VkDeviceMemory buf_mem; uint8_t *map;     /* guest-layout copy (the object itself for a buffer) */
@@ -112,6 +114,13 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
 bool lagfx_a64_res_ds_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h);
 void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* The 2D layer-0 level-0 view of a sampled texture (GENERAL layout, usable as SAMPLED_IMAGE in the shaders); VK_NULL_HANDLE if the format cannot be sampled / 3D. */
+/* Linear (buffer backed) textures, sampled: Metal reflects later buffer changes in the texture, the mirror image is a copy. lagfx_a64_res_sync_linear re-pulls every linear
+ * texture of the exec's resource list whose backing buffer changed since its last pull (call OUTSIDE a render pass: it records copies); lagfx_a64_res_linear_fresh says
+ * whether the image is current right now (a change inside the open pass makes it stale until the next sync: the draw is skipped, never drawn with old bytes);
+ * lagfx_a64_res_buf_written records a write the mirror cannot see happening (shader-writable binding, tile kernel). */
+void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x);
+bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b);
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);

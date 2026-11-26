@@ -556,7 +556,7 @@ typedef struct lagfx_protocol {
                 uint64_t execs, passes, draws, draws_skipped, submits, submit_failed, submit_pending, pending_leaked;
                 uint64_t busy_skipped, pending_unqueued, seg_blit, held;   /* execs refused while the previous one was in flight / PENDING without a completion queue / blit segments recorded */
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
-                uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
+                uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_pipeline_why[4], no_vertex_buf, no_index_buf, prim_unsupported;
                 uint64_t multi_attach, blend_indep_mismatch, extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported, obj_unsupported_linear;
                 /* depth / stencil / raster state (arm64_depth_stencil.c, arm64_exec_run.c) */
                 uint64_t dss_decoded, dss_bad, dss_bound, dss_unresolved;   /* tag-4 objects decoded / rejected; tag 104 applied / ref not a decodable object (state then stays as it was) */
@@ -568,6 +568,7 @@ typedef struct lagfx_protocol {
                 /* arm64_exec_run.c extensions: draw variants / sampler fidelity / misaligned buffer binds (printed as g7-gpu-ext) */
                 uint64_t ext_draw_instanced, ext_draw_base, ext_draw_wide, ext_draw_indirect, ext_draw_indirect_bad, ext_draw_zero, ext_noop_hint, ext_noop_fence, ext_barrier;
                 uint64_t ext_samp_compare, ext_samp_unnorm, ext_samp_mirror_clamp, ext_samp_lod_dropped, ext_samp_lod_binds;
+                uint64_t ext_gather_why[4]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather cache full (8), 3 scratch allocation */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
             } run;
             /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */
@@ -576,6 +577,7 @@ typedef struct lagfx_protocol {
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
                 uint64_t xlate_air2spv;
                 uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
+                uint64_t desc_linear_stale;   /* a linear texture whose buffer changed inside the open pass: draw skipped (also counted in desc_unbound_why[4]) */
                 uint64_t desc_unbound_why[6];   /* desc_unbound by cause: 0 buffer missing/offset, 1 input attachment, 2 storage image, 3 sampled image missing, 4 sampled image view (linear/none), 5 sampler */
                 uint64_t stub_fbfetch_why[5];   /* stub_fbfetch by reason (LAGFX_A64_FBF_*; [0] unused) */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;

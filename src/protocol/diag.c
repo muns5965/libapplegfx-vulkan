@@ -150,16 +150,18 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
     }
     if (X->run.execs) {   /* ARM64 render exec extensions (draw variants, sampler fidelity, misaligned buffer binds, no-op tags) */
         const __typeof__(X->run) *R = &X->run;
-        char el[600];
+        char el[900];
         snprintf(el, sizeof el,
                  "g7-gpu-ext: draw[instanced=%llu base=%llu wide=%llu indirect=%llu indirect_bad=%llu zero=%llu] noop[hint=%llu fence=%llu barrier_partial=%llu] "
-                 "sampler[compare_ignored=%llu unnorm_applied=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu writable_skipped=%llu] storage_img_unsupported=%llu vs_tex_binds=%llu unnorm_lod0=%llu unnorm_skipped=%llu",
+                 "sampler[compare_ignored=%llu unnorm_applied=%llu mirror_clamp_approx=%llu lod_binds=%llu lod_dropped=%llu] buf[gathered=%llu gather_failed=%llu range_clamped=%llu writable_skipped=%llu] storage_img_unsupported=%llu vs_tex_binds=%llu unnorm_lod0=%llu unnorm_skipped=%llu gather_why[nomap=%llu range=%llu cache=%llu scratch=%llu] no_pipeline_why[none=%llu unresolved=%llu build=%llu bind=%llu] linear_stale=%llu",
                  (unsigned long long)R->ext_draw_instanced, (unsigned long long)R->ext_draw_base, (unsigned long long)R->ext_draw_wide, (unsigned long long)R->ext_draw_indirect,
                  (unsigned long long)R->ext_draw_indirect_bad, (unsigned long long)R->ext_draw_zero, (unsigned long long)R->ext_noop_hint, (unsigned long long)R->ext_noop_fence,
                  (unsigned long long)R->ext_barrier, (unsigned long long)R->ext_samp_compare, (unsigned long long)R->ext_samp_unnorm, (unsigned long long)R->ext_samp_mirror_clamp,
                  (unsigned long long)R->ext_samp_lod_binds, (unsigned long long)R->ext_samp_lod_dropped, (unsigned long long)R->ext_gathered, (unsigned long long)R->ext_gather_failed,
                  (unsigned long long)R->ext_range_clamped, (unsigned long long)R->ext_wsb_skipped, (unsigned long long)R->ext_storage_img_unsupported,
-                 (unsigned long long)R->ext_vs_tex_binds, (unsigned long long)R->ext_unnorm_lod0, (unsigned long long)R->ext_unnorm_skipped);
+                 (unsigned long long)R->ext_vs_tex_binds, (unsigned long long)R->ext_unnorm_lod0, (unsigned long long)R->ext_unnorm_skipped,
+                 (unsigned long long)R->ext_gather_why[0], (unsigned long long)R->ext_gather_why[1], (unsigned long long)R->ext_gather_why[2], (unsigned long long)R->ext_gather_why[3],
+                 (unsigned long long)R->no_pipeline_why[0], (unsigned long long)R->no_pipeline_why[1], (unsigned long long)R->no_pipeline_why[2], (unsigned long long)R->no_pipeline_why[3], (unsigned long long)X->pipe.desc_linear_stale);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);
     }

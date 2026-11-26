@@ -11,6 +11,7 @@
 #include "protocol/arm64_pipeline.h"
 #include "protocol/arm64_dump.h"
 #include "protocol/arm64_completion.h"
+#include "protocol/arm64_resources.h"
 #include "vulkan/command.h"
 #include <dirent.h>
 #include <fcntl.h>
@@ -139,6 +140,10 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_BUF_POS  10u
 #define REF_BUF_UV   11u
 #define REF_BUF_MAT  12u
+#define REF_LBUF 20u                 /* buffer behind the linear textures */
+#define REF_LTEX 21u                 /* tag 9 linear texture over REF_LBUF (sampled) */
+#define REF_LRT  22u                 /* a second linear texture over the SAME bytes (render target) */
+#define VPN_LBUF 19u
 #define REF_PIPE_TRI2 13u            /* a second entry for the same payload (replacement tests) */
 #define RT_W 16u
 #define RT_H 16u
@@ -299,13 +304,15 @@ static uint32_t cb_finish(void) {
     va_write(VA_CMD, g_cb, g_cbn);
     return g_cbn;
 }
-static bool g_res_tex;
+static bool g_res_tex, g_res_lin;
 static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len) {
     static const uint32_t refs[] = { REF_TEX, REF_TEX2, REF_PIPE_TRI, REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT, REF_FN_TRI_A, REF_PIPE_TRI2, REF_PIPE_TEX };
+    static const uint32_t lrefs[] = { REF_LBUF, REF_LTEX, REF_LRT };
     uint32_t nr = g_res_tex ? 9u : 8u;           /* the textured pipeline is in the resource list only when the test uses it (listing it creates its object) */
-    uint32_t w[3 + 2 * 9 + 4], n = 0;
-    w[n++] = task; w[n++] = nr; w[n++] = 1;
+    uint32_t w[3 + 2 * 12 + 4], n = 0;
+    w[n++] = task; w[n++] = nr + (g_res_lin ? 3u : 0u); w[n++] = 1;
     for (uint32_t i = 0; i < nr; i++) { w[n++] = refs[i]; w[n++] = 0; }
+    if (g_res_lin) for (uint32_t i = 0; i < 3; i++) { w[n++] = lrefs[i]; w[n++] = 0; }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
     submit(p, 0x43, 0, w, n);
@@ -386,6 +393,7 @@ static void test_resolver_triangle_and_topology(void) {
     put_pipeline(REF_PIPE_TRI2, 0x800, none, 1, 3);
     tri_exec(p, REF_PIPE_TRI2, 3, 3, false);
     assert(PIPE(p).rf_no_refs == 1 && RUNC(p).pipeline_unresolved == 1 && RUNC(p).draws == 5);
+    assert(RUNC(p).no_pipeline_why[1] == 1 && RUNC(p).no_pipeline_why[0] == 0 && RUNC(p).no_pipeline == 1);   /* the cause: tag 116 named a pipeline that did not resolve */
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);
@@ -430,11 +438,66 @@ static void test_textured_draw(void) {
     exec(p, 1, cb_finish());
     assert(PIPE(p).desc_unaligned == 0 && PIPE(p).desc_unbound == 1 && PIPE(p).desc_feedback == 1);
     assert(RUNC(p).ext_gathered == 1 && RUNC(p).ext_gather_failed == 0 && RUNC(p).draws == 2);
+    /* gather failure classification: ten distinct unaligned offsets in ONE exec; the exec keeps 8 aligned copies, the rest fail with cause 2 (cache full), counted and skipped */
+    uint64_t g0 = RUNC(p).ext_gathered, u0 = PIPE(p).desc_unaligned;
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+    for (uint32_t k = 0; k < 10; k++) { uint8_t r[12] = {0}; uint32_t idx = 2; uint64_t off = 4 + 8ull * k; memcpy(r, &idx, 4); memcpy(r + 4, &off, 8); cb_cmd(126, r, 12); cb_draw(4, 0, 4); }
+    exec(p, 1, cb_finish());
+    assert(RUNC(p).ext_gathered - g0 == 8 && RUNC(p).ext_gather_failed == 2 && RUNC(p).ext_gather_why[2] == 2 && RUNC(p).ext_gather_why[0] + RUNC(p).ext_gather_why[1] + RUNC(p).ext_gather_why[3] == 0);
+    assert(PIPE(p).desc_unaligned - u0 == 2);
     lagfx_a64_exec_drop_task(p, 1);
     lagfx_a64_exec_free(p);
     pfree(p);
     g_res_tex = false;
     puts("PASS: descriptor binding on lavapipe: 3 storage buffers + texture + inline sampler read back, unbound / feedback skipped, misaligned offset gathered");
+}
+
+
+/* A linear (buffer backed) texture is sampled: Metal shows later changes of the buffer in the texture, so the mirror image is re-pulled when the buffer changed.
+ * (1) a draw samples it, (2) the guest rewrites the buffer between two execs, (3) inside ONE exec an earlier pass renders into another linear texture over the
+ * same bytes (pushed into the buffer) and a later pass samples the first one. */
+static void put_linear(uint32_t ref, uint32_t pay_off, uint32_t bref) {
+    uint8_t l[0x40]; memset(l, 0, sizeof l);
+    uint32_t tag = 9, sz = 0x20 + 24; uint64_t off = 0, row = RT_W * 4u;
+    memcpy(l, &tag, 4); memcpy(l + 4, &sz, 4); memcpy(l + 12, &bref, 4); memcpy(l + 16, &off, 8); memcpy(l + 24, &row, 8);
+    uint8_t *d = l + 0x20; d[0] = 2; d[2] = 80; uint32_t w = RT_W, h = RT_H; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); d[16] = 1; d[18] = 1;
+    va_write(VA_PAY + pay_off, l, sz); entry(ref, LAGFX_A64_OBJ_LINEAR_TEX, sz, VA_PAY + pay_off);
+}
+static void fill_lbuf(uint32_t v) { uint32_t a[RT_W * RT_H]; for (uint32_t i = 0; i < RT_W * RT_H; i++) a[i] = v; va_write((uint64_t)VPN_LBUF << 14, a, sizeof a); }
+static void test_linear_sampled(void) {
+    g_res_tex = g_res_lin = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    uint8_t img[RT_W * RT_H * 4];
+    const uint32_t vb[3] = { REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT }, lt[1] = { REF_LTEX };
+    const uint32_t PA = 0xff112233u, PB = 0xff445566u;
+    put_buffer_object(REF_LBUF, 0x260, 0x4000, VPN_LBUF);
+    put_linear(REF_LTEX, 0x600, REF_LBUF);
+    put_linear(REF_LRT, 0x640, REF_LBUF);
+    fill_lbuf(PA);
+    /* (1) */
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, lt, 1); cb_draw(4, 0, 4);
+    exec(p, 1, cb_finish());
+    assert(RUNC(p).draws == 1 && PIPE(p).desc_unbound == 0);
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, sizeof img, NULL, NULL) && px(img, 8, 8) == PA && px(img, 0, 15) == PA);
+    /* (2) guest rewrites the buffer between execs */
+    fill_lbuf(PB);
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, lt, 1); cb_draw(4, 0, 4);
+    exec(p, 1, cb_finish());
+    assert(RUNC(p).draws == 2 && lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, sizeof img, NULL, NULL) && px(img, 8, 8) == PB);
+    /* (3) one exec: pass 1 renders GREEN into REF_LRT (its result is pushed into the shared buffer), pass 2 samples REF_LTEX: it must show the new bytes */
+    uint64_t rs0 = lagfx_a64_res_stats(p)->linear_resync;
+    cb_reset(); cb_pass(REF_LRT, 2, G4); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, lt, 1); cb_draw(4, 0, 4);
+    exec(p, 1, cb_finish());
+    assert(RUNC(p).draws == 3 && PIPE(p).desc_linear_stale == 0);
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, sizeof img, NULL, NULL) && px(img, 8, 8) == GREEN && px(img, 15, 15) == GREEN);
+    assert(lagfx_a64_res_stats(p)->linear_resync == rs0 + 1);
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    pfree(p);
+    g_res_tex = g_res_lin = false;
+    puts("PASS: a linear (buffer backed) texture is sampled: current at the first draw, follows a guest rewrite between execs and a render push inside one exec (re-pulled outside the pass)");
 }
 
 static void test_invalidation(void) {
@@ -848,6 +911,7 @@ int main(void) {
         test_dump_via_resolver();
         test_resolver_triangle_and_topology();
         test_textured_draw();
+        test_linear_sampled();
         test_invalidation();
         test_missing_caps();
     } else {

@@ -53,6 +53,9 @@ void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task) { (void)p; (voi
 bool lagfx_a64_res_busy(lagfx_protocol_t *p) { (void)p; return false; }
 void lagfx_a64_res_counts(lagfx_protocol_t *p, uint32_t *l, uint64_t *c, uint64_t *d) { (void)p; if (l) *l = 0; if (c) *c = 0; if (d) *d = 0; }
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref) { (void)p; (void)task; (void)ref; return NULL; }
+void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) { (void)x; }
+bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { (void)x; (void)o; return false; }
+void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { (void)b; }
 static lagfx_a64_stats_t g_zero;
 const lagfx_a64_stats_t *lagfx_a64_res_stats(lagfx_protocol_t *p) { (void)p; return &g_zero; }
 void lagfx_a64_res_destroy(lagfx_protocol_t *p) { (void)p; }
@@ -293,6 +296,7 @@ static void guest_upload(lagfx_protocol_t *p, mgr2_t *m, const lagfx_task_entry_
         uint8_t *d = o->map + off;
         if (!lagfx_arm64_task_read(p, t, (o->vpage << 14) + off, d, 0x4000u)) memset(d, 0, 0x4000u), m->st.unmapped_pages++;
     }
+    o->wgen++;
     m->st.uploads++;
 }
 
@@ -801,13 +805,15 @@ static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!o->linear) return true;
     lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
     if (b && !b->host_valid) { if (!b->guest_stale) guest_upload(x->p, x->m, x->t, b); b->host_valid = true; }
-    return lin_xfer(x->cb, b, o, x->m, true);
+    bool ok = lin_xfer(x->cb, b, o, x->m, true);
+    if (ok) o->lin_pulled = true, o->lin_seen = b->wgen;
+    return ok;
 }
 static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!o->linear) return true;
     lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
     bool ok = lin_xfer(x->cb, b, o, x->m, false);
-    if (ok) b->host_valid = true;
+    if (ok) { b->host_valid = true; b->wgen++; o->lin_pulled = true, o->lin_seen = b->wgen; }   /* the pushing image is the buffer's new content; another image over it is now stale */
     return ok;
 }
 
@@ -847,6 +853,7 @@ static bool buf_tex_copy(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, lagfx_a64_obj
         .imageOffset = { (int32_t)bx->x, (int32_t)bx->y, (int32_t)bx->z }, .imageExtent = { (uint32_t)bx->w, (uint32_t)bx->h, (uint32_t)bx->d } };
     if (!to_tex && !lin_pull_x(x, t)) return false;   /* a linear texture is read: take the buffer's current bytes first */
     lagfx_translate_blit_cmd_buffer_image(x->cb, b->buf, t->img, &r, to_tex);
+    if (!to_tex) b->wgen++;
     if (to_tex) lin_push_x(x, t);                       /* ... written: back into the buffer (and so the guest pages of the buffer) */
     return true;
 }
@@ -875,6 +882,7 @@ static bool blit_301(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (a == b && so < dof + n && dof < so + n) return false;   /* overlapping copy within one buffer */
     VkBufferCopy c = { so, dof, n };
     lagfx_translate_blit_cmd_buffer_buffer(x->cb, a->buf, b->buf, &c);
+    b->wgen++;
     return true;
 }
 
@@ -906,6 +914,7 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
     uint64_t end = loc + n, a0 = (loc + 3) & ~3ull, a1 = end & ~3ull;
     if (a0 >= a1) a0 = a1 = end;   /* no aligned middle: everything goes through the staging copy (n < 8 then) */
     uint64_t head = a0 - loc, tail = end - a1;
+    b->wgen++;
     if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
     if (head || tail) {
         if (x->ntmp >= MAX_TMP) return false;
@@ -929,6 +938,7 @@ static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (!b || b->kind != LAGFX_A64_BUFFER || loc % 4u || loc > b->length || n > b->length - loc) return false;
     if (!n) return true;
     uint64_t mid = n & ~3ull, tail = n & 3ull;
+    b->wgen++;
     if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
     if (tail) {
         if (x->ntmp >= MAX_TMP) return false;
@@ -1361,6 +1371,27 @@ bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
         done += k;
     }
     return true;
+}
+
+/* ---- linear texture sampling support (see arm64_resources.h) ---- */
+void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { if (b) b->wgen++; }
+
+bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o) return false;
+    if (!o->linear) return true;
+    lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, false);
+    return b && o->lin_pulled && o->lin_seen == b->wgen;
+}
+
+void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) {
+    if (!x) return;
+    bool any = false;
+    for (uint32_t i = 0; i < x->nres; i++) {
+        lagfx_a64_obj_t *o = x->res[i].o;
+        if (o->kind != LAGFX_A64_TEXTURE || !o->linear || lagfx_a64_res_linear_fresh(x, o)) continue;
+        any |= lin_pull_x(x, o);
+    }
+    if (any) x->m->st.linear_resync++;
 }
 
 #endif /* LAGFX_HAVE_VULKAN */

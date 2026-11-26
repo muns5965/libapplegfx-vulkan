@@ -402,6 +402,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
             VkDeviceSize range = o->length - off;
             if (lim->maxStorageBufferRange && range > lim->maxStorageBufferRange) range = lim->maxStorageBufferRange;
             bi[i] = (VkDescriptorBufferInfo){ o->buf, off, range }, w[i].pBufferInfo = &bi[i];
+            lagfx_a64_res_buf_written(o);   /* the kernel may write it: a linear texture over it is stale from here on */
         } else if (b->kind == TB_TEXTURE) {
             lagfx_a64_obj_t *o = t->tex[mi];
             if (!o || o->linear) { TILE(p).skip_unbound++; return false; }

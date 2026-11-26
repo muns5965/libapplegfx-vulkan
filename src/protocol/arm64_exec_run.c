@@ -92,7 +92,7 @@ typedef struct {
     bool rendering;                  /* the render encoder has a vkCmdBeginRendering open (pass_open without it = a pass with no usable target) */
     lagfx_a64_obj_t *rt; uint32_t rt_w, rt_h;   /* the first mirror texture being drawn into (rts[first used slot]) */
     lagfx_a64_obj_t *rts[4]; uint32_t nslots;   /* colour attachments by their ORIGINAL slot (fragment output location); a null entry = unused slot; nslots = highest used slot + 1 */
-    a64_pipe_t *pipe; bool pipe_set;
+    a64_pipe_t *pipe; bool pipe_set, pipe_failed;   /* pipe_failed: tag 116 named a pipeline the resolver could not make */
     const lagfx_task_entry_t *task;  /* the exec's task */
     bool dispatching, consumed;      /* inside lagfx_render_inner_dispatch for a tag of this module */
     lagfx_translate_render_state_t rs;   /* the existing render encoder: begin / bind / draw / end of the open pass */
@@ -364,7 +364,7 @@ bool lagfx_a64_exec_begin(lagfx_protocol_t *p, lagfx_task_entry_t *task, const u
     CNT(p).execs++;
     r->vk = get_vk(p);
     r->x = NULL;
-    r->pass_open = r->rendering = r->wrote_storage = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false;
+    r->pass_open = r->rendering = r->wrote_storage = false, r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->pipe_failed = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     if (!r->vk) { CNT(p).no_vulkan++; return false; }
     flush_deferred(r);   /* an earlier submission may have finished */
@@ -492,10 +492,12 @@ static bool descriptor_pool(a64_run_t *r) {
  * exec to that buffer, e.g. by an earlier blit, or writes by the shader itself, are not seen / not written back), and ranges above A64_GATHER_MAX are refused.
  * One copy per (buffer generation, offset) and exec. NULL = not possible (the draw is skipped, counted as desc_unaligned). */
 static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t range) {
-    if (!b->map || range > A64_GATHER_MAX) { CNT(p).ext_gather_failed++; return VK_NULL_HANDLE; }
+    if (!b->map) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[0]++; return VK_NULL_HANDLE; }
+    if (range > A64_GATHER_MAX) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[1]++; return VK_NULL_HANDLE; }   /* range = the whole rest of the buffer, not what the shader reads */
     for (uint32_t i = 0; i < r->ngc; i++) if (r->gc[i].gen == b->gen && r->gc[i].off == off && r->gc[i].range == range) return r->gc[i].buf;
     VkBuffer sb; uint8_t *mp;
-    if (r->ngc == A64_GATHER_CACHE || !lagfx_a64_res_scratch(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++; return VK_NULL_HANDLE; }
+    if (r->ngc == A64_GATHER_CACHE) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[2]++; return VK_NULL_HANDLE; }   /* 8 distinct (offset, range) copies per exec */
+    if (!lagfx_a64_res_scratch(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
     memcpy(mp, b->map + off, (size_t)range);
     r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
     CNT(p).ext_gathered++;
@@ -526,6 +528,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
             if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
+            if (s->bind[i].writable) lagfx_a64_res_buf_written(b);   /* the shader may write it: a linear texture over it is stale from here on */
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
             if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
             if (off % r->min_sb_align) {   /* Metal allows any 4-aligned offset, Vulkan only multiples of minStorageBufferOffsetAlignment: bind an aligned copy of the range */
@@ -560,7 +563,10 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
-            VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_sample_view(r->x, t);   /* a linear texture needs a buffer pull recorded outside a pass: not sampled */
+            /* A linear texture (a buffer's bytes seen as an image): the mirror image is a copy that begin_pass (outside the pass) re-pulls whenever the backing buffer changed.
+             * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
+            if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; return false; }
+            VkImageView v = lagfx_a64_res_sample_view(r->x, t);
             if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
@@ -615,9 +621,9 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (alt && !r->pipe->src.alt_fragment_shader) { CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
     if (alt) CNT(p).ext_unnorm_lod0++;
     VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim | alt);
-    if (!vp) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
+    if (!vp) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[2]++; CNT(p).draws_skipped++; return false; }   /* 2: vkCreateGraphicsPipelines failed (now or earlier: failures are cached) */
     if (r->bound_vk != vp) {
-        if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }
+        if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[3]++; CNT(p).draws_skipped++; return false; }   /* 3: recording the bind failed */
         r->bound_vk = vp;
     }
     if (!bind_descriptors(r, p, r->pipe)) { CNT(p).draws_skipped++; return false; }
@@ -648,7 +654,7 @@ static void pass_end(a64_run_t *r) {
     r->dsobj = NULL, r->ds_dfmt = r->ds_sfmt = VK_FORMAT_UNDEFINED;
     r->pass_open = r->rendering = false, r->last_fetch = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
-    r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->bound_vk = VK_NULL_HANDLE;
+    r->rt = NULL, r->pipe = NULL, r->pipe_set = r->pipe_failed = false, r->bound_vk = VK_NULL_HANDLE;
 }
 
 #define R32(o) lagfx_le32(rec + (o))
@@ -666,6 +672,7 @@ static bool dup_of_color(const a64_run_t *r, const lagfx_a64_obj_t *o) {
  * (translate/render_encoder.c). */
 static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, uint32_t n) {
     pass_end(r);
+    lagfx_a64_res_sync_linear(r->x);   /* linear textures whose buffer changed since the last pull: copied now, outside any pass */
     CNT(p).passes++;
     r->pass_open = true;                        /* even without a usable target: the following tags belong to this pass */
     memset(r->vb, 0, sizeof r->vb);
@@ -774,14 +781,14 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
 static void set_pipeline(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, uint32_t n) {
     if (n < 4u) { CNT(p).bad_rec++; tag_unsup(p, 116); return; }
     a64_pipe_t *pp = pipeline_current(r, p, R32(0));
-    r->pipe_set = false, r->pipe = NULL;     /* Apple: Metal crashes on a missing pipeline, and on drawing without one */
-    if (!pp) { tag_partial(p, 116); return; }
+    r->pipe_set = r->pipe_failed = false, r->pipe = NULL;     /* Apple: Metal crashes on a missing pipeline, and on drawing without one */
+    if (!pp) { r->pipe_failed = true; tag_partial(p, 116); return; }
     r->pipe = pp, r->pipe_set = true;        /* the VkPipeline is built and bound at the draw (it depends on the primitive type) */
     tag_done(p, 116);
 }
 
 static bool draw_ready(a64_run_t *r, lagfx_protocol_t *p) {
-    if (!r->pipe_set || !r->pipe) { CNT(p).no_pipeline++; CNT(p).draws_skipped++; return false; }   /* Apple: no pipeline, no draw */
+    if (!r->pipe_set || !r->pipe) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[r->pipe_failed ? 1 : 0]++; CNT(p).draws_skipped++; return false; }   /* Apple: no pipeline, no draw (why: 0 none set in this pass, 1 tag 116's pipeline did not resolve) */
     if (r->pipe->src.tile) { p->diag2.exec.tile.draws_ignored++; CNT(p).draws_skipped++; return false; }   /* a tile pipeline draws nothing */
     if (!r->rendering) { CNT(p).no_target++; CNT(p).draws_skipped++; return false; }
     return true;
