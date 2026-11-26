@@ -460,6 +460,7 @@ static void test_exec_no_resolver_and_pending(void) {
     lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
     cb_reset(); cb_pass(REF_TEX, 2, g); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
     exec(p, 1, cb_finish(), true);
+    unsetenv("LAGFX_GPU_WAIT_MS");   /* the 1 ms wait is for the exec above only: lagfx_a64_res_readback waits with the same setting and returned false (PENDING) under parallel load, which was the intermittent SIGABRT here (also present at 18c7315) */
     R = &p->diag2.exec.run;
     assert(R->submit_failed == 0 && R->submits == 1);
     struct timespec ts = { 0, 5 * 1000000 };
