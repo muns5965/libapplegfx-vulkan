@@ -124,6 +124,25 @@ static void describe_state(char *buf, size_t cap, const VkGraphicsPipelineCreate
 static _Thread_local int32_t g_last_vr;   /* VkResult of this thread's last vkCreateGraphicsPipelines in lagfx_pipeline_build() (the repro reads it) */
 int32_t lagfx_pipeline_build_last_result(void) { return g_last_vr; }
 
+/* MTLVertexFormat (public Metal enum) -> VkFormat for the formats the PSO attribute decode may carry; VK_FORMAT_UNDEFINED = not handled (the caller falls back to
+ * the reflected float tight-pack). 37 is UInt2 (UInt is 36) and 52 is ShortNormalized (UChar4Normalized_BGRA is 42); the earlier table had 37 as a one-component UInt and 52 as
+ * BGRA8, which are other enum values. Neither 37 nor 52 appears in the device dumps of runs 231501/230109 (only 27 and 29 do), so this is a table correction against the
+ * public enum, not a fix of an observed symptom. */
+VkFormat lagfx_pso_vertex_format_to_vk(uint32_t f) {
+    switch (f) {
+    case 3:  return VK_FORMAT_R8G8B8A8_UINT;          /* UChar4 */
+    case 9:  return VK_FORMAT_B8G8R8A8_UNORM;         /* UChar4Normalized — CA pool colors are BGRA-ordered (the PBGRA pipes); R8G8B8A8 rendered blue UI as red */
+    case 27: return VK_FORMAT_R16G16B16A16_SFLOAT;    /* Half4: dump pso 93 family, colour @32 of a 48 byte vertex */
+    case 28: return VK_FORMAT_R32_SFLOAT;             /* Float */
+    case 29: return VK_FORMAT_R32G32_SFLOAT;          /* Float2 */
+    case 30: return VK_FORMAT_R32G32B32_SFLOAT;       /* Float3 */
+    case 31: return VK_FORMAT_R32G32B32A32_SFLOAT;    /* Float4 */
+    case 37: return VK_FORMAT_R32G32_UINT;            /* UInt2 */
+    case 52: return VK_FORMAT_R16_SNORM;              /* ShortNormalized */
+    default: return VK_FORMAT_UNDEFINED;
+    }
+}
+
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
@@ -161,11 +180,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
          * NaN color/alpha -> invisible panel fills. */
         bool use_pso_attrs = desc->n_pso_attrs >= nvi;
         for (uint32_t a = 0; use_pso_attrs && a < nvi; a++) {
-            switch (desc->pso_attr_fmt[a]) {
-            case 3: case 9: case 27: case 28: case 29: case 30: case 31:
-            case 37: case 52: break;
-            default: use_pso_attrs = false; break;
-            }
+            if (lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]) == VK_FORMAT_UNDEFINED) use_pso_attrs = false;
         }
         for (uint32_t a = 0; a < nvi; a++) {
             uint32_t c = desc->vtx_in_comp[a]; if (c < 1u) c = 1u; if (c > 4u) c = 4u;
@@ -176,17 +191,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
             uint32_t aoff = off;
             if (use_pso_attrs) {
                 aoff = desc->pso_attr_off[a];
-                switch (desc->pso_attr_fmt[a]) {
-                case 3:  fmt = VK_FORMAT_R8G8B8A8_UINT;          break; /* UChar4 */
-                case 9:  fmt = VK_FORMAT_B8G8R8A8_UNORM;         break; /* UChar4Normalized — CA pool colors are BGRA-ordered (the PBGRA pipes); R8G8B8A8 rendered blue UI as red */
-                case 27: fmt = VK_FORMAT_R16G16B16A16_SFLOAT;    break; /* Half4 (MTLVertexFormat 27): dump pso 93 family, colour @32 of a 48 byte vertex */
-                case 28: fmt = VK_FORMAT_R32_SFLOAT;             break; /* Float */
-                case 29: fmt = VK_FORMAT_R32G32_SFLOAT;          break; /* Float2 */
-                case 30: fmt = VK_FORMAT_R32G32B32_SFLOAT;       break; /* Float3 */
-                case 31: fmt = VK_FORMAT_R32G32B32A32_SFLOAT;    break; /* Float4 */
-                case 37: fmt = VK_FORMAT_R32_UINT;               break; /* UInt */
-                case 52: fmt = VK_FORMAT_B8G8R8A8_UNORM;         break; /* UChar4Normalized_BGRA */
-                }
+                fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);   /* the gate above guarantees a known format */
             }
             vattr[a] = (VkVertexInputAttributeDescription){
                 .location = desc->vtx_in_loc[a], .binding = 0u, .format = fmt, .offset = aoff,

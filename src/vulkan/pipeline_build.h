@@ -123,6 +123,8 @@ int32_t lagfx_pipeline_build_last_result(void);
 /* FNV-1a 64 (historical offset basis 1469598103934665603, see pipeline_build.c) of a byte range = the "hash=" of the "pipeline-build-fail:" device log line (compare it with examples/dump-pairhash on a dump). */
 uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n);
 
+VkFormat lagfx_pso_vertex_format_to_vk(uint32_t mtl_vertex_format);   /* VK_FORMAT_UNDEFINED = not handled */
+
 #ifdef __cplusplus
 }
 #endif

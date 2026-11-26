@@ -36,7 +36,8 @@ VkFormat lagfx_metal_pixel_format_to_vk(uint32_t pixel_format) {
     case 1:  /* MTLPixelFormatA8Unorm — glyph-atlas coverage bytes */
     case 10: return VK_FORMAT_R8_UNORM;            /* MTLPixelFormatR8Unorm */
     case 252: return VK_FORMAT_D32_SFLOAT;         /* MTLPixelFormatDepth32Float */
-    case 25: return VK_FORMAT_D16_UNORM;           /* MTLPixelFormatDepth16Unorm */
+    case 25: return VK_FORMAT_R16_SFLOAT;          /* MTLPixelFormatR16Float (25); Depth16Unorm is 250 */
+    case 250: return VK_FORMAT_D16_UNORM;          /* MTLPixelFormatDepth16Unorm */
     default:
         LAGFX_WARN("iosurface: unknown Metal pixel format %u, "
                     "falling back to BGRA8", (unsigned)pixel_format);
