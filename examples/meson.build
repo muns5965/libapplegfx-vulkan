@@ -88,3 +88,11 @@ executable('dump-bindings',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# dump-draws — per `draw` line of an arm64 dump: the bindings the PSO's shaders need (the resolver's own binding map) against the buffer/texture/sampler slots the draw provides.
+executable('dump-draws',
+  'dump-draws.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

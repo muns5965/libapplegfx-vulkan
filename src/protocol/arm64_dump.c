@@ -270,6 +270,25 @@ static void dump_mapped(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uin
     index_line("mapped task=%u ref=%u mapping=%llu tag=0x%x desc_size=%u %s first128=%s", task->id, ref, (unsigned long long)mapping, tag, dsz, surf, hx);
 }
 
+/* A buffer / texture / linear texture entry of the resource list (types 1, 2, 8, 9, 19): one `res` index line {type, size, payload tag, for tags 9 / 0x37 the backing buffer ref, offset, row},
+ * once per entry, so an offline run can tell which texture refs of a draw are linear (buffer backed) and which buffer a linear texture reads. No payload is saved. */
+static void dump_res_kind(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t e[3]) {
+    uint32_t type = e[0] & 0xffu;
+    if (type != 1u && type != 2u && type != 8u && type != 9u && type != 19u) return;
+    uint32_t k[8] = { task->id, ref, e[0], e[1], e[2], (uint32_t)task->root_page_pfn, 0x52, 0 };
+    if (!seen_add(lagfx_a64_hash64(k, sizeof k))) return;
+    open_dir();
+    if (G.logged >= LOG_OBJ_MAX) { p->diag2.exec.pipe.dump_skipped_cap++; return; }
+    G.logged++;
+    uint32_t full = e[0] >> 8, tag = 0, bref = 0;
+    uint64_t off = 0, row = 0;
+    uint8_t b[0x20];
+    memset(b, 0, sizeof b);
+    bool rd = full >= 4u && lagfx_arm64_task_read(p, task, (uint64_t)e[2] << 32 | e[1], b, full < sizeof b ? full : (uint32_t)sizeof b);
+    if (rd) { tag = lagfx_le32(b); if ((tag == 9u || tag == 0x37u) && full >= 0x20u) bref = lagfx_le32(b + 12), off = lagfx_le64(b + 16), row = lagfx_le64(b + 24); }
+    index_line("res task=%u ref=%u type=%u size=%u tag=0x%x lin_buf=%u lin_off=%llu lin_row=%llu%s", task->id, ref, type, full, tag, bref, (unsigned long long)off, (unsigned long long)row, rd ? "" : " unreadable=1");
+}
+
 void lagfx_a64_dump_resources(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint8_t *res, uint32_t nres) {
     if (!p || !task || !res || !lagfx_a64_dump_enabled()) return;
     memset(&G.vb, 0, sizeof G.vb), memset(&G.fb, 0, sizeof G.fb), memset(G.tex, 0, sizeof G.tex), memset(G.samp, 0, sizeof G.samp);
@@ -277,7 +296,7 @@ void lagfx_a64_dump_resources(lagfx_protocol_t *p, const lagfx_task_entry_t *tas
     for (uint32_t i = 0; i < nres; i++) {
         uint32_t ref = lagfx_le32(res + 8u * i), e[3];
         if (!ref || !lagfx_a64_objects_read_entry(p, task, ref, e)) continue;
-        if ((e[0] & 0xffu) == 11u) dump_mapped(p, task, ref, e); else dump_object(p, task, ref, e);
+        if ((e[0] & 0xffu) == 11u) dump_mapped(p, task, ref, e); else { dump_res_kind(p, task, ref, e); dump_object(p, task, ref, e); }
     }
 }
 
