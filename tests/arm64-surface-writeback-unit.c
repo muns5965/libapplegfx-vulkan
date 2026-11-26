@@ -83,6 +83,10 @@ static void test_cpu_layout(void) {
     for (int i = 0; i < 3; i++) for (uint32_t k = 0; k < 0x4000; k += 97) assert(g_mem[PG[i] + k] == 0xEE);
     /* decode refusals: fourcc, bounds, short descriptor, row < width*4, surface not fitting its pages */
     mk_surface(d, 0x52476841, false); assert(lagfx_guest_surface_decode(d, sizeof d, &gs) != LAGFX_OK);
+    /* decode_any accepts 'RGhA' (8 bytes per pixel, row >= width * 8); the plain decode (display swap) still refuses it */
+    mk_surface(d, LAGFX_FOURCC_RGHA, false); { uint64_t rw = 400; memcpy(d + 0x30, &rw, 8); }
+    assert(lagfx_guest_surface_decode_any(d, sizeof d, &gs) != LAGFX_OK);                 /* row 400 < 200 * 8 */
+    mk_surface(d, LAGFX_FOURCC_BGRA, false); assert(lagfx_guest_surface_decode_any(d, sizeof d, &gs) == LAGFX_OK && gs.bpp == 4);
     mk_surface(d, LAGFX_FOURCC_BGRA, false); assert(lagfx_guest_surface_decode(d, 0x60, &gs) != LAGFX_OK);
     uint64_t v = 399; memcpy(d + 0x30, &v, 8); assert(lagfx_guest_surface_decode(d, sizeof d, &gs) != LAGFX_OK);
     mk_surface(d, LAGFX_FOURCC_BGRA, false); v = 8192; memcpy(d + 0x20, &v, 8); assert(lagfx_guest_surface_decode(d, sizeof d, &gs) != LAGFX_OK);

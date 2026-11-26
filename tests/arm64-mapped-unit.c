@@ -66,7 +66,8 @@ static lagfx_device_t *g_dev;
 #define SROW 320u         /* > SW * 4 = 256: 64 bytes of row padding */
 #define SFIRST 0x100u     /* first-byte offset; 0x100 + 320 * 80 spans two 16 KiB pages */
 #define SENT 0xabu
-enum { MAP_OK = 7, MAP_OK2 = 17, MAP_RGHA = 8, MAP_HOLE = 9, MAP_BADLIST = 10, MAP_BADGEOM = 11, MAP_NONE = 99 };
+#define HROW 640u         /* RGhA: 64 * 8 = 512 bytes of pixels + 128 of padding; 0x100 + 640 * 80 spans four pages */
+enum { MAP_OK = 7, MAP_OK2 = 17, MAP_RGHA = 8, MAP_HALF = 12, MAP_HOLE = 9, MAP_BADLIST = 10, MAP_BADGEOM = 11, MAP_NONE = 99 };
 static int g_get_calls;
 static void mkdesc(uint8_t *d, uint32_t list_gpa, uint32_t fourcc, uint64_t row, uint32_t first) {
     memset(d, 0, 0x70);
@@ -79,7 +80,8 @@ static bool get_desc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len
     uint8_t d[0x70];
     switch (id) {
     case MAP_OK: case MAP_OK2: mkdesc(d, PFN_LIST << 14, 0x42475241u, SROW, SFIRST); break;
-    case MAP_RGHA: mkdesc(d, PFN_LIST << 14, 0x52476841u, SROW, SFIRST); break;                       /* half-float surface: refused */
+    case MAP_RGHA: mkdesc(d, PFN_LIST << 14, 0x58585858u, SROW, SFIRST); break;                       /* an unknown fourcc: refused */
+    case MAP_HALF: mkdesc(d, PFN_LIST << 14, 0x52476841u, HROW, SFIRST); break;                        /* 'RGhA': RGBA16Float, 8 bytes per pixel */
     case MAP_HOLE: mkdesc(d, PFN_LIST2 << 14, 0x42475241u, SROW, SFIRST); break;                       /* second page not present */
     case MAP_BADLIST: mkdesc(d, (uint32_t)(MEM_SIZE + 0x10000u), 0x42475241u, SROW, SFIRST); break;   /* page list outside guest memory */
     case MAP_BADGEOM: mkdesc(d, PFN_LIST << 14, 0x42475241u, 0x20000u, SFIRST); break;                 /* row pitch beyond Henge's bound */
@@ -93,10 +95,11 @@ static uint8_t *surf_page(uint32_t i) { return g_mem + ((uint64_t)(PFN_SURF0 + i
 static void surf_fill(uint8_t v) { memset(surf_page(0), v, 2u << 14); }
 static void surf_lists(void) {
     uint32_t *l = (uint32_t *)(g_mem + ((uint64_t)PFN_LIST << 14)), *l2 = (uint32_t *)(g_mem + ((uint64_t)PFN_LIST2 << 14));
-    l[0] = ((PFN_SURF0 + 0u) << 2) | 1u; l[1] = ((PFN_SURF0 + 1u) << 2) | 1u;   /* (pfn << 14) >> 12 = pfn << 2, bit 0 present */
+    l[0] = ((PFN_SURF0 + 0u) << 2) | 1u; l[1] = ((PFN_SURF0 + 1u) << 2) | 1u; l[2] = ((PFN_SURF0 + 2u) << 2) | 1u; l[3] = ((PFN_SURF0 + 3u) << 2) | 1u;   /* (pfn << 14) >> 12 = pfn << 2, bit 0 present */
     l2[0] = ((PFN_SURF0 + 0u) << 2) | 1u; l2[1] = ((PFN_SURF0 + 1u) << 2);     /* page 1: not present */
 }
 /* byte offset of pixel (x, y) in the surface's page run */
+static uint8_t *half_px(uint32_t x, uint32_t y) { return surf_page(0) + SFIRST + (uint64_t)y * HROW + x * 8u; }
 static uint32_t *surf_px(uint32_t x, uint32_t y) { return (uint32_t *)(surf_page(0) + SFIRST + (uint64_t)y * SROW + x * 4u); }
 
 static lagfx_device_t *make_device(void) {
@@ -166,6 +169,7 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_M5   14u    /* MAP_HOLE */
 #define REF_M6   15u    /* MAP_BADLIST */
 #define REF_M7   16u    /* MAP_BADGEOM */
+#define REF_M9   18u    /* MAP_HALF ('RGhA') */
 #define REF_M8   17u    /* MAP_OK2: another mapping id, same size */
 #define RED   0xffff0000u
 #define GREEN 0xff00ff00u
@@ -178,7 +182,7 @@ static void entry(uint32_t ref, uint32_t type, uint32_t size, uint64_t addr) {
 /* type 11 payload: {u64 mapping, u32 tag 0x39, u32 size 0x38, u32 ref, v2 description (0x38 bytes: type 2 at +0, format 80 at +1)} */
 static void put_mapped(uint32_t ref, uint32_t pay_off, uint64_t mapping, uint32_t tag) {
     uint8_t h[20 + 0x38]; memset(h, 0, sizeof h);
-    uint32_t sz = 0x38; memcpy(h, &mapping, 8); memcpy(h + 8, &tag, 4); memcpy(h + 12, &sz, 4); memcpy(h + 16, &ref, 4);
+    uint32_t sz = tag == 0x2f ? 48u : 0x38u; memcpy(h, &mapping, 8); memcpy(h + 8, &tag, 4); memcpy(h + 12, &sz, 4); memcpy(h + 16, &ref, 4);
     uint8_t *d = h + 20;
     if (tag == 0x39) { d[0] = 2; d[1] = 80; } else { d[0] = 2; d[2] = 80; }
     va_write(VA_PAY + pay_off, h, sizeof h);
@@ -199,6 +203,7 @@ static void build_objects(void) {
     put_mapped(REF_M6, 0x680, MAP_BADLIST, 0x39);
     put_mapped(REF_M7, 0x700, MAP_BADGEOM, 0x39);
     put_mapped(REF_M8, 0x780, MAP_OK2, 0x39);
+    put_mapped(REF_M9, 0x800, MAP_HALF, 0x2f);   /* the real guest's tag 0x2f, desc_size 48 (v1 layout) */
 }
 
 static uint8_t g_cb[4096];
@@ -395,6 +400,35 @@ int main(void) {
       assert(strstr(buf, "mapped task=1 ref=13 mapping=99 tag=0x39 desc_size=56 surface=unknown"));   /* the shell does not know this id */
       unsetenv("LAGFX_ARM64_DUMP"); unsetenv("LAGFX_ARM64_DUMP_DIR"); }
     printf("PASS: capture writes a `mapped` index line per type-11 resource (mapping, tag, desc_size, surface geometry)\n");
+
+    /* (RGhA) the guest's main display surface: RGBA16Float, 8 bytes per pixel, row pitch 640 (> 512), tag 0x2f payload */
+    { static const double col[4] = { 0.5, 0.25, 1, 1 };
+      memset(surf_page(0), SENT, 4u << 14);
+      uint64_t cr = CNT(p).mapped_created, un = CNT(p).mapped_unsupported, nt = CNT(p).no_target;
+      const uint32_t res[1][2] = { { REF_M9, 2 | 4 } };
+      run_exec(p, 15, REF_M9, 2, col, true, res, 1, true);
+      assert(cell(1) == 15 && CNT(p).mapped_created == cr + 1 && CNT(p).mapped_unsupported == un && CNT(p).no_target == nt);
+      assert(lagfx_a64_res_lookup(p, 1, REF_M9)->format == VK_FORMAT_R16G16B16A16_SFLOAT && lagfx_a64_res_lookup(p, 1, REF_M9)->bpp == 8);
+      static const uint8_t clear8[8] = { 0x00, 0x38, 0x00, 0x34, 0x00, 0x3c, 0x00, 0x3c }, red8[8] = { 0x00, 0x3c, 0, 0, 0, 0, 0x00, 0x3c };   /* 0.5 .25 1 1 / 1 0 0 1 */
+      assert(!memcmp(half_px(0, 0), clear8, 8) && !memcmp(half_px(63, 79), clear8, 8) && !memcmp(half_px(32, 40), red8, 8));
+      const uint8_t *s0 = surf_page(0);
+      for (uint32_t i = 0; i < 4u << 14; i++) {
+          bool in_px = i >= SFIRST && i < SFIRST + HROW * SH && ((i - SFIRST) % HROW) < SW * 8u;
+          if (!in_px) assert(s0[i] == SENT);
+      }
+      assert(CNT(p).mapped_bytes_down >= SW * SH * 8u);
+      /* guest upload round trip: guest pixels (flag 0x01) -> image -> readback -> synchronize -> guest */
+      for (uint32_t y = 0; y < SH; y++) for (uint32_t x = 0; x < SW; x++) { uint16_t v[4] = { (uint16_t)x, (uint16_t)y, (uint16_t)(x ^ y), 0x3c00 }; memcpy(half_px(x, y), v, 8); }
+      { const uint32_t r1[1][2] = { { REF_M9, 1 } }; run_exec(p, 16, 0, 0, col, false, r1, 1, false); }
+      uint8_t *img = malloc(SW * SH * 8u); uint32_t w, h;
+      assert(lagfx_a64_res_readback(p, 1, REF_M9, img, SW * SH * 8u, &w, &h) && w == SW && h == SH);
+      for (uint32_t y = 0; y < SH; y++) for (uint32_t x = 0; x < SW; x++) { uint16_t v[4] = { (uint16_t)x, (uint16_t)y, (uint16_t)(x ^ y), 0x3c00 }; assert(!memcmp(img + ((size_t)y * SW + x) * 8u, v, 8)); }
+      free(img);
+      memset(surf_page(0), SENT, 4u << 14);
+      synchronize(p, 17, REF_M9);
+      for (uint32_t y = 0; y < SH; y++) for (uint32_t x = 0; x < SW; x++) { uint16_t v[4] = { (uint16_t)x, (uint16_t)y, (uint16_t)(x ^ y), 0x3c00 }; assert(!memcmp(half_px(x, y), v, 8)); }
+      assert(s0[SFIRST + 600] == SENT); }
+    printf("PASS: RGhA (RGBA16Float) surface: clear + draw written back as raw half floats at pitch %u, guest upload round trip exact\n", HROW);
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);

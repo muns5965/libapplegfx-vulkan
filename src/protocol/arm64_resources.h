@@ -14,7 +14,7 @@
  *                  uncompressed, non-MSAA 2D / 2D array / 3D, formats in the table of arm64_resources.c
  *                type 8/9 linear 2D texture {tag, size, ref, description} without guest pages: a device image only (render target / blit), no write-back
  *   type 11        mapped texture {u64 mapping id, u32 tag, u32 size, u32 ref, description}: the pixels live in a guest display SURFACE whose descriptor the shell
- *                  supplies (lagfx_shell_callbacks_t.get_surface_desc, only B8G8R8A8 surfaces). ONE device image of the SURFACE's size per mapping id, shared by every ref /
+ *                  supplies (lagfx_shell_callbacks_t.get_surface_desc; B8G8R8A8 -> B8G8R8A8, 'RGhA' -> R16G16B16A16_SFLOAT, 8 bytes per pixel, raw copies). ONE device image of the SURFACE's size per mapping id, shared by every ref /
  *                  task naming that id, GENERAL layout, usable as colour attachment and sampled. Guest -> image: the surface pages are read (shell read_memory, honouring the
  *                  row pitch and first-byte offset) into a staging buffer on the flag rules below; image -> guest: flag 0x04 / sync ops write the pixels back (shell
  *                  write_memory), missing pages are skipped and counted. Counters: diag2.exec.run.mapped_*.

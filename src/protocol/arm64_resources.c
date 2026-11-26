@@ -60,7 +60,7 @@ typedef struct { lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; 
  * Every mapped-texture object (any ref / task) naming the same mapping id and size holds a reference; host_valid / guest_stale are the surface's, not the object's. */
 typedef struct lagfx_a64_msurf {
     mgr2_t *m;
-    uint32_t mapping, w, h, refs;
+    uint32_t mapping, w, h, refs, fourcc, bpp;
     VkFormat format; VkImageUsageFlags usage;
     VkImage img; VkDeviceMemory img_mem;
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
@@ -354,7 +354,7 @@ static void o_set_hv(lagfx_a64_obj_t *o, bool v) { if (o->ms) o->ms->host_valid 
 static bool o_stale(const lagfx_a64_obj_t *o) { return o->ms ? o->ms->guest_stale : o->guest_stale; }
 static void o_set_stale(lagfx_a64_obj_t *o, bool v) { if (o->ms) o->ms->guest_stale = v; else o->guest_stale = v; }
 
-/* The shell's descriptor of `mapping`, decoded (BGRA only). Counts mapped_no_desc (no callback / unknown id) or mapped_unsupported (does not decode / not BGRA). */
+/* The shell's descriptor of `mapping`, decoded (BGRA or RGhA). Counts mapped_no_desc (no callback / unknown id) or mapped_unsupported (does not decode / not BGRA). */
 static bool ms_desc(lagfx_protocol_t *p, uint32_t mapping, lagfx_guest_surface_t *gs) {
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     const lagfx_shell_callbacks_t *sh = dev ? &dev->desc.shell : NULL;
@@ -362,7 +362,7 @@ static bool ms_desc(lagfx_protocol_t *p, uint32_t mapping, lagfx_guest_surface_t
     size_t n = 0;
     memset(d, 0, sizeof d);
     if (!sh || !sh->get_surface_desc || !sh->get_surface_desc(sh->opaque, mapping, d, sizeof d, &n) || n < LAGFX_SURF_DESC_BYTES || n > sizeof d) { MRUN(p).mapped_no_desc++; return false; }
-    if (lagfx_guest_surface_decode(d, n, gs) != LAGFX_OK) { MRUN(p).mapped_unsupported++; return false; }
+    if (lagfx_guest_surface_decode_any(d, n, gs) != LAGFX_OK) { MRUN(p).mapped_unsupported++; return false; }
     return true;
 }
 
@@ -373,10 +373,10 @@ static bool ms_pull(lagfx_protocol_t *p, mgr2_t *m, VkCommandBuffer cb, msurf_t 
     if (ms->up_epoch == m->epoch) return true;   /* already taken in this exec */
     lagfx_guest_surface_t gs;
     if (!ms_desc(p, ms->mapping, &gs)) return false;
-    if (gs.width != ms->w || gs.height != ms->h) { MRUN(p).mapped_unsupported++; return false; }   /* the guest re-made the surface with another size */
+    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return false; }   /* the guest re-made the surface with another size */
     lagfx_guest_surface_xfer_stats_t st;
     memset(&st, 0, sizeof st);
-    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * 4u, false, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return false; }
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, false, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return false; }
     MRUN(p).mapped_uploaded++, MRUN(p).mapped_bytes_up += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
     VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { ms->w, ms->h, 1 } };
     lagfx_translate_blit_cmd_buffer_image(cb, ms->stage, ms->img, &r, true);
@@ -402,10 +402,10 @@ static void ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
     ms->down_pending = false;
     lagfx_guest_surface_t gs;
     if (!ms_desc(p, ms->mapping, &gs)) return;
-    if (gs.width != ms->w || gs.height != ms->h) { MRUN(p).mapped_unsupported++; return; }
+    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return; }
     lagfx_guest_surface_xfer_stats_t st;
     memset(&st, 0, sizeof st);
-    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * 4u, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return; }
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return; }
     MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
     ms->guest_stale = false;
 }
@@ -423,9 +423,9 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
     if (mapping > 0xffffffffull) { MRUN(p).mapped_unsupported++; return false; }
     lagfx_guest_surface_t gs;
     if (!ms_desc(p, (uint32_t)mapping, &gs)) return false;
-    if ((uint64_t)gs.width * gs.height * 4u > LAGFX_A64_MAX_OBJ_BYTES) { MRUN(p).mapped_unsupported++; return false; }
+    if ((uint64_t)gs.width * gs.height * gs.bpp > LAGFX_A64_MAX_OBJ_BYTES) { MRUN(p).mapped_unsupported++; return false; }
     msurf_t *ms = NULL;
-    for (uint32_t i = m->nms; i-- > 0;) if (m->ms[i]->mapping == (uint32_t)mapping && m->ms[i]->w == gs.width && m->ms[i]->h == gs.height) { ms = m->ms[i]; break; }
+    for (uint32_t i = m->nms; i-- > 0;) if (m->ms[i]->mapping == (uint32_t)mapping && m->ms[i]->w == gs.width && m->ms[i]->h == gs.height && m->ms[i]->fourcc == gs.fourcc) { ms = m->ms[i]; break; }
     if (!ms) {
         if (m->nms >= MAX_MS) { MRUN(p).mapped_unsupported++; return false; }
         if (m->nms == 0 || (m->nms & (m->nms - 1u)) == 0) {   /* grow the registry on powers of two */
@@ -434,16 +434,17 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
             if (!nn) { MRUN(p).mapped_unsupported++; return false; }
             m->ms = nn;
         }
-        o->format = fmt == 81u ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
-        o->img_type = VK_IMAGE_TYPE_2D, o->width = gs.width, o->height = gs.height, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = 4;
+        /* the image format follows the SURFACE's fourcc (not the description): BGRA -> B8G8R8A8, 'RGhA' -> R16G16B16A16_SFLOAT (raw half floats, no conversion) */
+        o->format = gs.fourcc == LAGFX_FOURCC_RGHA ? VK_FORMAT_R16G16B16A16_SFLOAT : fmt == 81u ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
+        o->img_type = VK_IMAGE_TYPE_2D, o->width = gs.width, o->height = gs.height, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = gs.bpp;
         if (!create_image(vk, m, o)) { MRUN(p).mapped_unsupported++; return false; }
         if (!(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { MRUN(p).mapped_unsupported++; return false; }   /* o frees its own image */
         ms = calloc(1, sizeof *ms);
         if (!ms) { MRUN(p).mapped_unsupported++; return false; }
-        if (!make_buf(vk, (VkDeviceSize)gs.width * gs.height * 4u, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &ms->stage, &ms->stage_mem, &ms->stage_map)) {
+        if (!make_buf(vk, (VkDeviceSize)gs.width * gs.height * gs.bpp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &ms->stage, &ms->stage_mem, &ms->stage_map)) {
             free(ms); MRUN(p).mapped_unsupported++; return false;
         }
-        ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->format = o->format, ms->usage = o->usage;
+        ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->fourcc = gs.fourcc, ms->bpp = gs.bpp, ms->format = o->format, ms->usage = o->usage;
         ms->img = o->img, ms->img_mem = o->img_mem;   /* ownership moves to the surface */
         o->img_mem = VK_NULL_HANDLE;
         m->ms[m->nms++] = ms;
@@ -451,13 +452,13 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
         LAGFX_LOG("arm64 mapped texture: mapping %u surface %ux%u row %llu first %u, description tag 0x%x format %u", (unsigned)mapping, gs.width, gs.height, (unsigned long long)gs.row_bytes, gs.first_offset, tag, fmt);
     } else {
         o->format = ms->format, o->usage = ms->usage, o->img = ms->img;
-        o->img_type = VK_IMAGE_TYPE_2D, o->width = ms->w, o->height = ms->h, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = 4;
+        o->img_type = VK_IMAGE_TYPE_2D, o->width = ms->w, o->height = ms->h, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = ms->bpp;
         MRUN(p).mapped_shared++;
     }
     ms->refs++;
     o->ms = ms, o->mapping = (uint32_t)mapping;
     o->kind = LAGFX_A64_TEXTURE, o->has_pages = false, o->length = 0, o->tex_mip_count = 1;
-    o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = (uint64_t)o->width * 4u;
+    o->mip[0].w = o->width, o->mip[0].h = o->height, o->mip[0].d = 1, o->mip[0].row = (uint64_t)o->width * o->bpp;
     return true;
 }
 

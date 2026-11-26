@@ -26,14 +26,20 @@
 #define LAGFX_SURF_DESC_BYTES   0x64u
 #define LAGFX_SURF_PAGE_SHIFT   14u
 #define LAGFX_FOURCC_BGRA       0x42475241u
+#define LAGFX_FOURCC_RGHA       0x52476841u   /* 'RGhA': RGBA16Float, 8 bytes per pixel (the guest's main display surface) */
 
 typedef struct {
     uint32_t fourcc, width, height, first_offset, npages;
+    uint32_t bpp;   /* bytes per pixel: 4 (BGRA) or 8 (RGhA, only from lagfx_guest_surface_decode_any) */
     uint64_t row_bytes, alloc, page_list_gpa;
 } lagfx_guest_surface_t;
 
 /* Decode + bounds-check a descriptor. LAGFX_ERR_INVALID_ARG on anything Henge's decode_surface rejects or a fourcc other than BGRA. */
 lagfx_status_t lagfx_guest_surface_decode(const uint8_t *desc, size_t desc_len, lagfx_guest_surface_t *out);
+
+/* Like lagfx_guest_surface_decode but also accepts 'RGhA' (bpp 8; same row / first-offset / page bounds with width * 8). Only the mirror of mapped textures uses it; the
+ * display swap path (write_bgra) keeps refusing everything but BGRA. */
+lagfx_status_t lagfx_guest_surface_decode_any(const uint8_t *desc, size_t desc_len, lagfx_guest_surface_t *out);
 
 /* Write w x h BGRA pixels (src, src_stride bytes per row) at the top-left of the surface: min(w, surface width) x min(h, surface height).
  * Reads the page list with shell->read_memory, then writes row by row with shell->write_memory (a row may straddle pages). Every page that will be
@@ -41,7 +47,7 @@ lagfx_status_t lagfx_guest_surface_decode(const uint8_t *desc, size_t desc_len, 
 lagfx_status_t lagfx_guest_surface_write_bgra(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s,
                                               const uint8_t *src, uint32_t w, uint32_t h, size_t src_stride);
 
-/* Tolerant row-by-row transfer for the ARM64 exec mirror of mapped (type 11) textures. Moves min(w, surface width) x min(h, surface height) BGRA pixels between
+/* (w x h pixels of s->bpp bytes; `stride` >= w * bpp.) Tolerant row-by-row transfer for the ARM64 exec mirror of mapped (type 11) textures. Moves min(w, surface width) x min(h, surface height) BGRA pixels between
  * `buf` (tightly strided by `stride` bytes) and the guest pages at pixel (0, 0): surface byte offset first_offset + y * row_bytes + 4 * x. Unlike write_bgra a
  * missing / non-present / unreadable page does NOT fail the transfer: the bytes of that page are skipped (to_guest: not written, guest keeps what it had; from
  * guest: the buffer bytes are zeroed) and the page is counted once in st->pages_skipped. Every chunk is bounds-checked against the descriptor's page count. Only

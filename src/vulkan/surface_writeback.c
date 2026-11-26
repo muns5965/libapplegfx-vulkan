@@ -6,22 +6,26 @@
 #include "../common/le.h"
 #include "../common/log.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
-lagfx_status_t lagfx_guest_surface_decode(const uint8_t *desc, size_t len, lagfx_guest_surface_t *out) {
+static lagfx_status_t decode_impl(const uint8_t *desc, size_t len, lagfx_guest_surface_t *out, bool allow_rgha) {
     if (!desc || !out || len < LAGFX_SURF_DESC_BYTES) return LAGFX_ERR_INVALID_ARG;
     uint32_t list = lagfx_le32(desc), fourcc = lagfx_le32(desc + 4), first = lagfx_le32(desc + 0x60);
     uint64_t alloc = lagfx_le64(desc + 0x18), sw = lagfx_le64(desc + 0x20), sh = lagfx_le64(desc + 0x28), row = lagfx_le64(desc + 0x30);
-    if (fourcc != LAGFX_FOURCC_BGRA) { LAGFX_WARN("guest surface: fourcc %08x refused (only BGRA)", fourcc); return LAGFX_ERR_INVALID_ARG; }
-    if (!(list & 1u) || !sw || !sh || sw > 8192 || sh > 8192 || row < sw * 4u || row > 0x10000 || alloc > 64ull * 1024 * 1024) return LAGFX_ERR_INVALID_ARG;
+    uint32_t bpp = fourcc == LAGFX_FOURCC_BGRA ? 4u : (allow_rgha && fourcc == LAGFX_FOURCC_RGHA) ? 8u : 0u;
+    if (!bpp) { LAGFX_WARN("guest surface: fourcc %08x refused (%s)", fourcc, allow_rgha ? "only BGRA / RGhA" : "only BGRA"); return LAGFX_ERR_INVALID_ARG; }
+    if (!(list & 1u) || !sw || !sh || sw > 8192 || sh > 8192 || row < sw * bpp || row > 0x10000 || alloc > 64ull * 1024 * 1024) return LAGFX_ERR_INVALID_ARG;
     uint64_t length = (alloc + first + 0x3fffull) & ~0x3fffull, npages = length >> LAGFX_SURF_PAGE_SHIFT;
     if (!npages || npages > 4096) return LAGFX_ERR_INVALID_ARG;
-    if ((uint64_t)first + row * (sh - 1) + sw * 4u > (npages << LAGFX_SURF_PAGE_SHIFT)) return LAGFX_ERR_INVALID_ARG;
-    out->fourcc = fourcc; out->width = (uint32_t)sw; out->height = (uint32_t)sh; out->first_offset = first; out->npages = (uint32_t)npages;
+    if ((uint64_t)first + row * (sh - 1) + sw * bpp > (npages << LAGFX_SURF_PAGE_SHIFT)) return LAGFX_ERR_INVALID_ARG;
+    out->fourcc = fourcc; out->width = (uint32_t)sw; out->height = (uint32_t)sh; out->first_offset = first; out->npages = (uint32_t)npages; out->bpp = bpp;
     out->row_bytes = row; out->alloc = alloc; out->page_list_gpa = (uint64_t)(list & ~1u) << 12;
     return LAGFX_OK;
 }
+lagfx_status_t lagfx_guest_surface_decode(const uint8_t *desc, size_t len, lagfx_guest_surface_t *out) { return decode_impl(desc, len, out, false); }
+lagfx_status_t lagfx_guest_surface_decode_any(const uint8_t *desc, size_t len, lagfx_guest_surface_t *out) { return decode_impl(desc, len, out, true); }
 
 lagfx_status_t lagfx_guest_surface_write_bgra(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s,
                                               const uint8_t *src, uint32_t w, uint32_t h, size_t src_stride) {
@@ -57,7 +61,7 @@ lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, co
                                         bool to_guest, lagfx_guest_surface_xfer_stats_t *st) {
     lagfx_guest_surface_xfer_stats_t zero = { 0, 0, 0 };
     if (!st) st = &zero;
-    if (!shell || !shell->read_memory || (to_guest && !shell->write_memory) || !s || !buf || !w || !h || !s->npages || s->npages > 4096u || stride < (size_t)w * 4u) return LAGFX_ERR_INVALID_ARG;
+    if (!shell || !shell->read_memory || (to_guest && !shell->write_memory) || !s || !buf || !w || !h || !s->npages || s->npages > 4096u || (s->bpp != 4u && s->bpp != 8u) || stride < (size_t)w * s->bpp) return LAGFX_ERR_INVALID_ARG;
     if (w > s->width) w = s->width;
     if (h > s->height) h = s->height;
     uint32_t *pages = malloc((size_t)s->npages * 4u);
@@ -67,7 +71,7 @@ lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, co
     if (!shell->read_memory(shell->opaque, s->page_list_gpa, (uint64_t)s->npages * 4u, pages)) goto out;
     const uint64_t total = (uint64_t)s->npages << LAGFX_SURF_PAGE_SHIFT;
     for (uint32_t y = 0; y < h; y++) {
-        uint64_t off = (uint64_t)s->first_offset + (uint64_t)y * s->row_bytes, n = (uint64_t)w * 4u;
+        uint64_t off = (uint64_t)s->first_offset + (uint64_t)y * s->row_bytes, n = (uint64_t)w * s->bpp;
         uint8_t *p = buf + (size_t)y * stride;
         while (n) {
             uint64_t pg = off >> LAGFX_SURF_PAGE_SHIFT, o = off & 0x3fffu, c = 0x4000u - o;
