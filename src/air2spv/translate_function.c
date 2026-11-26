@@ -1094,9 +1094,15 @@ static uint32_t emit_const_float32(xlate_ctx_t *c, float val) {
     return id;
 }
 
+static void lagfx_undef_site(uint32_t id, uint32_t ty, const char *fn, int line, uint32_t vid, int cached) {
+    static int en = -1; if (en < 0) en = getenv("LAGFX_UNDEF_SITES") != NULL;
+    if (en) fprintf(stderr, "UNDEFSITE id=%u ty=%u fn=%s line=%d vid=%d cached=%d\n", id, ty, fn, line, (int)vid, cached);
+}
+static uint32_t emit_undef_at(xlate_ctx_t *c, uint32_t spv_type, const char *fn, int line, uint32_t vid);
 /* OpUndef per SPIR-V type. Used as a placeholder for unresolvable
  * operands (function-local constants pending Phase 5.5 decode). */
-static uint32_t emit_undef(xlate_ctx_t *c, uint32_t spv_type) {
+static uint32_t emit_undef_at(xlate_ctx_t *c, uint32_t spv_type, const char *fn, int line, uint32_t vid);
+static uint32_t emit_undef_at(xlate_ctx_t *c, uint32_t spv_type, const char *fn, int line, uint32_t vid) {
     /* OpUndef %void is illegal (spirv-val: "Cannot create undefined values
      * with void type") — it arises when a placeholder is built for a value
      * whose AIR type resolved to void (e.g. a void-returning intrinsic that
@@ -1105,14 +1111,17 @@ static uint32_t emit_undef(xlate_ctx_t *c, uint32_t spv_type) {
      * undef is never meaningfully consumed, and this keeps the module valid. */
     if (c->id_void && spv_type == c->id_void)
         spv_type = emit_type_int_w(c, 32u, 0u);
-    uint32_t cached = cache_lookup_const(c, 0, spv_type, 0u);
-    if (cached) return cached;
+    static int nocache = -1; if (nocache < 0) nocache = getenv("LAGFX_UNDEF_NOCACHE") != NULL;   /* diagnostic only: one OpUndef per site, so every OpUndef has exactly one source (module differs from the default one) */
+    uint32_t cached = nocache ? 0u : cache_lookup_const(c, 0, spv_type, 0u);
+    if (cached) { lagfx_undef_site(cached, spv_type, fn, line, vid, 1); return cached; }
     uint32_t id = lagfx_spv_builder_alloc_id(c->b);
     uint32_t ops[] = { spv_type, id };
     lagfx_spv_builder_emit_op(c->b, 1 /* OpUndef */, ops, 2);
     cache_store_const(c, 0, spv_type, 0u, id);
+    lagfx_undef_site(id, spv_type, fn, line, vid, 0);
     return id;
 }
+#define emit_undef(c, t) emit_undef_at((c), (t), __func__, __LINE__, 0xffffffffu)
 
 /* ===================================================================
  * Value-id resolution
@@ -1251,16 +1260,17 @@ static bool resolve_value_lit_i32(const xlate_ctx_t *c, uint32_t value_id, int32
 
 /* For a referenced value-id, return its SPIR-V id; if unresolvable,
  * emit and return an OpUndef of `fallback_type` (SPIR-V id). */
-static uint32_t resolve_or_undef(xlate_ctx_t *c, uint32_t value_id,
-                                  uint32_t fallback_spv_type) {
+static uint32_t resolve_or_undef_at(xlate_ctx_t *c, uint32_t value_id,
+                                  uint32_t fallback_spv_type, const char *fn, int line) {
     uint32_t r = resolve_value_spv(c, value_id);
     if (r) return r;
     /* Module-level constant we didn't track? Triangle's GEP indices
      * resolve to `i64 0` (module const c[9]) — emit a real i64 zero
      * for those rather than a generic undef so spirv-val accepts the
      * AccessChain. */
-    return emit_undef(c, fallback_spv_type);
+    return emit_undef_at(c, fallback_spv_type, fn, line, value_id);
 }
+#define resolve_or_undef(c, v, t) resolve_or_undef_at((c), (v), (t), __func__, __LINE__)
 
 /* Forward decls — defined further below but referenced from the
  * prologue's ALLOCA pre-emission pass. */
@@ -8406,7 +8416,8 @@ static void bind_local_constants(xlate_ctx_t *c) {
                  * POISON code (26); treat as undef. */
                 if (air_type_requires_extra_cap(c, ty_air, 0)) break;
                 uint32_t ty_spv = emit_air_type(c, ty_air);
-                spv_id = emit_undef(c, ty_spv);
+                { static char nm[64]; if (k->kind == LAGFX_AIR_CONST_UNDEF) snprintf(nm, sizeof nm, "const_undef(code3)"); else snprintf(nm, sizeof nm, "const_unknown(code%d)", (int)k->payload.i64);
+                  spv_id = emit_undef_at(c, ty_spv, nm, __LINE__, vid); }
                 break;
             }
             case LAGFX_AIR_CONST_DATA: {

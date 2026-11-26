@@ -2038,6 +2038,7 @@ lagfx_air_function_body_open(const lagfx_air_module_t   *module,
                             break;
                         default:
                             c->kind = LAGFX_AIR_CONST_UNKNOWN;
+                            c->payload.i64 = (int64_t)crec.code;   /* diagnostic only (LAGFX_UNDEF_SITES): the raw CST_CODE of a constant record the reader does not decode */
                             break;
                     }
                     lc_count++;
