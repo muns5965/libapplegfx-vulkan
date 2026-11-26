@@ -54,6 +54,7 @@ enum {
     LAGFX_TYPE_FUNCTION     = 21,
     LAGFX_TYPE_TOKEN        = 22,
     LAGFX_TYPE_BFLOAT       = 23,
+    LAGFX_TYPE_OPAQUE_POINTER = 25,   /* [addrspace]: LLVM >= 15 pointer without a pointee type */
 };
 
 /* VALUE_SYMTAB_BLOCK record codes per llvm/Bitcode/LLVMBitCodes.h. */
@@ -1326,6 +1327,20 @@ lagfx_air_module_open(const uint8_t *blob, size_t blob_len,
                                 case LAGFX_TYPE_HALF:      t->kind = LAGFX_AIR_TYPE_HALF; break;
                                 case LAGFX_TYPE_LABEL:     t->kind = LAGFX_AIR_TYPE_LABEL; break;
                                 case LAGFX_TYPE_METADATA:  t->kind = LAGFX_AIR_TYPE_METADATA; break;
+                                case LAGFX_TYPE_OPAQUE_POINTER: {
+                                    /* Same shape as a typed pointer to an opaque struct (what Apple's AIR carries for textures / samplers): op0 = pointee index, which is
+                                     * out of range here (no pointee), op1 = address space. Every consumer already treats an out-of-range pointee as opaque. */
+                                    uint32_t pbuf[2] = { 0xFFFFFFFFu, trec.num_ops >= 1u ? (uint32_t)trec.ops[0] : 0u };
+                                    uint32_t off = arena_intern_u32_array(&m->arena, pbuf, 2u);
+                                    if (off == 0u) { lagfx_air_module_free(m); return LAGFX_ERR_OUT_OF_MEMORY; }
+                                    types = (lagfx_air_type_t *)(m->arena.base + types_off);
+                                    t = &types[num_types];
+                                    t->kind = LAGFX_AIR_TYPE_POINTER;
+                                    t->op = (const uint32_t *)(m->arena.base + off);
+                                    t->op_offset = off;
+                                    t->num_op = 2u;
+                                    break;
+                                }
                                 case LAGFX_TYPE_INTEGER:
                                 case LAGFX_TYPE_POINTER:
                                 case LAGFX_TYPE_VECTOR:
