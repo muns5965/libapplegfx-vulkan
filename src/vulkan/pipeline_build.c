@@ -263,6 +263,14 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
                         | VK_COLOR_COMPONENT_B_BIT
                         | VK_COLOR_COMPONENT_A_BIT,
     };
+    if (desc->blend_set) {
+        blend_att.blendEnable = desc->blend_enable ? VK_TRUE : VK_FALSE;
+        blend_att.srcColorBlendFactor = (VkBlendFactor)desc->blend_src_rgb, blend_att.dstColorBlendFactor = (VkBlendFactor)desc->blend_dst_rgb;
+        blend_att.colorBlendOp = (VkBlendOp)desc->blend_op_rgb;
+        blend_att.srcAlphaBlendFactor = (VkBlendFactor)desc->blend_src_a, blend_att.dstAlphaBlendFactor = (VkBlendFactor)desc->blend_dst_a;
+        blend_att.alphaBlendOp = (VkBlendOp)desc->blend_op_a;
+        blend_att.colorWriteMask = (VkColorComponentFlags)desc->color_write_mask;
+    }
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .attachmentCount = 1,

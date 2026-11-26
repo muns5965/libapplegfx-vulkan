@@ -20,6 +20,41 @@ uint64_t lagfx_a64_hash64(const void *data, size_t n) {
     return h;
 }
 
+/* Colour attachment 0: the record of the LAST array chunk `0c 00 00 00 <len u32> <count u8>` whose first element is `00 04 <0 u32>` and whose first token after it is
+ * `01 04 <pixel format>` (earlier chunks hold the vertex attributes, whose `01 04` value is a vertex format). */
+static bool is_pixfmt(uint32_t f) { return f == 10u || f == 70u || f == 80u || f == 81u || f == 90u || f == 94u || f == 115u || f == 125u || f == 55u || f == 71u || f == 8u || f == 20u || f == 30u || f == 40u || f == 60u || f == 65u || f == 110u || f == 105u || f == 100u; }
+static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o) {
+    memset(o, 0, sizeof *o);
+    o->src_rgb = 1, o->dst_rgb = 0, o->op_rgb = 0, o->src_a = 1, o->dst_a = 0, o->op_a = 0, o->mask = 0xfu;
+    for (uint32_t i = limit < 20u ? 0u : limit - 20u;; i--) {   /* last chunk first */
+        if (i + 20u <= limit && b[i] == 0x0cu && !b[i + 1] && !b[i + 2] && !b[i + 3] && b[i + 9] == 0x00u && b[i + 10] == 0x04u && !lagfx_le32(b + i + 11) &&
+            b[i + 15] == 0x01u && b[i + 16] == 0x04u && is_pixfmt(lagfx_le32(b + i + 17))) {
+            o->found = true;
+            o->pixfmt = lagfx_le32(b + i + 17);
+            uint32_t at = i + 21u, prev = 1u;
+            while (at + 6u <= limit && b[at + 1] == 0x04u && b[at] > prev && b[at] <= 9u) {
+                uint32_t key = b[at], v = lagfx_le32(b + at + 2u);
+                if (v > 0xffu) break;
+                switch (key) {
+                case 2: o->enabled_token = true; break;
+                case 3: o->src_rgb = (uint8_t)v; o->any_blend_token = true; break;
+                case 4: o->dst_rgb = (uint8_t)v; o->any_blend_token = true; break;
+                case 5: o->op_rgb = (uint8_t)v; o->any_blend_token = true; break;
+                case 6: o->src_a = (uint8_t)v; o->any_blend_token = true; break;
+                case 7: o->dst_a = (uint8_t)v; o->any_blend_token = true; break;
+                case 8: o->op_a = (uint8_t)v; o->any_blend_token = true; break;
+                case 9: o->mask = (uint8_t)v; break;
+                default: break;
+                }
+                prev = key; at += 6u;
+            }
+            if (o->enabled_token) o->any_blend_token = true;
+            return;
+        }
+        if (!i) break;
+    }
+}
+
 bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void *ctx, uint32_t ref), void *ctx, lagfx_a64_pdesc_t *out) {
     if (!blob || !out || n < 16u) return false;
     memset(out, 0, sizeof *out);
@@ -68,6 +103,7 @@ bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void 
     uint32_t best = 0, bestn = 0;
     for (uint32_t k = 0; k < nc; k++) if (hits[k] > bestn || (hits[k] == bestn && cand[k] > best)) best = cand[k], bestn = hits[k];
     out->stride = best;
+    decode_color0(blob, limit, &out->color0);
     return true;
 }
 
@@ -333,11 +369,28 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     out->desc.vertex_spv = (const uint32_t *)vspv, out->desc.vertex_spv_bytes = vsz;   /* ownership moves into r (freed by pres_release) */
     out->desc.fragment_spv = (const uint32_t *)fspv, out->desc.fragment_spv_bytes = fsz;
     out->desc.caps_enabled = vk->caps_enabled;
+    {   /* blend state of colour attachment 0 (see lagfx_a64_blend_t: only what the descriptor actually carries) */
+        static const uint8_t fac[15] = { VK_BLEND_FACTOR_ZERO, VK_BLEND_FACTOR_ONE, VK_BLEND_FACTOR_SRC_COLOR, VK_BLEND_FACTOR_ONE_MINUS_SRC_COLOR, VK_BLEND_FACTOR_SRC_ALPHA,
+            VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, VK_BLEND_FACTOR_DST_COLOR, VK_BLEND_FACTOR_ONE_MINUS_DST_COLOR, VK_BLEND_FACTOR_DST_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA,
+            VK_BLEND_FACTOR_SRC_ALPHA_SATURATE, VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR, VK_BLEND_FACTOR_CONSTANT_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA };
+        static const uint8_t ops[5] = { VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN, VK_BLEND_OP_MAX };
+        const lagfx_a64_blend_t *b = &d.color0;
+        bool ok_vals = b->found && b->src_rgb < 15u && b->dst_rgb < 15u && b->src_a < 15u && b->dst_a < 15u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
+        if (ok_vals) {
+            out->desc.blend_set = 1;
+            out->desc.blend_enable = b->any_blend_token;   /* no blend token at all = Metal default = off; any token keeps blending on (key 2 is not proven to be the enable) */
+            out->desc.blend_src_rgb = fac[b->src_rgb], out->desc.blend_dst_rgb = fac[b->dst_rgb], out->desc.blend_op_rgb = ops[b->op_rgb];
+            out->desc.blend_src_a = fac[b->src_a], out->desc.blend_dst_a = fac[b->dst_a], out->desc.blend_op_a = ops[b->op_a];
+            out->desc.color_write_mask = ((b->mask & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((b->mask & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((b->mask & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((b->mask & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
+            CNTP(p).blend_decoded++;
+            if (!b->any_blend_token) CNTP(p).blend_off++;
+        } else CNTP(p).stub_blend++;
+    }
     r->vspv = vspv, r->vsz = vsz, r->fspv = fspv, r->fsz = fsz;
     vspv = fspv = NULL;
     out->blob_hash = lagfx_a64_hash64(blob, blen);
     out->release = pres_release, out->user = r;
-    CNTP(p).stub_blend++, CNTP(p).stub_depth_stencil++, CNTP(p).stub_color_format_from_pass++, CNTP(p).stub_raster_state++;
+    CNTP(p).stub_depth_stencil++, CNTP(p).stub_color_format_from_pass++, CNTP(p).stub_raster_state++;
     CNTP(p).resolve_failed--, CNTP(p).resolved++;
     ok = true;
     r = NULL;   /* owned by out now */

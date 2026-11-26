@@ -28,11 +28,24 @@
 
 typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;
 
+/* Colour attachment 0 of the serialized descriptor (record `00 04 <idx 0>` followed by `kk 04 <u32>` tokens, keys in MTLRenderPipelineColorAttachmentDescriptor
+ * declaration order: 1 pixelFormat, 2 blendingEnabled, 3 sourceRGB, 4 destinationRGB, 5 rgbOp, 6 sourceAlpha, 7 destinationAlpha, 8 alphaOp, 9 writeMask; a
+ * property at its Metal default is not serialized). Evidence: all 43 descriptors of the device dump (pixelFormat values 70/80/115 are RGBA8Unorm/BGRA8Unorm/
+ * RGBA16Float, the blend values are valid MTLBlendFactor values and the common 4=5,7=5 pair is the premultiplied source-over the compositor uses). Whether key 2
+ * is blendingEnabled is NOT proven (13 descriptors carry factors without it), so `any_blend_token` is kept apart: blending is only turned OFF when the record has
+ * no blend token at all. found = the record was recognised; otherwise every field is the Metal default and the caller keeps its fixed state. */
+typedef struct {
+    bool found, any_blend_token, enabled_token;
+    uint32_t pixfmt;
+    uint8_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a, mask;   /* MTLBlendFactor / MTLBlendOperation / MTLColorWriteMask values (defaults: 1,0,0,1,0,0,0xf) */
+} lagfx_a64_blend_t;
+
 typedef struct {
     uint32_t tag, size, ref, length;             /* header words 0..3 */
     uint32_t nrefs, refs[LAGFX_A64_PDESC_MAX_REFS];   /* function-object refs, first-seen order */
     uint32_t nattrs; lagfx_a64_vattr_t attrs[LAGFX_A64_PDESC_MAX_ATTRS];   /* sorted by offset */
     uint32_t stride;                             /* 0 = not found */
+    lagfx_a64_blend_t color0;
 } lagfx_a64_pdesc_t;
 
 /* Pure (no guest memory, no Vulkan): decodes the header and scans the body. is_fn(ctx, ref) says whether `ref` names a function object (NULL = every

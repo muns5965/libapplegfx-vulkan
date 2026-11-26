@@ -62,6 +62,11 @@ typedef struct {
     const uint32_t  *vertex_spv;   size_t vertex_spv_bytes;
     const uint32_t  *fragment_spv; size_t fragment_spv_bytes;
     uint32_t         caps_enabled;
+    /* Colour attachment 0 blend state. blend_set == 0 keeps the fixed premultiplied source-over below (every existing caller); blend_set == 1 uses these
+     * Vulkan values (enable false = blending off, the factors/ops/mask are then ignored except the write mask). */
+    uint8_t          blend_set, blend_enable;
+    uint32_t         blend_src_rgb, blend_dst_rgb, blend_op_rgb, blend_src_a, blend_dst_a, blend_op_a;   /* VkBlendFactor / VkBlendOp */
+    uint32_t         color_write_mask;   /* VkColorComponentFlags */
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;
