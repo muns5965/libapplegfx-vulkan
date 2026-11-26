@@ -106,3 +106,11 @@ if vulkan_dep.found()
     build_by_default : true,
   )
 endif
+
+# dump-pairhash — per PSO of an arm64 dump: size + FNV-1a-64 hash of the vertex/fragment SPIR-V exactly as the resolver builds them (matches the device "pipeline-build-fail:" line).
+executable('dump-pairhash',
+  'dump-pairhash.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

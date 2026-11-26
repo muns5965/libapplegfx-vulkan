@@ -8,6 +8,14 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* FNV-1a 64 (with this repo's historical offset basis 1469598103934665603, not the textbook one) of a byte range: the "hash=" printed by the "pipeline-build-fail:" log line and the name of the spv_<hash>_vs/fs.spv dump files. */
+uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n) {
+    const uint8_t *b = data;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
 #ifdef LAGFX_HAVE_VULKAN
 
 static const char *vr_name(VkResult r) {
@@ -27,12 +35,7 @@ static const char *vr_name(VkResult r) {
     }
 }
 
-static uint64_t fnv64(const void *data, size_t n) {
-    const uint8_t *b = data;
-    uint64_t h = 1469598103934665603ull;
-    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
-    return h;
-}
+static uint64_t fnv64(const void *data, size_t n) { return lagfx_pipeline_spv_hash(data, n); }
 
 /* One diagnostic line per DISTINCT failure key (bounded to 8 keys per process; a repeat of a key is silent, the 9th distinct key says once that the rest is
  * suppressed). Called only after vkCreateGraphicsPipelines failed; creates the two shader modules separately (and destroys them again) to tell which one the driver

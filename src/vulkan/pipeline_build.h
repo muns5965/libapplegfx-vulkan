@@ -105,6 +105,9 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline);
 
+/* FNV-1a 64 (historical offset basis 1469598103934665603, see pipeline_build.c) of a byte range = the "hash=" of the "pipeline-build-fail:" device log line (compare it with examples/dump-pairhash on a dump). */
+uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n);
+
 #ifdef __cplusplus
 }
 #endif

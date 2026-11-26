@@ -1628,3 +1628,13 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
   test('air2spv undef report + fail closed (unit)', air2spv_undef_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# The hash= of the "pipeline-build-fail:" device log line (FNV-1a 64) + deterministic resolver-order translation of a fixture pair.
+pipeline_spv_hash_test = executable('pipeline-spv-hash-unit',
+  'pipeline-spv-hash-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('pipeline spv hash (unit)', pipeline_spv_hash_test, workdir : meson.current_source_dir() / '..')
