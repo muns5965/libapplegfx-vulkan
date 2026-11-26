@@ -86,6 +86,11 @@ static const want_glsl_t g_none[]   = { {0, 0} };
 static const want_glsl_t g_bits[] = { {LAGFX_SPV_GLSL_FIND_UMSB, 8}, {LAGFX_SPV_GLSL_FIND_ILSB, 8}, {0, 0} };
 static const want_op_t   o_bits[] = { {LAGFX_SPV_OP_BIT_COUNT, 4}, {LAGFX_SPV_OP_BIT_REVERSE, 4}, {0, 0} };
 
+/* mul_hi.{u,s}.i32 / .i64 / .v2i32 -> OpU/SMulExtended (the 8/16-bit forms widen instead and emit none) */
+static const want_op_t o_umul1[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_SPV_OP_SMUL_EXTENDED, 0}, {0, 0} };
+static const want_op_t o_smul1[] = { {LAGFX_SPV_OP_SMUL_EXTENDED, 1}, {LAGFX_SPV_OP_UMUL_EXTENDED, 0}, {0, 0} };
+static const want_op_t o_both_mul[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_SPV_OP_SMUL_EXTENDED, 1}, {0, 0} };
+
 static const case_t cases[] = {
     { "int_bitcount_fragment.air.bc", g_bits, o_bits },
     /* the fixtures executed by the lavapipe test must at least be spirv-val clean */
@@ -94,6 +99,14 @@ static const case_t cases[] = {
     { "rt_bitsnarrow2_fragment.air.bc", g_none, o_none },
     { "rt_bits64_fragment.air.bc", g_none, o_none },
     { "rt_bitsvec_fragment.air.bc", g_none, o_none },
+    { "rt_mulhi_u_fragment.air.bc", g_none, o_umul1 },
+    { "rt_mulhi_s_fragment.air.bc", g_none, o_smul1 },
+    { "rt_addsat_u_fragment.air.bc", g_none, o_none },
+    { "rt_addsat_s_fragment.air.bc", g_none, o_none },
+    { "rt_subsat_u_fragment.air.bc", g_none, o_none },
+    { "rt_subsat_s_fragment.air.bc", g_none, o_none },
+    { "rt_sat64a_fragment.air.bc", g_none, o_both_mul },
+    { "rt_sat64b_fragment.air.bc", g_none, o_umul1 },
     { "int_minmax_fragment.air.bc", g_minmax, o_none },
 };
 

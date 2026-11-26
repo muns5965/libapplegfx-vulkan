@@ -4114,6 +4114,53 @@ static uint32_t ix_count_zeros(ix_t *x, bool leading, uint32_t v, uint32_t res) 
     return ix_1(c, LAGFX_SPV_OP_UCONVERT, t64, res, r);
 }
 
+/* mul_hi: the upper half of the double-width product. 32/64-bit: OpU/SMulExtended -> {low, high}, element 1. 8/16-bit: widen to 32 bit (zero- or sign-extension),
+ * multiply, shift right by the width (logical / arithmetic), narrow (truncation). */
+static uint32_t ix_mul_hi(ix_t *x, bool is_signed, uint32_t a, uint32_t b, uint32_t res) {
+    xlate_ctx_t *c = x->c;
+    if (x->w >= 32u) {
+        uint32_t st = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t so[] = { st, x->ty, x->ty };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_STRUCT, so, 3);
+        uint32_t pr = ix_2(c, is_signed ? LAGFX_SPV_OP_SMUL_EXTENDED : LAGFX_SPV_OP_UMUL_EXTENDED, st, 0u, a, b);
+        uint32_t o[] = { x->ty, res, pr, 1u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, o, 4);
+        return res;
+    }
+    uint32_t t32 = ix_uty(x, 32u), cv = is_signed ? LAGFX_SPV_OP_SCONVERT : LAGFX_SPV_OP_UCONVERT;
+    uint32_t p = ix_2(c, LAGFX_SPV_OP_IMUL, t32, 0u, ix_1(c, cv, t32, 0u, a), ix_1(c, cv, t32, 0u, b));
+    p = ix_2(c, is_signed ? LAGFX_SPV_OP_SHIFT_RIGHT_ARITHMETIC : LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, t32, 0u, p, ix_const(x, 32u, x->w));
+    return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, p);
+}
+
+/* add_sat / sub_sat, any width, on SPIR-V's wrapping IAdd/ISub:
+ *   unsigned add: s = a + b;  overflow iff s < a            -> all ones
+ *   unsigned sub: d = a - b;  underflow iff a < b           -> 0
+ *   signed add:   s = a + b;  overflow iff ((a ^ s) & (b ^ s)) < 0
+ *   signed sub:   d = a - b;  overflow iff ((a ^ b) & (a ^ d)) < 0
+ *   signed overflow saturates to MIN when a < 0 (a negative operand overflowed downwards), else to MAX. */
+static uint32_t ix_add_sub_sat(ix_t *x, bool is_signed, bool is_add, uint32_t a, uint32_t b, uint32_t res) {
+    xlate_ctx_t *c = x->c; uint32_t ty = x->ty, bt = ix_bty(x), w = x->w;
+    uint32_t r = ix_2(c, is_add ? LAGFX_SPV_OP_IADD : LAGFX_SPV_OP_ISUB, ty, 0u, a, b);
+    if (!is_signed) {
+        if (is_add) {
+            uint32_t ov = ix_2(c, LAGFX_SPV_OP_ULESS_THAN, bt, 0u, r, a);
+            return ix_3(c, LAGFX_SPV_OP_SELECT, ty, res, ov, ix_const(x, w, ~(uint64_t)0), r);
+        }
+        uint32_t un = ix_2(c, LAGFX_SPV_OP_ULESS_THAN, bt, 0u, a, b);
+        return ix_3(c, LAGFX_SPV_OP_SELECT, ty, res, un, ix_const(x, w, 0u), r);
+    }
+    uint32_t t1, t2;
+    if (is_add) { t1 = ix_2(c, LAGFX_SPV_OP_BITWISE_XOR, ty, 0u, a, r); t2 = ix_2(c, LAGFX_SPV_OP_BITWISE_XOR, ty, 0u, b, r); }
+    else        { t1 = ix_2(c, LAGFX_SPV_OP_BITWISE_XOR, ty, 0u, a, b); t2 = ix_2(c, LAGFX_SPV_OP_BITWISE_XOR, ty, 0u, a, r); }
+    uint32_t zero = ix_const(x, w, 0u);
+    uint32_t ov = ix_2(c, LAGFX_SPV_OP_SLESS_THAN, bt, 0u, ix_2(c, LAGFX_SPV_OP_BITWISE_AND, ty, 0u, t1, t2), zero);
+    uint32_t neg = ix_2(c, LAGFX_SPV_OP_SLESS_THAN, bt, 0u, a, zero);
+    uint64_t smin = (uint64_t)1 << (w - 1u);
+    uint32_t sat = ix_3(c, LAGFX_SPV_OP_SELECT, ty, 0u, neg, ix_const(x, w, smin), ix_const(x, w, smin - 1u));
+    return ix_3(c, LAGFX_SPV_OP_SELECT, ty, res, ov, sat, r);
+}
+
 static bool ix_shape(xlate_ctx_t *c, uint32_t air_ty, ix_t *x) {
     uint32_t nt = 0;
     const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
@@ -4138,12 +4185,15 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
     p = dot + 1;
     char sign = 0;
     if ((p[0] == 's' || p[0] == 'u') && p[1] == '.') { sign = p[0]; p += 2; }
-    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS } k = K_NONE;
+    enum { K_NONE, K_CLZ, K_CTZ, K_POPCOUNT, K_REVERSE_BITS, K_MUL_HI, K_ADD_SAT, K_SUB_SAT } k = K_NONE;
     uint32_t nargs = 0;
     if (!sign && !strcmp(op, "clz")) { k = K_CLZ; nargs = 1u; }
     else if (!sign && !strcmp(op, "ctz")) { k = K_CTZ; nargs = 1u; }
     else if (!sign && !strcmp(op, "popcount")) { k = K_POPCOUNT; nargs = 1u; }
     else if (!sign && !strcmp(op, "reverse_bits")) { k = K_REVERSE_BITS; nargs = 1u; }
+    else if (sign && !strcmp(op, "mul_hi")) { k = K_MUL_HI; nargs = 2u; }
+    else if (sign && !strcmp(op, "add_sat")) { k = K_ADD_SAT; nargs = 2u; }
+    else if (sign && !strcmp(op, "sub_sat")) { k = K_SUB_SAT; nargs = 2u; }
     if (k == K_NONE) return false;
     ix_t x;
     if (!ix_shape(c, result_ty_air, &x)) return false;
@@ -4161,6 +4211,9 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
         ix_count_zeros(&x, false, arg[0], res); break;
     case K_POPCOUNT:     ix_1(c, LAGFX_SPV_OP_BIT_COUNT, x.ty, res, arg[0]); break;
     case K_REVERSE_BITS: ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, x.ty, res, arg[0]); break;
+    case K_MUL_HI:       ix_mul_hi(&x, sign == 's', arg[0], arg[1], res); break;
+    case K_ADD_SAT:      ix_add_sub_sat(&x, sign == 's', true, arg[0], arg[1], res); break;
+    case K_SUB_SAT:      ix_add_sub_sat(&x, sign == 's', false, arg[0], arg[1], res); break;
     default: return false;
     }
     bind_value_spv(c, result_value_id, res);

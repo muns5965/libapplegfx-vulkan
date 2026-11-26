@@ -18,6 +18,8 @@ entry:
   %A5 = lshr i32 %A, 5
   %B1 = or i32 %A, %A2
   %B = or i32 %B1, %A5
+  %py = extractelement <4 x float> %0, i64 1
+  %ya = call i32 @air.convert.s.i32.f.f32(float %py)
   %sh64 = zext i32 %shc to i64
   %p64 = shl i64 1, %sh64
   %L = select i1 %is0, i64 0, i64 %p64

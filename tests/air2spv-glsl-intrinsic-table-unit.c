@@ -233,6 +233,13 @@ int main(void) {
                 check(name, 1, irows[i].glsl, irows[i].nargs, 0);
             }
     }
+    /* The other integer intrinsics (clz, ctz, popcount, reverse_bits, mul_hi, add_sat, sub_sat, extract_bits, insert_bits, abs.u) are not GLSL.std.450 rows: they are
+     * lowered by their own code (tests/air2spv-int-intrinsics-unit.c), so the table must not claim them. */
+    {
+        static const char *const own[] = { "air.clz.i32", "air.ctz.v2i32", "air.popcount.i16", "air.reverse_bits.i8", "air.mul_hi.s.i32", "air.mul_hi.u.i64", "air.add_sat.s.i8",
+            "air.add_sat.u.v2i32", "air.sub_sat.s.i16", "air.sub_sat.u.i32", "air.extract_bits.s.i32", "air.insert_bits.u.v4i32", "air.abs.u.i32" };
+        for (size_t i = 0; i < sizeof own / sizeof own[0]; i++) check(own[i], 0, 0, 0, 0);
+    }
     /* Not integer-min/max names: no sign marker (ambiguous) or float suffix after a sign marker. */
     check("air.min.i32", 0, 0, 0, 0);
     check("air.max.i32", 0, 0, 0, 0);
