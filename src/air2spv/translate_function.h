@@ -40,6 +40,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -124,6 +125,10 @@ lagfx_status_t lagfx_air2spv_translate_function_ex(
  * simd_shuffle*, simd_shuffle_and_fill_*) for LOGICAL groups of `width` lanes (a power of two, 32 for Metal) carved out of the device's wider subgroup, for the calling
  * thread's following translations. 0 = native (the device subgroup is the simdgroup; the default). See t_simd_emul in translate_function.c for the assumptions. */
 void lagfx_air2spv_set_simd_emulation(uint32_t width);
+
+/* Internal (tests): look up an AIR math-intrinsic callee name in the GLSL.std.450 dispatch table. On a hit returns true and fills the GLSL.std.450 instruction
+ * number, the operand count and whether it is a chained three-operand form (fmax3/fmin3); any out pointer may be NULL. */
+bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way);
 
 #ifdef __cplusplus
 } /* extern "C" */
