@@ -107,6 +107,67 @@ const char *lagfx_a64_fbfetch_reason_name(int reason) {
     return reason >= 0 && reason < LAGFX_A64_FBF_REASONS ? n[reason] : "?";
 }
 
+/* Structural decode of the serialized MTLVertexDescriptor. Grammar (protocol facts, from the independent notes in the reference tree and checked against the 43
+ * descriptors of the device dump): a field is `tag, 0x04, u32`; an entry is `u8 nfields` + fields; the descriptor body (after the 16-byte header) is one entry whose
+ * tag 3 is the byte offset, from the header end, of the vertex descriptor root (an entry again: tag 0 = attribute section, tag 1 = layout section, offsets from the root
+ * start). A section is `u32 n`, `u32 rel[n]` (offsets from the section start), then n entries. Attribute entry: tag 0 location, 1 format, 2 offset, 3 buffer index; layout
+ * entry: tag 0 buffer index, 1 step function, 2 step rate, 3 stride. **A property equal to its default is not serialized**: an attribute at offset 0 has no tag 2 and one on
+ * buffer 0 has no tag 3; a layout on buffer 0 has no tag 0 either. The byte-pattern scan this replaces needed all three of tags 1,2,3 back to
+ * back and so dropped every attribute at offset 0 or on buffer 0 (the Float4 position of the compositor's 48-byte vertex, and BOTH attributes of the 32-byte quad vertex,
+ * whose stride then fell back to the reflected tight 24). false = the blob does not have this shape (caller falls back to the scan). */
+static bool entry_fields(const uint8_t *b, uint32_t n, uint32_t at, uint32_t tags_max, uint32_t *val, uint8_t *have, uint32_t *end) {
+    if (at >= n) return false;
+    uint32_t nf = b[at], p = at + 1u;
+    for (uint32_t i = 0; i < tags_max; i++) val[i] = 0, have[i] = 0;
+    for (uint32_t i = 0; i < nf; i++, p += 6u) {
+        if (p + 6u > n || b[p + 1u] != 4u) return false;
+        if (b[p] < tags_max) val[b[p]] = lagfx_le32(b + p + 2u), have[b[p]] = 1;
+    }
+    if (end) *end = p;
+    return true;
+}
+static bool vdesc_section(const uint8_t *b, uint32_t n, uint64_t sec, uint32_t *cnt) {
+    if (sec + 4u > n) return false;
+    uint32_t c = lagfx_le32(b + sec);
+    if (c > 64u || sec + 4u + 4ull * c > n) return false;
+    *cnt = c;
+    return true;
+}
+static bool decode_vertex_desc(const uint8_t *b, uint32_t limit, lagfx_a64_pdesc_t *out) {
+    uint32_t val[8]; uint8_t have[8];
+    if (!entry_fields(b, limit, 16u, 8u, val, have, NULL) || !have[3]) return false;
+    uint64_t root = 16ull + val[3];
+    uint32_t rv[4]; uint8_t rh[4];
+    if (root >= limit || !entry_fields(b, limit, (uint32_t)root, 4u, rv, rh, NULL) || !rh[0]) return false;
+    uint64_t asec = root + rv[0], lsec = root + rv[1];
+    uint32_t na = 0, nl = 0;
+    if (!vdesc_section(b, limit, asec, &na) || (rh[1] && !vdesc_section(b, limit, lsec, &nl))) return false;
+    out->nattrs = 0, out->stride = 0;
+    for (uint32_t i = 0; i < na; i++) {
+        uint64_t e = asec + lagfx_le32(b + asec + 4u + 4u * i);
+        uint32_t av[4]; uint8_t ah[4];
+        if (e >= limit || !entry_fields(b, limit, (uint32_t)e, 4u, av, ah, NULL)) return false;
+        if (av[1] == 0u || av[1] > 64u) continue;   /* format 0 = invalid: the attribute reads nothing */
+        if (out->nattrs < LAGFX_A64_PDESC_MAX_ATTRS) out->attrs[out->nattrs++] = (lagfx_a64_vattr_t){ av[1], av[2], av[3] };
+    }
+    for (uint32_t a = 1; a < out->nattrs; a++) {   /* sorted by offset, like the scan (the pipeline builder matches attributes to the reflected inputs by order) */
+        lagfx_a64_vattr_t t = out->attrs[a];
+        uint32_t j = a;
+        while (j > 0u && out->attrs[j - 1u].off > t.off) { out->attrs[j] = out->attrs[j - 1u]; j--; }
+        out->attrs[j] = t;
+    }
+    if (out->nattrs) {   /* the layout of the attributes' buffer (the executor feeds one stream; the first attribute's buffer after the offset sort picks it) */
+        uint32_t bi = out->attrs[0].bufidx;
+        for (uint32_t i = 0; i < nl; i++) {
+            uint64_t e = lsec + lagfx_le32(b + lsec + 4u + 4u * i);
+            uint32_t lv[4]; uint8_t lh[4];
+            if (e >= limit || !entry_fields(b, limit, (uint32_t)e, 4u, lv, lh, NULL)) return false;
+            if (lv[0] == bi && lh[3]) { out->stride = lv[3]; break; }
+        }
+    }
+    return true;
+}
+
 bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void *ctx, uint32_t ref), void *ctx, lagfx_a64_pdesc_t *out) {
     if (!blob || !out || n < 16u) return false;
     memset(out, 0, sizeof *out);
@@ -122,6 +183,8 @@ bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void 
         for (uint32_t k = 0; k < out->nrefs; k++) if (out->refs[k] == v) { seen = true; break; }
         if (!seen) out->refs[out->nrefs++] = v;
     }
+    if (!decode_vertex_desc(blob, limit, out)) {   /* not the serialized-descriptor shape: the legacy byte scan */
+    out->nattrs = 0, out->stride = 0;
     /* vertex attributes: `01 04 <fmt> 02 04 <off> 03 04 <bufidx>` (object_resolver.c lagfx_parse_pso_vertex_attrs, same plausibility limits) */
     for (uint32_t i = 16u; i + 18u <= limit; i++) {
         if (blob[i] != 0x01u || blob[i + 1u] != 0x04u || blob[i + 6u] != 0x02u || blob[i + 7u] != 0x04u || blob[i + 12u] != 0x03u || blob[i + 13u] != 0x04u) continue;
@@ -155,6 +218,7 @@ bool lagfx_a64_pdesc_decode(const uint8_t *blob, uint32_t n, bool (*is_fn)(void 
     uint32_t best = 0, bestn = 0;
     for (uint32_t k = 0; k < nc; k++) if (hits[k] > bestn || (hits[k] == bestn && cand[k] > best)) best = cand[k], bestn = hits[k];
     out->stride = best;
+    }
     decode_color0(blob, limit, &out->color0);
     return true;
 }

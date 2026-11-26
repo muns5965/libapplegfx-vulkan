@@ -323,6 +323,24 @@ static uint32_t px(const uint8_t *img, uint32_t x, uint32_t y) { uint32_t v; mem
 #define GREEN 0xff00ff00u
 #define BLUE  0xff0000ffu
 
+#include "arm64-pipe-psos.h"
+/* The vertex descriptor of two REAL device descriptors. The serializer omits properties at their default, so an attribute at offset 0 has no offset field and one on
+ * buffer 0 has no buffer field; the old byte scan needed all three and lost exactly those (device run 20261126-230109: the 4-attribute compositor pipeline decoded 3
+ * attributes, the 32-byte quad vertex none, and its stride came out as the unrelated 16 -> every vertex after the first read from the wrong place). */
+static void test_pdesc_vertex_layout(void) {
+    lagfx_a64_pdesc_t d;
+    assert(lagfx_a64_pdesc_decode(k_pso12, sizeof k_pso12, NULL, NULL, &d));
+    assert(d.nattrs == 2 && d.attrs[0].fmt == 31 && d.attrs[0].off == 0 && d.attrs[0].bufidx == 0 && d.attrs[1].fmt == 29 && d.attrs[1].off == 16 && d.attrs[1].bufidx == 0);
+    assert(d.stride == 32);
+    assert(lagfx_a64_pdesc_decode(k_pso19, sizeof k_pso19, NULL, NULL, &d));
+    assert(d.nattrs == 4 && d.attrs[0].fmt == 31 && d.attrs[0].off == 0 && d.attrs[0].bufidx == 1);
+    assert(d.attrs[1].fmt == 29 && d.attrs[1].off == 16 && d.attrs[2].fmt == 29 && d.attrs[2].off == 24 && d.attrs[3].fmt == 27 && d.attrs[3].off == 32 && d.attrs[3].bufidx == 1);
+    assert(d.stride == 48);
+    /* truncated blobs must not read out of bounds and must not invent attributes */
+    for (uint32_t n = 16; n < sizeof k_pso19; n += 7) { lagfx_a64_pdesc_t e; (void)lagfx_a64_pdesc_decode(k_pso19, n, NULL, NULL, &e); assert(e.nattrs <= 4); }
+    puts("PASS: vertex descriptor of real device PSOs (omitted default offset / buffer index, layout stride)");
+}
+
 static void test_pdesc(void) {
     uint8_t b[160]; memset(b, 0, sizeof b);
     uint32_t o = 16;
@@ -1178,7 +1196,7 @@ int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
     assert(g_dev);
-    test_pdesc(); test_pdesc_blend();
+    test_pdesc(); test_pdesc_vertex_layout(); test_pdesc_blend();
     g_have_fix = load_fixtures();
     if (!g_have_fix) { puts("SKIP: fixtures (triangle.metallib, guest_viewporttondc_vert, login_texturecopy_frag) missing"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_dump();
