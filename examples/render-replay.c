@@ -43,8 +43,8 @@
 extern uint64_t lagfx_vk_validation_msg_count;
 
 /* ---------------------------------------------------------------- guest memory + device ---- */
-#define RR_MEM_SIZE (24u << 20)
-#define RR_NVPN     1000u
+#define RR_NVPN     4000u          /* one 16 KiB leaf page maps at most 4096 pages */
+#define RR_MEM_SIZE ((32u + RR_NVPN) << 14)
 #define SHARED_PFN 1u
 #define TABLE_PFN  2u
 #define RING_PFN0  4u
@@ -115,7 +115,7 @@ typedef struct {
     uint32_t w, h, ntarget;
     uint32_t target_ref[2]; uint16_t load[2]; double clear[2][4];   /* load: 0 dont care, 1 load, 2 clear (MTLLoadAction) */
     rr_obj_t obj[160]; uint32_t nobj;
-    rr_draw_t draw[8]; uint32_t ndraw;
+    rr_draw_t draw[48]; uint32_t ndraw;
     int vb_override;                    /* >= 0: patch the resolved pipeline's vertex stream to this Metal buffer slot (the descriptor decoder leaves it at 0 when the
                                          * attribute records carry only non-default tokens; see the report: tool-side workaround, the library is NOT changed by it) */
     int allow_val;                      /* 1: validation messages are reported but do not fail the scene (fbfetch: the installed layer 1.3.275 predates VK_KHR_dynamic_rendering_local_read) */
@@ -334,7 +334,7 @@ static bool wrap_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t
     (void)c;
     if (!lagfx_a64_pipeline_resolve(NULL, p, t, ref, e, out)) return false;
     if (getenv("RR_VERBOSE")) {
-        fprintf(stderr, "rr: resolved pso %u: vtx inputs %u:", ref, out->desc.n_vtx_inputs);
+        fprintf(stderr, "rr: resolved pso %u (vs %s/%016llx fs %s/%016llx): vtx inputs %u:", ref, out->vs_name, (unsigned long long)out->vs_hash, out->fs_name, (unsigned long long)out->fs_hash, out->desc.n_vtx_inputs);
         for (uint32_t i = 0; i < out->desc.n_vtx_inputs; i++) fprintf(stderr, " loc%u/c%u", out->desc.vtx_in_loc[i], out->desc.vtx_in_comp[i]);
         fprintf(stderr, " pso_attrs %u stride %u vb_index %u n_bind %u\n", out->desc.n_pso_attrs, out->desc.vtx_stride, out->vertex_buffer_index, out->n_bind);
         for (uint32_t i = 0; i < out->n_bind; i++) fprintf(stderr, "rr:   bind %u kind %u stage %u metal %d\n", out->bind[i].binding, out->bind[i].kind, out->bind[i].stage, out->bind[i].metal_index);
@@ -413,6 +413,7 @@ static void rr_run(const rr_scene_t *s, rr_result_t *res) {
             { "desc_unbound", P->desc_unbound }, { "desc_failed", P->desc_failed }, { "no_pipeline", R->no_pipeline }, { "no_vertex_buf", R->no_vertex_buf } };
         size_t o2 = strlen(res->why);
         for (size_t i = 0; i < sizeof rf / sizeof rf[0]; i++) if (rf[i].v && o2 < sizeof res->why - 24) o2 += (size_t)snprintf(res->why + o2, sizeof res->why - o2, "%s=%llu ", rf[i].n, (unsigned long long)rf[i].v);
+        for (unsigned c = 0; c < 6; c++) if (P->desc_unbound_why[c] && o2 < sizeof res->why - 24) o2 += (size_t)snprintf(res->why + o2, sizeof res->why - o2, "unbound_%s=%llu ", c == 0 ? "buf" : c == 1 ? "input" : c == 2 ? "simg" : c == 3 ? "tex" : c == 4 ? "texview" : "samp", (unsigned long long)P->desc_unbound_why[c]);
         for (unsigned c = 0; c < LAGFX_A64_TEXWHY_COUNT; c++)   /* desc_unbound's texture part by reason (the same names as the device's g7-gpu-pipe texwhy[...]) */
             if (P->desc_tex_why[c] && o2 < sizeof res->why - 40) o2 += (size_t)snprintf(res->why + o2, sizeof res->why - o2, "texwhy_%s=%llu ", lagfx_a64_texwhy_name(c), (unsigned long long)P->desc_tex_why[c]);
     }
@@ -428,7 +429,7 @@ static void rr_run(const rr_scene_t *s, rr_result_t *res) {
 /* ---------------------------------------------------------------- dump loader ---- */
 typedef struct { uint32_t task, ref, type, tag; char file[96]; } dobj_t;
 typedef struct { uint32_t task, ref; char file[96]; } dfn_t;
-typedef struct { char dir[512]; dobj_t obj[1024]; uint32_t nobj; dfn_t fn[1024]; uint32_t nfn; uint32_t pso[512][2]; uint32_t npso; } dump_t;
+typedef struct { char dir[512]; dobj_t obj[1024]; uint32_t nobj; dfn_t fn[1024]; uint32_t nfn; uint32_t pso[512][2]; uint32_t npso; struct { uint32_t task, ref, n, fr[8]; } pf[512]; uint32_t npf; } dump_t;   /* pf: the `pso ... function_refs=[..]` lines (the refs the device resolved at the time) */
 static uint8_t *slurp(const char *path, uint32_t *n) {
     FILE *f = fopen(path, "rb"); if (!f) return NULL;
     fseek(f, 0, SEEK_END); long l = ftell(f); fseek(f, 0, SEEK_SET);
@@ -441,6 +442,11 @@ static bool dump_load(dump_t *d, const char *dir) {
     FILE *f = fopen(path, "r"); if (!f) return false;
     static char line[16384];
     while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "pso ", 4) && d->npf < 512) {   /* replay-analysis: function refs as the device saw them (the blob scan alone also matches later-defined functions of a reused ref) */
+            const char *t = strstr(line, "task="), *r = strstr(line, " ref="), *f = strstr(line, "function_refs=[");
+            if (t && r && f) { d->pf[d->npf].task = (uint32_t)atoi(t + 5); d->pf[d->npf].ref = (uint32_t)atoi(r + 5); f += 15; uint32_t n = 0; while (*f && *f != ']' && n < 8) { d->pf[d->npf].fr[n++] = (uint32_t)strtoul(f, (char **)&f, 10); if (*f == ',') f++; } d->pf[d->npf].n = n; d->npf++; }
+            continue;
+        }
         unsigned task = 0, ref = 0, type = 0; char file[96] = "", tagbuf[16] = "";
         const char *r = strstr(line, " ref="), *fl = strstr(line, " file=");
         if (!r || !fl || sscanf(strstr(line, "task="), "task=%u", &task) != 1) continue;
@@ -469,11 +475,14 @@ static bool scene_add_pso(rr_scene_t *s, const dump_t *d, uint32_t task, uint32_
     lagfx_a64_pdesc_t pd;
     if (!lagfx_a64_pdesc_decode(blob, n, NULL, NULL, &pd)) { free(blob); return false; }
     scene_add(s, (rr_obj_t){ .ref = ref, .kind = RR_PSO, .data = blob, .len = n });
-    for (uint32_t i = 0; i < pd.nrefs; i++) {
-        uint32_t fr = pd.refs[i], src = fr == swap_ref ? swap_with : fr;
+    uint32_t nfr = pd.nrefs; const uint32_t *frs = pd.refs;
+    for (uint32_t i = 0; i < d->npf; i++) if (d->pf[i].task == task && d->pf[i].ref == ref && d->pf[i].n) { nfr = d->pf[i].n; frs = d->pf[i].fr; break; }
+    for (uint32_t i = 0; i < nfr; i++) {
+        uint32_t fr = frs[i], src = fr == swap_ref ? swap_with : fr;
         const dfn_t *fn = dump_fn(d, task, src); if (!fn) continue;
         snprintf(path, sizeof path, "%s/%s", d->dir, fn->file);
         uint32_t ln = 0; uint8_t *lib = slurp(path, &ln); if (!lib) continue;
+        if (getenv("RR_VERBOSE")) fprintf(stderr, "rr: pso %u fn ref %u <- %s\n", ref, fr, fn->file);
         bool dup = false; for (uint32_t k = 0; k < s->nobj; k++) dup |= s->obj[k].ref == fr;
         if (!dup) scene_add(s, (rr_obj_t){ .ref = fr, .kind = RR_FN, .data = lib, .len = ln });
     }
@@ -748,6 +757,11 @@ static uint32_t cap_mtl(uint32_t mtl, uint32_t vk) { if (mtl == 70 || mtl == 80 
 static uint32_t vk_addr_to_mtl(uint32_t a) { return a == 0 ? 2u : a == 1 ? 3u : a == 2 ? 0u : a == 3 ? 5u : 0u; }
 static bool find_obj(const rr_scene_t *s, uint32_t ref) { for (uint32_t i = 0; i < s->nobj; i++) if (s->obj[i].ref == ref) return true; return false; }
 
+/* replay-analysis: chained state. The device capture stores only the first 8 MiB of each image (546 rows of a 1920x1080 RGBA16F target) and has no pre/post blob for most
+ * later passes, so a pass starts from [the previous replay result of that target ref] overlaid with the captured pre rows when there are any. */
+static uint8_t *g_state[RR_MAX_REF]; static uint32_t g_state_len[RR_MAX_REF];
+static uint8_t *state_get(uint32_t ref, size_t len) { if (ref < RR_MAX_REF && g_state[ref] && g_state_len[ref] == len) { uint8_t *p = malloc(len); memcpy(p, g_state[ref], len); return p; } return calloc(1, len); }
+static void state_put(uint32_t ref, const uint8_t *px, size_t len) { if (ref >= RR_MAX_REF) return; free(g_state[ref]); g_state[ref] = malloc(len); memcpy(g_state[ref], px, len); g_state_len[ref] = (uint32_t)len; }
 static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_cap_pass_t *ps, const char *outdir, uint32_t *ncmp, uint32_t *nbad) {
     static rr_scene_t s; memset(&s, 0, sizeof s);
     char nm[48]; snprintf(nm, sizeof nm, "cap_pass%u", ps->id); s.name = strdup(nm); s.w = ps->w; s.h = ps->h; s.vb_override = -1;
@@ -761,10 +775,13 @@ static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_ca
         if (!a) { printf("SKIP %s: attachment slot %u missing\n", nm, k); return 77; }
         uint32_t fmt = cap_mtl(a->mtlfmt, a->vkfmt);
         if (!fmt || a->ref >= RR_MAX_REF || a->w != ps->w || a->h != ps->h) { printf("SKIP %s: attachment format vk %u / mtl %u / ref %u not replayable\n", nm, a->vkfmt, a->mtlfmt, a->ref); return 77; }
-        size_t len = 0; uint8_t *pre = a->pre ? lagfx_cap_read_blob(c, c->imgs ? lagfx_cap_find_img(c, a->pre) ? lagfx_cap_find_img(c, a->pre)->blob : 0 : 0, &len) : NULL;
-        if (pre && len != (size_t)a->w * a->h * a->bpp) { free(pre); pre = NULL; }
+        size_t len = (size_t)a->w * a->h * a->bpp, plen = 0;
+        const lagfx_cap_img_t *pim = a->pre ? lagfx_cap_find_img(c, a->pre) : NULL;
+        uint8_t *pb = pim && pim->blob ? lagfx_cap_read_blob(c, pim->blob, &plen) : NULL;
+        uint8_t *pre = a->load == 1 ? state_get(a->ref, len) : calloc(1, len);   /* Load: chained state; Clear / DontCare start from zero (a Clear is applied by the pass itself) */
+        if (pb) { memcpy(pre, pb, plen < len ? plen : len); }
+        free(pb);
         s.target_ref[k] = a->ref; s.load[k] = (uint16_t)a->load;
-        if (a->load == 1 && !pre) { printf("SKIP %s: Load action but the pre image was not captured\n", nm); return 77; }
         for (int q = 0; q < 4; q++) s.clear[k][q] = a->clear[q];
         scene_add(&s, (rr_obj_t){ .ref = a->ref, .kind = RR_TEX, .data = pre, .len = (uint32_t)len, .w = a->w, .h = a->h, .pixfmt = fmt });
     }
@@ -772,7 +789,7 @@ static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_ca
     for (size_t di = 0; di < c->ndraws; di++) {
         const lagfx_cap_draw_t *cd = &c->draws[di];
         if (cd->pass != ps->id || cd->skip[0]) continue;
-        if (ndr >= 8) { printf("SKIP %s: more than 8 draws in the pass\n", nm); return 77; }
+        if (ndr >= 48) { printf("SKIP %s: more than 48 draws in the pass\n", nm); return 77; }
         if (cd->instances != 1 || cd->base_vertex || cd->base_instance || cd->prim != 3 || cd->first_vertex > 0xffff || cd->count > 0xffff || cd->depth_test || cd->stencil_test) { printf("SKIP %s: draw %u needs instancing / base vertex / depth / non-triangle-list (not emitted by this replay)\n", nm, cd->n); return 77; }
         if (cd->pipe_ref >= RR_MAX_REF || !find_pso_sources(d, cd->task, cd->pipe_ref)) { printf("SKIP %s: pso ref %u not in the capture's dump files\n", nm, cd->pipe_ref); return 77; }
         if (!find_obj(&s, cd->pipe_ref) && !scene_add_pso(&s, d, cd->task, cd->pipe_ref, 0, 0)) { printf("SKIP %s: pso files missing\n", nm); return 77; }
@@ -801,12 +818,25 @@ static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_ca
                 const lagfx_cap_img_t *im = lagfx_cap_find_img(c, bd->img); if (!im || im->ref >= RR_MAX_REF) { printf("SKIP %s: texture snapshot missing\n", nm); return 77; }
                 if (dr->nft < RR_MAXSLOT) dr->ft[dr->nft++] = (rr_slot_t){ bd->idx, im->ref, 0 };
             } else if (!strcmp(bd->kind, "sampler")) {
+                if (!bd->samp) { fprintf(stderr, "note %s: draw %u sampler binding %u idx %d has no sampler (left unbound)\n", nm, cd->n, bd->binding, (int)bd->idx); continue; }   /* replay-analysis: captured idx -1 / samp 0 = no sampler bound */
                 const lagfx_cap_samp_t *sp = lagfx_cap_find_samp(c, bd->samp); if (!sp || sp->ref >= RR_MAX_REF) { printf("SKIP %s: sampler missing\n", nm); return 77; }
                 if (dr->nfs < RR_MAXSLOT) dr->fs[dr->nfs++] = (rr_slot_t){ bd->idx, sp->ref, 0 };
             }
         }
     }
     if (!ndr) { printf("SKIP %s: no executed draw\n", nm); return 77; }
+    /* replay-analysis: buffers a draw of this pass uses whose snapshot was taken in an EARLIER pass (the capture dedups by generation) */
+    for (size_t di = 0; di < c->ndraws; di++) {
+        const lagfx_cap_draw_t *cd = &c->draws[di]; if (cd->pass != ps->id || cd->skip[0]) continue;
+        uint32_t ids[40], ni = 0; ids[ni++] = cd->vtx_buf; ids[ni++] = cd->index_buf;
+        for (uint32_t b = 0; b < cd->nbind && ni < 40; b++) { const lagfx_cap_bind_t *bd = &c->binds[cd->first_bind + b]; if (!strcmp(bd->kind, "buffer")) ids[ni++] = bd->buf; }
+        for (uint32_t q = 0; q < ni; q++) {
+            const lagfx_cap_buf_t *b = ids[q] ? lagfx_cap_find_buf(c, ids[q]) : NULL; if (!b || find_obj(&s, b->ref) || b->ref >= RR_MAX_REF || b->length > (8u << 20)) continue;
+            size_t n = 0; uint8_t *blob = b->blob ? lagfx_cap_read_blob(c, b->blob, &n) : NULL; uint8_t *full = calloc(1, b->length ? b->length : 16);
+            if (blob) memcpy(full + b->off, blob, n > b->length - b->off ? b->length - b->off : n);
+            free(blob); scene_add(&s, (rr_obj_t){ .ref = b->ref, .kind = RR_BUF, .data = full, .len = (uint32_t)b->length });
+        }
+    }
     /* objects: every buffer / image / sampler snapshot of this pass under its ORIGINAL ref */
     for (size_t i = 0; i < c->nbufs; i++) {
         const lagfx_cap_buf_t *b = &c->bufs[i]; if (b->pass != ps->id || find_obj(&s, b->ref)) continue;
@@ -818,7 +848,8 @@ static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_ca
     for (size_t i = 0; i < c->nimgs; i++) {
         const lagfx_cap_img_t *im = &c->imgs[i]; if (im->pass != ps->id || strcmp(im->use, "tex") || find_obj(&s, im->ref)) continue;
         uint32_t fmt = cap_mtl(im->mtlfmt, im->vkfmt); if (!fmt || im->mips > 1 || im->layers > 1 || im->d > 1) { printf("SKIP %s: texture %u (fmt %u, %u mips, %u layers) not replayable by this replay\n", nm, im->ref, im->vkfmt, im->mips, im->layers); return 77; }
-        size_t n = 0; uint8_t *blob = lagfx_cap_read_blob(c, im->blob, &n); size_t tl = (size_t)im->w * im->h * im->bpp; uint8_t *px = calloc(1, tl);
+        size_t n = 0; uint8_t *blob = im->blob ? lagfx_cap_read_blob(c, im->blob, &n) : NULL; size_t tl = (size_t)im->w * im->h * im->bpp; uint8_t *px = state_get(im->ref, tl);   /* replay-analysis: no blob -> the chained replay state of that ref (else zeros) */
+        if (!blob) fprintf(stderr, "note %s: texture ref %u has no captured data (%s)\n", nm, im->ref, g_state[im->ref < RR_MAX_REF ? im->ref : 0] ? "using chained replay state" : "zeros");
         if (blob) {
             if (!im->mirror) memcpy(px, blob, n < tl ? n : tl);
             else for (uint32_t y = 0; y < im->h; y++) { uint64_t o = im->tex_base + im->mip[0].off + (uint64_t)y * im->mip[0].row; if (o + (uint64_t)im->w * im->bpp <= n) memcpy(px + (size_t)y * im->w * im->bpp, blob + o, (size_t)im->w * im->bpp); }
@@ -834,26 +865,34 @@ static int cap_replay_pass(const lagfx_cap_t *c, const dump_t *d, const lagfx_ca
         scene_add(&s, (rr_obj_t){ .ref = sp->ref, .kind = RR_SAMP, .samp_state = st });
     }
     for (uint32_t k = 0; k < s.ndraw; k++) if (s.draw[k].index_ref && !find_obj(&s, s.draw[k].index_ref)) { printf("SKIP %s: index buffer snapshot missing\n", nm); return 77; }
+    if (getenv("RR_VERBOSE")) { fprintf(stderr, "rr: %s objects:", nm); for (uint32_t i = 0; i < s.nobj; i++) fprintf(stderr, " %s%u", s.obj[i].kind == RR_BUF ? "buf" : s.obj[i].kind == RR_TEX ? "tex" : s.obj[i].kind == RR_SAMP ? "samp" : s.obj[i].kind == RR_FN ? "fn" : "pso", s.obj[i].ref); fputc(10, stderr); }
     rr_result_t r; rr_run(&s, &r);
     if (!r.ran || r.draws != s.ndraw || r.skipped || r.submit_failed || !r.px[0]) { printf("FAIL %s: draws %llu/%u skipped %llu submit_failed %llu [%s]\n", nm, (unsigned long long)r.draws, s.ndraw, (unsigned long long)r.skipped, (unsigned long long)r.submit_failed, r.why); rr_obj_free_result(&r); return 1; }
-    int rc = 0; char msg[256] = ""; size_t mo = 0;
+    int rc = 0; char msg[640] = ""; size_t mo = 0;
     for (uint32_t k = 0; k < s.ntarget; k++) {
         const lagfx_cap_att_t *a = att[k]; const lagfx_cap_img_t *post = lagfx_cap_find_img(c, a->post);
-        size_t n = 0; uint8_t *want = post ? lagfx_cap_read_blob(c, post->blob, &n) : NULL; size_t tl = (size_t)a->w * a->h * a->bpp;
-        if (!want || n != tl) { mo += (size_t)snprintf(msg + mo, sizeof msg - mo, " slot%u: post image missing/truncated", k); free(want); rc = rc ? rc : 77; continue; }
-        uint32_t bad = 0, cmp = a->w * a->h; double worst = 0; uint32_t fx = 0, fy = 0;
-        for (uint32_t y = 0; y < a->h; y++) for (uint32_t x = 0; x < a->w; x++) {
+        size_t n = 0; uint8_t *want = post && post->blob ? lagfx_cap_read_blob(c, post->blob, &n) : NULL; size_t tl = (size_t)a->w * a->h * a->bpp;
+        state_put(a->ref, r.px[k], tl);
+        if (outdir) { char path[700]; snprintf(path, sizeof path, "%s/%s_slot%u_replay.png", outdir, nm, k); save_png(path, r.px[k], a->w, a->h, a->bpp == 8 ? 115 : 80); }
+        if (!want) { mo += (size_t)snprintf(msg + mo, sizeof msg - mo, " slot%u: no captured post image (replay PNG only)", k); rc = rc ? rc : 77; continue; }
+        /* replay-analysis: the captured post image is truncated to its first rows (8 MiB); compare those rows only */
+        uint32_t rows = (uint32_t)(n / ((size_t)a->w * a->bpp)); if (rows > a->h) rows = a->h;
+        uint32_t bad = 0, cmp = a->w * rows; double worst = 0; uint32_t fx = 0, fy = 0;
+        uint8_t *diff = outdir ? calloc((size_t)a->w * rows, 4) : NULL;
+        for (uint32_t y = 0; y < rows; y++) for (uint32_t x = 0; x < a->w; x++) {
             const uint8_t *g = r.px[k] + ((size_t)y * a->w + x) * a->bpp, *e = want + ((size_t)y * a->w + x) * a->bpp;
-            if (memcmp(g, e, a->bpp)) { double w = 0; for (uint32_t ch = 0; ch < 4; ch++) { double dd = fabs((double)rd_chan(g, a->bpp == 8 ? 115 : 70, ch) - rd_chan(e, a->bpp == 8 ? 115 : 70, ch)); if (dd > w) w = dd; } if (!bad) fx = x, fy = y; bad++; if (w > worst) worst = w; }
+            if (memcmp(g, e, a->bpp)) { double w = 0; for (uint32_t ch = 0; ch < 4; ch++) { double dd = fabs((double)rd_chan(g, a->bpp == 8 ? 115 : 70, ch) - rd_chan(e, a->bpp == 8 ? 115 : 70, ch)); if (dd > w) w = dd; } if (!bad) fx = x, fy = y; bad++; if (w > worst) worst = w; if (diff) { diff[((size_t)y * a->w + x) * 4] = 255; diff[((size_t)y * a->w + x) * 4 + 3] = 255; } }
         }
         *ncmp += cmp; *nbad += bad;
-        mo += (size_t)snprintf(msg + mo, sizeof msg - mo, " slot%u: %u/%u pixels differ (worst %.4g, first %u,%u)", k, bad, cmp, worst, fx, fy);
+        mo += (size_t)snprintf(msg + mo, sizeof msg - mo, " slot%u: %u/%u pixels differ in the captured %u rows (worst %.4g, first %u,%u)", k, bad, cmp, rows, worst, fx, fy);
         if (bad) rc = 1;
-        if (outdir) { char path[700]; snprintf(path, sizeof path, "%s/%s_slot%u_replay.png", outdir, nm, k); save_png(path, r.px[k], a->w, a->h, a->bpp == 8 ? 115 : 80); snprintf(path, sizeof path, "%s/%s_slot%u_captured.png", outdir, nm, k); save_png(path, want, a->w, a->h, a->bpp == 8 ? 115 : 80); }
+        if (outdir) { char path[700]; snprintf(path, sizeof path, "%s/%s_slot%u_captured.png", outdir, nm, k); save_png(path, want, a->w, rows, a->bpp == 8 ? 115 : 80); if (bad) { snprintf(path, sizeof path, "%s/%s_slot%u_diff.png", outdir, nm, k); save_png(path, diff, a->w, rows, 70); } }
+        free(diff);
         free(want);
     }
     printf("%s %s: %u draws, validation msgs %llu;%s\n", rc == 0 ? "PASS" : rc == 77 ? "SKIP" : "FAIL", nm, s.ndraw, (unsigned long long)r.val_msgs, msg);
     rr_obj_free_result(&r);
+    for (uint32_t i = 0; i < s.nobj; i++) if (s.obj[i].kind == RR_BUF || s.obj[i].kind == RR_TEX) free((void *)s.obj[i].data);
     return rc;
 }
 static int run_capture(const char *dir, const char *outdir) {
@@ -861,7 +900,8 @@ static int run_capture(const char *dir, const char *outdir) {
     if (!c) { printf("capture: cannot load %s: %s\n", dir, err ? err : "?"); return 2; }
     static dump_t d; if (!dump_load(&d, dir)) { printf("capture: no index.txt in %s\n", dir); lagfx_cap_free(c); return 2; }
     uint32_t ncmp = 0, nbad = 0; int fail = 0, skip = 0, pass = 0;
-    for (size_t i = 0; i < c->npasses; i++) { int rc = cap_replay_pass(c, &d, &c->passes[i], outdir, &ncmp, &nbad); if (rc == 0) pass++; else if (rc == 77) skip++; else fail++; }
+    const char *only = getenv("RR_PASS"); unsigned plo = only ? (unsigned)atoi(only) : 0, phi = only ? (only[strcspn(only, "-")] ? (unsigned)atoi(only + strcspn(only, "-") + 1) : plo) : 0xffffffffu;   /* RR_PASS=N or N-M: replay only these passes (state of skipped passes is NOT chained) */
+    for (size_t i = 0; i < c->npasses; i++) { if (only && (c->passes[i].id < plo || c->passes[i].id > phi)) continue; int rc = cap_replay_pass(c, &d, &c->passes[i], outdir, &ncmp, &nbad); if (rc == 0) pass++; else if (rc == 77) skip++; else fail++; }
     printf("capture %s: %zu passes: %d pass, %d fail, %d skipped; %u pixels compared byte for byte, %u differ\n", dir, c->npasses, pass, fail, skip, ncmp, nbad);
     lagfx_cap_free(c);
     return fail ? 1 : 0;
