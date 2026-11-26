@@ -27,10 +27,6 @@ static const lagfx_stage_keys_t *find_vsk(const char *h) {
 }
 /* pairs file: "<vs lib hash> <fs lib hash>" per line */
 static char g_pairs[512][2][24]; static int g_npairs;
-static const char *pair_vs_of(const char *fs) {
-    for (int i = 0; i < g_npairs; i++) if (!strcmp(g_pairs[i][1], fs)) return g_pairs[i][0];
-    return NULL;
-}
 
 int main(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s <dump dir> <out dir> [pairs file]\n", argv[0]); return 2; }
@@ -68,16 +64,27 @@ int main(int argc, char **argv) {
                 }
                 lagfx_air_module_free(m); continue;
             }
-            const lagfx_stage_keys_t *vk = NULL;
-            if (fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT) { const char *pv = pair_vs_of(libh); if (pv) vk = find_vsk(pv); }
-            lagfx_status_t s = lagfx_air2spv_translate_module_ex(m, vk, &spv, &sz);
+            /* a fragment function is translated once per vertex function it is paired with (the Location assignment depends on the VS outputs):
+             * "<fs>_<name>_fs__vs<vs hash>.spv"; an FS with no recorded pair, or a VS, is translated once without a suffix */
+            int nvs = 0; const char *vsl[64];
+            if (fn[k].stage == LAGFX_METALLIB_STAGE_FRAGMENT) for (int pi = 0; pi < g_npairs && nvs < 64; pi++) if (!strcmp(g_pairs[pi][1], libh)) { int dup = 0; for (int q = 0; q < nvs; q++) dup |= !strcmp(vsl[q], g_pairs[pi][0]); if (!dup) vsl[nvs++] = g_pairs[pi][0]; }
+            int variants = nvs ? nvs : 1;
+            for (int vi = 0; vi < variants; vi++) {
+                const lagfx_stage_keys_t *vk = NULL;
+                if (nvs) vk = find_vsk(vsl[vi]);
+                if (nvs && !vk) { fprintf(stderr, "%s %s: translate failed (paired vertex shader %s not in the dump)\n", e->d_name, fn[k].name, vsl[vi]); bad++; continue; }
+                lagfx_status_t s = lagfx_air2spv_translate_module_ex(m, vk, &spv, &sz);
+                if (s != LAGFX_OK || !spv) { fprintf(stderr, "%s %s: translate failed\n", e->d_name, fn[k].name); bad++; continue; }
+                char out[1400]; snprintf(out, sizeof out, "%s/%.*s_%s_%s", argv[2], (int)(strlen(e->d_name) - 8), e->d_name + 4, fn[k].name, st);
+                for (char *c = out + strlen(argv[2]) + 1; *c; c++) if (*c == '.') *c = '_';
+                size_t ol = strlen(out);
+                if (nvs) snprintf(out + ol, sizeof out - ol, "__vs%.8s.spv", vsl[vi]); else snprintf(out + ol, sizeof out - ol, ".spv");
+                FILE *o = fopen(out, "wb"); if (o) { fwrite(spv, 1, sz, o); fclose(o); ok++; } else { fprintf(stderr, "%s: cannot write\n", out); bad++; }
+                if (getenv("DUMP_CAPS")) printf("caps %s %s: 0x%x\n", libh, fn[k].name, lagfx_spv_required_caps(spv, sz));
+                free(spv); spv = NULL;
+            }
             lagfx_air_module_free(m);
-            if (s != LAGFX_OK || !spv) { fprintf(stderr, "%s %s: translate failed\n", e->d_name, fn[k].name); bad++; continue; }
-            char out[1400]; snprintf(out, sizeof out, "%s/%.*s_%s_%s.spv", argv[2], (int)(strlen(e->d_name) - 8), e->d_name + 4, fn[k].name, st);
-            for (char *c = out + strlen(argv[2]) + 1; *c; c++) if (*c == '.' && c[1] != 's') *c = '_';
-            FILE *o = fopen(out, "wb"); if (o) { fwrite(spv, 1, sz, o); fclose(o); ok++; }
-            if (getenv("DUMP_CAPS")) printf("caps %s %s: 0x%x\n", libh, fn[k].name, lagfx_spv_required_caps(spv, sz));
-            free(spv);
+            continue;
         }
         free(lib);
     }

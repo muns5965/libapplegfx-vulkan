@@ -43,7 +43,7 @@ for vs,fs in pairs:
     k=(vs[0],fs[0])
     if k in seen: continue
     seen.add(k)
-    vp=glob.glob(f'{rt}/{vs[0]}_*_vs.spv'); fp=glob.glob(f'{rt}/{fs[0]}_*_fs.spv')
+    vp=glob.glob(f'{rt}/{vs[0]}_*_vs.spv'); fp=glob.glob(f'{rt}/{fs[0]}_*_fs__vs{vs[0][:8]}.spv') or glob.glob(f'{rt}/{fs[0]}_*_fs.spv')   # pair-specific translation first
     if not vp or not fp:
         print('MISSING translated shader for pair',k); hard.append((k,['missing spv'])); continue
     v=iface(vp[0]); f=iface(fp[0]); n+=1
