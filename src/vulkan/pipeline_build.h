@@ -3,6 +3,8 @@
 #define LIBAPPLEGFX_VULKAN_PIPELINE_BUILD_H
 
 #include "libapplegfx-vulkan.h"
+#include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -55,6 +57,11 @@ typedef struct {
     uint8_t          n_pso_attrs;
     /* Primitive topology as VkPrimitiveTopology + 1; 0 = default (TRIANGLE_LIST), so every existing caller is unchanged. */
     uint8_t          topology_plus1;
+    /* OPTIONAL diagnostics (zero = unknown): the SPIR-V the two modules were made from and the enabled device-capability mask. Only read when vkCreateGraphicsPipelines
+     * fails (failure log line, per-module vkCreateShaderModule check); never changes what is built. The caller keeps the words alive across the call. */
+    const uint32_t  *vertex_spv;   size_t vertex_spv_bytes;
+    const uint32_t  *fragment_spv; size_t fragment_spv_bytes;
+    uint32_t         caps_enabled;
     /* Future fields (Stage 70b+):
      *   cull_mode, front_face, blend factor, depth-stencil state... */
 } lagfx_pipeline_desc_t;

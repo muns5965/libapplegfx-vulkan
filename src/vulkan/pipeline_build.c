@@ -3,7 +3,91 @@
 #include "common/log.h"
 #include "common/policy.h"
 
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
 #ifdef LAGFX_HAVE_VULKAN
+
+static const char *vr_name(VkResult r) {
+    switch (r) {
+    case VK_SUCCESS: return "VK_SUCCESS";
+    case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+    case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+    case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+    case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+    case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+    case VK_ERROR_FORMAT_NOT_SUPPORTED: return "VK_ERROR_FORMAT_NOT_SUPPORTED";
+    case VK_ERROR_TOO_MANY_OBJECTS: return "VK_ERROR_TOO_MANY_OBJECTS";
+    case VK_ERROR_INVALID_SHADER_NV: return "VK_ERROR_INVALID_SHADER_NV";
+    case VK_ERROR_UNKNOWN: return "VK_ERROR_UNKNOWN";
+    case VK_PIPELINE_COMPILE_REQUIRED: return "VK_PIPELINE_COMPILE_REQUIRED";
+    default: return "VK_ERROR_(other)";
+    }
+}
+
+static uint64_t fnv64(const void *data, size_t n) {
+    const uint8_t *b = data;
+    uint64_t h = 1469598103934665603ull;
+    for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull;
+    return h;
+}
+
+/* One diagnostic line per DISTINCT failure key (bounded to 8 keys per process; a repeat of a key is silent, the 9th distinct key says once that the rest is
+ * suppressed). Called only after vkCreateGraphicsPipelines failed; creates the two shader modules separately (and destroys them again) to tell which one the driver
+ * rejects. Builds nothing that is used afterwards. */
+#define FAIL_KEYS_MAX 8u
+static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc, const VkPipelineVertexInputStateCreateInfo *vin, VkPrimitiveTopology topo, VkFormat color_fmt, VkResult vr) {
+    static struct { uint64_t key; uint64_t count; } seen[FAIL_KEYS_MAX];
+    static uint32_t nseen;
+    static uint64_t suppressed;
+    uint64_t vh = desc->vertex_spv ? fnv64(desc->vertex_spv, desc->vertex_spv_bytes) : 0, fh = desc->fragment_spv ? fnv64(desc->fragment_spv, desc->fragment_spv_bytes) : 0;
+    char attrs[256];
+    size_t ao = 0;
+    attrs[0] = 0;
+    for (uint32_t i = 0; i < vin->vertexAttributeDescriptionCount && ao + 40 < sizeof attrs; i++) {
+        const VkVertexInputAttributeDescription *a = &vin->pVertexAttributeDescriptions[i];
+        ao += (size_t)snprintf(attrs + ao, sizeof attrs - ao, "%sloc%u:fmt%d@%u", i ? "," : "", a->location, (int)a->format, a->offset);
+    }
+    uint64_t key = vh * 1099511628211ull ^ fh;
+    key = (key ^ (uint64_t)(int64_t)vr) * 1099511628211ull;
+    key = (key ^ (uint64_t)color_fmt) * 1099511628211ull;
+    key = (key ^ (uint64_t)topo) * 1099511628211ull;
+    key = (key ^ fnv64(attrs, strlen(attrs))) * 1099511628211ull;
+    key = (key ^ (uint64_t)vin->vertexBindingDescriptionCount ^ ((uint64_t)(desc->vertex_entry_point ? fnv64(desc->vertex_entry_point, strlen(desc->vertex_entry_point)) : 0) << 1)) * 1099511628211ull;
+    for (uint32_t i = 0; i < nseen; i++) if (seen[i].key == key) { seen[i].count++; return; }
+    if (nseen >= FAIL_KEYS_MAX) {
+        if (!suppressed++) LAGFX_ERR("pipeline-build-fail: more than %u distinct failure keys; further failures are not logged", FAIL_KEYS_MAX);
+        return;
+    }
+    seen[nseen].key = key, seen[nseen].count = 1, nseen++;
+    /* each module on its own */
+    const char *vm = "not-checked(no spirv given)", *fm = "not-checked(no spirv given)";
+    char vb[48], fb[48];
+    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO };
+    VkShaderModule m = VK_NULL_HANDLE;
+    if (desc->vertex_spv && desc->vertex_spv_bytes && !(desc->vertex_spv_bytes & 3u)) {
+        ci.codeSize = desc->vertex_spv_bytes, ci.pCode = desc->vertex_spv;
+        VkResult r = vkCreateShaderModule(device, &ci, NULL, &m);
+        snprintf(vb, sizeof vb, "%s", r == VK_SUCCESS ? "accepted" : vr_name(r)), vm = vb;
+        if (m) vkDestroyShaderModule(device, m, NULL);
+        m = VK_NULL_HANDLE;
+    }
+    if (desc->fragment_spv && desc->fragment_spv_bytes && !(desc->fragment_spv_bytes & 3u)) {
+        ci.codeSize = desc->fragment_spv_bytes, ci.pCode = desc->fragment_spv;
+        VkResult r = vkCreateShaderModule(device, &ci, NULL, &m);
+        snprintf(fb, sizeof fb, "%s", r == VK_SUCCESS ? "accepted" : vr_name(r)), fm = fb;
+        if (m) vkDestroyShaderModule(device, m, NULL);
+    }
+    LAGFX_ERR("pipeline-build-fail: result=%s(%d) vs[bytes=%zu hash=%016llx module=%s entry=%s] fs[bytes=%zu hash=%016llx module=%s entry=%s] "
+              "vertex_bindings=%u vertex_attrs=%u[%s] stride=%u color_format=%d topology=%d dynamic_rendering=1(VkPipelineRenderingCreateInfo,no-renderpass) "
+              "caps_mask=0x%x distinct_failures=%u",
+              vr_name(vr), (int)vr, desc->vertex_spv_bytes, (unsigned long long)vh, vm, desc->vertex_entry_point ? desc->vertex_entry_point : "main",
+              desc->fragment_spv_bytes, (unsigned long long)fh, fm, desc->fragment_entry_point ? desc->fragment_entry_point : "main",
+              vin->vertexBindingDescriptionCount, vin->vertexAttributeDescriptionCount, attrs,
+              vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, desc->caps_enabled, nseen);
+}
 
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
@@ -260,6 +344,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("lagfx_pipeline_build: vkCreateGraphicsPipelines failed (%d)",
                   (int)vr);
+        log_build_failure(device, desc, &vin, ia.topology, color_fmt, vr);
         return LAGFX_ERR_BACKEND;
     }
 

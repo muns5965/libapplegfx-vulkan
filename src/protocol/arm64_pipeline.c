@@ -143,6 +143,7 @@ typedef struct {
     VkDescriptorSetLayout dsl;
     VkPipelineLayout pl;
     char vname[64], fname[64];
+    uint8_t *vspv, *fspv; size_t vsz, fsz;   /* the SPIR-V the modules were made from (diagnostics of a failed vkCreateGraphicsPipelines; owned) */
 } pres_t;
 
 static void pres_release(void *u) {
@@ -152,6 +153,7 @@ static void pres_release(void *u) {
     if (r->dsl) vkDestroyDescriptorSetLayout(r->dev, r->dsl, NULL);
     if (r->vs) vkDestroyShaderModule(r->dev, r->vs, NULL);
     if (r->fs) vkDestroyShaderModule(r->dev, r->fs, NULL);
+    free(r->vspv); free(r->fspv);
     free(r);
 }
 
@@ -322,6 +324,11 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     out->desc.layout = r->pl ? r->pl : vk->empty_layout;
     out->dsl = r->dsl;
     out->no_point_size = !spv_writes_point_size(vspv, vsz);
+    out->desc.vertex_spv = (const uint32_t *)vspv, out->desc.vertex_spv_bytes = vsz;   /* ownership moves into r (freed by pres_release) */
+    out->desc.fragment_spv = (const uint32_t *)fspv, out->desc.fragment_spv_bytes = fsz;
+    out->desc.caps_enabled = vk->caps_enabled;
+    r->vspv = vspv, r->vsz = vsz, r->fspv = fspv, r->fsz = fsz;
+    vspv = fspv = NULL;
     out->blob_hash = lagfx_a64_hash64(blob, blen);
     out->release = pres_release, out->user = r;
     CNTP(p).stub_blend++, CNTP(p).stub_depth_stencil++, CNTP(p).stub_color_format_from_pass++, CNTP(p).stub_raster_state++;

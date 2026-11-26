@@ -1458,6 +1458,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-mapped-unit.c') and vulkan_dep
   test('arm64 mapped textures (type 11) over guest surfaces (lavapipe, validation)', mp_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
 endif
 
+# Pipeline-build failure diagnostics (log once per failure key, failing SPIR-V capture) on lavapipe.
+if fs.is_file(meson.current_source_dir() / 'arm64-pipefail-unit.c') and vulkan_dep.found()
+  pf_test = executable('arm64-pipefail-unit',
+    'arm64-pipefail-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('pipeline build failure diagnostics + SPIR-V capture (lavapipe)', pf_test, timeout : 120)
+endif
+
 # ARM64 pipeline resolver + descriptor binding + topology + cache invalidation + real-data capture (lavapipe; honest SKIP without fixtures / ICD).
 if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   pu_deps = [libapplegfx_vulkan_dep]

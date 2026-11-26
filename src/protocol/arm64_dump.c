@@ -217,6 +217,27 @@ void lagfx_a64_dump_touch_object(lagfx_protocol_t *p, const lagfx_task_entry_t *
     if (type == LAGFX_A64_OBJ_SERIALIZED || type == LAGFX_A64_OBJ_FUNCTION) dump_object(p, task, ref, e);
 }
 
+void lagfx_a64_dump_spirv(lagfx_protocol_t *p, const void *vs, size_t vs_bytes, const void *fs, size_t fs_bytes) {
+    if (!p || !lagfx_a64_dump_enabled() || (!vs && !fs)) return;
+    uint64_t kk[3] = { vs ? lagfx_a64_hash64(vs, vs_bytes) : 0, fs ? lagfx_a64_hash64(fs, fs_bytes) : 0, 0x5350560au };
+    if (!seen_add(lagfx_a64_hash64(kk, sizeof kk))) return;   /* one capture per distinct module pair */
+    open_dir();
+    if (G.dirfd < 0) return;
+    char vf[200], ff[200], name[96];
+    uint64_t saved;
+    int tr;
+    snprintf(vf, sizeof vf, "-"), snprintf(ff, sizeof ff, "-");
+    if (vs && vs_bytes) {
+        snprintf(name, sizeof name, "spv_%016llx_vs.spv", (unsigned long long)lagfx_a64_hash64(vs, vs_bytes));
+        save_blob(p, name, vs, vs_bytes, vs_bytes, vf, sizeof vf, &saved, &tr);
+    }
+    if (fs && fs_bytes) {
+        snprintf(name, sizeof name, "spv_%016llx_fs.spv", (unsigned long long)lagfx_a64_hash64(fs, fs_bytes));
+        save_blob(p, name, fs, fs_bytes, fs_bytes, ff, sizeof ff, &saved, &tr);
+    }
+    index_line("spv vs=%s fs=%s vs_bytes=%zu fs_bytes=%zu", vf, ff, vs_bytes, fs_bytes);
+}
+
 /* type 11 (mapped texture) of the resource list: {u64 mapping, u32 tag, u32 size, u32 ref, description}; one index line + the first 128 bytes, once per entry */
 static void dump_mapped(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t e[3]) {
     uint32_t k[8] = { task->id, ref, e[0], e[1], e[2], (uint32_t)task->root_page_pfn, 11, 0 };

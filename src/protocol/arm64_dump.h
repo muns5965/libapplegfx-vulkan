@@ -31,6 +31,10 @@ void lagfx_a64_dump_resources(lagfx_protocol_t *p, const lagfx_task_entry_t *tas
  * name (tag 116 / 110 / 114 / 112 ... reach them by ref): same capture as for the resource list (seen set, caps, per-run directory, index lines obj / pso / fn;
  * the functions a pipeline names are captured with it). Other types are ignored. No-op unless LAGFX_ARM64_DUMP=1. `e` is the 12-byte object-table entry. */
 void lagfx_a64_dump_touch_object(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, const uint32_t e[3]);
+/* A pipeline whose vkCreateGraphicsPipelines failed: with LAGFX_ARM64_DUMP=1 and an open LAGFX_ARM64_DUMP_DIR the two SPIR-V modules are written as
+ * spv_<fnv64 of the module>_vs.spv / spv_<hash>_fs.spv (exclusive create: a repeat of the same module is not rewritten; same caps as every blob) plus an index
+ * line `spv vs=<file> fs=<file> vs_bytes= fs_bytes=`, so the failure can be reproduced offline with spirv-val / lavapipe. No-op otherwise. */
+void lagfx_a64_dump_spirv(lagfx_protocol_t *p, const void *vs, size_t vs_bytes, const void *fs, size_t fs_bytes);
 void lagfx_a64_dump_segment(lagfx_protocol_t *p, const lagfx_task_entry_t *task, const uint8_t *buf, uint32_t avail, const lagfx_exec_seg_t *seg);
 
 #endif

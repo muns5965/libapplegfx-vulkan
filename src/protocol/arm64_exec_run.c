@@ -365,7 +365,11 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     d.color_format = fmt;
     d.topology_plus1 = (uint8_t)(topo + 1u);
     VkPipeline pl = VK_NULL_HANDLE;
-    if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) { p->diag2.exec.pipe.pipe_build_failed++; return VK_NULL_HANDLE; }
+    if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
+        p->diag2.exec.pipe.pipe_build_failed++;
+        lagfx_a64_dump_spirv(p, d.vertex_spv, d.vertex_spv_bytes, d.fragment_spv, d.fragment_spv_bytes);   /* LAGFX_ARM64_DUMP=1 + dir: the failing modules, for offline spirv-val */
+        return VK_NULL_HANDLE;
+    }
     p->diag2.exec.pipe.pipes_built++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
