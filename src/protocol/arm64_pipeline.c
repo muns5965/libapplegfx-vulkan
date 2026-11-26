@@ -332,7 +332,11 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     *nab = 0;
     if (lagfx_air_module_open(f->bitcode, f->bitcode_len, &m) != LAGFX_OK || !m) { CNTP(p).rf_module++; return false; }
     if (keys_out && !lagfx_air_stage_keys(m, true, keys_out)) memset(keys_out, 0, sizeof *keys_out);   /* vertex: its output keys, for the paired fragment */
-    lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys */
+    lagfx_stage_link_totals_t l0, l1;
+    lagfx_air2spv_link_totals(&l0);
+    lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys; a typed vs_keys also links the interface types */
+    lagfx_air2spv_link_totals(&l1);   /* process-wide counters: the delta is this translation's (resolution runs on one thread) */
+    CNTP(p).link_mismatch_fixed += l1.mismatch_fixed - l0.mismatch_fixed; CNTP(p).link_missing_zeroed += l1.missing_zeroed - l0.missing_zeroed; CNTP(p).link_unlinked += l1.unlinked - l0.unlinked;
     if (st == LAGFX_OK && *spv) {
         *nab = lagfx_air_arg_bindings(m, ab, LAGFX_A64_MAX_ARGS);
         if (*nab > LAGFX_A64_MAX_ARGS) *nab = LAGFX_A64_MAX_ARGS;
@@ -385,7 +389,12 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     if (!vf || !ff) { CNTP(p).rf_no_stage++; goto done; }
     lagfx_stage_keys_t vkeys;
     memset(&vkeys, 0, sizeof vkeys);
-    if (!translate(p, vf, NULL, &vkeys, &vspv, &vsz, vab, &nvab) || !translate(p, ff, &vkeys, NULL, &fspv, &fsz, fab, &nfab)) goto done;
+    if (!translate(p, vf, NULL, &vkeys, &vspv, &vsz, vab, &nvab)) goto done;
+    {   /* LAGFX_A64_NO_STAGE_LINK=1: untyped keys -> the fragment translator keeps its pre-linker behaviour (Locations by key, no conversion, no zeroed inputs) */
+        const char *nl = getenv("LAGFX_A64_NO_STAGE_LINK");
+        if (nl && nl[0] && nl[0] != '0') vkeys.typed = 0;
+    }
+    if (!translate(p, ff, &vkeys, NULL, &fspv, &fsz, fab, &nfab)) goto done;
     {   /* device-capability gate: a module that declares a capability the device was not created with must not reach vkCreateShaderModule / a pipeline */
         uint32_t nv, nf;
         bool okv = lagfx_spv_required_caps_ex(vspv, vsz, &nv), okf = lagfx_spv_required_caps_ex(fspv, fsz, &nf);

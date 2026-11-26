@@ -461,6 +461,9 @@ typedef struct {
     uint32_t                  n_vec_cache;
     const lagfx_stage_keys_t *iface_own_in;   /* fragment: per-argument keys */
     const lagfx_stage_keys_t *iface_vs_out;   /* fragment: paired VS output keys */
+    /* fragment stage linker (frag_link_decide): per stage-in argument */
+    uint8_t                   arg_link[LAGFX_MAX_VERTEX_ARGS];       /* 0 = as declared, 1 = read as the VS output's type and convert, 2 = no VS output: zeroed Private */
+    uint8_t                   arg_link_lanes[LAGFX_MAX_VERTEX_ARGS]; /* arg_link == 1: lane count of the VS output (a float32 vector/scalar) */
 } xlate_ctx_t;
 
 /* Copy the MODULE-scope mutable state between function contexts. Helper
@@ -1862,6 +1865,93 @@ static bool input_var_is_dup(const xlate_ctx_t *c, uint32_t i) {
     return false;
 }
 
+/* ---- Fragment stage linker ----------------------------------------------
+ * Vulkan requires every fragment Input at Location L to have a vertex Output of the SAME type at L (VUID-RuntimeSpirv-OpEntryPoint-08743 and the type
+ * match rule), and drivers (the Adreno 840 build) may refuse the pipeline otherwise. Metal links by key and tolerates both: a fragment input with a different
+ * type than the vertex output, and one with no vertex output at all. Given the paired vertex module's typed keys (vs_out->typed) each user stage-in is resolved:
+ *   key found, same shape            -> unchanged
+ *   key found, float lanes differ    -> arg_link=1: the Input has the VERTEX shape and the value is converted to the fragment type by truncating extra
+ *                                       components and ZERO-filling missing ones (Metal's behaviour for a lane-count difference is NOT verified: this is
+ *                                       the same convention as an unwritten component, zero, and the only one we can justify without a device test)
+ *   key not found                    -> arg_link=2: a zero-initialised Private variable instead of an Input. Metal leaves such an input undefined, zero is one
+ *                                       valid value (UNVERIFIED that Apple hardware would produce zero)
+ *   anything else (scalar kind differs, shape unknown, empty key)  -> arg_link=0, counted as unlinked, the legacy Location is kept.
+ * "air.*" builtin keys (position, point_coord, ...) are never linked. */
+static lagfx_stage_link_totals_t g_link_totals;
+void lagfx_air2spv_link_totals(lagfx_stage_link_totals_t *out) {
+    if (!out) return;
+    out->mismatch_fixed = __atomic_load_n(&g_link_totals.mismatch_fixed, __ATOMIC_RELAXED);
+    out->missing_zeroed = __atomic_load_n(&g_link_totals.missing_zeroed, __ATOMIC_RELAXED);
+    out->unlinked       = __atomic_load_n(&g_link_totals.unlinked, __ATOMIC_RELAXED);
+}
+
+/* Shape of a fragment stage-in argument's interface variable (half is float32 on the interface, see iface_half_lanes). */
+static void frag_in_shape(const xlate_ctx_t *c, uint32_t ty, uint8_t *kind, uint8_t *lanes) {
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    *kind = LAGFX_SHAPE_NONE; *lanes = 0;
+    if (ty >= nt) return;
+    lagfx_air_type_kind_t k = ts[ty].kind;
+    if (k == LAGFX_AIR_TYPE_FLOAT || k == LAGFX_AIR_TYPE_HALF) { *kind = LAGFX_SHAPE_FLOAT; *lanes = 1; return; }
+    if (k == LAGFX_AIR_TYPE_INTEGER && ts[ty].num_op >= 1u && ts[ty].op[0] == 32u) { *kind = LAGFX_SHAPE_INT; *lanes = 1; return; }
+    if (k == LAGFX_AIR_TYPE_VECTOR && ts[ty].num_op >= 2u && ts[ty].op[1] < nt && ts[ty].op[0] >= 2u && ts[ty].op[0] <= 4u) {
+        lagfx_air_type_kind_t ek = ts[ts[ty].op[1]].kind;
+        if (ek == LAGFX_AIR_TYPE_FLOAT || ek == LAGFX_AIR_TYPE_HALF) { *kind = LAGFX_SHAPE_FLOAT; *lanes = (uint8_t)ts[ty].op[0]; }
+        else if (ek == LAGFX_AIR_TYPE_INTEGER && ts[ts[ty].op[1]].num_op >= 1u && ts[ts[ty].op[1]].op[0] == 32u) { *kind = LAGFX_SHAPE_INT; *lanes = (uint8_t)ts[ty].op[0]; }
+    }
+}
+
+static void frag_link_decide(xlate_ctx_t *c, uint32_t n_fa) {
+    const lagfx_stage_keys_t *vso = c->iface_vs_out, *own = c->iface_own_in;
+    if (!vso || !vso->n || !vso->typed || !own) return;
+    uint64_t nfix = 0, nzero = 0, nun = 0;
+    for (uint32_t i = 0; i < n_fa; i++) {
+        if (!c->arg_input_var_ids[i] || input_var_is_dup(c, i) || i >= own->n) continue;
+        const char *key = own->key[i];
+        if (strncmp(key, "air.", 4) == 0) continue;
+        uint8_t fk, fl;
+        frag_in_shape(c, c->arg_air_type_ids[i], &fk, &fl);
+        if (!key[0]) { nun++; continue; }
+        uint32_t hit = vso->n;
+        for (uint32_t k = 0; k < vso->n; k++) if (vso->key[k][0] && strcmp(vso->key[k], key) == 0) { hit = k; break; }
+        if (hit == vso->n) {
+            if (fk == LAGFX_SHAPE_NONE) { nun++; continue; }
+            c->arg_link[i] = 2; nzero++;
+            continue;
+        }
+        uint8_t vk = vso->kind[hit], vl = vso->lanes[hit];
+        if (vk == LAGFX_SHAPE_NONE || fk == LAGFX_SHAPE_NONE || vk != fk) { nun++; continue; }
+        if (vl == fl) continue;
+        if (vk != LAGFX_SHAPE_FLOAT) { nun++; continue; }   /* lane conversion is only defined for float lanes here */
+        c->arg_link[i] = 1; c->arg_link_lanes[i] = vl; nfix++;
+    }
+    if (nfix)  __atomic_fetch_add(&g_link_totals.mismatch_fixed, nfix, __ATOMIC_RELAXED);
+    if (nzero) __atomic_fetch_add(&g_link_totals.missing_zeroed, nzero, __ATOMIC_RELAXED);
+    if (nun)   __atomic_fetch_add(&g_link_totals.unlinked, nun, __ATOMIC_RELAXED);
+}
+
+/* float32 value with `vl` lanes -> float32 value with `fl` lanes: extra lanes dropped, missing lanes 0.0 (see the linker comment). The 0.0 constant is
+ * pre-warmed in the global section by the variable declaration code. */
+static uint32_t frag_link_convert(xlate_ctx_t *c, uint32_t val, uint32_t vl, uint32_t fl) {
+    uint32_t f32 = emit_type_float32(c), comp[4];
+    for (uint32_t j = 0; j < fl && j < 4u; j++) {
+        if (j < vl) {
+            if (vl == 1u) comp[j] = val;
+            else {
+                comp[j] = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t o[] = { f32, comp[j], val, j };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, o, 4);
+            }
+        } else comp[j] = emit_const_float32(c, 0.0f);
+    }
+    if (fl == 1u) return comp[0];
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[2u + 4u] = { emit_type_vec(c, f32, fl), id };
+    for (uint32_t j = 0; j < fl; j++) o[2u + j] = comp[j];
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 2u + fl);
+    return id;
+}
+
 /* ===================================================================
  * Compute stage (air.kernel): compute kernels and tile functions
  *
@@ -2353,6 +2443,7 @@ static void emit_prologue(xlate_ctx_t *c) {
         if (needs_default_sampler(c))
             c->id_default_sampler_var = lagfx_spv_builder_alloc_id(c->b);
 
+        frag_link_decide(c, n_fa);
         uint32_t prefix[] = { LAGFX_SPV_EXECUTION_MODEL_FRAGMENT, c->id_main };
         uint32_t suffix[3u * LAGFX_MAX_VERTEX_ARGS + LAGFX_MAX_BYTEBUF_VIEWS];
         uint32_t n_iface = 0u;
@@ -2442,6 +2533,7 @@ static void emit_prologue(xlate_ctx_t *c) {
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_input_var_ids[i]) continue;
             if (input_var_is_dup(c, i)) continue;
+            if (c->arg_link[i] == 2) continue;   /* linker: Private variable, no Location */
             uint32_t use = loc++;
             /* A fragment [[position]] is the window-space FragCoord, NOT a
              * vertex output: BuiltIn FragCoord (no Location). Only for the
@@ -2662,7 +2754,23 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
             if (input_var_is_dup(c, i)) continue;
             uint32_t elem_spv = iface_var_type(c, c->arg_air_type_ids[i],
                                     emit_air_type(c, c->arg_air_type_ids[i]));
+            if (c->arg_link[i] == 1u) {   /* linker: the Input has the vertex output's type */
+                elem_spv = iface_f32_type(c, c->arg_link_lanes[i]);
+                uint32_t fl = 0; uint8_t fk;
+                { uint8_t l8; frag_in_shape(c, c->arg_air_type_ids[i], &fk, &l8); fl = l8; }
+                if (fl > c->arg_link_lanes[i]) (void)emit_const_float32(c, 0.0f);
+            }
             uint32_t ptr_id = lagfx_spv_builder_alloc_id(c->b);
+            if (c->arg_link[i] == 2u) {   /* linker: zero-initialised Private variable (OpConstantNull initialiser) */
+                uint32_t pt_ops[] = { ptr_id, 6u /* Private */, elem_spv };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, pt_ops, 3);
+                uint32_t nul = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t nops[] = { elem_spv, nul };
+                lagfx_spv_builder_emit_op(c->b, 46u /* OpConstantNull */, nops, 2);
+                uint32_t var_ops[] = { ptr_id, c->arg_input_var_ids[i], 6u /* Private */, nul };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 4);
+                continue;
+            }
             uint32_t pt_ops[] = { ptr_id, LAGFX_SPV_STORAGE_INPUT, elem_spv };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, pt_ops, 3);
             uint32_t var_ops[] = { ptr_id, c->arg_input_var_ids[i],
@@ -2882,9 +2990,14 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                                   ? emit_type_int_w(c, 32u, 0u)
                                   : iface_var_type(c, c->arg_air_type_ids[i],
                                         emit_air_type(c, c->arg_air_type_ids[i]));
+            if (c->arg_link[i] == 1u) elem_spv = iface_f32_type(c, c->arg_link_lanes[i]);
             uint32_t id_load = lagfx_spv_builder_alloc_id(c->b);
             uint32_t ops[] = { elem_spv, id_load, c->arg_input_var_ids[i] };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, ops, 3);
+            if (c->arg_link[i] == 1u) {
+                uint8_t fk, fl8; frag_in_shape(c, c->arg_air_type_ids[i], &fk, &fl8);
+                id_load = frag_link_convert(c, id_load, c->arg_link_lanes[i], fl8);
+            }
             if (k != LAGFX_VARG_VID)
                 id_load = iface_narrow(c, c->arg_air_type_ids[i], id_load);
             c->arg_spv_ids[i] = id_load;

@@ -87,7 +87,25 @@ lagfx_status_t lagfx_air2spv_translate_function(
 typedef struct {
     uint32_t n;
     char     key[LAGFX_STAGE_KEYS_MAX][LAGFX_STAGE_KEY_LEN];
+    /* VERTEX OUTPUT keys only (lagfx_air_stage_keys(outputs=true)): the shape of
+     * the Output variable the vertex translator declares for member i, used by
+     * the stage linker. `typed` = 0 -> shapes absent/disabled, the linker is off
+     * and the fragment stage-in Locations behave exactly as before.
+     * kind: LAGFX_SHAPE_NONE = not modelled, _FLOAT = 32-bit float lanes (a half
+     * member is declared as float32), _INT = 32-bit integer lanes. */
+    uint8_t  typed;
+    uint8_t  kind[LAGFX_STAGE_KEYS_MAX];
+    uint8_t  lanes[LAGFX_STAGE_KEYS_MAX];
 } lagfx_stage_keys_t;
+#define LAGFX_SHAPE_NONE  0
+#define LAGFX_SHAPE_FLOAT 1
+#define LAGFX_SHAPE_INT   2
+
+/* Stage-linker counters (process totals, see lagfx_air2spv_link_totals):
+ *   mismatch_fixed  FS input read with the VS output's type and converted
+ *   missing_zeroed  FS input with no VS output -> zero-initialised Private
+ *   unlinked        FS input the linker could not resolve (left as before) */
+typedef struct { uint64_t mismatch_fixed, missing_zeroed, unlinked; } lagfx_stage_link_totals_t;
 
 /* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
  * Locations follow `vs_out` (the paired vertex module's output keys) via

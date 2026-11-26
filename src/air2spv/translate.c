@@ -219,6 +219,56 @@ static void md_kernel_key(const lagfx_air_module_t *m, const lagfx_air_metadata_
     }
 }
 
+/* The entry function of a module: the first non-prototype function that is not a C++ static initializer. (uint32_t)-1 when there is none. */
+static uint32_t pick_body_fn(const lagfx_air_module_t *m) {
+    uint32_t n_fns = 0;
+    const lagfx_air_function_t *fns = lagfx_air_module_functions(m, &n_fns);
+    uint32_t body_fn = (uint32_t)-1;
+    for (uint32_t i = 0; i < n_fns; i++) {
+        if (fns[i].is_proto || fns[i].body_offset == 0u) continue;
+        /* Skip C++ static-initializer functions (`_GLOBAL__sub_I_*.metal`, void(), section "air.static_init"). Composite SkyLight shaders carry one BEFORE the
+         * real entry shader (function-constant init); picking the first body function then translated the static-init (num_args=0, no resources) instead of
+         * e.g. UberCompositeFragment -> every texture + buffer dropped -> black. The real entry shader is the non-static-init body function. */
+        const char *nm = lagfx_air_module_string(m, fns[i].name_offset);
+        if (nm && (strstr(nm, "_GLOBAL__sub_I") || strstr(nm, "global_ctors") || strstr(nm, ".static_init"))) {
+            LAGFX_TRACE("air2spv: skipping static-init fn[%u] '%s'", i, nm);
+            continue;
+        }
+        body_fn = i; break;
+    }
+    return body_fn;
+}
+
+/* Shape of the Output variable the vertex translator declares for a member of AIR type `ty` (mirrors vertex_output_type_spv_idx + iface_var_type in
+ * translate_function.c: a float/half member or a float/half vector is a float32 scalar/vector, a 32-bit integer vector keeps its type, any other member type
+ * falls back to float4). Only 2..4 lanes are modelled for vectors. */
+static void out_shape(const lagfx_air_type_t *ts, uint32_t nt, uint32_t ty, uint8_t *kind, uint8_t *lanes) {
+    *kind = LAGFX_SHAPE_NONE; *lanes = 0;
+    if (ty >= nt) return;
+    if (ts[ty].kind == LAGFX_AIR_TYPE_FLOAT || ts[ty].kind == LAGFX_AIR_TYPE_HALF) { *kind = LAGFX_SHAPE_FLOAT; *lanes = 1; return; }
+    if (ts[ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[ty].num_op >= 2u && ts[ty].op[1] < nt && ts[ty].op[0] >= 2u && ts[ty].op[0] <= 4u) {
+        lagfx_air_type_kind_t ek = ts[ts[ty].op[1]].kind;
+        if (ek == LAGFX_AIR_TYPE_FLOAT || ek == LAGFX_AIR_TYPE_HALF) { *kind = LAGFX_SHAPE_FLOAT; *lanes = (uint8_t)ts[ty].op[0]; }
+        else if (ek == LAGFX_AIR_TYPE_INTEGER && ts[ts[ty].op[1]].num_op >= 1u && ts[ts[ty].op[1]].op[0] == 32u) { *kind = LAGFX_SHAPE_INT; *lanes = (uint8_t)ts[ty].op[0]; }
+        return;
+    }
+    if (ts[ty].kind != LAGFX_AIR_TYPE_VECTOR) { *kind = LAGFX_SHAPE_FLOAT; *lanes = 4; }   /* translator default for a non float/vector member (e.g. a scalar int): float4 */
+}
+
+static void fill_out_shapes(const lagfx_air_module_t *m, lagfx_stage_keys_t *out) {
+    uint32_t nt = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(m, &nt);
+    uint32_t nf = 0; const lagfx_air_function_t *fns = lagfx_air_module_functions(m, &nf);
+    uint32_t bi = pick_body_fn(m);
+    if (bi == (uint32_t)-1 || bi >= nf) return;
+    uint32_t fty = fns[bi].type_index;
+    if (fty >= nt || ts[fty].kind != LAGFX_AIR_TYPE_FUNCTION || ts[fty].num_op < 2u) return;
+    uint32_t rt = ts[fty].op[1];
+    if (rt >= nt || (ts[rt].kind != LAGFX_AIR_TYPE_STRUCT_ANON && ts[rt].kind != LAGFX_AIR_TYPE_STRUCT_NAMED)) return;
+    uint32_t nmem = ts[rt].num_op > 1u ? ts[rt].num_op - 1u : 0u;
+    for (uint32_t k = 0; k < out->n && k < nmem; k++) out_shape(ts, nt, ts[rt].op[1u + k], &out->kind[k], &out->lanes[k]);
+    out->typed = 1;
+}
+
 bool
 lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys_t *out) {
     if (!m || !out) return false;
@@ -242,6 +292,7 @@ lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys
         }
         out->n++;
     }
+    if (outputs && !kernel) fill_out_shapes(m, out);
     return true;
 }
 
@@ -271,26 +322,7 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
      * non-prototype function; the legacy reference emitters remain the
      * fallback when it fails. */
     {
-        uint32_t n_fns = 0;
-        const lagfx_air_function_t *fns = lagfx_air_module_functions(m, &n_fns);
-        uint32_t body_fn = (uint32_t)-1;
-        for (uint32_t i = 0; i < n_fns; i++) {
-            if (fns[i].is_proto || fns[i].body_offset == 0u) continue;
-            /* Skip C++ static-initializer functions (`_GLOBAL__sub_I_*.metal`,
-             * void(), section "air.static_init"). Composite SkyLight shaders
-             * carry one BEFORE the real entry shader (function-constant init);
-             * picking the first body function then translated the static-init
-             * (num_args=0, no resources) instead of e.g. UberCompositeFragment
-             * → every texture + buffer dropped → black. The real entry shader
-             * is the non-static-init body function. */
-            const char *nm = lagfx_air_module_string(m, fns[i].name_offset);
-            if (nm && (strstr(nm, "_GLOBAL__sub_I") || strstr(nm, "global_ctors")
-                       || strstr(nm, ".static_init"))) {
-                LAGFX_TRACE("air2spv: skipping static-init fn[%u] '%s'", i, nm);
-                continue;
-            }
-            body_fn = i; break;
-        }
+        uint32_t body_fn = pick_body_fn(m);
         if (body_fn != (uint32_t)-1 && stage != LAGFX_TRANS_STAGE_UNKNOWN) {
             lagfx_xlate_stage_t xs = (stage == LAGFX_TRANS_STAGE_VERTEX)   ? LAGFX_XLATE_STAGE_VERTEX
                                    : (stage == LAGFX_TRANS_STAGE_COMPUTE) ? LAGFX_XLATE_STAGE_COMPUTE

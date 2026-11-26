@@ -577,6 +577,7 @@ typedef struct lagfx_protocol {
                 uint64_t resolved, resolve_failed;
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
                 uint64_t xlate_air2spv;
+                uint64_t link_mismatch_fixed, link_missing_zeroed, link_unlinked;   /* fragment stage linker (air2spv): input read as the vertex type + converted / input with no vertex output zeroed / left unresolved */
                 uint64_t rf_missing_cap, stub_missing_cap[32];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
                 uint64_t desc_linear_stale;   /* a linear texture whose buffer changed inside the open pass: draw skipped (also counted in desc_unbound_why[4]) */
                 uint64_t desc_unbound_why[6];   /* desc_unbound by cause: 0 buffer missing/offset, 1 input attachment, 2 storage image, 3 sampled image missing, 4 sampled image view (linear/none), 5 sampler */
