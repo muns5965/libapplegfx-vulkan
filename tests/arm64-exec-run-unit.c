@@ -277,6 +277,7 @@ static void test_objects(void) {
 /* ---- pipeline resolver: the two trivial SPIR-V shaders + the empty layout ---- */
 static VkShaderModule g_vs, g_fs, g_fs_half, g_fs_mrt;
 static struct { int set, enable, mrt; uint32_t sf, df, op, saf, daf, aop, mask, mask1; int s1add, nomasks, fetch; } g_blend;
+static VkShaderModule g_fs_fetch2, g_fetch2_unused; static VkDescriptorSetLayout g_fetch2_dsl; static VkPipelineLayout g_fetch2_pl;
 static VkShaderModule g_fs_fetch; static VkDescriptorSetLayout g_fetch_dsl; static VkPipelineLayout g_fetch_pl;   /* desc.blend_* the resolver hands out (set == 0: the fixed state) */
 static int g_released;
 static void rel(void *u) { (void)u; g_released++; }
@@ -309,7 +310,7 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
             out->desc.fragment_shader = g_fs_mrt;
         }
     }
-    if (g_blend.fetch) {   /* framebuffer fetch: FS reads input attachment 0 (binding 24) = colour attachment 0 */
+    if (g_blend.fetch == 1) {   /* framebuffer fetch: FS reads input attachment 0 (binding 24) = colour attachment 0 */
         if (!g_fs_fetch) {
             VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_fetch_spv, .pCode = k_fs_fetch_spv };
             assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_fetch) == VK_SUCCESS);
@@ -321,6 +322,24 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
         }
         out->desc.fragment_shader = g_fs_fetch, out->desc.layout = g_fetch_pl, out->dsl = g_fetch_dsl;
         out->n_bind = 1, out->bind[0].binding = 24, out->bind[0].kind = LAGFX_A64_BIND_INPUT, out->bind[0].stage = 1, out->bind[0].metal_index = 0;
+    }
+    if (g_blend.fetch == 2) {   /* two input attachments (bindings 24, 25) and two outputs */
+        if (!g_fs_fetch2) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_fetch2_spv, .pCode = k_fs_fetch2_spv };
+            assert(vkCreateShaderModule(vk->device, &ci, NULL, &g_fs_fetch2) == VK_SUCCESS);
+            VkDescriptorSetLayoutBinding lb[2] = { { .binding = 24, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT },
+                                                   { .binding = 25, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .descriptorCount = 1, .stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT } };
+            VkDescriptorSetLayoutCreateInfo dl = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 2, .pBindings = lb };
+            assert(vkCreateDescriptorSetLayout(vk->device, &dl, NULL, &g_fetch2_dsl) == VK_SUCCESS);
+            VkPipelineLayoutCreateInfo pl = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &g_fetch2_dsl };
+            assert(vkCreatePipelineLayout(vk->device, &pl, NULL, &g_fetch2_pl) == VK_SUCCESS);
+        }
+        out->desc.fragment_shader = g_fs_fetch2, out->desc.layout = g_fetch2_pl, out->dsl = g_fetch2_dsl;
+        out->n_bind = 2;
+        for (int i = 0; i < 2; i++) out->bind[i].binding = (uint8_t)(24 + i), out->bind[i].kind = LAGFX_A64_BIND_INPUT, out->bind[i].stage = 1, out->bind[i].metal_index = (int16_t)i;
+        out->desc.blend_set = 1, out->desc.blend_enable = 0, out->desc.blend_src_rgb = out->desc.blend_src_a = VK_BLEND_FACTOR_ONE, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ZERO;
+        out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
+        for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     }
     out->release = rel;
     return true;
@@ -543,6 +562,28 @@ static void test_exec_fetch(void) {
     lagfx_a64_exec_free(p);
     free(p);
     g_blend.fetch = 0;
+    /* two attachments: BGRA8 slot 0 + RGBA16F slot 1, FS reads BOTH (dest_0 / dest_1 told apart) and writes both */
+    {
+        lagfx_protocol_t *q = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+        lagfx_task_entry_t *tq = def_task(q, 1);
+        build_objects();
+        lagfx_a64_exec_set_pipeline_resolver(q, resolver, NULL);
+        g_blend.fetch = 2; g_blend.set = 0; g_res_tex2 = true;
+        const uint32_t refs[2] = { REF_TEX, REF_TEX2 };
+        const uint16_t loads[2] = { 2, 2 };
+        const double clr[2][4] = { { 0, 0, 1, 1 }, { 0, 1, 0, 1 } };
+        cb_reset(); cb_pass_n(refs, loads, clr); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw(0, 3);
+        exec(q, 1, cb_finish(), true);
+        __typeof__(q->diag2.exec.run) *R2 = &q->diag2.exec.run;
+        assert(R2->submit_failed == 0 && R2->draws == 1);
+        assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX, img, sizeof img, &w, &h));
+        assert(px(img, 8, 8) == GREEN);                         /* slot 0 now holds what slot 1 had (0,1,0,1) */
+        uint8_t img8[RT_W * RT_H * 8];
+        assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX2, img8, sizeof img8, &w, &h));
+        assert(half_at(img8, 8, 8, 0) == 0x3800 && half_at(img8, 8, 8, 1) == 0 && half_at(img8, 8, 8, 2) == 0x3c00 && half_at(img8, 8, 8, 3) == 0x3c00);   /* slot 0's blue + 0.5 red, FP16 preserved */
+        lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
+        g_blend.fetch = 0; g_res_tex2 = false;
+    }
     puts("PASS: framebuffer fetch (input attachment 0 = colour attachment 0, two draws read each other's output) on lavapipe");
 }
 
