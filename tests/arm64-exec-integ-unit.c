@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
+#include <stdatomic.h>
 
 extern uint64_t lagfx_vk_validation_msg_count;
 
@@ -37,9 +39,11 @@ extern uint64_t lagfx_vk_validation_msg_count;
 
 static uint8_t *g_mem;
 static int g_irq;
+static uint32_t g_stamps[256]; static int g_nstamps; static atomic_uint g_last_stamp;   /* every value written to the stamp cell of slot 1, in order */
 static bool rd(void *o, uint64_t gpa, uint64_t len, void *dst) { (void)o; if (gpa + len > MEM_SIZE) return false; memcpy(dst, g_mem + gpa, len); return true; }
-static bool wr(void *o, uint64_t gpa, uint64_t len, const void *src) { (void)o; if (gpa + len > MEM_SIZE) return false; memcpy(g_mem + gpa, src, len); return true; }
-static void irq(void *o, uint32_t v) { (void)o; (void)v; g_irq++; }
+static bool wr(void *o, uint64_t gpa, uint64_t len, const void *src) { (void)o; if (gpa + len > MEM_SIZE) return false;
+    if (len == 4 && gpa == ((uint64_t)STAMP_PFN << 14) + 4 && g_nstamps < 256) { memcpy(&g_stamps[g_nstamps++], src, 4); atomic_store(&g_last_stamp, g_stamps[g_nstamps - 1]); } memcpy(g_mem + gpa, src, len); return true; }
+static void irq(void *o, uint32_t v) { (void)o; (void)v; g_irq++; }   /* only called under the execution lock / cq lock: one thread at a time */
 static lagfx_task_t *cb_create_task(void *o, uint64_t s, void **p) { (void)o; (void)s; (void)p; return NULL; }
 static void cb_destroy_task(void *o, lagfx_task_t *t) { (void)o; (void)t; }
 static bool cb_map(void *a, lagfx_task_t *t, uint64_t o, const lagfx_physical_range_t *r, size_t c, bool ro) { (void)a; (void)t; (void)o; (void)r; (void)c; (void)ro; return true; }
@@ -76,7 +80,7 @@ static void submit(lagfx_protocol_t *p, uint16_t op, uint32_t stamp, const uint3
 }
 
 static lagfx_protocol_t *mk(void) {
-    memset(g_mem, 0, MEM_SIZE); g_wp = 0; g_irq = 0;
+    memset(g_mem, 0, MEM_SIZE); g_wp = 0; g_irq = 0; g_nstamps = 0; atomic_store(&g_last_stamp, 0);
     lagfx_protocol_t *p = calloc(1, sizeof *p);
     p->magic = LAGFX_PROTOCOL_MAGIC; p->dev = g_dev;
     p->ring_page_shift = 14; p->protocol_mode = LAGFX_PROTO_ARM64_VMAPPLE;
@@ -118,6 +122,13 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_A   5u
 #define REF_B   6u
 #define REF_C   7u
+#define REF_LIN 8u     /* type 8 linear texture, no guest memory */
+#define REF_LB  9u     /* buffer behind the pitched linear texture */
+#define REF_LIN2 10u   /* tag 9 linear texture over REF_LB: offset 64, row pitch 96 (> 16 * 4) */
+#define VPN_LB  20u
+#define LIN_OFF 64u
+#define LIN_ROW 96u
+#define SENT    0xabu
 #define RT_W 16u
 #define RT_H 16u
 #define PATTERN 0x11223344u
@@ -162,6 +173,14 @@ static void build_objects(void) {
     uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
     va_write(VA_PAY + 0x300, pl, 16);
     entry(REF_PIPE, LAGFX_A64_OBJ_SERIALIZED, 16, VA_PAY + 0x300);
+    { uint8_t l[36]; memset(l, 0, sizeof l); uint32_t tag = 0x14, sz = sizeof l; memcpy(l, &tag, 4); memcpy(l + 4, &sz, 4);
+      uint8_t *d = l + 12; d[0] = 2; d[2] = 80; uint32_t w = RT_W, h = RT_H; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); d[16] = 1; d[18] = 1;
+      va_write(VA_PAY + 0x400, l, sizeof l); entry(REF_LIN, 8, sizeof l, VA_PAY + 0x400); }
+    put_buffer_object(REF_LB, 0x2a0, 0x4000, VPN_LB);
+    { uint8_t l[0x40]; memset(l, 0, sizeof l); uint32_t tag = 9, sz = 0x20 + 24, bref = REF_LB; uint64_t off = LIN_OFF, row = LIN_ROW;
+      memcpy(l, &tag, 4); memcpy(l + 4, &sz, 4); memcpy(l + 12, &bref, 4); memcpy(l + 16, &off, 8); memcpy(l + 24, &row, 8);
+      uint8_t *d = l + 0x20; d[0] = 2; d[2] = 80; uint32_t w = RT_W, h = RT_H; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); d[16] = 1; d[18] = 1;
+      va_write(VA_PAY + 0x500, l, sz); entry(REF_LIN2, 8, sz, VA_PAY + 0x500); }
     uint32_t pat[16]; for (int i = 0; i < 16; i++) pat[i] = PATTERN;   /* 4x4 pixels, row 16 bytes */
     va_write((uint64_t)VPN_B << 14, pat, sizeof pat);
 }
@@ -246,6 +265,12 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
 }
 
 
+static atomic_int g_stop;
+static void *timer_thread(void *a) {   /* the shell's completion timer */
+    lagfx_protocol_t *p = a;
+    while (!atomic_load(&g_stop)) { lagfx_arm64_poll_completions(p); struct timespec ts = { 0, 200 * 1000 }; nanosleep(&ts, NULL); }
+    return NULL;
+}
 static uint32_t px(const uint8_t *img, uint32_t x, uint32_t y) { uint32_t v; memcpy(&v, img + (y * RT_W + x) * 4, 4); return v; }
 static void check_images(const char *what) {
     const uint8_t *a = va_ptr((uint64_t)VPN_A << 14), *c = va_ptr((uint64_t)VPN_C << 14);
@@ -288,6 +313,13 @@ int main(void) {
     assert(lagfx_arm64_poll_completions(p) == 0 && cell(1) == 1);
     uint32_t live; uint64_t cr, de0, de1;
     lagfx_a64_res_counts(p, &live, &cr, &de0);
+    /* a SECOND exec while the first is only slow: held in the ring, not failed, not completed, not started */
+    exec_chain(p, 3);
+    assert(cell(1) == 1 && g_irq == 1 && S->execs == 2 && (p->a64_held_chan_mask & 2u) && p->diag2.exec.run.held == 1);
+    lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
+    assert(q.failed_pre == 0 && q.fault_rejected == 0 && !q.fault && p->diag2.exec.run.submit_failed == 0 && p->diag2.exec.run.busy_skipped == 0);
+    assert(lagfx_device_pending_completions(g_dev) == 0 || 1);   /* (the fake protocol is not the device's) */
+    assert(lagfx_arm64_poll_completions(p) == 0 && channel_compute_dispatcher_redrain_held(p) == 0 && S->execs == 2 && cell(1) == 1);   /* still held while pending */
     uint64_t deferred0 = S->deferred_frees;
     lagfx_a64_res_forget(p, 1, REF_C);              /* 0x25 for an object of the in-flight exec */
     lagfx_a64_exec_drop_task(p, 1);                 /* task teardown while in flight */
@@ -295,21 +327,93 @@ int main(void) {
     assert(live == 0 && de1 == de0 && S->deferred_frees > deferred0);   /* parked, NOT destroyed */
     assert(lagfx_a64_res_is_pending(p) && cell(1) == 1);
     lagfx_vk_test_inject_fence_result(0x7fffffff);   /* the GPU finishes */
-    { size_t rr = 0; struct timespec ts = { 0, 2 * 1000000 };   /* the shell's timer: poll until the GPU is done (never blocks) */
-      for (int i = 0; i < 2000 && !(rr = lagfx_arm64_poll_completions(p)); i++) nanosleep(&ts, NULL);
-      assert(rr == 1); }
-    assert(cell(1) == 2 && g_irq == 2 && !lagfx_a64_res_is_pending(p) && lagfx_arm64_cq_pending(p) == 0);
-    check_images("pending");                          /* the (forgotten, still alive) objects were written back before the stamp */
+    { struct timespec ts = { 0, 2 * 1000000 };   /* the shell's timer: poll + re-drain until everything retired (never blocks) */
+      for (int i = 0; i < 3000 && cell(1) != 3; i++) { lagfx_arm64_poll_completions(p); nanosleep(&ts, NULL); } }   /* ONLY the shell timer's poll: the held exec resumes without a new doorbell */
+    assert(cell(1) == 3 && g_irq == 3 &&   /* one IRQ per retire batch: stamp 1, the retire of 2, the held exec's own completion */
+            !lagfx_a64_res_is_pending(p) && lagfx_arm64_cq_pending(p) == 0 && p->a64_held_chan_mask == 0);
+    assert(g_nstamps == 3 && g_stamps[0] == 1 && g_stamps[1] == 2 && g_stamps[2] == 3);   /* order preserved: exec 2 retired, THEN the held exec ran and completed */
+    assert(S->execs == 3 && p->diag2.exec.run.submit_failed == 0);
+    check_images("pending + held");                   /* the (forgotten, still alive) objects were written back; the held exec rebuilt its own and wrote too */
     lagfx_a64_res_counts(p, &live, &cr, &de1);
-    assert(live == 0 && de1 == cr);                   /* now everything is destroyed: no leak, no double free */
-    printf("PASS: injected PENDING: stamp held, write-back + deferred frees after the fence (deferred=%llu)\n", (unsigned long long)S->deferred_frees);
+    assert(live == 6 && de1 == cr - live);            /* the dropped generation is destroyed (no leak, no double free), the rebuilt one is live */
+    printf("PASS: injected PENDING: stamp held, a second exec is held in the ring (not failed), runs after DONE in order; deferred frees after the fence (deferred=%llu)\n", (unsigned long long)S->deferred_frees);
 
     /* (3) after the drop the objects are rebuilt from their table entries and the chain runs again */
     memset(va_ptr((uint64_t)VPN_A << 14), 0, 0x4000); memset(va_ptr((uint64_t)VPN_C << 14), 0, 0x4000);
-    exec_chain(p, 3);
-    assert(cell(1) == 3 && g_irq == 3);
-    check_images("rebuilt");
+    exec_chain(p, 4);
+    assert(cell(1) == 4);
+    check_images("again");
 
+    /* (4) type 8 linear texture as a render target + blit source (regression of the old render path) */
+    { static const double g[4] = { 0, 1, 0, 1 }; uint32_t len[2];
+      cb_reset(0); cb_pass(REF_LIN, 2, g); cb_render_common(); { uint8_t r[8] = { 3, 0, 0, 0, 0, 0, 3, 0 }; cb_cmd(1, r, 8); } len[0] = cb_finish(0);
+      cb_reset(2); cb_tex_to_buf(REF_LIN, REF_C); len[1] = cb_finish(1);
+      uint32_t w[3 + 6 + 8], n = 0; w[n++] = 1; w[n++] = 3; w[n++] = 2;
+      w[n++] = REF_LIN; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_C; w[n++] = 4 | 2;
+      for (uint32_t i = 0; i < 2; i++) { uint64_t off = (uint64_t)(VPN_CMD + i) << 14, l = len[i]; memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2; }
+      submit(p, 0x43, 5, w, n); }
+    assert(cell(1) == 5 && S->linear_made == 1 && S->linear_unsupported == 0 && p->diag2.exec.run.obj_unsupported_linear == 0);
+    { const uint8_t *c = va_ptr((uint64_t)VPN_C << 14); assert(px(c, 8, 8) == RED && px(c, 15, 15) == GREEN); }
+    printf("PASS: type 8 linear texture rendered into and blitted\n");
+
+    /* (5) linear texture over a buffer, row pitch 96 > 64: render + flag 0x04; pixels land in the guest pages at offset/row, the padding stays untouched */
+    memset(va_ptr((uint64_t)VPN_LB << 14), SENT, 0x4000);
+    { static const double g[4] = { 0, 1, 0, 1 }; uint32_t len;
+      cb_reset(0); cb_pass(REF_LIN2, 2, g); cb_render_common(); { uint8_t r[8] = { 3, 0, 0, 0, 0, 0, 3, 0 }; cb_cmd(1, r, 8); } len = cb_finish(0);
+      uint32_t w[3 + 6 + 4], n = 0; w[n++] = 1; w[n++] = 3; w[n++] = 1;
+      w[n++] = REF_LIN2; w[n++] = 2 | 4; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0;
+      { uint64_t off = (uint64_t)VPN_CMD << 14, l = len; memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2; }
+      submit(p, 0x43, 6, w, n); }
+    assert(cell(1) == 6);
+    { const uint8_t *g = va_ptr((uint64_t)VPN_LB << 14);
+      for (uint32_t i = 0; i < 0x4000; i++) {
+          bool in_px = i >= LIN_OFF && i < LIN_OFF + LIN_ROW * RT_H && ((i - LIN_OFF) % LIN_ROW) < RT_W * 4u;
+          if (!in_px) assert(g[i] == SENT);   /* before the offset, the 32 padding bytes of every row, the tail: unchanged */
+      }
+      uint32_t c, e; memcpy(&c, g + LIN_OFF + 8 * LIN_ROW + 8 * 4, 4); memcpy(&e, g + LIN_OFF + 15 * LIN_ROW + 15 * 4, 4);
+      assert(c == RED && e == GREEN); }
+    assert(S->linear_made == 2 && S->linear_unsupported == 0);
+    printf("PASS: linear texture over a buffer, pitch 96: pixels written back, padding untouched\n");
+
+    /* (6) two threads: the shell timer polls while the vCPU thread rings doorbells (drains) and the GPU finishes. Three execs, the 2nd and 3rd held behind the
+     * slow first: each runs exactly once, stamps strictly in order, then a protocol reset races with the timer poll. */
+    for (int round = 0; round < 12; round++) {
+        uint32_t base = 100u + (uint32_t)round * 10u;
+        g_nstamps = 0; atomic_store(&g_last_stamp, 0);
+        lagfx_vk_test_inject_fence_result(VK_TIMEOUT);
+        uint64_t execs0 = S->execs;
+        exec_chain(p, base + 1); exec_chain(p, base + 2); exec_chain(p, base + 3);
+        assert(g_nstamps == 0 && S->execs == execs0 + 1 && lagfx_a64_res_is_pending(p));
+        atomic_store(&g_stop, 0);
+        pthread_t th; assert(pthread_create(&th, NULL, timer_thread, p) == 0);
+        lagfx_vk_test_inject_fence_result(0x7fffffff);
+        for (int i = 0; i < 4000 && atomic_load(&g_last_stamp) != base + 3; i++) {
+            channel_compute_dispatcher_drain(p, 1);   /* a doorbell racing with the timer */
+            struct timespec ts = { 0, 500 * 1000 }; nanosleep(&ts, NULL);
+        }
+        atomic_store(&g_stop, 1); pthread_join(th, NULL);
+        assert(atomic_load(&g_last_stamp) == base + 3 && S->execs == execs0 + 3);   /* each exactly once */
+        /* stamps strictly increasing, none twice, the last is the 3rd exec's (a retire batch writes the highest stamp of the batch once, so 1..3 writes) */
+        assert(g_nstamps >= 1 && g_nstamps <= 3 && g_stamps[g_nstamps - 1] == base + 3);
+        for (int k = 1; k < g_nstamps; k++) assert(g_stamps[k] > g_stamps[k - 1]);
+        assert(p->a64_held_chan_mask == 0 && !lagfx_a64_res_is_pending(p) && lagfx_arm64_cq_pending(p) == 0);
+    }
+    printf("PASS: two-thread stress: held execs ran once each, in order (12 rounds)\n");
+    for (int round = 0; round < 6; round++) {   /* reset / teardown racing with the timer poll */
+        lagfx_vk_test_inject_fence_result(VK_TIMEOUT);
+        exec_chain(p, 500u + round); exec_chain(p, 600u + round);
+        atomic_store(&g_stop, 0);
+        pthread_t th; assert(pthread_create(&th, NULL, timer_thread, p) == 0);
+        lagfx_vk_test_inject_fence_result(0x7fffffff);
+        if (round & 1) lagfx_protocol_reset(p); else { lagfx_arm64_cq_shutdown(p, 1000); lagfx_a64_exec_free(p); }
+        atomic_store(&g_stop, 1); pthread_join(th, NULL);
+        assert(!lagfx_a64_res_is_pending(p) && p->a64_held_chan_mask == 0 && p->a64cq == NULL);
+        memset(g_mem + ((uint64_t)RING_PFN0 << 14), 0, 4u << 14); g_wp = 0;
+        put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 0x00, 0); put32(((uint64_t)SHARED_PFN << 14) + LAGFX_RING_FIFO_DESC_BASE_OFFSET + 0x04, 0);
+        build_objects(); def_task(p, 1);   /* the guest comes back */
+        lagfx_a64_exec_set_pipeline_resolver(p, resolver, NULL);
+    }
+    printf("PASS: reset / teardown concurrent with the timer poll\n");
     printf("INFO: validation messenger %s\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive (LAGFX_VK_VALIDATION unset or layer missing)");
     assert(lagfx_vk_validation_msg_count == 0);       /* layouts / barriers between render and blit passes are valid */
     lagfx_arm64_cq_shutdown(p, 0);

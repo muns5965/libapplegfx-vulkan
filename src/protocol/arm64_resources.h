@@ -12,7 +12,8 @@
  *   type 1 and 19  buffer   {u64 length, u32 vpage, u32 flags}; the guest bytes live at task VA vpage << 14, length rounded up to 16 KiB
  *   type 2         texture  {u64 length, u32 vpage, layout{u16 mips, u16 slices, u64 base, u64 stride, mip table of 36 bytes}, description}
  *                  uncompressed, non-MSAA 2D / 2D array / 3D, formats in the table of arm64_resources.c
- * Not supported (resolve returns NULL, blit using them is counted as 'bad_object'): heaps (13/14), linear (8/9) and mapped (0xb) textures,
+ *                type 8/9 linear 2D texture {tag, size, ref, description} without guest pages: a device image only (render target / blit), no write-back
+ * Not supported (resolve returns NULL, blit using them is counted as 'bad_object'): heaps (13/14), mapped (0xb) textures,
  * cube/1D/MSAA/compressed/depth-stencil textures, type 6/7 objects.
  * Each supported object owns a host-visible "guest copy" VkBuffer holding the bytes in the GUEST layout (for a buffer it IS the object),
  * and a texture additionally a device VkImage kept in VK_IMAGE_LAYOUT_GENERAL between uses.
@@ -58,6 +59,7 @@ typedef struct {
     uint64_t sync_cmds, sync_objs, sync_skipped, inv_cmds, inv_objs, inv_missing, hint_cmds, res_cmd_bad;   /* ops 0x35/0x3e, 0x34, 0x3f */
     uint64_t gpu_timeout, gpu_fail, busy_skipped;   /* gpu_timeout: bounded wait ran out (pending, not failed); gpu_fail: a Vulkan call failed or the device was lost; busy_skipped: begin refused while the previous exec was still pending */
     uint64_t blit_seen, blit_done, blit_rejected, blit_noop, blit_unsupported;   /* per command */
+    uint64_t linear_made, linear_unsupported;   /* type 8/9 linear textures mirrored (device image only) / that could not be */
     uint64_t created, destroyed, deferred_frees;   /* mirror objects built / destroyed; frees parked until the in-flight fence signalled */
     uint64_t blit_tag[16];   /* done, indexed tag - 300 (300..315) */
 } lagfx_a64_stats_t;
@@ -79,6 +81,7 @@ struct lagfx_a64_obj {
     bool     leak;                      /* creation hit a GPU timeout: never freed */
     bool     host_valid, guest_stale;
     bool     has_pages;                 /* vpage != 0 */
+    bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
     uint64_t vpage;                     /* guest VA = vpage << 14 */
     VkBuffer buf; VkDeviceMemory buf_mem; uint8_t *map;     /* guest-layout copy (the object itself for a buffer) */

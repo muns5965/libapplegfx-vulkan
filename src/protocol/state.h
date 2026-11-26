@@ -554,10 +554,10 @@ typedef struct lagfx_protocol {
             /* ARM64 render execution (src/protocol/arm64_exec_run.c, LAGFX_ARM64_EXEC=1 only; all zero otherwise). */
             struct {
                 uint64_t execs, passes, draws, draws_skipped, submits, submit_failed, submit_pending, pending_leaked;
-                uint64_t busy_skipped, pending_unqueued, seg_blit;   /* execs refused while the previous one was in flight / PENDING without a completion queue / blit segments recorded */
+                uint64_t busy_skipped, pending_unqueued, seg_blit, held;   /* execs refused while the previous one was in flight / PENDING without a completion queue / blit segments recorded */
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
                 uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
-                uint64_t extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported;
+                uint64_t extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported, obj_unsupported_linear;
                 uint64_t tag_done[512], tag_partial[512], tag_unsup[512];   /* by inner tag; partial = recorded but not applied to Vulkan */
                 uint64_t tag_over;                                   /* tags >= 512, any outcome */
             } run;
@@ -611,6 +611,18 @@ typedef struct lagfx_protocol {
     /* ARM64 exec resource mirror (src/protocol/arm64_resources.c); NULL until the first LAGFX_ARM64_EXEC=1 exec. Freed by
      * lagfx_protocol_free / lagfx_protocol_reset through lagfx_a64_res_destroy. */
     void     *a64_res;
+    /* compute channels (bit = chan_id) whose next command is HELD in the ring (read pointer not advanced) because an exec is still in flight on the GPU:
+     * channel_compute_dispatcher_redrain_held() runs them once it finished. Never set unless LAGFX_ARM64_EXEC=1 in arm64 mode. */
+    uint32_t  a64_held_chan_mask;
+    /* EXECUTION LOCK (distinct from the completion queue's lock; order: exec lock -> cq lock, never the reverse). A recursive owner-aware lock, zero-initialised
+     * (works for protocols that are calloc'ed by tests). Held by: the compute drain (ARM64 + LAGFX_ARM64_EXEC=1), lagfx_arm64_poll_completions (try-lock),
+     * the held-command redrive, cq shutdown and lagfx_a64_exec_free. It makes the ring read pointer, the held mask, the exec mirror and the in-flight exec
+     * single-threaded: the vCPU thread (doorbell -> drain) and the shell timer thread (lagfx_device_poll_completions) never run them at the same time. A try-lock
+     * that fails means 'someone is draining/retiring right now', and that thread polls itself. Lifetime: the shell must stop its timer before lagfx_device_free. */
+    _Atomic uintptr_t a64_exec_owner;
+    uint32_t  a64_exec_depth;       /* only touched by the owner */
+    uint32_t  a64_drain_depth;      /* drain nesting, under the lock: no redrive from a poll made inside a drain */
+    void    (*a64_redrive)(struct lagfx_protocol *p);   /* set by the compute dispatcher when it holds a command: runs the held channels (exec lock held) */
 
 } lagfx_protocol_t;
 

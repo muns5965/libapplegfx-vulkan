@@ -288,12 +288,33 @@ bool lagfx_arm64_submit_dropped(lagfx_protocol_t *p, uint32_t slot, const lagfx_
     return lagfx_arm64_submit_end(p, c);
 }
 
+bool lagfx_a64_exec_trylock(lagfx_protocol_t *p) {
+    uintptr_t me = (uintptr_t)pthread_self(), cur = atomic_load(&p->a64_exec_owner);
+    if (cur == me) { p->a64_exec_depth++; return true; }
+    uintptr_t zero = 0;
+    if (atomic_compare_exchange_strong(&p->a64_exec_owner, &zero, me)) { p->a64_exec_depth = 1; return true; }
+    return false;
+}
+void lagfx_a64_exec_lock(lagfx_protocol_t *p) { while (!lagfx_a64_exec_trylock(p)) { struct timespec ts = { 0, 50000 }; nanosleep(&ts, NULL); } }
+void lagfx_a64_exec_unlock(lagfx_protocol_t *p) { if (p->a64_exec_depth && --p->a64_exec_depth == 0) atomic_store(&p->a64_exec_owner, 0); }
+
 size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p) {
-    if (!lagfx_protocol_is_valid(p) || !p->a64cq) return 0;
-    struct lagfx_arm64_cq *cq = p->a64cq;
-    if (pthread_mutex_trylock(&cq->lock) != 0) return 0;
-    size_t n = cq->pending ? retire_locked(p, cq) : 0;
-    pthread_mutex_unlock(&cq->lock);
+    if (!lagfx_protocol_is_valid(p)) return 0;
+    if (!lagfx_a64_exec_trylock(p)) return 0;   /* another thread is draining / retiring / tearing down: it polls itself */
+    size_t n = 0;
+    if (p->a64cq) {
+        struct lagfx_arm64_cq *cq = p->a64cq;
+        if (pthread_mutex_trylock(&cq->lock) == 0) {
+            n = cq->pending ? retire_locked(p, cq) : 0;
+            pthread_mutex_unlock(&cq->lock);
+        }
+    }
+    /* execution hold: commands left in the ring behind an exec that was still running resume HERE, without a new guest doorbell (not from a poll made inside a drain) */
+    if ((p->a64_held_chan_mask || lagfx_arm64_held_channels(p)) && p->a64_redrive && !p->a64_drain_depth) {
+        p->a64_redrive(p);
+        if (p->a64cq && pthread_mutex_trylock(&p->a64cq->lock) == 0) { n += p->a64cq->pending ? retire_locked(p, p->a64cq) : 0; pthread_mutex_unlock(&p->a64cq->lock); }
+    }
+    lagfx_a64_exec_unlock(p);
     return n;
 }
 
@@ -334,6 +355,8 @@ static void drain_work(cq_work_t *w, uint64_t deadline_ns) {
 
 void lagfx_arm64_cq_shutdown(lagfx_protocol_t *p, uint32_t timeout_ms) {
     if (!lagfx_protocol_is_valid(p) || !p->a64cq) return;
+    lagfx_a64_exec_lock(p);   /* no drain / poll runs while the queue is freed */
+    if (!p->a64cq) { lagfx_a64_exec_unlock(p); return; }
     struct lagfx_arm64_cq *cq = p->a64cq;
     pthread_mutex_lock(&cq->lock);
     uint64_t deadline = now_ns() + (uint64_t)timeout_ms * 1000000ull;
@@ -349,9 +372,11 @@ void lagfx_arm64_cq_shutdown(lagfx_protocol_t *p, uint32_t timeout_ms) {
     if (cq->cur) { for (uint32_t i = 0; i < cq->cur->nwork; i++) drain_work(&cq->cur->work[i], deadline); free(cq->cur); cq->cur = NULL; }
     if (dropped) LAGFX_WARN("arm64 cq: shutdown with %zu uncompleted command(s); their stamps are not written", dropped);
     p->a64cq = NULL;
+    p->a64_held_chan_mask = 0;   /* the guest is going away: nothing stays held in its ring */
     pthread_mutex_unlock(&cq->lock);
     pthread_mutex_destroy(&cq->lock);
     free(cq);
+    lagfx_a64_exec_unlock(p);
 }
 
 /* ---- barriers gate PROCESSING (Henge pvg_lite.c ~930-960): a command carrying {channel, stamp} slots is not processed until that channel has

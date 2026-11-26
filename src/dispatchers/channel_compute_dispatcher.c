@@ -425,13 +425,18 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     }
 }
 
+static void channel_compute_dispatcher_redrive_held_cb(lagfx_protocol_t *p);
+static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id);
+
 /* Drain ring buffer for compute channels. Returns number of commands processed. */
 static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id);
 
-/* Re-run channels whose head command is held by a barrier (queue on only). */
+/* Re-run channels whose head command is held by a barrier (queue on only). Counts as a drain nesting (no redrive from the polls inside). */
 size_t channel_compute_retry_held(lagfx_protocol_t *p) {
     size_t n = 0;
     uint32_t held = lagfx_arm64_held_channels(p);
+    if (!held) return 0;
+    p->a64_drain_depth++;
     for (uint32_t ch = 1; held && ch <= 4; ch++) {
         if (!(held & (1u << ch))) continue;
         held &= ~(1u << ch);
@@ -441,17 +446,7 @@ size_t channel_compute_retry_held(lagfx_protocol_t *p) {
         p->current_chan_id = save;
         lagfx_arm64_chan_leave(p, ch);
     }
-    return n;
-}
-
-size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
-    if (!lagfx_protocol_is_valid(p)) return 0;
-    bool own = lagfx_arm64_cq_ensure(p) && lagfx_arm64_chan_enter(p, chan_id);   /* queue off: no guard, nothing changes */
-    size_t n = drain_impl(p, chan_id);
-    if (own) {
-        lagfx_arm64_chan_leave(p, chan_id);
-        if (lagfx_arm64_held_channels(p)) n += channel_compute_retry_held(p);   /* this drain may have released another channel's barrier */
-    }
+    p->a64_drain_depth--;
     return n;
 }
 
@@ -496,6 +491,7 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
 
     uint32_t rp = read_ptr;
     size_t cmds = 0;
+    p->a64_held_chan_mask &= ~(1u << (chan_id & 31u));   /* set again below if the next command is held again */
     const bool a64 = lagfx_proto_arm64(p);
     /* ARM64 (Apple pvg_lite.c do_channel): free-running u32 counters; more pending than the ring holds means the pointers are garbage: drop it all. */
     if (a64 && (uint32_t)(write_ptr - rp) > ring_size) {
@@ -547,7 +543,10 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
                     p->current_chan_id = save;
                     lagfx_arm64_chan_leave(p, dep);
                 }
-                if (lagfx_arm64_barrier_gate(p, chan_id, bar, nb) == LAGFX_BARRIER_HOLD) break;   /* rp stays: retried later */
+                if (lagfx_arm64_barrier_gate(p, chan_id, bar, nb) == LAGFX_BARRIER_HOLD) {   /* rp stays: retried by the end of any drain / the poll (no doorbell) */
+                    p->a64_redrive = channel_compute_dispatcher_redrive_held_cb;
+                    break;
+                }
             }
         }
         if (a64 && length > LAGFX_COMPUTE_MAX_CMD_BYTES && length <= ring_size) {
@@ -568,6 +567,18 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
                        chan_id, length, rp, opcode,
                        hdr_buf[0], hdr_buf[1], hdr_buf[2], hdr_buf[3],
                        hdr_buf[4], hdr_buf[5], hdr_buf[6], hdr_buf[7]);
+            break;
+        }
+
+        /* ARM64 + LAGFX_ARM64_EXEC=1: while an exec is still running on the GPU (bounded wait ran out: slow, NOT failed) the next command that would touch the
+         * same resources (exec 0x43/0x45, synchronize/invalidate 0x34/0x35/0x3e) stays UNPROCESSED in the ring: the read pointer is not advanced, nothing completes
+         * early and nothing fails. Commands behind it on this channel wait too (order). channel_compute_dispatcher_redrain_held() / the next drain retries once
+         * the exec finished. Only a FAULTed GPU (device lost / hard timeout) does not hold: the command then completes as failed through the queue. */
+        if (a64 && p->a64cq && (opcode == 0x43 || opcode == 0x45 || opcode == 0x34 || opcode == 0x35 || opcode == 0x3e) && lagfx_a64_res_is_pending(p) &&
+            !lagfx_arm64_gpu_faulted(p) && lagfx_a64_res_poll(p, 0) == LAGFX_A64_PENDING) {
+            p->a64_held_chan_mask |= 1u << (chan_id & 31u);
+            p->a64_redrive = channel_compute_dispatcher_redrive_held_cb;
+            p->diag2.exec.run.held++;
             break;
         }
 
@@ -631,6 +642,11 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
         rp = rp + length;  /* absolute, monotonic — see per-channel-ring-pfn-array.md */
     }
 
+    if (a64 && p->a64cq && rp != write_ptr && cmds >= LAGFX_COMPUTE_DRAIN_MAX_CMDS) {   /* per-drain cap reached with commands left: the poll resumes them (never dropped, no new doorbell) */
+        p->a64_held_chan_mask |= 1u << (chan_id & 31u);
+        p->a64_redrive = channel_compute_dispatcher_redrive_held_cb;
+    }
+
     /* Publish the drained position back to the descriptor so the
      * kext's watchdog observes progress (channel-progress-flag-RE.md). */
     lagfx_ring_publish_read_ptr(p, desc_gpa, rp);
@@ -639,4 +655,43 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
     LAGFX_LOG("compute drain: ch=%u drained=%zu new rp=0x%x",
               chan_id, cmds, rp);
     return cmds;
+}
+
+/* The public drain. ARM64 + LAGFX_ARM64_EXEC=1: runs under the execution lock (state.h a64_exec_owner), so the ring read pointer, the held masks and the exec
+ * mirror are only ever touched by one thread: a held command is read, executed and its rp advanced by exactly one drain. Queue on: the channel is guarded
+ * against recursion (barrier dependency drains) and, at the end, channels held by a barrier are retried (this drain may have released one). */
+size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
+    if (!lagfx_protocol_is_valid(p)) return 0;
+    bool lk = lagfx_proto_arm64(p) && lagfx_a64_res_enabled();
+    if (lk) lagfx_a64_exec_lock(p);
+    p->a64_drain_depth++;
+    bool own = lagfx_arm64_cq_ensure(p) && lagfx_arm64_chan_enter(p, chan_id);   /* queue off: no guard, nothing changes */
+    size_t n = drain_impl(p, chan_id);
+    if (own) {
+        lagfx_arm64_chan_leave(p, chan_id);
+        if (lagfx_arm64_held_channels(p)) n += channel_compute_retry_held(p);
+    }
+    p->a64_drain_depth--;
+    if (lk) lagfx_a64_exec_unlock(p);
+    return n;
+}
+
+/* Retries the channels that hold a command behind an in-flight exec (see the hold in the drain_impl). Runs with the execution lock (taken here when called
+ * directly; from lagfx_arm64_poll_completions it is already held). Cheap no-op when nothing is held. */
+size_t channel_compute_dispatcher_redrain_held(lagfx_protocol_t *p) {
+    size_t n = 0;
+    if (!lagfx_protocol_is_valid(p) || !p->a64_held_chan_mask) return 0;
+    if (!lagfx_a64_exec_trylock(p)) return 0;   /* the other thread is draining: it will run them */
+    if (!(lagfx_a64_res_is_pending(p) && !lagfx_arm64_gpu_faulted(p) && lagfx_a64_res_poll(p, 0) == LAGFX_A64_PENDING)) {
+        uint32_t mask = p->a64_held_chan_mask;
+        for (uint32_t ch = 0; ch < 32u; ch++)
+            if (mask & (1u << ch)) { uint8_t save = p->current_chan_id; p->current_chan_id = (uint8_t)ch; n += channel_compute_dispatcher_drain(p, ch); p->current_chan_id = save; }
+    }
+    lagfx_a64_exec_unlock(p);
+    return n;
+}
+/* The poll's redrive (exec lock held, not inside a drain): both kinds of held channel, exec-held first. */
+static void channel_compute_dispatcher_redrive_held_cb(lagfx_protocol_t *p) {
+    channel_compute_dispatcher_redrain_held(p);
+    channel_compute_retry_held(p);
 }

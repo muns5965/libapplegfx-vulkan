@@ -114,6 +114,11 @@ uint32_t lagfx_arm64_held_channels(lagfx_protocol_t *p);
 bool lagfx_arm64_chan_enter(lagfx_protocol_t *p, uint32_t ch);
 void lagfx_arm64_chan_leave(lagfx_protocol_t *p, uint32_t ch);
 
+/* Execution lock (see state.h a64_exec_owner). Recursive; try variant never blocks. Safe on any protocol (cheap when uncontended). */
+bool lagfx_a64_exec_trylock(lagfx_protocol_t *p);
+void lagfx_a64_exec_lock(lagfx_protocol_t *p);
+void lagfx_a64_exec_unlock(lagfx_protocol_t *p);
+
 /* Retire every finished entry in per-channel order. Returns the number of stamps retired (>=0); at most one IRQ is raised for the batch. */
 size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p);
 size_t lagfx_arm64_cq_pending(lagfx_protocol_t *p);

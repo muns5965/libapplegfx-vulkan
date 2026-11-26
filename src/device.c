@@ -426,16 +426,17 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
 
 size_t lagfx_device_poll_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
-    lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
-    channel_compute_retry_held(p);   /* channels held by a barrier (their dependency may have been submitted since) */
-    return lagfx_arm64_poll_completions(p);
+    /* retires finished stamps AND resumes held channels (barrier dependency or exec in flight) without a new doorbell */
+    return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);
 }
 
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
     lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;
-    uint32_t held = lagfx_arm64_held_channels(p);
-    return lagfx_arm64_cq_pending(p) + (size_t)__builtin_popcount(held);   /* keep the shell's timer running while a barrier holds a channel */
+    if (!lagfx_a64_exec_trylock(p)) return 1;   /* a drain / retire / teardown is running right now: keep the timer going */
+    size_t n = lagfx_arm64_cq_pending(p) + (size_t)__builtin_popcount(lagfx_arm64_held_channels(p)) + (p->a64_held_chan_mask ? 1u : 0u);   /* barrier-held channels and a held exec command both need the shell's timer */
+    lagfx_a64_exec_unlock(p);
+    return n;
 }
 
 void lagfx_device_free(lagfx_device_t *device) {

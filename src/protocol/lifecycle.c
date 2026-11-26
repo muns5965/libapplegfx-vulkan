@@ -49,6 +49,7 @@ void lagfx_protocol_free(lagfx_protocol_t *p) {
 void lagfx_protocol_reset(lagfx_protocol_t *p) {
     if (!lagfx_protocol_is_valid(p)) return;
 
+    lagfx_a64_exec_lock(p);   /* a concurrent drain / timer poll waits (or skips) until the reset is over */
     /* Clear tables and inflight state; preserve ring geometry */
     lagfx_arm64_cq_shutdown(p, 1000);   /* uncompleted stamps are dropped; the guest is being reset */
     lagfx_a64_exec_free(p);             /* the tasks (and so every object ref, pipeline and mirror) go away */
@@ -61,6 +62,7 @@ void lagfx_protocol_reset(lagfx_protocol_t *p) {
     p->unknown_opcode_count = 0;
     p->write_ptr = 0;
     p->read_ptr = 0;
+    p->a64_held_chan_mask = 0;   /* nothing is held across a reset */
     /* Atomic stores are required because cross-thread readers may
      * already be observing the field. memory_order_relaxed is fine
      * here — caller is responsible for quiescing the device before
@@ -69,4 +71,5 @@ void lagfx_protocol_reset(lagfx_protocol_t *p) {
                           memory_order_relaxed);
     atomic_store_explicit(&p->pending_displays_bitmask, 0u,
                           memory_order_relaxed);
+    lagfx_a64_exec_unlock(p);
 }
