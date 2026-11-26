@@ -75,6 +75,24 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
                                   uint8_t                 **out_blob,
                                   size_t                   *out_size_bytes);
 
+/* OpUndef usage of a translated module (the translator substitutes OpUndef for operands it cannot resolve; one that reaches control flow makes the result driver
+ * dependent). MAY-reach taint over the finished SPIR-V, see spv_undef_report.c.
+ *   undef_defs      OpUndef instructions in the module (incl. unused pre-warmed placeholders)
+ *   undef_used      of those, consumed by at least one function-body instruction
+ *   reach_branch    OpBranchConditional whose condition may derive from an OpUndef
+ *   reach_switch    OpSwitch whose selector may derive from an OpUndef
+ *   reach_select_cond OpSelect whose condition may derive from an OpUndef
+ *   reach_store     OpStore / OpReturnValue / OpImageWrite of a value that may derive from an OpUndef */
+typedef struct {
+    uint32_t undef_defs, undef_used, reach_branch, reach_switch, reach_select_cond, reach_store;
+} lagfx_spv_undef_report_t;
+void lagfx_spv_undef_analyze(const void *spv, size_t bytes, lagfx_spv_undef_report_t *out);
+
+/* Process-wide totals of the report over every module lagfx_air2spv_translate_module_ex() produced (diagnostic counters; `modules` = translated modules,
+ * `modules_ctl` = modules with reach_branch + reach_switch + reach_select_cond > 0). */
+typedef struct { uint64_t modules, modules_ctl, undef_used, reach_ctl, reach_store, rejected; } lagfx_undef_totals_t;   /* rejected = modules refused because of modules_ctl (fail closed; LAGFX_ALLOW_UNDEF_CONTROL=1 disables) */
+void lagfx_air2spv_undef_totals(lagfx_undef_totals_t *out);
+
 /* One resource argument of the module's entry point, in FUNCTION-ARG ORDER
  * (the same order the translator assigns sequential SPIR-V bindings), with
  * its Metal resource index from Apple's own arg metadata.

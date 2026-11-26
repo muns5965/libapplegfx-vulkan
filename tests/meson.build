@@ -1615,3 +1615,16 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-i1-const-lavapipe.c') and vu
   test('air2spv i1 constants + any/all on lavapipe', air2spv_i1_vk_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# OpUndef usage report + fail-closed translation (fixtures undefctl_fragment / i1const_fragment).
+if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
+  air2spv_undef_test = executable('air2spv-undef-report-unit',
+    'air2spv-undef-report-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv undef report + fail closed (unit)', air2spv_undef_test,
+    workdir : meson.current_source_dir() / '..')
+endif

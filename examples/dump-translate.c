@@ -84,6 +84,8 @@ int main(int argc, char **argv) {
                 size_t ol = strlen(out);
                 if (nvs) snprintf(out + ol, sizeof out - ol, "__vs%.8s.spv", vsl[vi]); else snprintf(out + ol, sizeof out - ol, ".spv");
                 FILE *o = fopen(out, "wb"); if (o) { fwrite(spv, 1, sz, o); fclose(o); ok++; } else { fprintf(stderr, "%s: cannot write\n", out); bad++; }
+                if (getenv("DUMP_UNDEF")) { lagfx_spv_undef_report_t ur; lagfx_spv_undef_analyze(spv, sz, &ur);   /* DUMP_UNDEF=1: per-module OpUndef usage report (src/air2spv/spv_undef_report.c) */
+                    printf("undef %s %s: defs=%u used=%u branch=%u switch=%u select_cond=%u store=%u\n", libh, fn[k].name, ur.undef_defs, ur.undef_used, ur.reach_branch, ur.reach_switch, ur.reach_select_cond, ur.reach_store); }
                 if (getenv("DUMP_CAPS")) printf("caps %s %s: 0x%x\n", libh, fn[k].name, lagfx_spv_required_caps(spv, sz));
                 free(spv); spv = NULL;
             }
@@ -93,5 +95,9 @@ int main(int argc, char **argv) {
         free(lib);
     }
     }
-    closedir(d); printf("translated %d functions, %d failed\n", ok, bad); return bad ? 1 : 0;
+    closedir(d);
+    { lagfx_undef_totals_t t; lagfx_air2spv_undef_totals(&t);
+      printf("undef summary: %llu modules, %llu with a possibly-undefined value in control flow (%llu control sinks), %llu undef values used, %llu stores of possibly-undefined values, %llu rejected (fail closed)\n",
+             (unsigned long long)t.modules, (unsigned long long)t.modules_ctl, (unsigned long long)t.reach_ctl, (unsigned long long)t.undef_used, (unsigned long long)t.reach_store, (unsigned long long)t.rejected); }
+    printf("translated %d functions, %d failed\n", ok, bad); return bad ? 1 : 0;
 }

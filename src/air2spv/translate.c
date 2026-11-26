@@ -252,6 +252,9 @@ lagfx_air2spv_translate_module(const lagfx_air_module_t *m,
     return lagfx_air2spv_translate_module_ex(m, NULL, out_blob, out_size_bytes);
 }
 
+static lagfx_undef_totals_t g_undef_totals;
+void lagfx_air2spv_undef_totals(lagfx_undef_totals_t *out) { if (out) *out = g_undef_totals; }
+
 lagfx_status_t
 lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
                                 const lagfx_stage_keys_t *vs_out,
@@ -304,6 +307,19 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
             if (bst == LAGFX_OK) {
                 /* the translator does not always declare the 8/16-bit storage capabilities it relies on: add them so a device that has the feature accepts the module */
                 if (!lagfx_spv_declare_used_caps(out_blob, out_size_bytes)) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; return LAGFX_ERR_OUT_OF_MEMORY; }
+                lagfx_spv_undef_report_t ur; lagfx_spv_undef_analyze(*out_blob, *out_size_bytes, &ur);
+                uint32_t ctl = ur.reach_branch + ur.reach_switch + ur.reach_select_cond;
+                g_undef_totals.modules++; g_undef_totals.undef_used += ur.undef_used; g_undef_totals.reach_ctl += ctl; g_undef_totals.reach_store += ur.reach_store;
+                if (ctl) g_undef_totals.modules_ctl++;
+                if (ctl) {
+                    LAGFX_WARN("air2spv: undef_used=%u of %u OpUndef; may-be-undefined values control %u branch / %u switch / %u select condition(s) and feed %u store(s): result is driver dependent",
+                               ur.undef_used, ur.undef_defs, ur.reach_branch, ur.reach_switch, ur.reach_select_cond, ur.reach_store);
+                    /* FAIL CLOSED: a module whose control flow depends on an unresolved operand is not built (no stub fallback either: a stub would silently draw the wrong thing). On the
+                     * 39 shaders of the real dump the count is 0 (tools/check-dump-spirv.sh), so this rejects nothing valid there; LAGFX_ALLOW_UNDEF_CONTROL=1 restores the old behaviour.
+                     * The analysis is a MAY-reach over-approximation: a reported module may still be correct, which is why the override exists. */
+                    g_undef_totals.rejected++;
+                    if (!getenv("LAGFX_ALLOW_UNDEF_CONTROL")) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; return LAGFX_ERR_PROTOCOL; }
+                } else LAGFX_TRACE("air2spv: undef_used=%u of %u OpUndef, %u store(s) of possibly undefined values, no control flow affected", ur.undef_used, ur.undef_defs, ur.reach_store);
                 return LAGFX_OK;
             }
             LAGFX_WARN("air2spv: translate_function failed (st=%d); falling back",
