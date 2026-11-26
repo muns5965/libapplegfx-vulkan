@@ -435,6 +435,11 @@ void lagfx_device_diag_tick(lagfx_device_t *device) {
     lagfx_diag_tick((lagfx_protocol_t *)device->protocol_state);
 }
 
+void lagfx_device_diag_final(lagfx_device_t *device) {
+    if (!lagfx_device_is_valid(device) || !device->protocol_state) return;
+    lagfx_diag_final((lagfx_protocol_t *)device->protocol_state);
+}
+
 size_t lagfx_device_pending_completions(lagfx_device_t *device) {
     if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
     lagfx_protocol_t *p = (lagfx_protocol_t *)device->protocol_state;

@@ -1296,7 +1296,7 @@ if fs.is_file(meson.current_source_dir() / 'task-define-unit.c')
 endif
 
 if fs.is_file(meson.current_source_dir() / 'diag-unit.c')
-  diag_deps = [libapplegfx_vulkan_dep]
+  diag_deps = [libapplegfx_vulkan_dep, dependency('threads')]
   if vulkan_dep.found()
     diag_deps += [vulkan_dep]
   endif

@@ -26,10 +26,19 @@ void lagfx_diag_note_0x44(lagfx_protocol_t *p, uint32_t chan, uint32_t task) {
     p->diag2.last44_global_task = task; p->diag2.last44_global_seq = p->diag2.seq; p->diag2.last44_global_valid = 1;
 }
 
+/* First observer starts the clocks (several threads may race here): last_stats is stored BEFORE t0 is published, and only one thread's t0 wins.
+ * Returns true if this call started them. */
+static bool diag_init_clock(lagfx_protocol_t *p, uint64_t t) {
+    if (__atomic_load_n(&p->diag2.t0_ns, __ATOMIC_ACQUIRE)) return false;
+    uint64_t zero = 0;
+    __atomic_store_n(&p->diag2.last_stats_ns, t, __ATOMIC_RELAXED);
+    return __atomic_compare_exchange_n(&p->diag2.t0_ns, &zero, t, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
+
 void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, const uint8_t *raw, uint32_t length) {
     if (!p || !raw || length < 12u || src < 0 || src > 2) return;
     uint64_t t = now_ns();
-    if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; }
+    diag_init_clock(p, t);
     p->diag2.last_cmd_ns = t;
     uint64_t seq = ++p->diag2.seq;
     uint16_t op = (uint16_t)(raw[0] | raw[1] << 8);
@@ -60,7 +69,7 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
     if (((p->diag2.mmio_reads + p->diag2.mmio_writes) & 0xffu) != 0u) return;
     uint64_t t = now_ns();
     p->diag2.last_mmio_ns = t;
-    if (!p->diag2.t0_ns) { p->diag2.t0_ns = t; p->diag2.last_stats_ns = t; return; }
+    if (diag_init_clock(p, t)) return;
     lagfx_diag_stats(p, t, false);
 }
 
@@ -78,7 +87,7 @@ void lagfx_diag_final(lagfx_protocol_t *p) {
 void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
     uint64_t last = __atomic_load_n(&p->diag2.last_stats_ns, __ATOMIC_RELAXED);
     if (!final) {
-        if (t - last < 10ull * 1000000000ull) return;
+        if (t <= last || t - last < 10ull * 1000000000ull) return;   /* t <= last: another thread already stored a newer stamp — never underflow */
         /* only one of several callers (two vCPU threads + timer) prints for a given interval */
         if (!__atomic_compare_exchange_n(&p->diag2.last_stats_ns, &last, t, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) return;
     } else {

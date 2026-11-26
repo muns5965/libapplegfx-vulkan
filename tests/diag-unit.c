@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 #include <unistd.h>
 
 static long file_lines(const char *path, const char *needle) {
@@ -13,6 +14,12 @@ static long file_lines(const char *path, const char *needle) {
     char line[2048]; long n = 0;
     while (fgets(line, sizeof line, f)) if (strstr(line, needle)) n++;
     fclose(f); return n;
+}
+
+static void *tick_hammer(void *arg) {
+    lagfx_protocol_t *p = arg;
+    for (int i = 0; i < 20000; i++) lagfx_diag_tick(p);
+    return NULL;
 }
 
 int main(void) {
@@ -75,8 +82,17 @@ int main(void) {
         assert(file_lines(path, "g7-gpu: t=") == nb + 1);
         lagfx_diag_tick(p);   /* once per interval, however many callers */
         assert(file_lines(path, "g7-gpu: t=") == nb + 1);
+        /* concurrent callers (two vCPU threads + the shell timer + more): one line per interval, and a stamp stored by another thread never makes t - last underflow */
+        p->diag2.last_stats_ns -= 11ull * 1000000000ull;
+        pthread_t th[8];
+        for (int i = 0; i < 8; i++) assert(pthread_create(&th[i], NULL, tick_hammer, p) == 0);
+        for (int i = 0; i < 8; i++) pthread_join(th[i], NULL);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 2);
+        p->diag2.last_stats_ns = p->diag2.last_stats_ns + 5ull * 1000000000ull;   /* a stamp NEWER than now: no print, no underflow */
+        lagfx_diag_tick(p);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 2);
         lagfx_diag_final(p);
-        assert(file_lines(path, "g7-gpu: t=") == nb + 2 && file_lines(path, "g7-gpu-final:") == 1);
+        assert(file_lines(path, "g7-gpu: t=") == nb + 3 && file_lines(path, "g7-gpu-final:") == 1);
     }
 
     free(p); remove(path); close(fd);
