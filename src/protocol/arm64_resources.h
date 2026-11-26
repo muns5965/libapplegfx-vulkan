@@ -92,6 +92,8 @@ struct lagfx_a64_obj {
     struct lagfx_a64_msurf *ms; uint32_t mapping;       /* type 11: the shared surface image (host_valid / guest_stale of the object live in ms); has_pages stays false */
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t wgen;                      /* buffer: bumped at every write the mirror knows of (guest upload, blit / fill / texture->buffer copy, linear push, shader-writable bind, tile kernel) */
+    uint64_t rd_epoch; bool gpu_dirty;  /* buffer: exec epoch of the last read from the guest's pages; written by the GPU (blit / push / shader / tile) since that read */
+    VkImageView sview;                  /* sampled view when it differs from view (A8Unorm: components 0,0,0,R); lazily made */
     uint64_t lin_seen; bool lin_pulled; /* linear texture: wgen of the backing buffer when the image last took (pulled) or gave (pushed) the buffer's bytes; image is current iff lin_pulled && lin_seen == buffer wgen */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
     uint64_t vpage;                     /* guest VA = vpage << 14 */
@@ -120,6 +122,11 @@ void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
  * texture of the exec's resource list whose backing buffer changed since its last pull (call OUTSIDE a render pass: it records copies); lagfx_a64_res_linear_fresh says
  * whether the image is current right now (a change inside the open pass makes it stale until the next sync: the draw is skipped, never drawn with old bytes);
  * lagfx_a64_res_buf_written records a write the mirror cannot see happening (shader-writable binding, tile kernel). */
+/* lagfx_a64_res_prepare_sampled: a texture a render encoder binds for sampling that the exec's resource list did not name. Call OUTSIDE a render pass (it records
+ * copies): resolves (creates) the object, takes the guest's bytes on first use, and for a linear texture makes the image current: the backing buffer is re-read from
+ * the guest's pages once per exec unless the GPU wrote it since (assumption, unverified on a device: the guest may change a shared buffer at any time) and the image is
+ * pulled when the buffer changed. false = no usable texture (the creation failure is memoed for lagfx_a64_res_diagnose). */
+bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref);
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x);
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b);

@@ -305,15 +305,16 @@ static uint32_t cb_finish(void) {
     return g_cbn;
 }
 static bool g_res_tex, g_res_lin;
+static uint32_t g_lin_n = 3;                   /* how many of REF_LBUF / REF_LTEX / REF_LRT the exec's resource list names when g_res_lin (the rest must be found by the pass itself) */
 static uint32_t g_extra_refs[16], g_nextra;   /* more refs for the exec's resource list (the reason tests list objects that must or must not be created) */
 static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len) {
     static const uint32_t refs[] = { REF_TEX, REF_TEX2, REF_PIPE_TRI, REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT, REF_FN_TRI_A, REF_PIPE_TRI2, REF_PIPE_TEX };
     static const uint32_t lrefs[] = { REF_LBUF, REF_LTEX, REF_LRT };
     uint32_t nr = g_res_tex ? 9u : 8u;           /* the textured pipeline is in the resource list only when the test uses it (listing it creates its object) */
     uint32_t w[3 + 2 * 28 + 4], n = 0;
-    w[n++] = task; w[n++] = nr + (g_res_lin ? 3u : 0u) + g_nextra; w[n++] = 1;
+    w[n++] = task; w[n++] = nr + (g_res_lin ? g_lin_n : 0u) + g_nextra; w[n++] = 1;
     for (uint32_t i = 0; i < nr; i++) { w[n++] = refs[i]; w[n++] = 0; }
-    if (g_res_lin) for (uint32_t i = 0; i < 3; i++) { w[n++] = lrefs[i]; w[n++] = 0; }
+    if (g_res_lin) for (uint32_t i = 0; i < g_lin_n; i++) { w[n++] = lrefs[i]; w[n++] = 0; }
     for (uint32_t i = 0; i < g_nextra; i++) { w[n++] = g_extra_refs[i]; w[n++] = 0; }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
@@ -544,17 +545,18 @@ static void test_tex_unbound_reasons(void) {
     exec(p, 1, cb_finish());
     g_nextra = 0;
     const unsigned NDRAW = 1 + (unsigned)(sizeof seq / sizeof *seq) + 1;
-    assert(RUNC(p).draws == 0 && PIPE(p).desc_unbound == NDRAW && PIPE(p).desc_unbound_why[3] == NDRAW);
+    /* R_OK_UNLISTED is well formed but not in the resource list: the pass's textures are created before it opens, so its draw is made (it used to be not_mirrored) */
+    assert(RUNC(p).draws == 1 && PIPE(p).desc_unbound == NDRAW - 1u && PIPE(p).desc_unbound_why[3] == NDRAW - 1u && lagfx_a64_res_lookup(p, 1, R_OK_UNLISTED) != NULL);
     uint64_t sum = 0;
     for (unsigned c = 0; c < TEXWHY_COUNT; c++) sum += PIPE(p).desc_tex_why[c];
-    assert(sum == NDRAW);                                                   /* the split adds up to the old single counter */
+    assert(sum == NDRAW - 1u);                                                 /* the split adds up to the old single counter */
     assert(PIPE(p).desc_tex_why[TEXWHY_SLOT_UNBOUND] == 1);
     assert(PIPE(p).desc_tex_why[TEXWHY_REF_ZERO] == 1);
     assert(PIPE(p).desc_tex_why[TEXWHY_NO_TABLE] == 1);                     /* ref 100 is beyond the object table length */
     assert(PIPE(p).desc_tex_why[TEXWHY_ENTRY_EMPTY] == 1);
     assert(PIPE(p).desc_tex_why[TEXWHY_NOT_TEXTURE] == 1);                  /* a buffer */
     assert(PIPE(p).desc_tex_why[TEXWHY_UNKNOWN_TYPE] == 1);                 /* a function */
-    assert(PIPE(p).desc_tex_why[TEXWHY_NOT_MIRRORED] == 1);                 /* a well-formed texture that was not in the exec's resource list */
+    assert(PIPE(p).desc_tex_why[TEXWHY_NOT_MIRRORED] == 0);                 /* nothing: a well-formed texture outside the resource list is created before the pass */
     assert(PIPE(p).desc_tex_why[TEXWHY_C_FORMAT] == 1);
     assert(PIPE(p).desc_tex_why[TEXWHY_C_MSAA] == 1);
     assert(PIPE(p).desc_tex_why[TEXWHY_C_TYPE] == 1);
@@ -564,7 +566,6 @@ static void test_tex_unbound_reasons(void) {
     /* the logged distinct texture of a reason names the object: entry type, Metal format, extent */
     assert(PIPE(p).desc_tex_nseen[TEXWHY_C_FORMAT] == 1 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].ref == R_BC1 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].type == 2 &&
            PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].mtl_format == 130 && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].w == RT_W && PIPE(p).desc_tex_seen[TEXWHY_C_FORMAT][0].h == RT_H);
-    assert(PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].ref == R_OK_UNLISTED && PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].mtl_format == 80 && PIPE(p).desc_tex_seen[TEXWHY_NOT_MIRRORED][0].task == 1);
     assert(PIPE(p).desc_tex_seen[TEXWHY_C_MAPPED_NODESC][0].type == 11 && PIPE(p).desc_tex_seen[TEXWHY_C_MAPPED_NODESC][0].mapping == 7);
     assert(PIPE(p).desc_tex_seen[TEXWHY_UNKNOWN_TYPE][0].type == LAGFX_A64_OBJ_FUNCTION);
     /* the diagnosis is also callable on its own, and follows the guest: the entry gets filled in later (created later than the first draw) */
@@ -576,7 +577,7 @@ static void test_tex_unbound_reasons(void) {
     cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); { uint32_t r1 = R_EMPTY; cb_refs(114, 0, &r1, 1); } cb_draw(4, 0, 4);
     exec(p, 1, cb_finish());
     g_nextra = 0;
-    assert(RUNC(p).draws == 1 && PIPE(p).desc_unbound == NDRAW);            /* once the entry is filled in and listed, it resolves and draws */
+    assert(RUNC(p).draws == 2 && PIPE(p).desc_unbound == NDRAW - 1u);        /* once the entry is filled in and listed, it resolves and draws */
     {   /* the log line carries the draw context: draw index, pipeline ref, shader names / hashes, binding, colour attachment 0 */
         char *st = capture_stats(p);
         assert(strstr(st, "obj_table[created=") && strstr(st, "texwhy[slot_unbound=1 record_bad=1 ref_zero=1 no_table=1"));
@@ -793,6 +794,110 @@ static void test_linear_sampled(void) {
     pfree(p);
     g_res_tex = g_res_lin = false;
     puts("PASS: a linear (buffer backed) texture is sampled: current at the first draw, follows a guest rewrite between execs and a render push inside one exec (re-pulled outside the pass)");
+}
+
+/* Linear textures NOT named by the exec's resource list (the device log: 117 draws, type 8, no mirror object, no creation failure): the pass creates them before it
+ * opens. Formats 1 (A8Unorm), 30 (RG8Unorm: Metal's number 30, not RGBA8) and 80 (BGRA8Unorm), a row pitch larger than width * bpp with garbage in the padding, a
+ * non-zero buffer offset, and an update of the buffer between execs. Expected pixels are Metal's sampling rules; not checked against a device. */
+static void put_linear_fmt(uint32_t ref, uint32_t pay_off, uint32_t bref, uint32_t fmt, uint64_t off, uint64_t row) {
+    uint8_t l[0x40]; memset(l, 0, sizeof l);
+    uint32_t tag = 9, sz = 0x20 + 24;
+    memcpy(l, &tag, 4); memcpy(l + 4, &sz, 4); memcpy(l + 12, &bref, 4); memcpy(l + 16, &off, 8); memcpy(l + 24, &row, 8);
+    uint8_t *d = l + 0x20; d[0] = 2; d[2] = (uint8_t)fmt; d[3] = (uint8_t)(fmt >> 8); uint32_t w = RT_W, h = RT_H; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); d[16] = 1; d[18] = 1;
+    va_write(VA_PAY + pay_off, l, sz); entry(ref, LAGFX_A64_OBJ_LINEAR_TEX, sz, VA_PAY + pay_off);
+}
+/* row y, column x of the texture: a value that differs per row, per column and per `gen` (so a stale or mis-pitched read shows) */
+static uint32_t lin_val(uint32_t x, uint32_t y, uint32_t gen) { return (x * 5u + y * 11u + gen * 37u + 3u) & 0xffu; }
+static void lin_fill(uint32_t bpp, uint64_t off, uint64_t row, uint32_t gen) {
+    static uint8_t buf[0x4000];
+    memset(buf, 0xee, sizeof buf);                                                  /* padding / bytes outside the texture: poison */
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++)
+        for (uint32_t c = 0; c < bpp; c++) buf[off + y * row + x * bpp + c] = bpp == 4u && c == 3u ? 0xffu : (uint8_t)lin_val(x + c * 3u, y, gen);   /* BGRA: opaque (the pass blends, see lin_expect) */
+    va_write((uint64_t)VPN_LBUF << 14, buf, sizeof buf);
+}
+/* The pixel of the BGRA8 target (raw bytes read as u32 = A << 24 | R << 16 | G << 8 | B) the textured pass leaves for the texel (x, y). The quad maps target row 0 to
+ * the texture's LAST row (Metal NDC y up, texture v down). The test pipeline blends source-alpha over the blue clear (observed on lavapipe: an A8 texel a gave blue
+ * 255 - a; the pipeline record names no blend state, so where that blend comes from was not traced), hence opaque BGRA texels. */
+static uint32_t lin_expect(uint32_t fmt, uint32_t x, uint32_t row, uint32_t gen) {
+    uint32_t y = RT_H - 1u - row;
+    uint32_t c0 = lin_val(x, y, gen), c1 = lin_val(x + 3u, y, gen), c2 = lin_val(x + 6u, y, gen);
+    if (fmt == 1u)  return 0xff000000u | (255u - c0);                               /* A8Unorm samples as (0, 0, 0, a): black over blue by alpha a */
+    if (fmt == 30u) return 0xff000000u | c0 << 16 | c1 << 8;                        /* RG8Unorm: (r, g, 0, 1) */
+    return 0xff000000u | c2 << 16 | c1 << 8 | c0;                                   /* BGRA8Unorm: bytes B G R A -> the same bytes in the target */
+}
+static void lin_check(lagfx_protocol_t *p, lagfx_task_entry_t *t, uint32_t fmt, uint32_t gen) {
+    uint8_t img[RT_W * RT_H * 4];
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX2, img, sizeof img, NULL, NULL));
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
+        uint32_t got = px(img, x, y), want = lin_expect(fmt, x, y, gen);
+        if (fmt == 1u && (got ^ want) <= 1u /* low bit only */) continue;                                    /* blend rounding */
+        if (got != want) { fprintf(stderr, "fmt %u gen %u texel (%u,%u): got %08x want %08x\n", fmt, gen, x, y, got, want); assert(0); }
+    }
+}
+static void test_linear_unlisted(void) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    static const struct { uint32_t fmt, bpp; uint64_t off, row; } F[3] = { { 1, 1, 64, 40 }, { 30, 2, 128, 52 }, { 80, 4, 256, 100 } };   /* row > width * bpp (16, 32, 64) in every case */
+    for (unsigned mode = 0; mode < 2; mode++) {   /* 0: neither the texture nor its buffer is in the resource list, 1: only the buffer */
+        g_res_tex = g_res_lin = true; g_lin_n = mode;
+        lagfx_task_entry_t *t;
+        lagfx_protocol_t *p = new_task(&t);
+        const uint32_t vb[3] = { REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT };
+        put_buffer_object(REF_LBUF, 0x260, 0x4000, VPN_LBUF);
+        uint32_t draws = 0;
+        for (unsigned f = 0; f < 3; f++) {
+            uint32_t ref = 40u + f;
+            put_linear_fmt(ref, 0xf00 + f * 0x40, REF_LBUF, F[f].fmt, F[f].off, F[f].row);
+            assert(lagfx_a64_res_lookup(p, 1, ref) == NULL);
+            lin_fill(F[f].bpp, F[f].off, F[f].row, 0);
+            cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, &ref, 1); cb_draw(4, 0, 4);
+            uint64_t made0 = lagfx_a64_res_stats(p)->linear_made;
+            exec(p, 1, cb_finish());
+            assert(RUNC(p).draws == ++draws && PIPE(p).desc_unbound == 0 && PIPE(p).desc_tex_why[TEXWHY_NOT_MIRRORED] == 0);
+            assert(lagfx_a64_res_stats(p)->linear_made == made0 + 1 && lagfx_a64_res_lookup(p, 1, ref) != NULL);
+            lin_check(p, t, F[f].fmt, 0);
+            /* the guest rewrites the buffer: the next exec shows the new bytes (one image, re-pulled) */
+            lin_fill(F[f].bpp, F[f].off, F[f].row, 1);
+            cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, &ref, 1); cb_draw(4, 0, 4);
+            exec(p, 1, cb_finish());
+            assert(RUNC(p).draws == ++draws && PIPE(p).desc_unbound == 0 && lagfx_a64_res_stats(p)->linear_made == made0 + 1);
+            lin_check(p, t, F[f].fmt, 1);
+        }
+        assert(RUNC(p).ext_tex_prepared == 3u && PIPE(p).desc_linear_stale == 0);   /* each texture was missing from the mirror only at its first pass */
+        lagfx_a64_exec_drop_task(p, 1);
+        lagfx_a64_exec_free(p);
+        pfree(p);
+        g_res_tex = g_res_lin = false; g_lin_n = 3;
+    }
+    puts("PASS: linear textures (A8 / RG8 / BGRA8, pitch > width * bpp, offset, poisoned padding) outside the resource list are mirrored before the pass and follow guest rewrites");
+}
+
+/* A vertex-buffer slot of a draw that holds no usable buffer is named by reason (desc_buf_why) and logged (g7-gpu-buf-unbound). Four draws, each with one defect. */
+static void test_buf_unbound_reasons(void) {
+    g_res_tex = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    const uint32_t R_EMPTYB = 150, tex[1] = { REF_TEX };
+    const uint32_t v_tex[3] = { REF_BUF_POS, REF_BUF_UV, REF_TEX }, v_empty[3] = { REF_BUF_POS, REF_BUF_UV, R_EMPTYB }, v_ok[3] = { REF_BUF_POS, REF_BUF_UV, REF_BUF_MAT };
+    cb_reset(); cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_refs(114, 0, tex, 1);
+    cb_bufs(125, 0, v_tex, 3); cb_draw(4, 0, 4);                           /* slot 2 names a texture */
+    cb_bufs(125, 0, v_empty, 3); cb_draw(4, 0, 4);                         /* slot 2 names an empty table entry */
+    cb_pass(REF_TEX2, 2, B4); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE_TEX); cb_refs(114, 0, tex, 1);          /* a new pass: nothing is bound */
+    cb_bufs(125, 0, v_ok, 2); cb_draw(4, 0, 4);                            /* slot 2 never bound in this pass */
+    cb_bufs(125, 0, v_ok, 3); { uint8_t o[12] = {0}; uint32_t idx = 0; uint64_t off = 0x10000; memcpy(o, &idx, 4); memcpy(o + 4, &off, 8); cb_cmd(126, o, 12); } cb_draw(4, 0, 4);   /* offset past the 0x4000 buffer */
+    exec(p, 1, cb_finish());
+    g_nextra = 0;
+    assert(RUNC(p).draws == 0 && PIPE(p).desc_unbound_why[0] == 4);
+    assert(PIPE(p).desc_buf_why[4] == 1 && PIPE(p).desc_buf_why[3] == 1 && PIPE(p).desc_buf_why[2] == 1 && PIPE(p).desc_buf_why[6] == 1);
+    assert(PIPE(p).desc_buf_seen[4][0].ref == REF_TEX && PIPE(p).desc_buf_seen[4][0].slot == 2 && PIPE(p).desc_buf_seen[3][0].ref == R_EMPTYB);
+    char *st = capture_stats(p);
+    assert(strstr(st, "bufwhy[never_bound=1 unresolved=1 not_buffer=1 offset=1]"));
+    free(st);
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    pfree(p);
+    g_res_tex = false;
+    puts("PASS: an unbound buffer slot of a draw is named: never bound, ref unresolved, not a buffer, offset past the end (counted, first 8 logged)");
 }
 
 static void test_invalidation(void) {
@@ -1207,6 +1312,8 @@ int main(void) {
         test_resolver_triangle_and_topology();
         test_textured_draw();
         test_linear_sampled();
+        test_linear_unlisted();
+        test_buf_unbound_reasons();
         test_tex_unbound_reasons();
         test_object_slots_reused();
         test_slot_reuse_safety();
