@@ -1592,3 +1592,13 @@ if fs.is_file(meson.current_source_dir() / 'arm64-capture-unit.c') and vulkan_de
   )
   test('arm64 render replay capture (unit, lavapipe)', cap_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
+
+if fs.is_file(meson.current_source_dir() / 'arm64-replay-unit.c') and vulkan_dep.found()
+  rp_test = executable('arm64-replay-unit',
+    'arm64-replay-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    build_by_default : true,
+  )
+  test('render-replay self tests (unit; scenes need LAGFX_TEST_DUMP)', rp_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 180)
+endif

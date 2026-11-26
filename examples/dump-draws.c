@@ -56,12 +56,12 @@ static void resolve_pso(const char *dir, const psoent_t *ps, resolved_t *R) {
     }
     if (vf && ff) {
         lagfx_air_module_t *vm = NULL, *fm = NULL; uint8_t *vspv = NULL, *fspv = NULL; size_t vsz = 0, fsz = 0;
-        lagfx_air_arg_binding_t vab[16], fab[16]; size_t nvab = 0, nfab = 0;
+        lagfx_air_arg_binding_t vab[LAGFX_A64_MAX_ARGS], fab[LAGFX_A64_MAX_ARGS]; size_t nvab = 0, nfab = 0;
         lagfx_stage_keys_t vk; memset(&vk, 0, sizeof vk);
         if (lagfx_air_module_open(vf->bitcode, vf->bitcode_len, &vm) == LAGFX_OK && lagfx_air_module_open(ff->bitcode, ff->bitcode_len, &fm) == LAGFX_OK) {
             if (!lagfx_air_stage_keys(vm, true, &vk)) memset(&vk, 0, sizeof vk);
             if (lagfx_air2spv_translate_module_ex(vm, NULL, &vspv, &vsz) == LAGFX_OK && lagfx_air2spv_translate_module_ex(fm, &vk, &fspv, &fsz) == LAGFX_OK) {
-                nvab = lagfx_air_arg_bindings(vm, vab, 16), nfab = lagfx_air_arg_bindings(fm, fab, 16);
+                nvab = lagfx_air_arg_bindings(vm, vab, LAGFX_A64_MAX_ARGS), nfab = lagfx_air_arg_bindings(fm, fab, LAGFX_A64_MAX_ARGS);
                 if (nvab > 16) nvab = 16;
                 if (nfab > 16) nfab = 16;
                 lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);

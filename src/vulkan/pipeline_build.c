@@ -127,7 +127,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         bool use_pso_attrs = desc->n_pso_attrs >= nvi;
         for (uint32_t a = 0; use_pso_attrs && a < nvi; a++) {
             switch (desc->pso_attr_fmt[a]) {
-            case 3: case 9: case 28: case 29: case 30: case 31:
+            case 3: case 9: case 27: case 28: case 29: case 30: case 31:
             case 37: case 52: break;
             default: use_pso_attrs = false; break;
             }
@@ -144,6 +144,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
                 switch (desc->pso_attr_fmt[a]) {
                 case 3:  fmt = VK_FORMAT_R8G8B8A8_UINT;          break; /* UChar4 */
                 case 9:  fmt = VK_FORMAT_B8G8R8A8_UNORM;         break; /* UChar4Normalized — CA pool colors are BGRA-ordered (the PBGRA pipes); R8G8B8A8 rendered blue UI as red */
+                case 27: fmt = VK_FORMAT_R16G16B16A16_SFLOAT;    break; /* Half4 (MTLVertexFormat 27): dump pso 93 family, colour @32 of a 48 byte vertex */
                 case 28: fmt = VK_FORMAT_R32_SFLOAT;             break; /* Float */
                 case 29: fmt = VK_FORMAT_R32G32_SFLOAT;          break; /* Float2 */
                 case 30: fmt = VK_FORMAT_R32G32B32_SFLOAT;       break; /* Float3 */
