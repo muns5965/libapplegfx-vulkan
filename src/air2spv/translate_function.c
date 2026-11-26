@@ -1945,6 +1945,29 @@ static uint32_t cs_load(xlate_ctx_t *c, int csv) {
     return id;
 }
 
+/* Metal simdgroup emulation on a wider subgroup. A kernel sees 32-lane simdgroups; a device whose subgroup is 64 (Adreno) or 128 wide cannot be pinned to 32, so
+ * with t_simd_emul = W (a power of two, 32 for Metal) every simdgroup query / shuffle is translated to a LOGICAL group of W consecutive subgroup lanes:
+ *   thread_index_in_simdgroup = SubgroupLocalInvocationId & (W-1);  threads_per_simdgroup = W;  simdgroup_index = LocalInvocationIndex / W
+ *   shuffle(idx)              = OpGroupNonUniformShuffle(value, (SubgroupLocalInvocationId & ~(W-1)) | (idx & (W-1)))
+ * Assumptions (UNVERIFIED on hardware): the invocations of a workgroup map to subgroup lanes in LocalInvocationIndex order (subgroup k holds indices
+ * k*S .. k*S+S-1, S = the device subgroup size, a multiple of W), so a logical group is W consecutive LocalInvocationIndex values; and an out-of-range shuffle
+ * index (down/up past the group end) wraps inside the logical group (Metal leaves that undefined; no kernel may depend on it). 0 = native (unchanged output). */
+static _Thread_local uint32_t t_simd_emul;
+
+void lagfx_air2spv_set_simd_emulation(uint32_t width) { t_simd_emul = width; }
+
+static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uint32_t b);
+/* the simdgroup width a kernel sees (a constant when emulating, else the subgroup size) */
+static uint32_t cs_simd_size(xlate_ctx_t *c) {
+    return t_simd_emul ? emit_const_uint32(c, t_simd_emul) : cs_load(c, CSV_SG_SIZE);
+}
+/* the lane id a kernel sees */
+static uint32_t cs_simd_lane(xlate_ctx_t *c) {
+    uint32_t raw = cs_load(c, CSV_SG_LANE);
+    if (!t_simd_emul) return raw;
+    return cs_op2(c, LAGFX_SPV_OP_BITWISE_AND, emit_type_int_w(c, 32u, 0u), raw, emit_const_uint32(c, t_simd_emul - 1u));
+}
+
 /* Generic binary / unary core ops on 32-bit unsigned scalars. */
 static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uint32_t b) {
     uint32_t id = lagfx_spv_builder_alloc_id(c->b);
@@ -2006,10 +2029,10 @@ static uint32_t cs_arg_value(xlate_ctx_t *c, uint32_t i) {
         return cs_to_air_int(c, id, true, aty);
     }
     case CSA_INDEX_IN_TG:    return cs_to_air_int(c, cs_load(c, CSV_LOCAL_INDEX), false, aty);
-    case CSA_LANE:           return cs_to_air_int(c, cs_load(c, CSV_SG_LANE), false, aty);
-    case CSA_THREADS_PER_SIMD: return cs_to_air_int(c, cs_load(c, CSV_SG_SIZE), false, aty);
+    case CSA_LANE:           return cs_to_air_int(c, cs_simd_lane(c), false, aty);
+    case CSA_THREADS_PER_SIMD: return cs_to_air_int(c, cs_simd_size(c), false, aty);
     case CSA_SIMD_INDEX:     /* subgroups are formed from consecutive LocalInvocationIndex values */
-        return cs_to_air_int(c, cs_op2(c, 134u /* OpUDiv */, u32, cs_load(c, CSV_LOCAL_INDEX), cs_load(c, CSV_SG_SIZE)), false, aty);
+        return cs_to_air_int(c, cs_op2(c, 134u /* OpUDiv */, u32, cs_load(c, CSV_LOCAL_INDEX), cs_simd_size(c)), false, aty);
     case CSA_SIMDS_PER_TG: {
         uint32_t n = 0u;
         for (uint32_t q = 0; q < 3u; q++) {
@@ -2018,7 +2041,7 @@ static uint32_t cs_arg_value(xlate_ctx_t *c, uint32_t i) {
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, eo, 4);
             n = q ? cs_op2(c, LAGFX_SPV_OP_IMUL, u32, n, e) : e;
         }
-        uint32_t sz = cs_load(c, CSV_SG_SIZE);
+        uint32_t sz = cs_simd_size(c);
         uint32_t one = emit_const_uint32(c, 1u);
         uint32_t num = cs_op2(c, LAGFX_SPV_OP_IADD, u32, n, cs_op2(c, LAGFX_SPV_OP_ISUB, u32, sz, one));
         return cs_to_air_int(c, cs_op2(c, 134u /* OpUDiv */, u32, num, sz), false, aty);
@@ -3616,6 +3639,11 @@ static uint32_t cs_shuffle(xlate_ctx_t *c, uint32_t air_ty, uint32_t val, uint32
     uint32_t sub = emit_const_uint32(c, 3u /* Subgroup */);
     uint32_t v = val;
     if (k->widen) v = cs_conv(c, k->is_float ? LAGFX_SPV_OP_F_CONVERT : LAGFX_SPV_OP_UCONVERT, k->carrier_ty, v);
+    if (t_simd_emul) {   /* the logical group's base lane + the index inside it (see t_simd_emul) */
+        uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+        uint32_t base = cs_op2(c, LAGFX_SPV_OP_BITWISE_AND, u32, cs_load(c, CSV_SG_LANE), emit_const_uint32(c, ~(t_simd_emul - 1u)));
+        idx = cs_op2(c, LAGFX_SPV_OP_BITWISE_OR, u32, base, cs_op2(c, LAGFX_SPV_OP_BITWISE_AND, u32, idx, emit_const_uint32(c, t_simd_emul - 1u)));
+    }
     uint32_t r = lagfx_spv_builder_alloc_id(c->b);
     uint32_t o[] = { k->carrier_ty, r, sub, v, idx };
     lagfx_spv_builder_emit_op(c->b, 345u /* OpGroupNonUniformShuffle */, o, 5);
@@ -4200,7 +4228,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
 
         /* air.get_simdgroup_size.i16 -> SubgroupSize */
         if (strncmp(fn_name, "air.get_simdgroup_size.", 23u) == 0 && result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE) {
-            uint32_t r = cs_to_air_int(c, cs_load(c, CSV_SG_SIZE), false, result_ty_air);
+            uint32_t r = cs_to_air_int(c, cs_simd_size(c), false, result_ty_air);
             bind_value_spv(c, result_value_id, r);
             set_result_air_type(c, result_value_id, result_ty_air);
             return;
@@ -4217,7 +4245,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 uint32_t val = resolve_or_undef(c, CS_ARG(0), emit_air_type(c, result_ty_air));
                 uint32_t arg = cs_index_u32(c, CS_ARG(1));
                 cs_cap(c, true);
-                uint32_t lane = cs_load(c, CSV_SG_LANE), idx;
+                uint32_t lane = cs_simd_lane(c), idx;
                 switch (sh[q].kind) {
                 case 1:  idx = cs_op2(c, LAGFX_SPV_OP_IADD, u32, lane, arg); break;
                 case 2:  idx = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, arg); break;
@@ -4242,7 +4270,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 uint32_t data = resolve_or_undef(c, CS_ARG(0), rty), fill = resolve_or_undef(c, CS_ARG(1), rty);
                 uint32_t delta = cs_index_u32(c, CS_ARG(2)), mod = cs_index_u32(c, CS_ARG(3));
                 cs_cap(c, true);
-                uint32_t lane = cs_load(c, CSV_SG_LANE);
+                uint32_t lane = cs_simd_lane(c);
                 uint32_t rem = cs_op2(c, LAGFX_SPV_OP_UMOD, u32, lane, mod);
                 uint32_t base = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, rem);
                 uint32_t boolt = emit_type_bool(c);

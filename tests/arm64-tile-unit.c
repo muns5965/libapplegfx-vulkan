@@ -268,20 +268,21 @@ static float texv(uint32_t x, uint32_t y, int ch) {
 #define RUNC(p) ((p)->diag2.exec.run)
 #define SENT 3.0f
 
-static uint32_t g_S, g_W, g_H, g_TW;
+static uint32_t g_S, g_W, g_H, g_TW, g_TH;
+static bool g_vert;
 static float g_w[15];
 
 static void build_objects(const uint8_t *lib, size_t libn, bool horizontal) {
     put_function(REF_FN, 0x400, VPN_LIB, lib, libn);
     put_tile_pipeline(REF_TILE, 0x500, REF_FN);
-    put_texture(REF_SRC, 0x000, g_TW, g_H, 115, 8, VPN_SRC);
+    put_texture(REF_SRC, 0x000, g_TW, g_TH, 115, 8, VPN_SRC);
     put_texture(REF_DST, 0x100, g_W, g_H, 115, 8, 0);
     put_texture(REF_DST4, 0x200, g_W, g_H, 70, 4, 0);   /* RGBA8Unorm */
     put_buffer_object(REF_UBO, 0x300, 0x4000, VPN_UBO);
     put_buffer_object(REF_WBUF, 0x320, 0x4000, VPN_WBUF);
-    uint16_t *tp = calloc((size_t)g_TW * g_H * 4, 2);
-    for (uint32_t y = 0; y < g_H; y++) for (uint32_t x = 0; x < g_TW; x++) for (int ch = 0; ch < 4; ch++) tp[((size_t)y * g_TW + x) * 4 + ch] = f2h(texv(x, y, ch));
-    va_write((uint64_t)VPN_SRC << 14, tp, g_TW * g_H * 8);
+    uint16_t *tp = calloc((size_t)g_TW * g_TH * 4, 2);
+    for (uint32_t y = 0; y < g_TH; y++) for (uint32_t x = 0; x < g_TW; x++) for (int ch = 0; ch < 4; ch++) tp[((size_t)y * g_TW + x) * 4 + ch] = f2h(texv(x, y, ch));
+    va_write((uint64_t)VPN_SRC << 14, tp, g_TW * g_TH * 8);
     free(tp);
     uint16_t u[8] = { 0, 0, (uint16_t)(horizontal ? g_S : 0), (uint16_t)(horizontal ? 0 : g_S), horizontal, f2h(0.5f), 0, 0 };   /* { src_offset, fill_offset, horizontal, edr_scale } */
     va_write((uint64_t)VPN_UBO << 14, u, sizeof u);
@@ -292,13 +293,13 @@ static void build_objects(const uint8_t *lib, size_t libn, bool horizontal) {
 /* the expected value of the horizontal kernel at (x, y), the same model as tests/air2spv-compute-lavapipe.c */
 static float model(uint32_t x, uint32_t y, int ch) {
     float acc = 0;
-    for (uint32_t i = 0; i <= g_S && i < 15; i++) acc += g_w[i] * texv(x + i, y, ch);
+    for (uint32_t i = 0; i <= g_S && i < 15; i++) acc += g_w[i] * (g_vert ? texv(x, y + i, ch) : texv(x + i, y, ch));
     return ch < 3 ? acc * 0.5f : acc;
 }
 static lagfx_protocol_t *new_task(lagfx_task_entry_t **t, const uint8_t *lib, size_t libn) {
     lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
     *t = def_task(p, 1);
-    build_objects(lib, libn, true);
+    build_objects(lib, libn, !g_vert);
     return p;
 }
 static unsigned compare(lagfx_protocol_t *p, lagfx_task_entry_t *t, uint32_t ref, bool (*computed)(uint32_t, uint32_t), unsigned *n_computed, unsigned *n_kept) {
@@ -321,19 +322,26 @@ static bool all_px(uint32_t x, uint32_t y) { (void)x; (void)y; return true; }
 static bool no_px(uint32_t x, uint32_t y) { (void)x; (void)y; return false; }
 static bool right_half_and_top_left(uint32_t x, uint32_t y) { return x >= g_S || y < 4; }
 
+static bool vert_cols(uint32_t x, uint32_t y) { (void)y; return (x % g_S) < 4u; }   /* the 4-wide columns of the two tiles */
+
 static void tile_pass_clear(void) { static const double sent[4] = { SENT, SENT, SENT, SENT }; cb_reset(); cb_pass(REF_DST, 2, sent); }
 static void tile_bind_all(void) { cb_pipeline(REF_TILE); cb_tile_buf(0, REF_UBO, 0); cb_tile_buf(1, REF_WBUF, 0); cb_tile_tex(0, REF_SRC); }
 
-static void test_tile(const uint8_t *lib, size_t libn) {
+static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     struct lagfx_vk_state *vk = g_dev->vk;
-    g_S = lagfx_vk_can_pin_subgroup32(vk) ? 32u : vk->sg_size;
+    bool wide = vk->sg_size > 32u && !(vk->sg_size % 32u) && vk->sg_min == vk->sg_max;   /* a fixed 64 / 128 wide subgroup: the dispatcher emulates 32-lane simdgroups */
+    g_S = force_w ? force_w : (lagfx_vk_can_pin_subgroup32(vk) || wide) ? 32u : vk->sg_size;
+    if (force_w) { char e[16]; snprintf(e, sizeof e, "%u", force_w); setenv("LAGFX_TILE_SIMD_EMULATE", e, 1); }
+    else unsetenv("LAGFX_TILE_SIMD_EMULATE");
+    printf("INFO: tile test: device subgroup %u [%u..%u], logical simdgroup width %u (%s)\n", vk->sg_size, vk->sg_min, vk->sg_max, g_S, force_w ? "forced emulation hook" : wide ? "emulated on a wide subgroup" : g_S == 32u ? "native / pinned 32" : "device size");
     if (g_S < 4 || g_S > 64) { printf("SKIP: subgroup size %u not handled by this test\n", g_S); return; }
-    g_W = 2 * g_S, g_H = 8, g_TW = 3 * g_S + 4;
+    g_vert = false;
+    g_W = 2 * g_S, g_H = 8, g_TW = 3 * g_S + 4, g_TH = g_H;
     unsigned nc, nk;
 
     /* (1) fail closed: the device's subgroup is not 32 wide and cannot be pinned -> the kernel (simd lane mapping) is not run, the attachment keeps its clear */
-    bool native = g_S == 32u;
+    bool native = force_w || wide || g_S == 32u;
     if (!native) {
         unsetenv("LAGFX_TILE_ANY_SUBGROUP");
         lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
@@ -379,6 +387,33 @@ static void test_tile(const uint8_t *lib, size_t libn) {
         puts("PASS: tile region dispatch (tag 0xa2): WorkgroupId base shifted to the region origin, attachment contents preserved across suspend / resume, untouched region keeps its clear");
     }
 
+    if (force_w || wide) {
+        lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+        tile_pass_clear(); tile_bind_all(); cb_dispatch_all(g_S, 4);
+        exec_refs(p, 1, cb_finish());
+        assert(TILE(p).sg_emulated == 1 && TILE(p).sg_pinned == 0 && TILE(p).sg_override == 0 && TILE(p).skip_no_sg32 == 0);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        puts("PASS: logical-simdgroup emulation is what ran (tile.sg_emulated counted, no pin / override / skip)");
+    }
+
+    /* (3b) the same kernel in its vertical mode (uniform horizontal = 0: the thread coordinates are swapped, the shuffle runs along y; src_offset = (0,0), fill_offset = (0,S)).
+     * Read from the AIR: a tile (S,4) writes the 4-wide, S-tall pixel block at (WorkgroupId * (S,4)) + (ty, tx), each = sum_i w[i] * tex(x, y + i). One row of tiles is dispatched
+     * as a region so every written pixel is inside the S-tall target; the rest keeps the clear. */
+    {
+        g_vert = true; g_W = 2 * g_S; g_H = g_S; g_TW = g_W; g_TH = 2 * g_S + 4;
+        lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+        tile_pass_clear(); tile_bind_all();
+        cb_dispatch_region(g_S, 4, 0, 0, g_W, 4);
+        exec_refs(p, 1, cb_finish());
+        assert(TILE(p).dispatches == 1 && TILE(p).region == 1 && TILE(p).groups == 2u && TILE(p).resume_failed == 0 && RUNC(p).submit_failed == 0);
+        unsigned bad = compare(p, t, REF_DST, vert_cols, &nc, &nk);
+        printf("tile vertical region dispatch: %u computed + %u kept pixels, %u channel mismatches\n", nc, nk, bad);
+        assert(bad == 0 && nc == 8u * g_S);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        g_vert = false; g_W = 2 * g_S, g_H = 8, g_TW = 3 * g_S + 4, g_TH = g_H;
+        puts("PASS: vertical simd blur (swapped lanes, shuffle along y) equals the CPU model");
+    }
+
     /* (4) fail closed: unbound texture (not set), unbound buffer, and an attachment that is not Rgba16f */
     {
         lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
@@ -399,6 +434,37 @@ static void test_tile(const uint8_t *lib, size_t libn) {
 }
 #endif
 
+#ifdef LAGFX_HAVE_VULKAN
+#include "air/bitcode_reader.h"
+#include "air2spv/translate.h"
+/* Translator level (no device): the kernel translated for logical 32-lane groups (the Adreno case: a 64-wide subgroup) and for 64 / 128 wide ones is valid SPIR-V, differs from
+ * the native translation, and the native translation is unchanged by a previous emulated one (the width is per call, reset afterwards). NOT executed at those widths. */
+static void test_translate_widths(const uint8_t *bc, size_t bn) {
+    lagfx_air_module_t *m = NULL;
+    assert(lagfx_air_module_open(bc, bn, &m) == LAGFX_OK && m);
+    uint8_t *nat = NULL, *nat2 = NULL, *e32 = NULL, *e4 = NULL; size_t nn = 0, nn2 = 0, n32 = 0, n4 = 0;
+    assert(lagfx_air2spv_translate_module(m, &nat, &nn) == LAGFX_OK);
+    lagfx_air2spv_set_simd_emulation(32); assert(lagfx_air2spv_translate_module(m, &e32, &n32) == LAGFX_OK);
+    lagfx_air2spv_set_simd_emulation(4);  assert(lagfx_air2spv_translate_module(m, &e4, &n4) == LAGFX_OK);
+    lagfx_air2spv_set_simd_emulation(0);  assert(lagfx_air2spv_translate_module(m, &nat2, &nn2) == LAGFX_OK);
+    assert(nn == nn2 && !memcmp(nat, nat2, nn));
+    assert(n32 > nn && (n32 != nn || memcmp(nat, e32, nn)) && n4 > nn);
+    const char *names[3] = { "/tmp/lagfx-tile-e32.spv", "/tmp/lagfx-tile-e4.spv", "/tmp/lagfx-tile-nat.spv" };
+    const uint8_t *bl[3] = { e32, e4, nat }; size_t ln[3] = { n32, n4, nn };
+    if (system("spirv-val --version >/dev/null 2>&1") == 0) {
+        for (int i = 0; i < 3; i++) {
+            FILE *f = fopen(names[i], "wb"); assert(f); fwrite(bl[i], 1, ln[i], f); fclose(f);
+            char cmd[256]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s", names[i]);
+            assert(system(cmd) == 0);
+            remove(names[i]);
+        }
+        puts("PASS: kernel translated for logical 32 / 4 lane simdgroups and natively is spirv-val clean; native output unchanged by the emulation setting");
+    } else puts("PASS: emulated translations succeed and the native output is unchanged (spirv-val not installed: validity not checked)");
+    free(nat); free(nat2); free(e32); free(e4);
+    lagfx_air_module_free(m);
+}
+#endif
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -412,7 +478,11 @@ int main(void) {
     struct lagfx_vk_state *vk = g_dev->vk;
     uint32_t need = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE);
     if ((vk->caps_enabled & need) != need) { puts("SKIP: device has no compute subgroup shuffle"); free(lib); free(bc); lagfx_device_free(g_dev); free(g_mem); return 77; }
-    test_tile(lib, ln);
+    test_translate_widths(bc, bn);
+    test_tile(lib, ln, 0);
+    /* forced logical simdgroups narrower than the device subgroup: the same group-boundary logic as 32 lanes inside a 64-wide Adreno subgroup (a logical group is the lower /
+     * upper part of the physical subgroup), run on lavapipe's real 32-wide one */
+    for (uint32_t w = vk->sg_size >> 1; w >= 4u && !(w & (w - 1u)); w >>= 1) test_tile(lib, ln, w);
     free(lib); free(bc);
 #else
     puts("SKIP: built without Vulkan");

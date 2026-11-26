@@ -102,6 +102,11 @@ lagfx_status_t lagfx_air2spv_translate_function_ex(
     uint8_t                 **out_blob,
     size_t                   *out_size_bytes);
 
+/* Compute kernels: translate Metal's simdgroup operations (thread_index_in_simdgroup, threads_per_simdgroup, simdgroup_index_in_threadgroup, simdgroups_per_threadgroup,
+ * simd_shuffle*, simd_shuffle_and_fill_*) for LOGICAL groups of `width` lanes (a power of two, 32 for Metal) carved out of the device's wider subgroup, for the calling
+ * thread's following translations. 0 = native (the device subgroup is the simdgroup; the default). See t_simd_emul in translate_function.c for the assumptions. */
+void lagfx_air2spv_set_simd_emulation(uint32_t width);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

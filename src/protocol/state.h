@@ -587,7 +587,7 @@ typedef struct lagfx_protocol {
             struct {
                 uint64_t pipes, pipe_failed, pipe_no_kernel, pipe_missing_cap, pipe_bindings;
                 uint64_t binds_buf, binds_tex, binds_ignored;           /* 0x9d/0x9e, 0xa1 applied; samplers / threadgroup memory / dims (counted, not mapped) */
-                uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override;
+                uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override, sg_emulated;
                 uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
                 uint64_t skip_no_pass, skip_no_pipe, skip_bad_rec, skip_local, skip_no_sg32, skip_rt, skip_unbound, skip_unaligned, skip_feedback, skip_desc, skip_pipe_build, resume_failed;
             } tile;

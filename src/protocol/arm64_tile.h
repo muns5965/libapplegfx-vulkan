@@ -17,6 +17,11 @@
  *     Otherwise (fallback) the dispatch is NOT run and counted (tile.skip_no_sg32): a lane-to-pixel mapping on another subgroup width would produce wrong
  *     pixels, which is worse than leaving the attachment untouched. LAGFX_TILE_ANY_SUBGROUP=1 overrides the check for debugging / tests on devices whose
  *     subgroup size differs (the kernel is then only right if it does not depend on the lane count).
+ *     Third choice, before skipping: a device whose subgroup is a multiple of 32 wider (Adreno: 64, size not controllable) runs the kernel translated for LOGICAL
+ *     32-lane simdgroups inside the wide subgroup (air2spv lagfx_air2spv_set_simd_emulation: lane id / simdgroup size / index / shuffles are remapped, see
+ *     translate_function.c t_simd_emul for the assumptions). The native-32 and pinned paths are unchanged and always preferred. tile.sg_emulated counts these
+ *     dispatches. LAGFX_TILE_SIMD_EMULATE=<W> (W a power of two, 2 <= W <= the device subgroup size) forces emulation with logical width W on ANY device (test
+ *     hook: the unit tests run W=16 on a 32-wide lavapipe, which exercises the same logical-group boundary logic as W=32 on a 64-wide device).
  * Not mapped (counted): tile samplers (tags 0x9f / 0xa0: the default sampler is used), threadgroup / imageblock memory (0x9c), the render-target array
  * index of 0xa3, imageblock formats other than Rgba16f, draws while a tile pipeline is bound.
  */

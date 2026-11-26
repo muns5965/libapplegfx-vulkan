@@ -37,6 +37,7 @@ struct lagfx_a64_tile_pipe {
     VkDescriptorSetLayout dsl; VkPipelineLayout pl;
     uint32_t n_bind; tile_bind_t bind[TILE_MAX_BIND];
     uint32_t rt_mask;               /* bit n: the kernel writes the imageblock of colour attachment n (STORAGE_IMAGE at 40 + n) */
+    uint32_t simd_emul;             /* 0 = native simdgroup; W = the kernel was translated for logical W-lane simdgroups inside a wider subgroup */
     bool lane_mapped;               /* uses subgroup operations: Metal's 32-lane simdgroup semantics are assumed */
     struct { uint32_t l[3]; bool pin; VkPipeline pl; } cache[TILE_PIPE_CACHE]; uint32_t ncache;
 };
@@ -48,6 +49,21 @@ struct lagfx_a64_tile {
     VkSampler defsamp;
     VkDescriptorPool pool[TILE_POOLS]; uint32_t npool, cur;
 };
+
+/* The logical simdgroup width to translate tile kernels for: 0 = native (the device's own 32-lane subgroup, or one pinned to 32 by the dispatch); 32 on a device whose
+ * subgroup is wider (a multiple of 32) and cannot be pinned; the LAGFX_TILE_SIMD_EMULATE test hook forces any power of two <= the subgroup size. */
+static uint32_t tile_simd_emul_width(const struct lagfx_vk_state *vk) {
+    const char *ov = getenv("LAGFX_TILE_SIMD_EMULATE");
+    if (ov && ov[0]) {
+        char *end = NULL; unsigned long w = strtoul(ov, &end, 10);
+        if (end && !*end && w >= 2ul && w <= 128ul && !(w & (w - 1ul)) && w <= vk->sg_size) return (uint32_t)w;
+        return 0;
+    }
+    if (vk->sg_size == 32u && vk->sg_min == vk->sg_max) return 0;
+    if (lagfx_vk_can_pin_subgroup32(vk)) return 0;
+    if (vk->sg_size > 32u && !(vk->sg_size % 32u) && vk->sg_min == vk->sg_max) return 32u;   /* a fixed wide size; a range the driver may change per pipeline is not assumed */
+    return 0;
+}
 
 /* ---- the translated kernel's descriptor bindings (a small SPIR-V scan: the shared reflector does not tell storage images from sampled ones) ---- */
 
@@ -124,7 +140,9 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
     uint8_t *spv = NULL; size_t spv_n = 0;
     lagfx_a64_tile_pipe_t *tp = NULL;
     lagfx_air_arg_binding_t ab[16]; size_t nab = 0;
+    uint32_t emul = 0;
     if (!vk || !vk->initialized || vk->device == VK_NULL_HANDLE) { p->diag2.exec.pipe.rf_no_vulkan++; return false; }
+    emul = tile_simd_emul_width(vk);
     /* the kernel: the first kernel-stage function of the libraries the descriptor's function tokens name */
     lagfx_air_module_t *m = NULL;
     uint8_t *lib = NULL;
@@ -138,7 +156,10 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
                 if (fn[k].bitcode && fn[k].bitcode_len && fn[k].stage == LAGFX_METALLIB_STAGE_KERNEL) {
                     lagfx_air_module_t *mm = NULL;
                     if (lagfx_air_module_open(fn[k].bitcode, fn[k].bitcode_len, &mm) == LAGFX_OK && mm) {
-                        if (lagfx_air2spv_translate_module(mm, &spv, &spv_n) == LAGFX_OK && spv && spv_n) { nab = lagfx_air_arg_bindings(mm, ab, 16); if (nab > 16u) nab = 16u; m = mm; }
+                        lagfx_air2spv_set_simd_emulation(emul);
+                        lagfx_status_t xst = lagfx_air2spv_translate_module(mm, &spv, &spv_n);
+                        lagfx_air2spv_set_simd_emulation(0);
+                        if (xst == LAGFX_OK && spv && spv_n) { nab = lagfx_air_arg_bindings(mm, ab, 16); if (nab > 16u) nab = 16u; m = mm; }
                         else { free(spv); spv = NULL; p->diag2.exec.pipe.rf_translate++; lagfx_air_module_free(mm); }
                     } else p->diag2.exec.pipe.rf_module++;
                 }
@@ -159,6 +180,7 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
         }
         tp = calloc(1, sizeof *tp);
         if (!tp) goto fail;
+        tp->simd_emul = emul;
         tp->lane_mapped = (need & (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE_RELATIVE))) != 0;
     }
     tp->vk = vk, tp->dev = vk->device;
@@ -330,7 +352,10 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
         (uint64_t)d->tw * d->th * d->td > lim->maxComputeWorkGroupInvocations) { TILE(p).skip_local++; return false; }
     /* simd lanes: a 32-wide subgroup or nothing (see the header) */
     bool pin = false;
-    if (tp->lane_mapped && !(vk->sg_size == 32u && vk->sg_min == vk->sg_max)) {
+    if (tp->simd_emul) {
+        /* the kernel carries its own logical-group lane mapping: no subgroup size requirement */
+        if (tp->lane_mapped && tp->simd_emul > vk->sg_size) { TILE(p).skip_no_sg32++; return false; }
+    } else if (tp->lane_mapped && !(vk->sg_size == 32u && vk->sg_min == vk->sg_max)) {
         if (lagfx_vk_can_pin_subgroup32(vk)) pin = true;
         else {
             const char *ov = getenv("LAGFX_TILE_ANY_SUBGROUP");
@@ -410,6 +435,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     TILE(p).dispatches++, TILE(p).groups += (uint64_t)(gx1 - gx0) * (gy1 - gy0);
     if (d->region) TILE(p).region++; else TILE(p).whole++;
     if (pin) TILE(p).sg_pinned++;
+    if (tp->simd_emul && tp->lane_mapped) TILE(p).sg_emulated++;
     return true;
 }
 
