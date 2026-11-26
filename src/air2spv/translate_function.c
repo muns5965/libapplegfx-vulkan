@@ -4328,7 +4328,8 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
     /* A HALF source vector (the <4 x half> of a half texture sample or varying): sources AND result are half vectors. The float-only typing made
      * `OpVectorShuffle %v3float <half4> ...` (spirv-val: "Component Type of Vector 1 must be the same as ResultType"). Both sources take the first
      * operand's type; an operand of another type becomes an undef of it. */
-    bool src_half = false;
+    bool src_half = false, v2_replaced = false;
+    uint32_t src_lanes = 0;
     {
         uint32_t n_t = 0;
         const lagfx_air_type_t *tys = lagfx_air_module_types(c->m, &n_t);
@@ -4339,9 +4340,13 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
             if (e < n_t && tys[e].kind == LAGFX_AIR_TYPE_HALF && lanes >= 2u && lanes <= 4u) {
                 uint32_t srcvec = emit_type_vec(c, emit_type_half(c), lanes);
                 src_half = true;
+                src_lanes = lanes;
                 uint32_t t2 = value_air_type_idx(c, v2_id);
                 v1_spv = resolve_or_undef(c, v1_id, srcvec);
-                v2_spv = (t2 == t1) ? resolve_or_undef(c, v2_id, srcvec) : emit_undef(c, srcvec);
+                /* LLVM's verifier guarantees both shuffle sources share one type, so an operand whose type we merely failed to track (NONE) is used as it is;
+                 * only an operand tracked with a DIFFERENT type is replaced, and that is reported below if the mask actually reads it. */
+                v2_replaced = (t2 != LAGFX_AIR_TYPE_NONE && t2 != t1);
+                v2_spv = v2_replaced ? emit_undef(c, srcvec) : resolve_or_undef(c, v2_id, srcvec);
             }
         }
     }
@@ -4416,6 +4421,11 @@ static void emit_inst_shufflevec(xlate_ctx_t *c, uint32_t inst_idx,
             }
             for (uint32_t i = 0; i < 4u; i++) mask_lanes[i] = 0u;
         }
+    }
+
+    if (v2_replaced) {
+        for (uint32_t i = 0; i < shuf_n; i++)
+            if (mask_lanes[i] != 0xFFFFFFFFu && mask_lanes[i] >= src_lanes) { LAGFX_WARN("shufflevec: mask lane %u reads the second vector, whose type differs from the first — it was replaced by undef", i); break; }
     }
 
     /* Result vector type matches the mask lane count. */
