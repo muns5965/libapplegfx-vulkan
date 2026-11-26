@@ -4,6 +4,7 @@
 #include "protocol/state.h"
 #include "device.h"
 #include "doorbell.h"
+#include "protocol/arm64_completion.h"
 #include "libapplegfx-vulkan.h"
 #include <assert.h>
 #include <stdio.h>
@@ -118,6 +119,23 @@ int main(void) {
         assert(file_lines(path, "op_setpage=0 op_ack=0 op_swap=0") >= 1);
         assert(file_lines(path, "db_reads=4 db_nonzero=2 db_bit0=1 db_bit1=0 db_bit2=1 db_bit3=1 sig_total=3 sig_bit0=2 sig_bit1=0 sig_bit2=1 sig_bit3=1") == 1);
         free(dev);
+    }
+
+    {   /* idle triage line: absent without the completion queue; with it, the last poll time is recorded and the counters reach the line */
+        long ni = file_lines(path, "g7-gpu-idle:");
+        lagfx_diag_stats(p, now_ns_for_test(), true);
+        assert(file_lines(path, "g7-gpu-idle:") == ni);
+        p->protocol_mode = 1u;
+        assert(lagfx_arm64_cq_enable(p));
+        assert(p->diag2.last_poll_ns == 0);
+        lagfx_arm64_poll_completions(p);
+        assert(p->diag2.last_poll_ns != 0);
+        atomic_store(&p->pending_stamps_bitmask, 0x8u);
+        lagfx_diag_stats(p, now_ns_for_test(), true);
+        assert(file_lines(path, "g7-gpu-idle:") == ni + 1);
+        assert(file_lines(path, "held_chan_mask=0x0 held_exec_mask=0x0 drain_depth=0") == 1 && file_lines(path, "stamp_pending=0x8") == 1);
+        lagfx_arm64_cq_shutdown(p, 10);
+        p->protocol_mode = 0u;
     }
 
     free(p); remove(path); close(fd);

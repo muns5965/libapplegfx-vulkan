@@ -300,6 +300,7 @@ void lagfx_a64_exec_unlock(lagfx_protocol_t *p) { if (p->a64_exec_depth && --p->
 
 size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p) {
     if (!lagfx_protocol_is_valid(p)) return 0;
+    { struct timespec pts; clock_gettime(CLOCK_MONOTONIC, &pts); __atomic_store_n(&p->diag2.last_poll_ns, (uint64_t)pts.tv_sec * 1000000000ull + (uint64_t)pts.tv_nsec, __ATOMIC_RELAXED); }   /* diagnostics: when was the queue last given a chance to retire */
     if (!lagfx_a64_exec_trylock(p)) return 0;   /* another thread is draining / retiring / tearing down: it polls itself */
     size_t n = 0;
     if (p->a64cq) {

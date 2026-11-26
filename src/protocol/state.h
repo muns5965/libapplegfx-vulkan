@@ -540,6 +540,7 @@ typedef struct lagfx_protocol {
     struct {
         uint64_t seq;                    /* every command seen by a drain loop, all channels */
         uint64_t t0_ns, last_stats_ns, last_cmd_ns, last_mmio_ns;
+        uint64_t last_poll_ns;           /* last lagfx_arm64_poll_completions() entry (relaxed atomic; diagnostics only) */
         uint64_t mmio_reads, mmio_writes;
         uint64_t src_cmds[3];            /* 0 root, 1 compute, 2 display */
         uint64_t op_count[3][256];       /* opcode & 0xff */
