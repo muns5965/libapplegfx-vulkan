@@ -95,6 +95,12 @@ uint32_t lagfx_mmio_read(lagfx_device_t *device, uint64_t offset) {
     return doorbell_handle_read(device->protocol_state, offset);
 }
 
+void lagfx_diag_root_ptrs(lagfx_device_t *device, uint32_t *write_ptr, uint32_t *read_ptr) {
+    lagfx_protocol_t *p = lagfx_device_is_valid(device) ? (lagfx_protocol_t *)device->protocol_state : NULL;
+    if (write_ptr) *write_ptr = p ? p->write_ptr : 0;
+    if (read_ptr) *read_ptr = p ? p->read_ptr : 0;
+}
+
 void lagfx_mmio_write(lagfx_device_t *device, uint64_t offset, uint32_t value) {
     if (!lagfx_device_is_valid(device)) return;
     if (offset < LAGFX_MSIX_RANGE_END) return;  /* MSI-X — shell owns */

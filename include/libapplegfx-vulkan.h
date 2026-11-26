@@ -322,6 +322,9 @@ LAGFX_EXPORT void lagfx_device_reset(lagfx_device_t *device);
 /* 4-byte read (Apple's protocol is 4-byte aligned per their docs). */
 LAGFX_EXPORT uint32_t lagfx_mmio_read(lagfx_device_t *device, uint64_t offset);
 
+/* Diagnostics only, no side effects (unlike a 0x100c read, which runs the root ring): the root ring's write and read pointers as the library holds them. */
+LAGFX_EXPORT void lagfx_diag_root_ptrs(lagfx_device_t *device, uint32_t *write_ptr, uint32_t *read_ptr);
+
 /* 4-byte write. */
 LAGFX_EXPORT void lagfx_mmio_write(lagfx_device_t *device, uint64_t offset,
                        uint32_t value);
