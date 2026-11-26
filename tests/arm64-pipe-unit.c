@@ -535,6 +535,29 @@ static void test_tex_unbound_reasons(void) {
     puts("PASS: unresolved texture handles are counted by reason (nil, beyond the table, empty entry, buffer, function, not listed, bad format / MSAA / type / extent, mapped without a surface, refused record) and logged with their format and size");
 }
 
+/* The mirror's object table reuses the slot of a released object. Before, every release left a hole and every later creation appended: MAX_OBJS (4096) creations over
+ * a run, however few objects were alive, refused every new texture (silently: no counter) = "texture handle did not resolve". */
+static void test_object_slots_reused(void) {
+    g_res_tex = true;
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+    uint64_t slots0 = lagfx_a64_res_stats(p)->obj_slots, created0 = lagfx_a64_res_stats(p)->created;
+    assert(slots0 > 0);
+    for (unsigned i = 0; i < 40; i++) {
+        lagfx_a64_res_forget(p, 1, REF_TEX);
+        lagfx_a64_res_forget(p, 1, REF_BUF_POS);
+        tri_exec(p, REF_PIPE_TRI, 3, 3, false);
+    }
+    assert(lagfx_a64_res_stats(p)->created >= created0 + 80);               /* 80 recreations ... */
+    assert(lagfx_a64_res_stats(p)->obj_slots == slots0 && lagfx_a64_res_stats(p)->obj_table_full == 0);   /* ... in the freed slots: the table did not grow */
+    lagfx_a64_exec_drop_task(p, 1);
+    lagfx_a64_exec_free(p);
+    pfree(p);
+    g_res_tex = false;
+    puts("PASS: released object slots of the mirror table are reused (no growth over forget / recreate cycles)");
+}
 
 /* A linear (buffer backed) texture is sampled: Metal shows later changes of the buffer in the texture, so the mirror image is re-pulled when the buffer changed.
  * (1) a draw samples it, (2) the guest rewrites the buffer between two execs, (3) inside ONE exec an earlier pass renders into another linear texture over the
@@ -996,6 +1019,7 @@ int main(void) {
         test_textured_draw();
         test_linear_sampled();
         test_tex_unbound_reasons();
+        test_object_slots_reused();
         test_invalidation();
         test_missing_caps();
     } else {

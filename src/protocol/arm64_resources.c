@@ -715,6 +715,9 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
         obj_release(m, vk, o);   /* deferred while an exec records / is in flight */
         m->objs[slot] = NULL;
     } else {
+        /* A slot freed by a release (0x25 forget, task drop, a replaced entry whose new object failed) is a hole: reuse it. Without this the table only grew, and after
+         * MAX_OBJS creations over a run every new object was refused (silently) although few were alive. */
+        for (uint32_t i = 0; i < m->n; i++) if (!m->objs[i]) { slot = i; break; }
         if (slot == m->n && m->n >= MAX_OBJS) { m->st.obj_table_full++; memo_fail(m, t->id, ref, e, TEXWHY_TABLE_FULL); return NULL; }
     }
     lagfx_a64_obj_t *o = obj_make(p, m, vk, t, ref, e);
