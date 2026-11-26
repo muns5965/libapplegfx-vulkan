@@ -1505,3 +1505,23 @@ cleanup_rendered:
 #endif
     #undef LAGFX_PERF_WORK_END
 }
+
+/* ARM64 swap path: copy the rendered display target into the guest's swapped surface (see the header comment). */
+lagfx_status_t lagfx_display_write_guest_surface(lagfx_display_t *display, const uint8_t *desc, size_t desc_len) {
+    if (!display || display->magic != LAGFX_DISPLAY_MAGIC || !display->device || !desc) return LAGFX_ERR_INVALID_ARG;
+#ifdef LAGFX_HAVE_VULKAN
+    lagfx_device_t *dev = display->device;
+    if (!dev->vk || !dev->vk->initialized) return LAGFX_ERR_NO_FRAME;
+    lagfx_vk_render_target_t rt;
+    bool ready;
+    LAGFX_DISPLAY_RT_LOCK(display);
+    ready = display->rt_ready;
+    rt = display->rt;                       /* handles only; the shell callbacks run without rt_lock held */
+    LAGFX_DISPLAY_RT_UNLOCK(display);
+    if (!ready) return LAGFX_ERR_NO_FRAME;
+    return lagfx_vk_render_target_to_guest_surface(dev->vk, &rt, &dev->desc.shell, desc, desc_len);
+#else
+    (void)desc_len;
+    return LAGFX_ERR_NO_FRAME;
+#endif
+}

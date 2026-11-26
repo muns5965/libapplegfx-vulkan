@@ -18,6 +18,7 @@
 #include "display.h"
 #include "protocol/state.h"  /* lagfx_protocol_t typedef */
 #include "protocol/diag.h"
+#include "protocol/arm64_completion.h"
 #include "vulkan/instance.h"
 #include "vulkan/iosurface.h"   /* white_fb teardown */
 #include "shaders/catalog.h"
@@ -422,6 +423,16 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
     return dev;
 }
 
+size_t lagfx_device_poll_completions(lagfx_device_t *device) {
+    if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
+    return lagfx_arm64_poll_completions((lagfx_protocol_t *)device->protocol_state);
+}
+
+size_t lagfx_device_pending_completions(lagfx_device_t *device) {
+    if (!lagfx_device_is_valid(device) || !device->protocol_state) return 0;
+    return lagfx_arm64_cq_pending((lagfx_protocol_t *)device->protocol_state);
+}
+
 void lagfx_device_free(lagfx_device_t *device) {
     if (!device) {
         return;
@@ -449,6 +460,8 @@ void lagfx_device_free(lagfx_device_t *device) {
      * report a leak on device teardown. */
     if (device->protocol_state) {
         lagfx_protocol_t *pfree = (lagfx_protocol_t *)device->protocol_state;
+        /* ARM64 deferred completion: outstanding GPU work (fences) is waited for (bounded) and released while Vulkan is still alive. */
+        lagfx_arm64_cq_shutdown(pfree, 2000);
 #ifdef LAGFX_HAVE_VULKAN
         /* The lazily-created opaque-white fallback texture is protocol-owned
          * but Vulkan-backed — destroy it while vk is still alive. */

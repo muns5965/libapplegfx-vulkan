@@ -42,12 +42,32 @@ lagfx_status_t lagfx_vk_command_pool_create(struct lagfx_vk_state *vk);
  * never had a pool created. */
 void lagfx_vk_command_pool_destroy(struct lagfx_vk_state *vk);
 
+/* Process-wide GPU failure counters (no-ops returning 0 without Vulkan). */
+/* A caller that detected its own GPU failure (e.g. a forced completion) records it here. */
+void lagfx_vk_note_gpu_failure(bool timeout);
+void lagfx_vk_gpu_fail_stats(uint64_t *timeouts, uint64_t *failures, uint64_t *submit_failures);
+
 #ifdef LAGFX_HAVE_VULKAN
 
 /* Allocate one primary command buffer from the pool. On no-vulkan
  * builds these are gated out — callers must also be gated. */
 lagfx_status_t lagfx_vk_cmdbuf_alloc(struct lagfx_vk_state *vk,
                                      VkCommandBuffer *out);
+
+/* === Bounded GPU waits (use these on the vCPU / dispatcher path instead of vkWaitForFences(UINT64_MAX)) ===
+ * A GPU hang must never freeze the VM: every wait is bounded (env LAGFX_VK_WAIT_MS, default 2000 ms; timeout_ns == 0 means that default) and every
+ * VkResult is checked. Failures are counted process-wide (lagfx_vk_gpu_fail_stats, printed by the g7 diag as g7-gpu-sync) so the caller can mark the
+ * work failed and STILL complete the guest's stamp. */
+typedef enum {
+    LAGFX_VK_WAIT_OK = 0,
+    LAGFX_VK_WAIT_TIMEOUT,     /* not finished within the bound; the fence/work is still in flight: do not destroy what it uses */
+    LAGFX_VK_WAIT_FAILED       /* VK_ERROR_DEVICE_LOST / out of memory / any other error */
+} lagfx_vk_wait_result_t;
+
+uint64_t lagfx_vk_wait_default_ns(void);
+lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns);
+/* vkQueueSubmit with the result checked and counted. LAGFX_OK or LAGFX_ERR_BACKEND (the fence is then NOT pending). */
+lagfx_status_t lagfx_vk_submit_checked(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence);
 
 /* Free a previously-allocated primary command buffer. */
 void lagfx_vk_cmdbuf_free(struct lagfx_vk_state *vk, VkCommandBuffer cb);

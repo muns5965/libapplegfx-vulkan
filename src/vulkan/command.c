@@ -50,6 +50,7 @@
 #include "instance.h"
 #include "common/log.h"
 
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -413,3 +414,50 @@ lagfx_status_t lagfx_vk_end_frame(struct lagfx_vk_state *vk) {
 }
 
 #endif /* LAGFX_HAVE_VULKAN */
+
+
+#ifdef LAGFX_HAVE_VULKAN
+static atomic_ullong g_gpu_timeouts, g_gpu_failures, g_gpu_submit_failures;
+
+uint64_t lagfx_vk_wait_default_ns(void) {
+    static uint64_t ns;
+    if (!ns) {
+        const char *e = getenv("LAGFX_VK_WAIT_MS");
+        unsigned long ms = e ? strtoul(e, NULL, 10) : 0;
+        ns = (ms ? ms : 2000ul) * 1000000ull;
+    }
+    return ns;
+}
+
+void lagfx_vk_note_gpu_failure(bool timeout) {
+    atomic_fetch_add(timeout ? &g_gpu_timeouts : &g_gpu_failures, 1);
+}
+
+lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence fence, uint64_t timeout_ns) {
+    if (!vk || vk->device == VK_NULL_HANDLE || fence == VK_NULL_HANDLE) return LAGFX_VK_WAIT_FAILED;
+    VkResult r = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns ? timeout_ns : lagfx_vk_wait_default_ns());
+    if (r == VK_SUCCESS) return LAGFX_VK_WAIT_OK;
+    if (r == VK_TIMEOUT) { lagfx_vk_note_gpu_failure(true); LAGFX_ERR("vk wait: timeout"); return LAGFX_VK_WAIT_TIMEOUT; }
+    lagfx_vk_note_gpu_failure(false);
+    LAGFX_ERR("vk wait: VkResult %d (device lost?)", (int)r);
+    return LAGFX_VK_WAIT_FAILED;
+}
+
+lagfx_status_t lagfx_vk_submit_checked(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence) {
+    if (!vk || !si || vk->graphics_queue == VK_NULL_HANDLE) return LAGFX_ERR_INVALID_ARG;
+    VkResult r = vkQueueSubmit(vk->graphics_queue, 1, si, fence);
+    if (r == VK_SUCCESS) return LAGFX_OK;
+    atomic_fetch_add(&g_gpu_submit_failures, 1);
+    LAGFX_ERR("vkQueueSubmit failed: VkResult %d", (int)r);
+    return LAGFX_ERR_BACKEND;
+}
+
+void lagfx_vk_gpu_fail_stats(uint64_t *timeouts, uint64_t *failures, uint64_t *submit_failures) {
+    if (timeouts) *timeouts = atomic_load(&g_gpu_timeouts);
+    if (failures) *failures = atomic_load(&g_gpu_failures);
+    if (submit_failures) *submit_failures = atomic_load(&g_gpu_submit_failures);
+}
+#else
+void lagfx_vk_note_gpu_failure(bool timeout) { (void)timeout; }
+void lagfx_vk_gpu_fail_stats(uint64_t *t, uint64_t *f, uint64_t *s) { if (t) *t = 0; if (f) *f = 0; if (s) *s = 0; }
+#endif

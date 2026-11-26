@@ -23,6 +23,7 @@
 #include "dispatchers/channel_door_dispatcher.h"
 #include "dispatchers/primary_ring_door_dispatcher.h"
 #include "protocol/state.h"
+#include "protocol/arm64_completion.h"
 #include "common/log.h"
 
 #include "device.h"
@@ -318,6 +319,7 @@ uint32_t doorbell_handle_read(void *protocol_state, uint64_t offset) {
 
     /* Stamp bitmask — atomic xchg-and-clear with acquire ordering. */
     if (offset == 0x1018u) {
+        if (p && p->a64cq) lagfx_arm64_poll_completions(p);   /* arm64 deferred completion: retire finished GPU work first (no-op when off) */
         uint32_t mask = p
             ? atomic_exchange_explicit(&p->pending_stamps_bitmask,
                                        0u, memory_order_acquire)
@@ -329,6 +331,7 @@ uint32_t doorbell_handle_read(void *protocol_state, uint64_t offset) {
     /* arm64 vmapple (Apple Henge gfx_read): reading the root read pointer first runs the root ring (the driver spins on this waiting for
      * space), then returns the cumulative pointer. */
     if (offset == 0x100cu && p && lagfx_proto_arm64(p)) {
+        if (p->a64cq) lagfx_arm64_poll_completions(p);
         channel_0_dispatcher_drain(p);
         LAGFX_TRACE("doorbell: read off=0x100c root_rp → 0x%x", p->read_ptr);
         return p->read_ptr;

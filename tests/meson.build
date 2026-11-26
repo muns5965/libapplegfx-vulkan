@@ -1380,3 +1380,33 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-decode-unit.c')
   )
   test('arm64 exec 0x43/0x45 decode (unit)', ed_test)
 endif
+
+# ARM64 deferred stamp completion queue (CPU only, mock GPU work) and the compute drain's behaviour with it off / on.
+if fs.is_file(meson.current_source_dir() / 'arm64-completion-unit.c')
+  ac_deps = [libapplegfx_vulkan_dep, dependency('threads')]
+  if vulkan_dep.found()
+    ac_deps += [vulkan_dep]
+  endif
+  ac_test = executable('arm64-completion-unit',
+    'arm64-completion-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : ac_deps,
+    build_by_default : true,
+  )
+  test('arm64 deferred stamp completion (unit)', ac_test)
+endif
+
+# (F+D) fence-tracked completion + guest-surface writeback on lavapipe (16 KiB page surface, row stride).
+if fs.is_file(meson.current_source_dir() / 'arm64-surface-writeback-unit.c')
+  sw_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    sw_deps += [vulkan_dep]
+  endif
+  sw_test = executable('arm64-surface-writeback-unit',
+    'arm64-surface-writeback-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : sw_deps,
+    build_by_default : true,
+  )
+  test('arm64 completion fence + guest surface writeback (lavapipe)', sw_test)
+endif

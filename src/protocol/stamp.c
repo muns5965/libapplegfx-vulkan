@@ -67,8 +67,9 @@ void lagfx_advance_stamp_cell(lagfx_protocol_t *p, uint32_t slot, uint32_t targe
     }
 }
 
-/* Complete stamp for a specific slot */
-void lagfx_protocol_complete_stamp_slot(lagfx_protocol_t *p, uint32_t slot, uint32_t stamp) {
+/* Complete stamp for a specific slot, without raising the interrupt. The stamp cell and the pending bit are published; the caller raises the
+ * interrupt (lagfx_protocol_raise_completion_irq) once for however many slots it completed (arm64 deferred completion batches). */
+void lagfx_protocol_complete_stamp_slot_noirq(lagfx_protocol_t *p, uint32_t slot, uint32_t stamp) {
     if (!lagfx_protocol_is_valid(p)) return;
 
     p->last_completed_stamp = stamp;
@@ -86,15 +87,24 @@ void lagfx_protocol_complete_stamp_slot(lagfx_protocol_t *p, uint32_t slot, uint
                                               memory_order_release);
     uint32_t new_mask = prev | (1u << slot);
 
-    /* Raise interrupt if shell callback is available */
+    LAGFX_LOG("complete_stamp[slot=%u]: stamp=0x%08x mask=0x%x",
+              slot, stamp, new_mask);
+}
+
+void lagfx_protocol_raise_completion_irq(lagfx_protocol_t *p) {
+    if (!lagfx_protocol_is_valid(p)) return;
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     if (dev && dev->desc.shell.raise_interrupt) {
         dev->desc.shell.raise_interrupt(dev->desc.shell.opaque, 0u);
         p->diag2.irq_raised++;
     }
+}
 
-    LAGFX_LOG("complete_stamp[slot=%u]: stamp=0x%08x mask=0x%x",
-              slot, stamp, new_mask);
+/* Complete stamp for a specific slot (cell + pending bit + interrupt). Unchanged behaviour. */
+void lagfx_protocol_complete_stamp_slot(lagfx_protocol_t *p, uint32_t slot, uint32_t stamp) {
+    if (!lagfx_protocol_is_valid(p)) return;
+    lagfx_protocol_complete_stamp_slot_noirq(p, slot, stamp);
+    lagfx_protocol_raise_completion_irq(p);
 }
 
 /* Complete stamp for root channel (slot 0) */

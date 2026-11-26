@@ -3,6 +3,8 @@
  */
 #include "diag.h"
 #include "state.h"
+#include "arm64_completion.h"
+#include "../vulkan/command.h"
 #include "../common/log.h"
 
 #include <stdio.h>
@@ -96,4 +98,16 @@ void lagfx_diag_mmio(lagfx_protocol_t *p, bool is_write) {
              (unsigned long long)X->inner_bad, tags);
     fprintf(stderr, "%s\n", line);
     LAGFX_LOG("%s", line);
+    {   /* arm64 deferred completion + GPU wait failures (separate line: the line above keeps its format) */
+        uint64_t r = 0, f = 0, to = 0, wt = 0, wf = 0, sf = 0;
+        lagfx_arm64_cq_stats(p, &r, &f, &to);
+        lagfx_vk_gpu_fail_stats(&wt, &wf, &sf);
+        if (p->a64cq || wt || wf || sf) {
+            snprintf(line, sizeof line, "g7-gpu-sync: cq_retired=%llu cq_failed=%llu cq_timed_out=%llu cq_pending=%llu vk_wait_timeouts=%llu vk_wait_failed=%llu vk_submit_failed=%llu",
+                     (unsigned long long)r, (unsigned long long)f, (unsigned long long)to, (unsigned long long)lagfx_arm64_cq_pending(p),
+                     (unsigned long long)wt, (unsigned long long)wf, (unsigned long long)sf);
+            fprintf(stderr, "%s\n", line);
+            LAGFX_LOG("%s", line);
+        }
+    }
 }

@@ -300,6 +300,13 @@ typedef struct {
 LAGFX_EXPORT lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
                                   char **errp_out);
 
+/* ARM64 only, env LAGFX_ARM64_EXEC=1 only (otherwise both return 0): the library completes a command's stamp cell and raises the interrupt only
+ * after the GPU work recorded for it finished. Nothing wakes the library when a GPU fence signals, so the shell calls
+ * lagfx_device_poll_completions() from a timer (on the thread it already calls the library from, e.g. under the BQL; it raises the interrupt
+ * through the raise_interrupt callback) for as long as lagfx_device_pending_completions() is non-zero. Returns the number of stamps retired. */
+LAGFX_EXPORT size_t lagfx_device_poll_completions(lagfx_device_t *device);
+LAGFX_EXPORT size_t lagfx_device_pending_completions(lagfx_device_t *device);
+
 /* Destroy the device and all associated displays. Safe on NULL. */
 LAGFX_EXPORT void lagfx_device_free(lagfx_device_t *device);
 
@@ -359,6 +366,14 @@ LAGFX_EXPORT lagfx_status_t lagfx_display_read_frame(lagfx_display_t *display,
                                          size_t dst_size_bytes,
                                          size_t *stride_out,
                                          bool *new_frame_out);
+
+/* ARM64 vmapple swap path: write the display's current rendered frame (BGRA8) into the guest surface described by `desc` (the surface descriptor
+ * the shell keeps for the swapped mapping id: page list at +0, fourcc at +4, alloc +0x18, width +0x20, height +0x28, row bytes +0x30, first-page
+ * offset +0x60; 16 KiB guest pages; at least 0x64 bytes, see Henge pvg_lite.c decode_surface). The shell calls this from its display_command
+ * handler for Display op 8 (swap) after it resolved the mapping, and it uses the device's shell.read_memory / write_memory. Only 'BGRA' surfaces;
+ * the top-left min(w,h) overlap is written without scaling. Returns LAGFX_ERR_NO_FRAME when no frame was rendered yet; nothing is written on
+ * any error. Not wired into the library's own display_command forwarding (the shell owns the descriptor table). */
+LAGFX_EXPORT lagfx_status_t lagfx_display_write_guest_surface(lagfx_display_t *display, const uint8_t *desc, size_t desc_len);
 
 /* Advance the display shared-state vblank counter and DMA-write it
  * to the guest. The shell should call this at ~60 Hz from a timer.

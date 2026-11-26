@@ -32,6 +32,7 @@
 #include "protocol/state.h"
 #include "protocol/diag.h"
 #include "protocol/arm64_exec_decode.h"
+#include "protocol/arm64_completion.h"
 #include "protocol/object_resolver.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
@@ -424,6 +425,8 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
     if (!lagfx_protocol_is_valid(p)) {
         return 0;
     }
+    /* ARM64 deferred completion (LAGFX_ARM64_EXEC=1): retire what the GPU finished since the last drain. No-op when off. */
+    if (lagfx_arm64_cq_ensure(p)) lagfx_arm64_poll_completions(p);
 
     /* Look up the per-channel ring geometry from the FIFORingDescriptor.
      * Helper lives in ring_common.{c,h}; shared with display dispatcher. */
@@ -499,6 +502,10 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
         if (a64 && length > LAGFX_COMPUTE_MAX_CMD_BYTES && length <= ring_size) {
             /* valid for Apple, larger than our scratch: skip it visibly rather than stall */
             LAGFX_WARN("compute drain: ch=%u command len=0x%x op=0x%04x exceeds scratch; skipped", chan_id, length, opcode);
+            if (p->a64cq) {   /* deferred-completion mode: a skipped command still completes its stamp (in order), the guest must not wait for it */
+                lagfx_cmd_header_t sh = { .opcode = opcode, .arg_count_8b = arg_count_8b, .length = length, .stamp = stamp };
+                lagfx_arm64_submit_dropped(p, chan_id, &sh);
+            }
             rp += length;
             continue;
         }
@@ -560,10 +567,13 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
                               : NULL;
 
         lagfx_diag_cmd(p, LAGFX_DIAG_COMPUTE, chan_id, rp, cmd_buf, length);   /* diagnostics only */
+        /* ARM64 + LAGFX_ARM64_EXEC=1: the stamp is completed by the completion queue (now if no GPU work was attached, else after it finished). */
+        lagfx_arm64_submit_ctx_t *sctx = a64 ? lagfx_arm64_submit_begin(p, chan_id, &hdr) : NULL;
         dispatch_command(p, &hdr);
 
         /* Per-channel stamp slot = chan_id (1..4 → SLOT_COMPUTE_1..4). */
-        lagfx_protocol_complete_stamp_slot(p, chan_id, stamp);
+        if (sctx) lagfx_arm64_submit_end(p, sctx);
+        else      lagfx_protocol_complete_stamp_slot(p, chan_id, stamp);
 
         p->total_cmds_seen++;
         cmds++;
@@ -573,6 +583,7 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
     /* Publish the drained position back to the descriptor so the
      * kext's watchdog observes progress (channel-progress-flag-RE.md). */
     lagfx_ring_publish_read_ptr(p, desc_gpa, rp);
+    if (p->a64cq) lagfx_arm64_poll_completions(p);   /* one IRQ for everything this drain queued that is already finished */
 
     LAGFX_LOG("compute drain: ch=%u drained=%zu new rp=0x%x",
               chan_id, cmds, rp);

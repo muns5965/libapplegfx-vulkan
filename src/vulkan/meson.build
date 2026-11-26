@@ -17,4 +17,5 @@ lagfx_sources += files(
   'iosurface.c',
   'display_blit.c',
   'draw_record.c',
+  'surface_writeback.c',
 )

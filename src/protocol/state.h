@@ -593,6 +593,9 @@ typedef struct lagfx_protocol {
     uint8_t  *scratch_exec_heap;
     uint32_t  scratch_exec_heap_size;
 
+    /* ARM64 deferred stamp completion queue (src/protocol/arm64_completion.h). NULL unless LAGFX_ARM64_EXEC=1 in arm64 mode. */
+    struct lagfx_arm64_cq *a64cq;
+
 } lagfx_protocol_t;
 
 /* The command rings' page size and PFN encoding. The shift is 12 unless the device was created with another ring_page_shift (the only accepted
@@ -669,6 +672,8 @@ static inline lagfx_fifo_entry_t* lagfx_protocol_alloc_fifo_slot(lagfx_protocol_
 
 /* Stamp slot helpers — exported for tests. */
 extern void lagfx_protocol_complete_stamp_slot(lagfx_protocol_t *p, uint32_t slot, uint32_t stamp);
+extern void lagfx_protocol_complete_stamp_slot_noirq(lagfx_protocol_t *p, uint32_t slot, uint32_t stamp);
+extern void lagfx_protocol_raise_completion_irq(lagfx_protocol_t *p);
 
 /* Back-compat wrapper — completes slot 0 with given stamp value (defined in stamp.c). */
 extern void lagfx_protocol_complete_stamp(lagfx_protocol_t *p, uint32_t stamp);
