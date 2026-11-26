@@ -75,6 +75,7 @@ typedef struct {
     lagfx_a64_pipeline_resolver_t resolver; void *resolver_ctx;
     lagfx_a64_rexec_t *x;            /* the exec being recorded (mirror context), NULL outside an exec */
     bool pass_open;                  /* a tag 26 was seen and the segment chain has not ended it */
+    bool last_fetch;                 /* the previous draw of this pass read input attachments (framebuffer fetch) */
     bool rendering;                  /* the render encoder has a vkCmdBeginRendering open (pass_open without it = a pass with no usable target) */
     lagfx_a64_obj_t *rt; uint32_t rt_w, rt_h;   /* the first mirror texture being drawn into (rts[first used slot]) */
     lagfx_a64_obj_t *rts[4]; uint32_t nslots;   /* colour attachments by their ORIGINAL slot (fragment output location); a null entry = unused slot; nslots = highest used slot + 1 */
@@ -405,8 +406,8 @@ static VkSampler default_sampler(a64_run_t *r) {
 
 static bool descriptor_pool(a64_run_t *r) {
     if (r->dpool) return true;
-    VkDescriptorPoolSize sz[3] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 } };
-    VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 512, .poolSizeCount = 3, .pPoolSizes = sz };
+    VkDescriptorPoolSize sz[4] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 }, { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024 } };
+    VkDescriptorPoolCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT, .maxSets = 512, .poolSizeCount = 4, .pPoolSizes = sz };
     if (vkCreateDescriptorPool(r->vk->device, &ci, NULL, &r->dpool) != VK_SUCCESS) { r->dpool = VK_NULL_HANDLE; return false; }
     VkPhysicalDeviceProperties pr;
     vkGetPhysicalDeviceProperties(r->vk->phys_device, &pr);
@@ -441,6 +442,12 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             bi[i] = (VkDescriptorBufferInfo){ b->buf, off, b->length - off };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, w[i].pBufferInfo = &bi[i];
             MIX(b->gen), MIX(off);
+        } else if (s->bind[i].kind == LAGFX_A64_BIND_INPUT) {   /* framebuffer fetch: colour attachment mi of the open pass */
+            lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
+            if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++; return false; }
+            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
+            w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
+            MIX(t->gen), MIX(0x1f0u);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_IMAGE) {
             lagfx_a64_obj_t *t = mi_s >= 0 && mi < A64_MAX_FB ? r->ftex[mi] : NULL;
             if (!t) { p->diag2.exec.pipe.desc_unbound++; return false; }
@@ -496,6 +503,16 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
         r->bound_vk = vp;
     }
     if (!bind_descriptors(r, p, r->pipe)) { CNT(p).draws_skipped++; return false; }
+    bool fetch = false;
+    for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) fetch |= r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT;
+    if (fetch || r->last_fetch) {   /* same-pixel dependency inside the pass: earlier colour writes -> this draw's input-attachment read, and (after a reading draw) its read -> later writes */
+        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT };
+        vkCmdPipelineBarrier(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+        if (fetch) p->diag2.exec.pipe.fbfetch_draws++;
+    }
+    r->last_fetch = fetch;
     return true;
 }
 
@@ -504,7 +521,7 @@ static void pass_end(a64_run_t *r) {
         lagfx_translate_render_end(&r->rs);
         for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
     }
-    r->pass_open = r->rendering = false;
+    r->pass_open = r->rendering = false, r->last_fetch = false;
     memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
     r->rt = NULL, r->pipe = NULL, r->pipe_set = false, r->bound_vk = VK_NULL_HANDLE;
 }
@@ -531,7 +548,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     VkRenderingAttachmentInfo ca[4];
     memset(ca, 0, sizeof ca);
     for (int k = 0; k < 4; k++) ca[k] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = VK_NULL_HANDLE,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
+        .imageLayout = r->vk->have_local_read ? (VkImageLayout)1000232000 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
     lagfx_a64_obj_t *first = NULL;
     uint32_t fw = 0, fh = 0, nslots = 0;
     for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++) {

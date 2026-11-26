@@ -291,6 +291,11 @@ typedef struct {
      * 0=none), cached so GEP can tell a buffer var apart for its storage
      * class. */
     uint8_t                   arg_resource_kind[LAGFX_MAX_VERTEX_ARGS];
+    /* Framebuffer fetch: a fragment input arg keyed "air.render_target:<n>" (Metal `[[color(n)]]` / dest_n) reads the current value of colour attachment n.
+     * It becomes an input attachment (OpTypeImage Dim=SubpassData, InputAttachmentIndex n); arg_rt_var[i] is its UniformConstant variable (0 = not one). */
+    uint32_t                  arg_rt_var[LAGFX_MAX_VERTEX_ARGS];
+    uint8_t                   arg_rt_idx[LAGFX_MAX_VERTEX_ARGS];
+    uint32_t                  id_subpass_t, id_subpass_ptr, id_subpass_zero;
     /* Effective-pointee override for a nonstruct `device T*` buffer arg
      * whose body accesses UNANIMOUSLY reinterpret it as a different element
      * type. Metal code like `device uchar *raw` GEP'd with
@@ -1773,6 +1778,15 @@ static uint32_t emit_type_arrayed_block_ptr(xlate_ctx_t *c, uint32_t pointee_ty)
 
 /* A fragment arg that is Metal's [[position]] (window-space FragCoord) — only
  * known when the module's per-arg keys were supplied. */
+/* The colour attachment index when fragment arg i is a framebuffer-fetch input ("air.render_target:<n>" key), else -1. */
+static int frag_arg_rt_index(const xlate_ctx_t *c, uint32_t i) {
+    const lagfx_stage_keys_t *own = c->iface_own_in;
+    if (c->stage != LAGFX_XLATE_STAGE_FRAGMENT || !own || i >= own->n) return -1;
+    if (strncmp(own->key[i], "air.render_target:", 18u) != 0) return -1;
+    int n = atoi(own->key[i] + 18);
+    return n >= 0 && n < 8 ? n : -1;
+}
+
 static bool frag_arg_is_fragcoord(xlate_ctx_t *c, uint32_t i) {
     const lagfx_stage_keys_t *own = c->iface_own_in;
     if (!own || i >= own->n || strcmp(own->key[i], "air.position") != 0) return false;
@@ -1958,6 +1972,12 @@ static void emit_prologue(xlate_ctx_t *c) {
         uint32_t n_fa = c->num_args < LAGFX_MAX_VERTEX_ARGS
                             ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
         for (uint32_t i = 0; i < n_fa; i++) {
+            int rti = frag_arg_rt_index(c, i);
+            if (rti >= 0 && vertex_arg_kind(c, i) == LAGFX_VARG_ATTR) {   /* framebuffer fetch: an input attachment, not a varying */
+                c->arg_rt_var[i] = lagfx_spv_builder_alloc_id(c->b);
+                c->arg_rt_idx[i] = (uint8_t)rti;
+                continue;
+            }
             if (vertex_arg_kind(c, i) == LAGFX_VARG_ATTR) {
                 c->arg_input_var_ids[i] = lagfx_spv_builder_alloc_id(c->b);
                 if (frag_arg_is_fragcoord(c, i))
@@ -1994,6 +2014,7 @@ static void emit_prologue(xlate_ctx_t *c) {
             /* SPIR-V 1.4: list ALL used globals (Input + UniformConstant). */
             if (c->arg_input_var_ids[i] && !input_var_is_dup(c, i)) suffix[n_iface++] = c->arg_input_var_ids[i];
             if (c->arg_resource_var[i])  suffix[n_iface++] = c->arg_resource_var[i];
+            if (c->arg_rt_var[i])        suffix[n_iface++] = c->arg_rt_var[i];
         }
         if (c->id_default_sampler_var) suffix[n_iface++] = c->id_default_sampler_var;
         for (uint32_t v = 0; v < c->n_bytebuf_views; v++)
@@ -2048,6 +2069,16 @@ static void emit_prologue(xlate_ctx_t *c) {
             uint32_t d_bind[] = { c->id_default_sampler_var,
                                    LAGFX_SPV_DECORATION_BINDING, binding++ };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
+        }
+        /* Input attachments (framebuffer fetch): set 0, a fixed binding range above the resources (24 + n), InputAttachmentIndex n. */
+        for (uint32_t i = 0; i < n_fa; i++) {
+            if (!c->arg_rt_var[i]) continue;
+            uint32_t d1[] = { c->arg_rt_var[i], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+            uint32_t d2[] = { c->arg_rt_var[i], LAGFX_SPV_DECORATION_BINDING, 24u + c->arg_rt_idx[i] };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+            uint32_t d3[] = { c->arg_rt_var[i], 43u /* InputAttachmentIndex */, c->arg_rt_idx[i] };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d3, 3);
         }
         /* OpDecorate each stage-in Input %arg Location N (input Location
          * space is separate from the output color's). */
@@ -2276,6 +2307,7 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                             ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
         for (uint32_t i = 0; i < n_fa; i++) {
             if (vertex_arg_kind(c, i) != LAGFX_VARG_ATTR) continue;
+            if (c->arg_rt_var[i]) continue;   /* input attachment, declared below */
             if (input_var_is_dup(c, i)) continue;
             uint32_t elem_spv = iface_var_type(c, c->arg_air_type_ids[i],
                                     emit_air_type(c, c->arg_air_type_ids[i]));
@@ -2288,6 +2320,32 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
         }
 
         emit_arg_resource_vars(c, n_fa);
+        for (uint32_t i = 0; i < n_fa; i++) {
+            if (!c->arg_rt_var[i]) continue;
+            if (!c->id_subpass_t) {
+                uint32_t cap[] = { 40u /* InputAttachment */ };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1);
+                c->id_subpass_t = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t io[] = { c->id_subpass_t, emit_type_float32(c), 6u /* SubpassData */, 0u, 0u, 0u, 2u /* Sampled=2 */, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, io, 8);
+                c->id_subpass_ptr = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t po[] = { c->id_subpass_ptr, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT, c->id_subpass_t };
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+            }
+            uint32_t vo[] = { c->id_subpass_ptr, c->arg_rt_var[i], LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
+        }
+        {   /* the (0,0) read coordinate: an int2 null constant, declared before any function */
+            bool any = false;
+            for (uint32_t i = 0; i < n_fa; i++) if (c->arg_rt_var[i]) any = true;
+            if (any) {
+                uint32_t iv2 = emit_type_vec(c, emit_type_int_w(c, 32u, 1u), 2u);
+                c->id_subpass_zero = lagfx_spv_builder_alloc_id(c->b);
+                uint32_t co[] = { iv2, c->id_subpass_zero };
+                lagfx_spv_builder_emit_op(c->b, 46u /* OpConstantNull */, co, 2);
+                (void)emit_type_vec4_f(c);
+            }
+        }
     }
 
     /* Pre-emit all AIR types likely to be referenced by the body
@@ -2480,6 +2538,18 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
                 id_load = iface_narrow(c, c->arg_air_type_ids[i], id_load);
             c->arg_spv_ids[i] = id_load;
             bind_value_spv(c, c->arg_id_base + i, id_load);
+        }
+        for (uint32_t i = 0; i < n_va; i++) {   /* framebuffer fetch: read the attachment's current value at this pixel */
+            if (!c->arg_rt_var[i]) continue;
+            uint32_t img = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t lo[] = { c->id_subpass_t, img, c->arg_rt_var[i] };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, lo, 3);
+            uint32_t v = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t ro[] = { emit_type_vec4_f(c), v, img, c->id_subpass_zero };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_READ, ro, 4);
+            v = iface_narrow(c, c->arg_air_type_ids[i], v);   /* half4 arg: float4 -> half4 */
+            c->arg_spv_ids[i] = v;
+            bind_value_spv(c, c->arg_id_base + i, v);
         }
     }
 }

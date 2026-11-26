@@ -80,7 +80,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                 }
                 break;
             case OP_TYPE_IMAGE:
-                if (wc >= 2u && W(1) < MAXID) is_image[W(1)] = 1;
+                if (wc >= 4u && W(1) < MAXID) is_image[W(1)] = (W(3) == 6u) ? 2 : 1;   /* Dim SubpassData = input attachment */
                 break;
             case OP_TYPE_SAMPLER:
                 if (wc >= 2u && W(1) < MAXID) is_sampler[W(1)] = 1;
@@ -112,7 +112,9 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
         uint32_t pointee = (ptr < MAXID) ? ptr_pointee[ptr] : 0u;
         lagfx_spv_binding_kind_t kind = LAGFX_SPV_BINDING_UNKNOWN;
         if (pointee < MAXID) {
-            if (is_image[pointee] || is_sampled_image[pointee])
+            if (is_image[pointee] == 2)
+                kind = LAGFX_SPV_BINDING_INPUT_ATTACHMENT;
+            else if (is_image[pointee] || is_sampled_image[pointee])
                 kind = LAGFX_SPV_BINDING_SAMPLED_IMAGE;
             else if (is_sampler[pointee])
                 kind = LAGFX_SPV_BINDING_SAMPLER;

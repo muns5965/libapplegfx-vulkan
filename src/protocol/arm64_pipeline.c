@@ -373,6 +373,13 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         uint32_t nth[4] = { 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
         for (size_t t = 0; t < nt; t++) {
             if (tmp[t].set != 0u) continue;
+            if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
+                if (st == 0 || !vk->have_local_read || tmp[t].binding < 24u || tmp[t].binding > 27u || out->n_bind >= LAGFX_A64_MAX_BINDINGS) { CNTP(p).stub_fbfetch++; goto done; }
+                out->bind[out->n_bind].binding = (uint8_t)tmp[t].binding, out->bind[out->n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT;
+                out->bind[out->n_bind].stage = 1, out->bind[out->n_bind].metal_index = (int16_t)(tmp[t].binding - 24u);
+                out->n_bind++, CNTP(p).fbfetch_pipes++;
+                continue;
+            }
             if (tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].kind != LAGFX_SPV_BINDING_SAMPLER) { CNTP(p).rf_bindings++; goto done; }
             if (out->n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) { CNTP(p).rf_bindings++; goto done; }
             if (st == 0 && tmp[t].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER) { CNTP(p).rf_vertex_res++; goto done; }   /* tags 129/127 are not executed */

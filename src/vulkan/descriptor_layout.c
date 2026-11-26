@@ -19,6 +19,7 @@ static VkDescriptorType kind_to_vk(lagfx_spv_binding_kind_t k) {
         case LAGFX_SPV_BINDING_SAMPLED_IMAGE:  return VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
         case LAGFX_SPV_BINDING_SAMPLER:        return VK_DESCRIPTOR_TYPE_SAMPLER;
         case LAGFX_SPV_BINDING_STORAGE_BUFFER: return VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        case LAGFX_SPV_BINDING_INPUT_ATTACHMENT: return VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT;
         default:                               return VK_DESCRIPTOR_TYPE_MAX_ENUM;
     }
 }

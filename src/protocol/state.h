@@ -568,7 +568,7 @@ typedef struct lagfx_protocol {
                 uint64_t rf_no_blob, rf_bad_tag, rf_no_refs, rf_no_lib, rf_no_stage, rf_module, rf_translate, rf_layout, rf_multi_stream, rf_vertex_res, rf_bindings, rf_no_vulkan;
                 uint64_t xlate_air2spv;
                 uint64_t rf_missing_cap, stub_missing_cap[16];   /* a translated module needs a device capability that is not enabled (vulkan/caps.h order): pipeline not built */
-                uint64_t blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
+                uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
                 uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
                 uint64_t desc_sets, desc_unbound, desc_unaligned, desc_feedback, desc_failed, samplers, sampler_failed, point_no_size;
                 uint64_t dump_objects, dump_bytes, dump_files, dump_skipped_cap, dump_truncated, dump_draws, dump_table_full;

@@ -30,6 +30,7 @@ typedef enum {
     LAGFX_SPV_BINDING_SAMPLED_IMAGE  = 1, /* OpTypeImage, Sampled=1  -> VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE */
     LAGFX_SPV_BINDING_SAMPLER        = 2, /* OpTypeSampler           -> VK_DESCRIPTOR_TYPE_SAMPLER */
     LAGFX_SPV_BINDING_STORAGE_BUFFER = 3, /* StorageBuffer Block     -> VK_DESCRIPTOR_TYPE_STORAGE_BUFFER */
+    LAGFX_SPV_BINDING_INPUT_ATTACHMENT = 4, /* OpTypeImage Dim=SubpassData -> VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT (framebuffer fetch) */
 } lagfx_spv_binding_kind_t;
 
 typedef struct {

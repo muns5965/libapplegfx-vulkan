@@ -164,7 +164,12 @@ static void md_iface_key(const lagfx_air_module_t *m, const lagfx_air_metadata_t
         const char *s = md_string(m, node->operands[j] - 1u);
         if (!s) continue;
         if (strcmp(s, "air.position") == 0 || strcmp(s, "air.point_size") == 0 ||
-            strcmp(s, "air.point_coord") == 0 || strcmp(s, "air.render_target") == 0) { snprintf(out, cap, "%s", s); return; }
+            strcmp(s, "air.point_coord") == 0) { snprintf(out, cap, "%s", s); return; }
+        if (strcmp(s, "air.render_target") == 0) {   /* "air.render_target:<index>": the colour attachment a fragment input (dest_N, framebuffer fetch) or output refers to */
+            int64_t idx = (j + 1u < node->num_operands && node->operands[j + 1u]) ? md_value_int(m, md_record(m, node->operands[j + 1u] - 1u)) : -1;
+            if (idx >= 0 && idx < 8) snprintf(out, cap, "%s:%d", s, (int)idx); else snprintf(out, cap, "%s", s);
+            return;
+        }
         if (strcmp(s, "air.vertex_output") == 0 || strcmp(s, "air.fragment_input") == 0) { after_io = true; continue; }
         if (after_io) {
             if (strncmp(s, "air.", 4) != 0) snprintf(out, cap, "%s", s);
