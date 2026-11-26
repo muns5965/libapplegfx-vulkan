@@ -143,6 +143,12 @@ static void test_walker(void) {
     assert(lagfx_exec_walk_segment(x, n, n, &s, collect, NULL) == LAGFX_SEG_OK);
     assert(s.type == 0 && s.cont == 0 && s.more == 1 && s.ninner == 4 && s.body_len == 60 && !s.clamped && !s.bad_inner && !s.truncated && s.tail == 0 && s.slack == 0);
     assert(g_ntags == 4 && g_tags[0] == 26 && g_tags[3] == 7);
+    /* real guests write seglen = the whole buffer (header included): normal, not clamped (regression for 4761c7a; seen in 18/18 real execs) */
+    { uint32_t sl = n; memcpy(x, &sl, 4); g_ntags = 0;
+      assert(lagfx_exec_walk_segment(x, n, n, &s, collect, NULL) == LAGFX_SEG_OK);
+      assert(!s.clamped && s.body_len == 60 && s.ninner == 4 && s.tail == 0 && !s.bad_inner);
+      sl = n + 9; memcpy(x, &sl, 4);
+      assert(lagfx_exec_walk_segment(x, n, n, &s, collect, NULL) == LAGFX_SEG_OK && s.clamped && s.ninner == 4); }
     free(x);
     /* type 5 protection header skipped, then the real one (8 option bytes in between, whatever they hold) */
     uint8_t pb[512]; uint32_t in = seg(b, 1, 1, 0, 2, tg + 1, sz + 1);
