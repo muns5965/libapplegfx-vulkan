@@ -38,6 +38,9 @@ typedef struct {
     uint32_t                 set;
     uint32_t                 binding;
     lagfx_spv_binding_kind_t kind;
+    uint8_t                  may_write;  /* STORAGE_BUFFER only: 0 = the module PROVABLY never writes through it (every use of the variable / its access chains is a load or an
+                                          * array length), 1 = a store / atomic / copy / call / phi / pointer escape was found (or the module is too large to analyse).
+                                          * Several variables of one binding (byte-buffer views) are OR-ed. Not set for other kinds. */
 } lagfx_spv_binding_t;
 
 /* Reflect descriptor bindings from a SPIR-V blob. Writes up to `cap`

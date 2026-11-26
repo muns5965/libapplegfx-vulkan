@@ -339,7 +339,9 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
         bind[*n_bind].kind = (uint8_t)tmp[t].kind;
         bind[*n_bind].stage = (uint8_t)st;
         bind[*n_bind].metal_index = (int16_t)midx;
-        bind[*n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? wr : 0u;
+        /* writable = the arg metadata allows writes (air.write / air.read_write: every non-const `device T *`) AND the translated module has a use that may write through the
+         * binding (reflect may_write). Metadata alone over-reports: VfxXgh's `vertex_buffer` is air.read_write, yet the function is `readonly` and its SPIR-V never stores to it. */
+        bind[*n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(wr && tmp[t].may_write) : 0u;
         (*n_bind)++;
     }
     return LAGFX_A64_MAP_OK;

@@ -9,6 +9,7 @@
 
 #include "common/le.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 
 #define SPV_MAGIC                0x07230203u
@@ -19,6 +20,16 @@
 #define OP_TYPE_STRUCT           30u
 #define OP_TYPE_POINTER          32u
 #define OP_VARIABLE              59u
+#define OP_FUNCTION              54u
+#define OP_LOAD                  61u
+#define OP_ACCESS_CHAIN          65u
+#define OP_IN_BOUNDS_ACCESS_CHAIN 66u
+#define OP_PTR_ACCESS_CHAIN      67u
+#define OP_ARRAY_LENGTH          68u
+#define OP_IN_BOUNDS_PTR_ACCESS_CHAIN 70u
+#define OP_COPY_OBJECT           83u
+#define OP_BITCAST               124u
+#define OP_ATOMIC_LOAD           227u
 #define OP_TYPE_FLOAT            22u
 #define OP_TYPE_VECTOR           23u
 #define DECOR_BINDING            33u
@@ -48,6 +59,9 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     uint32_t *var_ptr = NULL, *var_sc = NULL;         /* OpVariable: ptr type id, storage class */
     uint32_t *ptr_pointee = NULL;                     /* OpTypePointer: pointee id */
     uint8_t  *is_image = NULL, *is_sampler = NULL, *is_struct = NULL, *is_sampled_image = NULL;
+    uint32_t *root = NULL;                            /* id -> the storage-buffer variable a pointer id derives from (0 = none) */
+    uint8_t  *var_written = NULL;                     /* per variable: something that may write through it was found */
+    bool      overflow_ids = false;
 
     size_t sz = MAXID;
     has_set = calloc(sz, 1); has_bind = calloc(sz, 1); is_var = calloc(sz, 1);
@@ -56,6 +70,8 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     ptr_pointee = calloc(sz, sizeof(uint32_t));
     is_image = calloc(sz, 1); is_sampler = calloc(sz, 1); is_struct = calloc(sz, 1);
     is_sampled_image = calloc(sz, 1);
+    root = calloc(sz, sizeof(uint32_t)); var_written = calloc(sz, 1);
+    if (!root || !var_written) goto done;
     if (!has_set || !has_bind || !is_var || !dec_set || !dec_bind || !var_ptr ||
         !var_sc || !ptr_pointee || !is_image || !is_sampler || !is_struct ||
         !is_sampled_image) {
@@ -105,6 +121,67 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
         i += wc;
     }
 
+    /* Which storage-buffer variables can be written? A pointer id derives from a variable through OpAccessChain / OpInBoundsAccessChain / OpPtrAccessChain /
+     * OpInBoundsPtrAccessChain / OpBitcast / OpCopyObject. Inside function bodies the only uses that cannot write are OpLoad, OpAtomicLoad and OpArrayLength of
+     * such a pointer; ANY other instruction that mentions a derived id (OpStore, atomics, OpCopyMemory*, OpFunctionCall, OpPhi, OpSelect, a pointer stored as a value,
+     * an extended instruction, ...) marks the variable written. A literal that equals a derived id marks it too: only ever towards "may write". Declarations (everything
+     * before the first OpFunction: decorations, types, constants, the variables themselves) are not uses. Definitions precede uses (SPIR-V rule) except OpPhi operands,
+     * which are conservative anyway. */
+    for (uint32_t id = 0; id < MAXID; id++)
+        if (is_var[id] && var_sc[id] == STORAGE_STORAGE_BUFFER) root[id] = id;
+    bool in_body = false;
+    for (size_t i = 5u; i < nwords; ) {
+        uint32_t hdr = lagfx_le32(spv + i * 4u);
+        uint16_t wc = (uint16_t)(hdr >> 16);
+        uint16_t op = (uint16_t)(hdr & 0xFFFFu);
+        if (wc == 0u || i + wc > nwords) break;
+        if (op == OP_FUNCTION) in_body = true;
+        if (in_body) {
+            #define W(n) lagfx_le32(spv + (i + (n)) * 4u)
+            bool chain = (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN || op == OP_PTR_ACCESS_CHAIN || op == OP_IN_BOUNDS_PTR_ACCESS_CHAIN || op == OP_BITCAST || op == OP_COPY_OBJECT) && wc >= 4u;
+            if (chain) {
+                uint32_t res = W(2), base = W(3);
+                if (base < MAXID && root[base]) {
+                    if (res < MAXID) root[res] = root[base]; else overflow_ids = true;
+                }
+                if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN || op == OP_PTR_ACCESS_CHAIN || op == OP_IN_BOUNDS_PTR_ACCESS_CHAIN)   /* indices are ids of integers, not pointers */
+                    { i += wc; continue; }
+            }
+            if (!chain) {
+                /* Word ranges [lo, hi) that can hold an ID operand which is (or carries) a pointer. Positions are per opcode so that literals (CompositeExtract indices, memory-access
+                 * alignments, ...) are never mistaken for ids: a small literal equals the id of an early variable. Anything not listed here and not a known pointer-free opcode is
+                 * handled by `default`. */
+                uint32_t lo = 0, hi = 0, step = 1;
+                switch (op) {
+                    case 62u:                                   /* OpStore ptr object */
+                    case 63u: lo = 1, hi = 3; break;            /* OpCopyMemory target source (a copy out of a buffer reads it, a copy into it writes it; both marked) */
+                    case 64u: lo = 1, hi = 3; break;            /* OpCopyMemorySized target source size */
+                    case 57u: lo = 4, hi = wc; break;           /* OpFunctionCall type id fn args... */
+                    case 245u: lo = 3, hi = wc; step = 2; break;/* OpPhi type id (value, parent)... : values at 3, 5, ... */
+                    case 169u: lo = 4, hi = 6; break;           /* OpSelect type id cond a b */
+                    case 12u: lo = 5, hi = wc; break;           /* OpExtInst type id set inst args... (all args are ids) */
+                    case 80u: lo = 3, hi = wc; break;           /* OpCompositeConstruct */
+                    case 82u: lo = 3, hi = 5; break;            /* OpCompositeInsert type id object composite literals... */
+                    case 254u: lo = 1, hi = 2; break;           /* OpReturnValue */
+                    case 400u: lo = 3, hi = 4; break;           /* OpCopyLogical */
+                    case 117u: case 121u: case 122u: case 123u: lo = 3, hi = 4; break;   /* OpConvertPtrToU, OpPtrCastToGeneric, OpGenericCastToPtr(+Explicit) */
+                    case 228u: case 319u: lo = 1, hi = 2; break;   /* OpAtomicStore ptr ..., OpAtomicFlagClear ptr ... */
+                    case 318u: lo = 3, hi = 4; break;              /* OpAtomicFlagTestAndSet type id ptr ... */
+                    default:
+                        if (op >= 229u && op <= 242u) lo = 3, hi = 4;          /* OpAtomicExchange .. OpAtomicXor: type id ptr ... */
+                        else if (op >= 4000u) lo = 1, hi = wc;                 /* extension opcodes (float atomics, cooperative matrices, ...): unknown layout, every word */
+                        break;
+                }
+                for (uint32_t w = lo; w < hi && w < wc; w += step) {
+                    uint32_t v = W(w);
+                    if (v < MAXID && root[v]) var_written[root[v]] = 1;
+                }
+            }
+            #undef W
+        }
+        i += wc;
+    }
+
     /* Emit a binding for every variable carrying BOTH set + binding. */
     for (uint32_t id = 0; id < MAXID; id++) {
         if (!is_var[id] || !has_set[id] || !has_bind[id]) continue;
@@ -128,6 +205,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
             out[total].set = dec_set[id];
             out[total].binding = dec_bind[id];
             out[total].kind = kind;
+            out[total].may_write = kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(var_written[id] || overflow_ids) : 0u;
         }
         total++;
     }
@@ -148,7 +226,13 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
         out[b] = key;
     }
 
+    /* views of one binding (byte-buffer views of the same buffer) share the descriptor: it may be written when any view may */
+    for (size_t a = 0; a < n; a++)
+        if (out[a].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER && out[a].may_write)
+            for (size_t b = 0; b < n; b++) if (out[b].set == out[a].set && out[b].binding == out[a].binding) out[b].may_write = 1;
+
 done:
+    free(root); free(var_written);
     free(has_set); free(has_bind); free(is_var);
     free(dec_set); free(dec_bind); free(var_ptr); free(var_sc);
     free(ptr_pointee); free(is_image); free(is_sampler); free(is_struct);
