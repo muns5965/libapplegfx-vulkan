@@ -1379,6 +1379,17 @@ if fs.is_file(meson.current_source_dir() / 'vertex-input-unknown-fmt-unit.c') an
   test('vertex input: unknown Metal format is per-attribute (unit)', vtx_unk_fmt_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'arm64-vertex-desc-real-unit.c') and vulkan_dep.found()
+  vdesc_real_test = executable('arm64-vertex-desc-real-unit',
+    'arm64-vertex-desc-real-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DLAGFX_TEST_FIXTURE_DIR="' + (meson.current_source_dir() / 'fixtures') + '"'],
+    build_by_default : true,
+  )
+  test('arm64 vertex descriptor: real device-captured PSOs -> attributes / stride / Vulkan input (unit)', vdesc_real_test)
+endif
+
 # Vertex float-plausibility scorer: text/poison score ~0, real floats ~100.
 if fs.is_file(meson.current_source_dir() / 'vtx-plausibility-unit.c') and vulkan_dep.found()
   vtx_plaus_test = executable('vtx-plausibility-unit',
