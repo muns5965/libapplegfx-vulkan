@@ -106,7 +106,8 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define VA_PAY    0x4000u            /* payloads of the entries */
 #define VA_CMD    0x8000u            /* command buffer */
 #define VPN_VB    10u                /* vertex data page */
-#define VPN_IB    11u                /* index data page */
+#define VPN_IB    11u
+#define VPN_TEX   12u                /* guest pages behind the render-target texture */                /* index data page */
 #define REF_TEX 1u
 #define REF_VB  2u
 #define REF_PIPE 3u
@@ -125,9 +126,12 @@ static void put_buffer_object(uint32_t ref, uint32_t pay_off, uint64_t len, uint
     entry(ref, LAGFX_A64_OBJ_BUFFER, 16, VA_PAY + pay_off);
 }
 static void build_objects(void) {
-    /* texture: {length, page}, layout (mips = 1), {tag, size, ref}, v1 description (2D, BGRA8 = 80, w x h, 1 sample) */
-    uint8_t t[200]; memset(t, 0, sizeof t);
+    /* texture (mirror layout): {u64 length, u32 vpage}, layout (mips = 1, mip table: off, row, w, h, d), {tag, size, ref}, v1 description (2D, BGRA8 = 80, w x h, 1 sample) */
+    uint8_t t[220]; memset(t, 0, sizeof t);
+    uint64_t tlen = RT_W * RT_H * 4u; uint32_t tvp = VPN_TEX;
+    memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
     t[12] = 1;                                   /* mips */
+    { uint8_t *mp = t + 12 + 0x18; uint64_t row = RT_W * 4u; uint32_t mw = RT_W, mh = RT_H, md = 1; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
     uint32_t rec = 12 + 0x18 + 36, tag = 0x14;
     memcpy(t + rec, &tag, 4);
     uint8_t *d = t + rec + 12;
@@ -135,7 +139,7 @@ static void build_objects(void) {
     uint32_t w = RT_W, h = RT_H, one = 1;
     memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &one, 4);
     d[16] = 1; d[18] = 1;
-    uint32_t tsize = rec + 12 + 24;
+    uint32_t tsize = rec + 12 + 28;
     va_write(VA_PAY, t, tsize);
     entry(REF_TEX, LAGFX_A64_OBJ_TEXTURE, tsize, VA_PAY);
     /* vertex buffer: 4 vertices (float2). 0..2 a big triangle, 3 spare. */

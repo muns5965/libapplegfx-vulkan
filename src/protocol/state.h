@@ -554,6 +554,7 @@ typedef struct lagfx_protocol {
             /* ARM64 render execution (src/protocol/arm64_exec_run.c, LAGFX_ARM64_EXEC=1 only; all zero otherwise). */
             struct {
                 uint64_t execs, passes, draws, draws_skipped, submits, submit_failed, submit_pending, pending_leaked;
+                uint64_t busy_skipped, pending_unqueued, seg_blit;   /* execs refused while the previous one was in flight / PENDING without a completion queue / blit segments recorded */
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
                 uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_vertex_buf, no_index_buf, prim_unsupported;
                 uint64_t extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported;
@@ -607,6 +608,9 @@ typedef struct lagfx_protocol {
     /* ARM64 render execution state (object table + per-exec recording), NULL unless LAGFX_ARM64_EXEC=1 in arm64 mode. Owned by
      * src/protocol/arm64_exec_run.c; freed in lagfx_protocol_free / reset. */
     void *a64_exec;
+    /* ARM64 exec resource mirror (src/protocol/arm64_resources.c); NULL until the first LAGFX_ARM64_EXEC=1 exec. Freed by
+     * lagfx_protocol_free / lagfx_protocol_reset through lagfx_a64_res_destroy. */
+    void     *a64_res;
 
 } lagfx_protocol_t;
 

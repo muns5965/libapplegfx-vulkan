@@ -1425,3 +1425,24 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   )
   test('arm64 exec render execution (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
+
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-blit-unit.c') and vulkan_dep.found()
+  eb_test = executable('arm64-exec-blit-unit',
+    'arm64-exec-blit-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec blit + resource flags on lavapipe (unit)', eb_test, timeout : 120)
+endif
+
+# ARM64 exec integration (Render + Blit in one exec, shared mirror, write-back, PENDING stamp, deferred release) on lavapipe + validation.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-integ-unit.c') and vulkan_dep.found()
+  ei_test = executable('arm64-exec-integ-unit',
+    'arm64-exec-integ-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec render+blit integration (lavapipe, validation)', ei_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
+endif

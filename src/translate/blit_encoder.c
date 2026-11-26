@@ -439,6 +439,21 @@ lagfx_status_t lagfx_translate_blit_copy_texture_to_texture(void *vk,
 }
 
 
+/* ================================================================
+ * ARM64 exec recorders (tags 300-303, 306): record only, see blit_encoder.h
+ * ================================================================ */
+void lagfx_translate_blit_cmd_buffer_image(VkCommandBuffer cb, VkBuffer buf, VkImage img, const VkBufferImageCopy *r, bool buffer_to_image) {
+    if (buffer_to_image) vkCmdCopyBufferToImage(cb, buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, r);
+    else vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, buf, 1, r);
+}
+void lagfx_translate_blit_cmd_buffer_buffer(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, const VkBufferCopy *r) { vkCmdCopyBuffer(cb, src, dst, 1, r); }
+void lagfx_translate_blit_cmd_image_image(VkCommandBuffer cb, VkImage src, VkImage dst, const VkImageCopy *r) {
+    vkCmdCopyImage(cb, src, VK_IMAGE_LAYOUT_GENERAL, dst, VK_IMAGE_LAYOUT_GENERAL, 1, r);
+}
+void lagfx_translate_blit_cmd_fill_buffer(VkCommandBuffer cb, VkBuffer buf, uint64_t offset, uint64_t size, uint8_t value) {
+    vkCmdFillBuffer(cb, buf, offset, size, (uint32_t)value * 0x01010101u);
+}
+
 #endif /* LAGFX_HAVE_VULKAN */
 
 #ifndef LAGFX_HAVE_VULKAN

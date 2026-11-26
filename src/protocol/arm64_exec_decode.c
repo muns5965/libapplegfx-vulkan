@@ -25,29 +25,53 @@ static bool pfn_gpa(uint64_t pfn, uint64_t *gpa) {
     return true;
 }
 
-bool lagfx_arm64_task_read(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, void *dst, uint64_t n) {
-    if (!p || !task || !dst || !task->root_page_pfn) return false;
+bool lagfx_arm64_task_translate(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, uint64_t *gpa_out) {
+    if (!p || !task || !gpa_out || !task->root_page_pfn) return false;
     uint64_t rgpa;
     uint8_t hdr[8];
     if (!pfn_gpa(task->root_page_pfn, &rgpa) || !rd_mem(p, rgpa, 8, hdr)) return false;
     uint32_t top = lagfx_le32(hdr), depth = lagfx_le32(hdr + 4);
     if (depth < 1u || depth > 3u) return false;
+    uint64_t vpn = va >> 14;
+    uint32_t page = top;
+    for (int level = (int)depth - 1; level >= 0; level--) {
+        uint64_t tgpa;
+        uint8_t w[4];
+        if (!page || !pfn_gpa(page, &tgpa) || !rd_mem(p, tgpa + (((vpn >> (12 * level)) & 0xfffu) * 4u), 4, w)) return false;
+        page = lagfx_le32(w) & 0x7fffffffu;
+    }
+    uint64_t pgpa;
+    if (!page || !pfn_gpa(page, &pgpa)) return false;
+    *gpa_out = pgpa + (va & 0x3fffu);
+    return true;
+}
+
+bool lagfx_arm64_task_read(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, void *dst, uint64_t n) {
+    if (!p || !task || !dst || !task->root_page_pfn) return false;
     uint8_t *d = dst;
     while (n) {
-        uint64_t vpn = va >> 14;
-        uint32_t page = top;
-        for (int level = (int)depth - 1; level >= 0; level--) {
-            uint64_t tgpa;
-            uint8_t w[4];
-            if (!page || !pfn_gpa(page, &tgpa) || !rd_mem(p, tgpa + (((vpn >> (12 * level)) & 0xfffu) * 4u), 4, w)) return false;
-            page = lagfx_le32(w) & 0x7fffffffu;
-        }
-        uint64_t pgpa;
-        if (!page || !pfn_gpa(page, &pgpa)) return false;
-        uint32_t in = (uint32_t)(va & 0x3fffu), avail = 0x4000u - in;
+        uint64_t gpa;
+        if (!lagfx_arm64_task_translate(p, task, va, &gpa)) return false;
+        uint32_t avail = 0x4000u - (uint32_t)(va & 0x3fffu);
         uint32_t c = n < avail ? (uint32_t)n : avail;
-        if (!rd_mem(p, pgpa + in, c, d)) return false;
+        if (!rd_mem(p, gpa, c, d)) return false;
         d += c, va += c, n -= c;
+    }
+    return true;
+}
+
+bool lagfx_arm64_task_write(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint64_t va, const void *src, uint64_t n) {
+    if (!p || !task || !src || !task->root_page_pfn) return false;
+    lagfx_device_t *dev = (lagfx_device_t *)p->dev;
+    if (!dev || !dev->desc.shell.write_memory) return false;
+    const uint8_t *s = src;
+    while (n) {
+        uint64_t gpa;
+        if (!lagfx_arm64_task_translate(p, task, va, &gpa)) return false;
+        uint32_t avail = 0x4000u - (uint32_t)(va & 0x3fffu);
+        uint32_t c = n < avail ? (uint32_t)n : avail;
+        if (!dev->desc.shell.write_memory(dev->desc.shell.opaque, gpa, c, s)) return false;
+        s += c, va += c, n -= c;
     }
     return true;
 }
@@ -192,7 +216,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
     if (logit && nres > 12u) sb_add(&sb, " +%u", nres - 12u);
     sb_add(&sb, " ]");
 
-    if (run && t && t->root_page_pfn) lagfx_a64_exec_begin(p, t, res, nres);
+    if (run && t && t->root_page_pfn) lagfx_a64_exec_begin(p, t, res, nres);   /* ONE exec context: resource flags, Render + Blit segments, one submit (arm64_exec_run.c / arm64_resources.c) */
 
     /* buffers */
     uint32_t budget = LAGFX_EXEC_READ_CAP_TOTAL;
@@ -267,7 +291,7 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         (void)inner_before;
     }
     free(scratch);
-    if (run) lagfx_a64_exec_end(p);
+    if (run && lagfx_a64_exec_end(p) == LAGFX_A64_EXEC_FAILED) failed = true;   /* PENDING is not a failure: the stamp waits for the GPU (completion queue), see arm64_exec_run.c */
     if (logit) {
         sb_add(&sb, " tags[");
         for (uint32_t i = 0; i < ctx.nd; i++) sb_add(&sb, "%st%u:%u x%u", i ? " " : "", ctx.d[i].type, ctx.d[i].tag, ctx.d[i].n);
