@@ -218,6 +218,15 @@ void lagfx_arm64_exec_decode(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         }
         budget -= want;
         E->bytes_read += want;
+        {   /* bounded raw dump of the first buffers, so the real inner commands can be read from the log */
+            static unsigned dumped;
+            if (dumped < 12u) {
+                char hx[3 * 96 + 1]; uint32_t dn = want < 96u ? want : 96u, k = 0;
+                for (uint32_t i = 0; i < dn; i++) k += (uint32_t)snprintf(hx + k, sizeof hx - k, "%02x%s", scratch[i], (i & 15u) == 15u ? "|" : " ");
+                LAGFX_LOG("exec-buf-dump #%u b%u off=0x%llx len=%llu first%u: %s", dumped, b, (unsigned long long)off, (unsigned long long)blen, dn, hx);
+                dumped++;
+            }
+        }
         lagfx_exec_seg_t s;
         uint64_t inner_before = E->inner;
         /* the walker reports a segment's type only after the header, so tag counting needs it first: peek at it */
