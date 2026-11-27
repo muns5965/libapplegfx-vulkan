@@ -1928,6 +1928,36 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
        workdir : meson.current_source_dir() / '..')
 endif
 
+# The descriptor binding allocator / table: sequential allocation, sharing, every incompatibility, growth + overflow, the table key, reflected translator output.
+binding_alloc_test = executable('binding-alloc-unit',
+  'binding-alloc-unit.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('descriptor binding allocator (unit)', binding_alloc_test, workdir : meson.current_source_dir() / '..')
+
+# Descriptor bindings of translated modules: no set+binding with two descriptor types (many resources + constexpr samplers + input attachments), growth, VS+FS table.
+air2spv_binding_translate_test = executable('air2spv-binding-translate-unit',
+  'air2spv-binding-translate-unit.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('air2spv descriptor bindings (translated modules, unit)', air2spv_binding_translate_test, workdir : meson.current_source_dir() / '..')
+
+# Descriptor binding table at the Vulkan level (lavapipe + Khronos validation layer when installed): collisions are reported, VS+FS sharing keeps one binding, growth, pipeline + descriptor writes of translated pairs.
+vk_binding_layout_test = executable('vk-binding-layout-lavapipe',
+  'vk-binding-layout-lavapipe.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"', '-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('vulkan descriptor binding layout (lavapipe, validation)', vk_binding_layout_test, env : ['LAGFX_VK_VALIDATION=1'], workdir : meson.current_source_dir() / '..', timeout : 120)
+
 # VkSampler cache by state (lavapipe): distinct states -> distinct samplers.
 if fs.is_file(meson.current_source_dir() / 'vulkan-sampler-cache-unit.c')
   sampler_cache_deps = [libapplegfx_vulkan_dep]

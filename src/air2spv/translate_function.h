@@ -83,7 +83,7 @@ lagfx_status_t lagfx_air2spv_translate_function(
  * position. `key[i]` is the key of the i-th vertex-output struct member (for
  * a vertex module) or of the i-th function argument (for a fragment module);
  * "" = no key. */
-#define LAGFX_STAGE_KEYS_MAX 32
+#define LAGFX_STAGE_KEYS_MAX 128
 #define LAGFX_STAGE_KEY_LEN  72
 typedef struct {
     uint32_t n;

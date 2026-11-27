@@ -414,7 +414,7 @@ static void stats(L_t *l) {
         size_t cn = 0;
         cb[0] = 0;
         for (uint32_t q = 0; q < in->ncollide && q < 4; q++) cn += (size_t)snprintf(cb + cn, sizeof cb - cn, "set %u binding %u: %s vs %s; ", in->collide[q].set, in->collide[q].binding, kn[in->collide[q].ka % 6], kn[in->collide[q].kb % 6]);
-        emit_line(l, "pipeline-reduce: stats descriptor-binding collisions (variables of DIFFERENT kinds on one set+binding; the layout derived from the module keeps one kind per binding): %u %s%s", in->ncollide, cb, in->ncxs ? "| the module has translator constexpr samplers (OpName lagfx.cxs.*)" : "");
+        emit_line(l, "pipeline-reduce: stats descriptor-binding collisions (variables of DIFFERENT kinds on one set+binding; the shared binding table (air2spv/binding_alloc.h) refuses such a module: no layout is derived from it): %u %s%s", in->ncollide, cb, in->ncxs ? "| the module has translator constexpr samplers (OpName lagfx.cxs.*)" : "");
     }
 }
 

@@ -15,6 +15,7 @@
 #include "../vulkan/caps.h"
 #include "../air/bitcode_reader.h"
 #include "../air2spv/translate.h"
+#include "../air2spv/spv_reflect.h"
 #include "../air2spirv/metallib_extract.h"
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +23,7 @@
 
 #define TILE(p) ((p)->diag2.exec.tile)
 #define TILE_MAX_BIND 32u
-#define TILE_RT_BASE 40u        /* STORAGE_IMAGE binding of colour attachment 0 (the translator's imageblock mapping) */
+#define TILE_RT_MAX 4u          /* imageblock images of colour attachments 0..3 are fed (the translator names each one "lagfx.imageblock.<n>"; its BINDING is whatever the allocator gave it) */
 #define TILE_PIPE_CACHE 4u
 #define TILE_POOLS 16u
 
@@ -36,7 +37,7 @@ struct lagfx_a64_tile_pipe {
     VkShaderModule cs; char entry[64];
     VkDescriptorSetLayout dsl; VkPipelineLayout pl;
     uint32_t n_bind; tile_bind_t bind[TILE_MAX_BIND];
-    uint32_t rt_mask;               /* bit n: the kernel writes the imageblock of colour attachment n (STORAGE_IMAGE at 40 + n) */
+    uint32_t rt_mask;               /* bit n: the kernel writes the imageblock of colour attachment n (a STORAGE_IMAGE named lagfx.imageblock.n) */
     uint32_t simd_emul;             /* 0 = native simdgroup; W = the kernel was translated for logical W-lane simdgroups inside a wider subgroup */
     bool lane_mapped;               /* uses subgroup operations: Metal's 32-lane simdgroup semantics are assumed */
     struct { uint32_t l[3]; bool pin; VkPipeline pl; } cache[TILE_PIPE_CACHE]; uint32_t ncache;
@@ -67,7 +68,7 @@ static uint32_t tile_simd_emul_width(const struct lagfx_vk_state *vk) {
 
 /* ---- the translated kernel's descriptor bindings (a small SPIR-V scan: the shared reflector does not tell storage images from sampled ones) ---- */
 
-typedef struct { uint32_t binding; uint8_t kind; } scan_bind_t;
+typedef struct { uint32_t binding; uint8_t kind; uint32_t rt; } scan_bind_t;   /* rt: TB_RT only, the colour attachment of the imageblock image (its OpName) */
 
 /* Fills out (binding order) with every set-0 variable; false = something the tile path cannot feed (another set, arrays, unknown resource type). */
 static bool scan_bindings(const uint8_t *spv, size_t n, scan_bind_t *out, uint32_t cap, uint32_t *nout, char *entry, size_t entry_cap) {
@@ -80,7 +81,8 @@ static bool scan_bindings(const uint8_t *spv, size_t n, scan_bind_t *out, uint32
     uint8_t *hset = calloc(bound, 1), *hbind = calloc(bound, 1);
     uint32_t *var_t = calloc(bound, 4), *var_sc = calloc(bound, 4);
     uint8_t *isvar = calloc(bound, 1);
-    bool ok = kind && ptr_t && ptr_sc && dset && dbind && hset && hbind && var_t && var_sc && isvar, got_entry = false;
+    uint32_t *rtn = calloc(bound, 4);          /* imageblock render target of a variable (OpName lagfx.imageblock.<n>) + 1; 0 = none */
+    bool ok = kind && ptr_t && ptr_sc && dset && dbind && hset && hbind && var_t && var_sc && isvar && rtn, got_entry = false;
     for (size_t w = 5; ok && w * 4u + 4u <= n;) {
         uint32_t ins = lagfx_le32(spv + w * 4u), op = ins & 0xffffu, wc = ins >> 16;
         if (!wc || (w + wc) * 4u > n) { ok = false; break; }
@@ -92,6 +94,10 @@ static bool scan_bindings(const uint8_t *spv, size_t n, scan_bind_t *out, uint32
             } break;
         case 71: if (wc >= 4u && W(1) < bound) { if (W(2) == 34u) hset[W(1)] = 1, dset[W(1)] = W(3); else if (W(2) == 33u) hbind[W(1)] = 1, dbind[W(1)] = W(3); } break;
         case 25: if (wc >= 8u && W(1) < bound && W(3) != 6u) kind[W(1)] = W(7) == 2u ? 2 : 1; break;   /* OpTypeImage: Sampled operand (1 sampled, 2 storage); SubpassData is not a tile resource */
+        case 5: if (wc >= 3u && W(1) < bound) {   /* OpName "lagfx.imageblock.<n>" */
+                const char *nm = (const char *)spv + (w + 2u) * 4u; size_t room = (size_t)(wc - 2u) * 4u, l = strnlen(nm, room), pl = sizeof LAGFX_IMAGEBLOCK_NAME_PREFIX - 1u;
+                if (l > pl && l < room && !memcmp(nm, LAGFX_IMAGEBLOCK_NAME_PREFIX, pl)) { uint32_t v = 0; bool dig = true; for (size_t h = pl; h < l; h++) { if (nm[h] < '0' || nm[h] > '9' || v > 1000u) { dig = false; break; } v = v * 10u + (uint32_t)(nm[h] - '0'); } if (dig) rtn[W(1)] = v + 1u; }
+            } break;
         case 26: if (wc >= 2u && W(1) < bound) kind[W(1)] = 3; break;
         case 28: case 29: if (wc >= 2u && W(1) < bound) kind[W(1)] = 9; break;      /* arrays of resources: not mapped */
         case 30: if (wc >= 2u && W(1) < bound) kind[W(1)] = 4; break;
@@ -112,10 +118,11 @@ static bool scan_bindings(const uint8_t *spv, size_t n, scan_bind_t *out, uint32
         else if (k == 4u && var_sc[id] == 12u /* StorageBuffer */) bk = TB_BUFFER;
         else { ok = false; break; }
         if (*nout >= cap) { ok = false; break; }
-        out[*nout].binding = dbind[id], out[*nout].kind = bk, (*nout)++;
+        if (bk == TB_RT && !rtn[id]) { ok = false; break; }   /* an imageblock image the translator did not name: the attachment is unknown, not guessed */
+        out[*nout].binding = dbind[id], out[*nout].kind = bk, out[*nout].rt = rtn[id] ? rtn[id] - 1u : 0u, (*nout)++;
     }
     for (uint32_t a = 1; ok && a < *nout; a++) { scan_bind_t x = out[a]; uint32_t b = a; while (b && out[b - 1].binding > x.binding) out[b] = out[b - 1], b--; out[b] = x; }
-    free(kind); free(ptr_t); free(ptr_sc); free(dset); free(dbind); free(hset); free(hbind); free(var_t); free(var_sc); free(isvar);
+    free(kind); free(ptr_t); free(ptr_sc); free(dset); free(dbind); free(hset); free(hbind); free(var_t); free(var_sc); free(isvar); free(rtn);
     return ok;
 }
 
@@ -193,8 +200,9 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
             b->binding = (uint8_t)sb[i].binding, b->kind = sb[i].kind, b->metal_index = -1, b->written = 1;   /* unknown access (no metadata) counts as written: never gathered */
             if (sb[i].binding > 255u) { TILE(p).pipe_bindings++; goto fail; }
             if (sb[i].kind == TB_RT) {
-                if (sb[i].binding < TILE_RT_BASE || sb[i].binding >= TILE_RT_BASE + 4u) { TILE(p).pipe_bindings++; goto fail; }
-                tp->rt_mask |= 1u << (sb[i].binding - TILE_RT_BASE);
+                if (sb[i].rt >= TILE_RT_MAX) { TILE(p).pipe_bindings++; goto fail; }
+                b->metal_index = (int16_t)sb[i].rt;
+                tp->rt_mask |= 1u << sb[i].rt;
             } else {
                 uint32_t want = sb[i].kind, n = nth[want]++, seen = 0;
                 for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && seen++ == n) { b->metal_index = ab[k].metal_index; b->written = ab[k].written; break; }
@@ -451,8 +459,8 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
                 if (vkCreateSampler(vk->device, &sc, NULL, &t->defsamp) != VK_SUCCESS) { t->defsamp = VK_NULL_HANDLE; TILE(p).skip_unbound++; return false; }
             }
             ii[i] = (VkDescriptorImageInfo){ t->defsamp, VK_NULL_HANDLE, 0 }, w[i].pImageInfo = &ii[i];
-        } else {   /* TB_RT: the imageblock of colour attachment (binding - 40) */
-            lagfx_a64_obj_t *o = e->rts[b->binding - TILE_RT_BASE];
+        } else {   /* TB_RT: the imageblock of colour attachment metal_index (the OpName of the variable) */
+            lagfx_a64_obj_t *o = e->rts[b->metal_index];
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, o->view, VK_IMAGE_LAYOUT_GENERAL }, w[i].pImageInfo = &ii[i];
         }
     }

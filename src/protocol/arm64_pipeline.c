@@ -8,6 +8,7 @@
 #include "../air2spv/constexpr_sampler.h"
 #include "../air2spv/spv_reflect.h"
 #include "../air2spv/translate.h"
+#include "../air2spv/binding_alloc.h"
 #include "../common/le.h"
 #include "../common/log.h"
 
@@ -94,17 +95,18 @@ static void decode_color0(const uint8_t *b, uint32_t limit, lagfx_a64_blend_t *o
     }
 }
 
-int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t spv_binding, uint32_t n_bind) {
+uint32_t lagfx_a64_frag_base(const uint8_t *vspv, size_t vsz) { return lagfx_ba_stage_base(vspv, vsz, LAGFX_A64_FRAG_BINDING_BASE); }
+
+int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t attachment, uint32_t n_bind) {
     if (stage == 0) return LAGFX_A64_FBF_VERTEX_STAGE;
     if (!have_local_read) return LAGFX_A64_FBF_NO_LOCAL_READ;
-    /* fragment modules are offset by LAGFX_A64_FRAG_BINDING_BASE before reflection, so attachment n sits at BASE + 24 + n (the first bug: the unshifted 24..27 never matched) */
-    uint32_t lo = LAGFX_A64_FRAG_BINDING_BASE + LAGFX_A64_FBF_BINDING_BASE;
-    if (spv_binding < lo || spv_binding > lo + 3u) return LAGFX_A64_FBF_BINDING_RANGE;
+    /* the colour attachment is the InputAttachmentIndex, never the binding number (the number is a position in the module's table: it moves when resources are added) */
+    if (attachment > 3u) return LAGFX_A64_FBF_BINDING_RANGE;
     if (n_bind >= LAGFX_A64_MAX_BINDINGS) return LAGFX_A64_FBF_TOO_MANY;   /* = LAGFX_A64_MAX_BINDINGS (kept literal: that macro lives in the exec header) */
     return LAGFX_A64_FBF_OK;
 }
 const char *lagfx_a64_fbfetch_reason_name(int reason) {
-    static const char *const n[LAGFX_A64_FBF_REASONS] = { "ok", "vertex_stage", "no_local_read", "binding_range", "too_many_bindings" };
+    static const char *const n[LAGFX_A64_FBF_REASONS] = { "ok", "vertex_stage", "no_local_read", "attachment_index", "too_many_bindings" };
     return reason >= 0 && reason < LAGFX_A64_FBF_REASONS ? n[reason] : "?";
 }
 
@@ -321,11 +323,11 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
     for (size_t t = 0; t < nt; t++) {
         if (tmp[t].set != 0u) continue;
         if (t && tmp[t - 1].set == 0u && tmp[t - 1].binding == tmp[t].binding) continue;   /* byte-buffer views of one buffer alias its binding (translator): ONE descriptor and ONE Metal argument, not one per view */
-        if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: binding 24 + n reads colour attachment n of the current pass */
-            int why = lagfx_a64_fbfetch_check(st, have_local_read, tmp[t].binding, *n_bind);
+        if (tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {   /* framebuffer fetch: the input attachment with InputAttachmentIndex n reads colour attachment n of the current pass */
+            int why = lagfx_a64_fbfetch_check(st, have_local_read, tmp[t].role_index, *n_bind);
             if (why != LAGFX_A64_FBF_OK) { if (fbf_why) *fbf_why = why; return LAGFX_A64_MAP_FBFETCH; }
             bind[*n_bind].binding = (uint8_t)tmp[t].binding, bind[*n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT, bind[*n_bind].writable = 0;
-            bind[*n_bind].stage = 1, bind[*n_bind].metal_index = (int16_t)(tmp[t].binding - LAGFX_A64_FRAG_BINDING_BASE - LAGFX_A64_FBF_BINDING_BASE);
+            bind[*n_bind].stage = 1, bind[*n_bind].metal_index = (int16_t)tmp[t].role_index;
             (*n_bind)++;
             continue;
         }
@@ -553,13 +555,20 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
         out->desc.vtx_stride = d.stride;
     }
 
-    /* descriptor bindings: fragment bindings move to a disjoint range (as the x86 draw path does), then the merged set-0 layout */
-    lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+    /* descriptor bindings: fragment bindings move to a range disjoint from the vertex module's (as the x86 draw path does), then the merged set-0 layout */
+    lagfx_spv_offset_bindings(fspv, fsz, lagfx_a64_frag_base(vspv, vsz));
     const uint8_t *blobs[2] = { vspv, fspv };
     const size_t lens[2] = { vsz, fsz };
     r = calloc(1, sizeof *r);
     if (!r) goto done;
     r->dev = vk->device;
+    {   /* the pipeline's binding table: one derivation (shared allocator), refused loudly when a set+binding holds two descriptor types; its key identifies the layout in the pipeline caches */
+        VkDescriptorSetLayoutBinding lb[LAGFX_LAYOUT_MAX_BINDINGS];
+        uint32_t nlb = 0;
+        lagfx_layout_info_t li;
+        if (lagfx_layout_derive(blobs, lens, 2, lb, LAGFX_LAYOUT_MAX_BINDINGS, &nlb, &li) != LAGFX_OK) { CNTP(p).rf_layout++; LAGFX_WARN("arm64 pipeline %u: invalid descriptor binding table, pipeline refused:\n%s", ref, li.report); goto done; }
+        out->layout_key = li.key;
+    }
     if (lagfx_build_pipeline_layout_from_spv(vk->device, blobs, lens, 2, &r->dsl, &r->pl) != LAGFX_OK) { CNTP(p).rf_layout++; goto done; }
     /* Per stage: the reflected bindings in binding order, each matched to the n-th Metal argument of its KIND (buffer / texture / sampler) from Apple's arg
      * metadata. By kind, not by position: the translator emits an extra sampler binding for an inline `constexpr sampler` that has no argument; such a sampler

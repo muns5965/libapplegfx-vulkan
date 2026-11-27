@@ -9,10 +9,12 @@
 
 #ifdef LAGFX_HAVE_VULKAN
 
+#include "air2spv/binding_alloc.h"
 #include "air2spv/spv_reflect.h"
 #include "common/log.h"
 
-#define LAGFX_MAX_DESC_BINDINGS 32u
+#include <stdlib.h>
+#include <string.h>
 
 static VkDescriptorType kind_to_vk(lagfx_spv_binding_kind_t k) {
     switch (k) {
@@ -25,47 +27,67 @@ static VkDescriptorType kind_to_vk(lagfx_spv_binding_kind_t k) {
     }
 }
 
-/* The set-0 bindings of the merged layout: union over the stages, deduped by binding number (first wins). Returns the count (<= LAGFX_MAX_DESC_BINDINGS). */
-uint32_t lagfx_layout_bindings_from_spv(const uint8_t *const *spv_blobs, const size_t *spv_lens, uint32_t n_stages, VkDescriptorSetLayoutBinding *binds) {
-    /* Accumulate the union of bindings across stages, deduped by binding
-     * number (our translator only uses descriptor set 0). */
-    uint32_t n_binds = 0;
+static VkShaderStageFlags stages_to_vk(uint32_t st, VkDescriptorType t) {
+    VkShaderStageFlags f = 0;
+    if (st & LAGFX_BA_STAGE_VERTEX) f |= VK_SHADER_STAGE_VERTEX_BIT;
+    if (st & LAGFX_BA_STAGE_FRAGMENT) f |= VK_SHADER_STAGE_FRAGMENT_BIT;
+    if (st & LAGFX_BA_STAGE_COMPUTE) f |= VK_SHADER_STAGE_COMPUTE_BIT;
+    if (t == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT) f = VK_SHADER_STAGE_FRAGMENT_BIT;   /* VUID-VkDescriptorSetLayoutBinding-descriptorType-01510 */
+    return f;
+}
 
-    for (uint32_t s = 0; s < n_stages; s++) {
-        if (!spv_blobs[s] || spv_lens[s] == 0) continue;
-        lagfx_spv_binding_t refl[LAGFX_MAX_DESC_BINDINGS];
-        size_t n = lagfx_spv_reflect_bindings(spv_blobs[s], spv_lens[s],
-                                              refl, LAGFX_MAX_DESC_BINDINGS);
-        if (n > LAGFX_MAX_DESC_BINDINGS) n = LAGFX_MAX_DESC_BINDINGS;
-        for (size_t i = 0; i < n; i++) {
-            if (refl[i].set != 0u) {
-                /* Multi-set shaders aren't emitted by our translator yet;
-                 * skip so we don't silently build a wrong layout. */
-                LAGFX_WARN("descriptor_layout: skipping binding in set %u "
-                           "(only set 0 supported)", refl[i].set);
-                continue;
-            }
-            VkDescriptorType vt = kind_to_vk(refl[i].kind);
-            if (vt == VK_DESCRIPTOR_TYPE_MAX_ENUM) continue;
-            /* Dedup: if this binding number already present, keep the first
-             * (a binding has one type; vertex+fragment sharing it agree). */
-            bool dup = false;
-            for (uint32_t b = 0; b < n_binds; b++) {
-                if (binds[b].binding == refl[i].binding) { dup = true; break; }
-            }
-            if (dup) continue;
-            if (n_binds >= LAGFX_MAX_DESC_BINDINGS) break;
-            binds[n_binds++] = (VkDescriptorSetLayoutBinding){
-                .binding = refl[i].binding,
-                .descriptorType = vt,
-                .descriptorCount = 1u,
-                .stageFlags = vt == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT ? VK_SHADER_STAGE_FRAGMENT_BIT   /* VUID-VkDescriptorSetLayoutBinding-descriptorType-01510 */
-                                                                       : (VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
-                .pImmutableSamplers = NULL,
-            };
+lagfx_status_t lagfx_layout_derive(const uint8_t *const *spv_blobs, const size_t *spv_lens, uint32_t n_stages, VkDescriptorSetLayoutBinding *binds, uint32_t cap,
+                                   uint32_t *n_out, lagfx_layout_info_t *info) {
+    if (n_out) *n_out = 0;
+    if (info) memset(info, 0, sizeof *info);
+    if (!spv_blobs || !spv_lens || !binds || !n_out) return LAGFX_ERR_INVALID_ARG;
+    lagfx_ba_t *ba = malloc(sizeof *ba);
+    if (!ba) return LAGFX_ERR_OUT_OF_MEMORY;
+    lagfx_ba_init(ba);
+    lagfx_ba_merge_modules(ba, spv_blobs, spv_lens, n_stages);
+    uint32_t n = 0, other = 0;
+    for (uint32_t i = 0; i < ba->n; i++) {
+        const lagfx_ba_entry_t *e = &ba->e[i];
+        VkDescriptorType vt = kind_to_vk(e->kind);
+        if (vt == VK_DESCRIPTOR_TYPE_MAX_ENUM) continue;
+        if (e->set != 0u) {
+            /* Multi-set shaders aren't emitted by our translator; skip (counted, reported) so we don't silently build a wrong layout. */
+            other++;
+            continue;
         }
+        if (n >= cap) { ba->noverflow++; continue; }
+        binds[n++] = (VkDescriptorSetLayoutBinding){
+            .binding = e->binding,
+            .descriptorType = vt,
+            .descriptorCount = 1u,
+            .stageFlags = stages_to_vk(e->stages, vt),
+            .pImmutableSamplers = NULL,
+        };
     }
-    return n_binds;
+    char text[1024];
+    text[0] = 0;
+    if (!lagfx_ba_ok(ba)) lagfx_ba_describe(ba, text, sizeof text);
+    if (info) {
+        info->key = lagfx_ba_key(ba);
+        info->n_conflict = ba->nconflict;
+        info->n_overflow = ba->noverflow;
+        info->n_other_sets = other;
+        lagfx_ba_describe(ba, info->report, sizeof info->report);
+    }
+    if (other) LAGFX_WARN("descriptor_layout: %u binding(s) outside set 0 skipped (only set 0 is supported)", other);
+    lagfx_status_t st = LAGFX_OK;
+    if (!lagfx_ba_ok(ba)) {
+        LAGFX_ERR("descriptor_layout: the binding table is invalid (%u conflict(s), %u overflow(s)); no layout is built:\n%s", ba->nconflict, ba->noverflow, text);
+        st = LAGFX_ERR_INTERNAL;
+    } else *n_out = n;
+    free(ba);
+    return st;
+}
+
+uint32_t lagfx_layout_bindings_from_spv(const uint8_t *const *spv_blobs, const size_t *spv_lens, uint32_t n_stages, VkDescriptorSetLayoutBinding *binds) {
+    uint32_t n = 0;
+    if (lagfx_layout_derive(spv_blobs, spv_lens, n_stages, binds, LAGFX_LAYOUT_MAX_BINDINGS, &n, NULL) != LAGFX_OK) return 0;
+    return n;
 }
 
 lagfx_status_t
@@ -80,8 +102,10 @@ lagfx_build_pipeline_layout_from_spv(VkDevice device,
     *out_dsl = VK_NULL_HANDLE;
     *out_pl = VK_NULL_HANDLE;
 
-    VkDescriptorSetLayoutBinding binds[LAGFX_MAX_DESC_BINDINGS];
-    uint32_t n_binds = lagfx_layout_bindings_from_spv(spv_blobs, spv_lens, n_stages, binds);
+    VkDescriptorSetLayoutBinding binds[LAGFX_LAYOUT_MAX_BINDINGS];
+    uint32_t n_binds = 0;
+    lagfx_status_t dst = lagfx_layout_derive(spv_blobs, spv_lens, n_stages, binds, LAGFX_LAYOUT_MAX_BINDINGS, &n_binds, NULL);
+    if (dst != LAGFX_OK) return dst;   /* a conflicting / oversized table: no layout (the reason is in the log) */
 
     if (n_binds == 0u) {
         /* No descriptors — caller uses the device empty layout. */

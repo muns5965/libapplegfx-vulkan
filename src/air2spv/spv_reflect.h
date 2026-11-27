@@ -42,7 +42,15 @@ typedef struct {
     uint8_t                  may_write;  /* STORAGE_BUFFER only: 0 = the module PROVABLY never writes through it (every use of the variable / its access chains is a load or an
                                           * array length), 1 = a store / atomic / copy / call / phi / pointer escape was found (or the module is too large to analyse).
                                           * Several variables of one binding (byte-buffer views) are OR-ed. Not set for other kinds. */
+    uint32_t                 role_index; /* INPUT_ATTACHMENT: the InputAttachmentIndex decoration = the colour attachment the variable reads (the BINDING NUMBER carries no meaning);
+                                          * STORAGE_IMAGE named "lagfx.imageblock.<n>" (translator imageblock image): n = the colour attachment; otherwise LAGFX_SPV_NO_ROLE. */
 } lagfx_spv_binding_t;
+#define LAGFX_SPV_NO_ROLE 0xffffffffu
+/* OpName prefix of a translator imageblock storage image (compute / tile kernels): "lagfx.imageblock.<colour attachment>" */
+#define LAGFX_IMAGEBLOCK_NAME_PREFIX "lagfx.imageblock."
+
+/* Execution model of the module's first OpEntryPoint (0 Vertex, 4 Fragment, 5 GLCompute), 0xffffffff when there is none / the blob is not SPIR-V. */
+uint32_t lagfx_spv_reflect_exec_model(const uint8_t *spv, size_t spv_len);
 
 /* Reflect descriptor bindings from a SPIR-V blob. Writes up to `cap`
  * entries to `out` (sorted by set then binding) and returns the TOTAL

@@ -12,7 +12,7 @@
  *
  * state keys: lagfx-pipefail-bundle 1 | result <VkResult> | translator <lagfx_build_info()> | origin <text> | vs_entry/fs_entry/vs_fn/fs_fn | vs_hash/fs_hash/vs_bytes/fs_bytes |
  *   desc.<field> <values...> (every scalar field of lagfx_pipeline_desc_t; the repro rebuilds the descriptor from them and calls lagfx_pipeline_build() itself) |
- *   layout.sets <0|1> | layout.binding <binding> <VkDescriptorType> <count> <stageFlags> | layout.push <stageFlags> <offset> <size> | spec_constants 0 |
+ *   layout.sets <0|1> | layout.binding <binding> <VkDescriptorType> <count> <stageFlags> | layout.key <hex> | layout.error <status> conflicts=<n> overflows=<n> | layout.push <stageFlags> <offset> <size> | spec_constants 0 |
  *   dev.name/dev.driver_version/dev.api_version/dev.vendor_id/dev.device_id/dev.driver_name/dev.driver_info/dev.extensions/dev.features/dev.caps_enabled |
  *   env.<NAME> <value|(unset)> (the environment variables lagfx_pipeline_build() reads: they change the built state, the repro only REPORTS a difference).
  */
@@ -24,7 +24,7 @@
 #ifdef LAGFX_HAVE_VULKAN
 #include <vulkan/vulkan.h>
 
-#define LAGFX_BUNDLE_MAX_DSL 32u
+#define LAGFX_BUNDLE_MAX_DSL 128u   /* = LAGFX_LAYOUT_MAX_BINDINGS */
 #define LAGFX_BUNDLE_MAX_PUSH 4u
 #define LAGFX_BUNDLE_MAX_FAILURES 8u
 
@@ -44,6 +44,8 @@ typedef struct {
     char     translator[160], origin[160], vs_entry[64], fs_entry[64], vs_fn[96], fs_fn[96];
     uint64_t vs_hash, fs_hash;
     uint32_t n_sets, n_dsl, n_push;
+    uint64_t layout_key;        /* layout.key: lagfx_ba_key of the binding table the writer derived (0 = a bundle from before the key existed) */
+    bool     layout_error;      /* layout.error: the writer's table had a conflict / overflow, layout.binding lines are empty on purpose */
     VkDescriptorSetLayoutBinding dsl[LAGFX_BUNDLE_MAX_DSL];
     VkPushConstantRange push[LAGFX_BUNDLE_MAX_PUSH];
     char     dev_name[256], dev_driver_name[VK_MAX_DRIVER_NAME_SIZE], dev_driver_info[VK_MAX_DRIVER_INFO_SIZE], dev_exts[512], dev_features[1024];

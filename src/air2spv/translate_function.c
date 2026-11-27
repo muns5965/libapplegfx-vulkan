@@ -25,6 +25,7 @@
 #include "ce_cast.h"
 #include "common/log.h"
 #include "constexpr_sampler.h"
+#include "binding_alloc.h"
 #include "vertex_fetch.h"
 
 #include <stdint.h>
@@ -286,7 +287,7 @@ typedef struct {
 /* 32: the Xgc login-panel fragment (pipeline 0x31) takes 30 args — its
  * texture/sampler args sit past the old cap of 8 and were silently
  * dropped (no OpTypeImage in the module -> every sample undef -> black). */
-#define LAGFX_MAX_VERTEX_ARGS 32u
+#define LAGFX_MAX_VERTEX_ARGS 128u   /* Metal's per-stage texture limit; a larger argument list is refused loudly (xlate_ctx_init_fn), never truncated */
     uint32_t                  arg_input_var_ids[LAGFX_MAX_VERTEX_ARGS];
 
     /* Fragment colour outputs. A `fragment float4 f()` has one (Location 0);
@@ -479,7 +480,42 @@ typedef struct {
     /* fragment stage linker (frag_link_decide): per stage-in argument */
     uint8_t                   arg_link[LAGFX_MAX_VERTEX_ARGS];       /* 0 = as declared, 1 = read as the VS output's type and convert, 2 = no VS output: zeroed Private */
     uint8_t                   arg_link_lanes[LAGFX_MAX_VERTEX_ARGS]; /* arg_link == 1: lane count of the VS output (a float32 vector/scalar) */
+    /* The module's descriptor bindings: EVERY (DescriptorSet, Binding) the translator decorates comes from this one allocator (binding_alloc.h), never from a literal. */
+    lagfx_ba_t                ba;
 } xlate_ctx_t;
+
+static uint32_t ba_stage_bit(const xlate_ctx_t *c) {
+    return c->stage == LAGFX_XLATE_STAGE_VERTEX ? LAGFX_BA_STAGE_VERTEX : c->stage == LAGFX_XLATE_STAGE_FRAGMENT ? LAGFX_BA_STAGE_FRAGMENT : LAGFX_BA_STAGE_COMPUTE;
+}
+/* descriptor kind of a resource argument (arg_resource_kind: 1 texture, 2 sampler, 3 buffer, 4 written texture = storage image, 5 3D texture) */
+static lagfx_spv_binding_kind_t ba_kind_of_rk(uint32_t rk) {
+    switch (rk) {
+    case 1u: case 5u: return LAGFX_SPV_BINDING_SAMPLED_IMAGE;
+    case 2u: return LAGFX_SPV_BINDING_SAMPLER;
+    case 3u: return LAGFX_SPV_BINDING_STORAGE_BUFFER;
+    case 4u: return LAGFX_SPV_BINDING_STORAGE_IMAGE;
+    default: return LAGFX_SPV_BINDING_UNKNOWN;
+    }
+}
+/* Takes a binding of set 0 for the variable `var` and decorates it (DescriptorSet + Binding); `role` = LAGFX_SPV_NO_ROLE or the input-attachment index. Returns the binding. */
+static uint32_t decl_binding(xlate_ctx_t *c, uint32_t var, lagfx_spv_binding_kind_t kind, uint32_t dim, uint32_t role) {
+    uint32_t binding = 0u;
+    (void)lagfx_ba_alloc(&c->ba, 0u, kind, ba_stage_bit(c), dim, role, &binding);   /* a refusal is counted in c->ba and fails the translation at the end */
+    uint32_t d1[] = { var, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+    uint32_t d2[] = { var, LAGFX_SPV_DECORATION_BINDING, binding };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+    return binding;
+}
+/* A further variable on the binding another one holds (the byte-buffer views of one buffer argument: one descriptor, several Block types). */
+static void decl_alias(xlate_ctx_t *c, uint32_t var, uint32_t binding, lagfx_spv_binding_kind_t kind) {
+    lagfx_ba_entry_t e = { .set = 0u, .binding = binding, .kind = kind, .stages = ba_stage_bit(c), .image_dim = 0u, .role_index = LAGFX_SPV_NO_ROLE, .may_write = 0u };
+    (void)lagfx_ba_claim(&c->ba, &e);
+    uint32_t d1[] = { var, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
+    uint32_t d2[] = { var, LAGFX_SPV_DECORATION_BINDING, binding };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+}
 
 /* Copy the MODULE-scope mutable state between function contexts. Helper
  * functions are translated with their own ctx (fresh value maps — bitcode
@@ -1454,13 +1490,10 @@ static int cxs_find(const xlate_ctx_t *c, uint32_t abs_value_id) {
     return -1;
 }
 
-/* Binding + name of every constexpr sampler variable; `binding` is advanced. Called after the default sampler's decorations. */
-static void cxs_decorate(xlate_ctx_t *c, uint32_t *binding) {
+/* Binding (one of its own, from the allocator) + name of every constexpr sampler variable. Called after the default sampler's decorations. */
+static void cxs_decorate(xlate_ctx_t *c) {
     for (uint32_t k = 0; k < c->n_cxs; k++) {
-        uint32_t d_set[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_set, 3);
-        uint32_t d_bind[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_BINDING, (*binding)++ };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
+        (void)decl_binding(c, c->id_cxs_var[k], LAGFX_SPV_BINDING_SAMPLER, 0u, LAGFX_SPV_NO_ROLE);
         char nm[48];
         snprintf(nm, sizeof nm, LAGFX_CXS_NAME_PREFIX "%016llx", (unsigned long long)c->cxs_dec[k].raw);
         uint32_t pre[] = { c->id_cxs_var[k] };
@@ -2066,14 +2099,13 @@ static uint32_t frag_link_convert(xlate_ctx_t *c, uint32_t val, uint32_t vl, uin
  *   thread_index_in_simdgroup    -> BuiltIn SubgroupLocalInvocationId
  *   air.simd_shuffle*            -> OpGroupNonUniformShuffle (+ select), Subgroup scope (OpCapability GroupNonUniformShuffle)
  *   air.wg.barrier               -> OpControlBarrier Workgroup/Workgroup, AcquireRelease | WorkgroupMemory (| UniformMemory / ImageMemory per the flags)
- *   air.store/load.implicit_imageblock -> OpImageWrite / OpImageRead of a Rgba16f storage image, set 0 binding CS_IMAGEBLOCK_BINDING + render-target index.
+ *   air.store/load.implicit_imageblock -> OpImageWrite / OpImageRead of a Rgba16f storage image, a set 0 storage image OpName'd "lagfx.imageblock.<render-target index>" (binding from the allocator).
  *                                   A tile function is run as an ordinary dispatch over the WHOLE attachment with one workgroup per tile (tile size == workgroup
  *                                   size, as for a Metal tile dispatch): an imageblock coordinate is tile-local, so WorkgroupId * WorkgroupSize is added to make it
  *                                   an attachment coordinate.
  * Metal's simdgroup is 32 lanes wide; this maps it to the device subgroup, so a kernel that bakes the width in (a 32-wide lane -> pixel mapping) is only
  * correct on a device whose subgroup size is 32 (the dispatcher must pick/require that size).
  * =================================================================== */
-#define CS_IMAGEBLOCK_BINDING 40u
 
 static lagfx_cs_arg_kind_t cs_arg_kind_from_key(const char *k) {
     static const struct { const char *key; lagfx_cs_arg_kind_t kind; } t[] = {
@@ -2277,31 +2309,20 @@ static void cs_prologue(xlate_ctx_t *c) {
     uint32_t wd[] = { c->cs_wgsize, LAGFX_SPV_DECORATION_BUILTIN, 25u /* WorkgroupSize */ };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, wd, 3);
 
-    /* Resource bindings: set 0, sequential in argument order (the order lagfx_air_arg_bindings reports); byte-buffer views alias their buffer's binding. */
-    uint32_t binding = 0u;
+    /* Resource bindings: set 0, taken from the allocator in argument order (the order lagfx_air_arg_bindings reports); byte-buffer views alias their buffer's binding. */
     for (uint32_t i = 0; i < n; i++) {
         if (!c->arg_resource_var[i]) continue;
         cs_iface_add(c, c->arg_resource_var[i]);
-        uint32_t d1[] = { c->arg_resource_var[i], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
-        uint32_t d2[] = { c->arg_resource_var[i], LAGFX_SPV_DECORATION_BINDING, binding };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+        uint32_t binding = decl_binding(c, c->arg_resource_var[i], ba_kind_of_rk(c->arg_resource_kind[i]), 0u, LAGFX_SPV_NO_ROLE);
         for (uint32_t v = 0; v < c->n_bytebuf_views; v++) {
             if (c->bytebuf_view[v].arg != i) continue;
             cs_iface_add(c, c->bytebuf_view[v].var_id);
-            uint32_t vd1[] = { c->bytebuf_view[v].var_id, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vd1, 3);
-            uint32_t vd2[] = { c->bytebuf_view[v].var_id, LAGFX_SPV_DECORATION_BINDING, binding };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vd2, 3);
+            decl_alias(c, c->bytebuf_view[v].var_id, binding, LAGFX_SPV_BINDING_STORAGE_BUFFER);
         }
-        binding++;
     }
     if (c->id_default_sampler_var) {
         cs_iface_add(c, c->id_default_sampler_var);
-        uint32_t d1[] = { c->id_default_sampler_var, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
-        uint32_t d2[] = { c->id_default_sampler_var, LAGFX_SPV_DECORATION_BINDING, binding++ };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+        (void)decl_binding(c, c->id_default_sampler_var, LAGFX_SPV_BINDING_SAMPLER, 0u, LAGFX_SPV_NO_ROLE);
     }
 }
 
@@ -2320,6 +2341,13 @@ static uint32_t cs_tile_coord(xlate_ctx_t *c, uint32_t coord_u2) {
 static void cs_emit_entry_point(xlate_ctx_t *c) {
     uint32_t prefix[] = { LAGFX_SPV_EXECUTION_MODEL_GLCOMPUTE, c->id_main };
     lagfx_spv_builder_emit_op_string(c->b, LAGFX_SPV_OP_ENTRY_POINT, prefix, 2, "main", c->cs_iface, c->cs_n_iface);
+    for (uint32_t rt = 0; rt < 8u; rt++) {   /* "lagfx.imageblock.<rt>": how the host finds the colour attachment of a storage image whatever its binding */
+        if (!c->cs_stimg_var[rt]) continue;
+        char nm[48];
+        snprintf(nm, sizeof nm, LAGFX_IMAGEBLOCK_NAME_PREFIX "%u", rt);
+        uint32_t pre[] = { c->cs_stimg_var[rt] };
+        lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, nm, NULL, 0);
+    }
 }
 
 /* The Rgba16f storage image backing imageblock render target `rt` (created on first use). */
@@ -2337,11 +2365,9 @@ static uint32_t cs_imageblock_image(xlate_ctx_t *c, uint32_t rt) {
     uint32_t v = lagfx_spv_builder_alloc_id(c->b);
     uint32_t vo[] = { c->cs_stimg_ptr, v, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
-    uint32_t d1[] = { v, LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
-    uint32_t d2[] = { v, LAGFX_SPV_DECORATION_BINDING, CS_IMAGEBLOCK_BINDING + rt };
-    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
-    cs_iface_add(c, v);
+    /* its own binding from the allocator (it used to be the fixed 40 + rt, which a kernel with more than 40 resources collided with); the reflector finds the attachment by this name */
+    (void)decl_binding(c, v, LAGFX_SPV_BINDING_STORAGE_IMAGE, 1u, rt);
+    cs_iface_add(c, v);   /* its OpName is emitted by cs_emit_entry_point (debug names must follow OpEntryPoint, which is emitted after the body) */
     c->cs_stimg_var[rt] = v;
     return v;
 }
@@ -2438,29 +2464,16 @@ static void emit_prologue(xlate_ctx_t *c) {
             suffix[n_iface++] = c->bytebuf_view[v].var_id;
         lagfx_spv_builder_emit_op_string(c->b, LAGFX_SPV_OP_ENTRY_POINT,
                                           prefix, 2, "main", suffix, n_iface);
-        /* DescriptorSet 0 + sequential Binding for vertex resources. */
+        /* DescriptorSet 0 + a Binding from the allocator for vertex resources. */
         {
-            uint32_t binding = 0u;
             for (uint32_t i = 0; i < n_va; i++) {
                 if (!c->arg_resource_var[i]) continue;
-                uint32_t ds[] = { c->arg_resource_var[i],
-                                   LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ds, 3);
-                uint32_t bd[] = { c->arg_resource_var[i],
-                                   LAGFX_SPV_DECORATION_BINDING, binding };
-                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, bd, 3);
-                /* Byte-buffer views alias the SAME descriptor (set 0,
-                 * same binding) with a different Block type. */
+                uint32_t binding = decl_binding(c, c->arg_resource_var[i], ba_kind_of_rk(c->arg_resource_kind[i]), 0u, LAGFX_SPV_NO_ROLE);
+                /* Byte-buffer views alias the SAME descriptor (set 0, same binding) with a different Block type. */
                 for (uint32_t v = 0; v < c->n_bytebuf_views; v++) {
                     if (c->bytebuf_view[v].arg != i) continue;
-                    uint32_t vds[] = { c->bytebuf_view[v].var_id,
-                                       LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vds, 3);
-                    uint32_t vbd[] = { c->bytebuf_view[v].var_id,
-                                       LAGFX_SPV_DECORATION_BINDING, binding };
-                    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vbd, 3);
+                    decl_alias(c, c->bytebuf_view[v].var_id, binding, LAGFX_SPV_BINDING_STORAGE_BUFFER);
                 }
-                binding++;
             }
         }
 
@@ -2594,52 +2607,30 @@ static void emit_prologue(xlate_ctx_t *c) {
             uint32_t ops[] = { c->id_color_vars[k], LAGFX_SPV_DECORATION_LOCATION, k };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
         }
-        /* OpDecorate each texture/sampler resource DescriptorSet 0 + a
-         * sequential Binding (matches the air.texture(n)/sampler(n) order;
-         * metadata-driven binding numbers are a refinement). */
-        uint32_t binding = 0u;
+        /* OpDecorate each texture/sampler/buffer resource DescriptorSet 0 + a Binding from the allocator, in argument order (matches the air.texture(n)/sampler(n)
+         * order; metadata-driven binding numbers are a refinement). The binding numbers are positions in the table, nothing else: the host identifies input attachments by
+         * InputAttachmentIndex and every other resource by its kind and rank. */
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_resource_var[i]) continue;
             /* The buffer's Block / Offset / ArrayStride decorations are
              * emitted with the OpTypeStruct in module-vars — the
              * multi-section builder auto-routes them to the annotations
              * section, so they don't need to be hand-placed here. */
-            uint32_t d_set[] = { c->arg_resource_var[i],
-                                  LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_set, 3);
-            uint32_t d_bind[] = { c->arg_resource_var[i],
-                                   LAGFX_SPV_DECORATION_BINDING, binding };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
-            /* Byte-buffer views alias the SAME descriptor (set 0, same
-             * binding) with a different Block type. */
+            uint32_t binding = decl_binding(c, c->arg_resource_var[i], ba_kind_of_rk(c->arg_resource_kind[i]), c->arg_resource_kind[i] == 5u ? 2u : 1u, LAGFX_SPV_NO_ROLE);
+            /* Byte-buffer views alias the SAME descriptor (set 0, same binding) with a different Block type. */
             for (uint32_t v = 0; v < c->n_bytebuf_views; v++) {
                 if (c->bytebuf_view[v].arg != i) continue;
-                uint32_t vds[] = { c->bytebuf_view[v].var_id,
-                                   LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vds, 3);
-                uint32_t vbd[] = { c->bytebuf_view[v].var_id,
-                                   LAGFX_SPV_DECORATION_BINDING, binding };
-                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, vbd, 3);
+                decl_alias(c, c->bytebuf_view[v].var_id, binding, LAGFX_SPV_BINDING_STORAGE_BUFFER);
             }
-            binding++;
         }
         /* The default sampler binds after the texture(s) in the same set. */
-        if (c->id_default_sampler_var) {
-            uint32_t d_set[] = { c->id_default_sampler_var,
-                                  LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_set, 3);
-            uint32_t d_bind[] = { c->id_default_sampler_var,
-                                   LAGFX_SPV_DECORATION_BINDING, binding++ };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
-        }
-        cxs_decorate(c, &binding);   /* constexpr samplers: one binding each, after the default sampler */
-        /* Input attachments (framebuffer fetch): set 0, a fixed binding range above the resources (24 + n), InputAttachmentIndex n. */
+        if (c->id_default_sampler_var) (void)decl_binding(c, c->id_default_sampler_var, LAGFX_SPV_BINDING_SAMPLER, 0u, LAGFX_SPV_NO_ROLE);
+        cxs_decorate(c);   /* constexpr samplers: one binding each, after the default sampler */
+        /* Input attachments (framebuffer fetch): the next free bindings of set 0 AFTER everything above (they used to sit at the fixed 24 + n, which a module with more than
+         * ~21 resources shared with a sampler); InputAttachmentIndex n names the colour attachment, the binding number does not. */
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_rt_var[i]) continue;
-            uint32_t d1[] = { c->arg_rt_var[i], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d1, 3);
-            uint32_t d2[] = { c->arg_rt_var[i], LAGFX_SPV_DECORATION_BINDING, 24u + c->arg_rt_idx[i] };
-            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d2, 3);
+            (void)decl_binding(c, c->arg_rt_var[i], LAGFX_SPV_BINDING_INPUT_ATTACHMENT, 0u, c->arg_rt_idx[i]);
             uint32_t d3[] = { c->arg_rt_var[i], 43u /* InputAttachmentIndex */, c->arg_rt_idx[i] };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d3, 3);
         }
@@ -8719,6 +8710,10 @@ static lagfx_status_t xlate_ctx_init_fn(xlate_ctx_t *c, uint32_t fn_idx) {
         const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nn_types);
         if (fn_ty_idx < nn_types && ts[fn_ty_idx].kind == LAGFX_AIR_TYPE_FUNCTION) {
             c->num_args = ts[fn_ty_idx].num_op > 2u ? ts[fn_ty_idx].num_op - 2u : 0u;
+            if (c->num_args > LAGFX_MAX_VERTEX_ARGS) {   /* the per-argument tables below hold LAGFX_MAX_VERTEX_ARGS entries: refuse, do not drop the rest */
+                LAGFX_ERR("air2spv: entry function has %u arguments, the translator handles at most %u", c->num_args, (unsigned)LAGFX_MAX_VERTEX_ARGS);
+                return LAGFX_ERR_INTERNAL;
+            }
             if (c->num_args > 0u) {
                 c->arg_spv_ids = (uint32_t *)calloc(c->num_args, sizeof(uint32_t));
                 c->arg_air_type_ids = (uint32_t *)calloc(c->num_args, sizeof(uint32_t));
@@ -9826,6 +9821,13 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
 
     st = translate_body(&c);
     if (st != LAGFX_OK) goto fail;
+    if (!lagfx_ba_ok(&c.ba)) {   /* the allocator refused a descriptor (table full / incompatible claim): a module with two types on one binding must never leave the translator */
+        char tab[2048];
+        lagfx_ba_describe(&c.ba, tab, sizeof tab);
+        LAGFX_ERR("air2spv: descriptor binding table is inconsistent (%u conflict(s), %u overflow(s)):\n%s", c.ba.nconflict, c.ba.noverflow, tab);
+        st = LAGFX_ERR_INTERNAL;
+        goto fail;
+    }
     if (c.stage == LAGFX_XLATE_STAGE_COMPUTE) cs_emit_entry_point(&c);   /* after the body: the interface list now holds every builtin / image variable it used */
 
     *out_blob = lagfx_spv_builder_finish(c.b, out_size_bytes);
