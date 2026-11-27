@@ -1506,6 +1506,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-completion-unit.c')
   test('arm64 deferred stamp completion (unit)', ac_test)
 endif
 
+# Hold ledger: time spent inside the library per call site (counters, slow-call lines + cap, 10 s summary window, formatter, overhead).
+if fs.is_file(meson.current_source_dir() / 'arm64-hold-unit.c')
+  hold_test = executable('arm64-hold-unit',
+    'arm64-hold-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 hold ledger (unit)', hold_test)
+endif
+
 # (F+D) fence-tracked completion + guest-surface writeback on lavapipe (16 KiB page surface, row stride).
 if fs.is_file(meson.current_source_dir() / 'arm64-surface-writeback-unit.c')
   sw_deps = [libapplegfx_vulkan_dep]

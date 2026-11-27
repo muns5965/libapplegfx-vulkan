@@ -33,6 +33,7 @@
 #include "protocol/diag.h"
 #include "protocol/arm64_exec_decode.h"
 #include "protocol/arm64_completion.h"
+#include "protocol/arm64_hold.h"
 #include "protocol/arm64_resources.h"
 #include "protocol/object_resolver.h"
 #include "handlers/handlers.h"
@@ -668,6 +669,8 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
     if (!lagfx_protocol_is_valid(p)) return 0;
     bool lk = lagfx_proto_arm64(p) && lagfx_a64_res_enabled();
     if (lk) lagfx_a64_exec_lock(p);
+    const bool outer = p->a64_drain_depth == 0;   /* hold ledger: only the outermost drain (barrier retries recurse) */
+    const uint64_t hold_t0 = outer ? lagfx_hold_now_ns() : 0;
     p->a64_drain_depth++;
     bool own = lagfx_arm64_cq_ensure(p) && lagfx_arm64_chan_enter(p, chan_id);   /* queue off: no guard, nothing changes */
     size_t n = drain_impl(p, chan_id);
@@ -676,6 +679,7 @@ size_t channel_compute_dispatcher_drain(lagfx_protocol_t *p, uint32_t chan_id) {
         if (lagfx_arm64_held_channels(p)) n += channel_compute_retry_held(p);
     }
     p->a64_drain_depth--;
+    if (outer) lagfx_hold_note(LAGFX_HOLD_DRAIN, hold_t0, 0);
     if (lk) lagfx_a64_exec_unlock(p);
     return n;
 }
