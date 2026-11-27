@@ -1912,6 +1912,20 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-lavapipe.c') 
     workdir : meson.current_source_dir() / '..')
 endif
 
+# S06 robustness: discard in nested loops / around an OpPhi merge / before a buffer store, image store and atomic, kill and demote, executed on a Vulkan 1.3 device (lavapipe) against a CPU reference.
+# Skips (77) without a device. Fixtures: tests/fixtures/gen-discard-robust-fixtures.sh, gen-discard-atomic-spv.sh.
+if fs.is_file(meson.current_source_dir() / 'air2spv-discard-robust-lavapipe.c') and vulkan_dep.found()
+  air2spv_discard_robust_test = executable('air2spv-discard-robust-lavapipe',
+    'air2spv-discard-robust-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv discard robustness on lavapipe', air2spv_discard_robust_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # Sampler state + texture3d on a Vulkan 1.3 device (lavapipe), compared with an independent CPU reference: constexpr samplers (normalized + pixel coordinates), runtime sampler
 # descriptors (address modes, filters, unnormalized), Dim3D images. Skips (77) without a device. Fixtures: tests/fixtures/gen-sampler-fixtures.sh.
 if fs.is_file(meson.current_source_dir() / 'air2spv-sampler-lavapipe.c') and vulkan_dep.found()
