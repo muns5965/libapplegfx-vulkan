@@ -425,3 +425,27 @@ int lagfx_spv_variant_ia_rebind(const uint32_t *in, size_t words, unsigned mode,
     if (info && cap) snprintf(info, cap, "%d descriptor decoration(s) renumbered (%u input attachment variable(s))", changes, n_ia);
     return changes;
 }
+
+/* (n) D2 candidate: GLSL.std.450 FMin / FMax / FClamp (37 / 40 / 43) -> NMin / NMax / NClamp (79 / 80 / 81) in every OpExtInst of the module's "GLSL.std.450" import. Same operand layout, no new
+ * capability. CHANGES MEANING only for a NaN operand (FMin / FMax / FClamp: undefined which operand is the result; NMin / NMax / NClamp: the other operand is the result). */
+int lagfx_spv_variant_nanmax(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap) {
+    if (out) *out = NULL;
+    if (!walk_ok(in, words)) return -1;
+    uint32_t glsl = 0;
+    for (size_t w = 5; w < words; w += in[w] >> 16)
+        if ((in[w] & 0xffffu) == 11u && (in[w] >> 16) >= 3 && !strncmp((const char *)&in[w + 2], "GLSL.std.450", 13)) glsl = in[w + 1];   /* OpExtInstImport: result id, name */
+    if (!glsl) { if (info && cap) snprintf(info, cap, "no GLSL.std.450 import"); return 0; }
+    wbuf_t b = { 0 };
+    int rc = wput(&b, in, words) , n37 = 0, n40 = 0, n43 = 0;
+    if (rc < 0) return -1;
+    for (size_t w = 5; w < words; w += b.w[w] >> 16) {
+        if ((b.w[w] & 0xffffu) != 12u || (b.w[w] >> 16) < 6 || b.w[w + 3] != glsl) continue;   /* OpExtInst: type, result, set, instruction, operands */
+        uint32_t *ins = &b.w[w + 4];
+        if (*ins == 37u) *ins = 79u, n37++; else if (*ins == 40u) *ins = 80u, n40++; else if (*ins == 43u) *ins = 81u, n43++;
+    }
+    const int changes = n37 + n40 + n43;
+    if (!changes) { free(b.w); if (info && cap) snprintf(info, cap, "no FMin / FMax / FClamp"); return 0; }
+    *out = b.w, *out_words = b.n;
+    if (info && cap) snprintf(info, cap, "FMin->NMin %d, FMax->NMax %d, FClamp->NClamp %d", n37, n40, n43);
+    return changes;
+}

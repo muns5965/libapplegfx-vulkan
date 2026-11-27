@@ -323,6 +323,9 @@ enum {
     LAGFX_SPV_GLSL_FCLAMP               = 43,
     LAGFX_SPV_GLSL_UCLAMP               = 44,   /* GLSLstd450UClamp */
     LAGFX_SPV_GLSL_SCLAMP               = 45,   /* GLSLstd450SClamp */
+    LAGFX_SPV_GLSL_NMIN                 = 79,   /* GLSLstd450NMin: a NaN operand yields the other operand (D2 candidate, opt-in: LAGFX_SPV_NANMAX) */
+    LAGFX_SPV_GLSL_NMAX                 = 80,   /* GLSLstd450NMax */
+    LAGFX_SPV_GLSL_NCLAMP               = 81,   /* GLSLstd450NClamp */
     LAGFX_SPV_GLSL_FMIX                 = 46,
     LAGFX_SPV_GLSL_STEP                 = 48,
     LAGFX_SPV_GLSL_SMOOTH_STEP          = 49,

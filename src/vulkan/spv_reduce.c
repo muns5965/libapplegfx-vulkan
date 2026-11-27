@@ -50,7 +50,7 @@ typedef struct {
     size_t *off; uint32_t ni, first_fn;
     uint32_t *op_of, *ty_of, *undef_ord; size_t *defoff;
     uint8_t *ia_var;
-    uint32_t nundef, entry_id;
+    uint32_t nundef, entry_id, glsl_id;   /* glsl_id: result id of OpExtInstImport "GLSL.std.450" (0 = none) */
     uint32_t nfn;
     struct { uint32_t id, i0, i1, ret; } fn[LAGFX_RED_MAXFN];
     uint32_t *fn_of_id;   /* id -> function index + 1 */
@@ -80,6 +80,7 @@ static int mod_open(mod_t *m, const uint32_t *w, size_t n) {
         if (op == 1 && wc >= 3 && w[p + 2] < m->bound) m->undef_ord[w[p + 2]] = ++m->nundef;
         if (op == 71 && wc >= 4 && w[p + 2] == 43 && w[p + 1] < m->bound) m->ia_var[w[p + 1]] = 1;
         if (op == 15 && !m->entry_id && wc >= 3) m->entry_id = w[p + 2];
+        if (op == 11 && wc >= 3 && !strncmp((const char *)&w[p + 2], "GLSL.std.450", 13)) m->glsl_id = w[p + 1];
         if (op == 54) {
             if (m->first_fn == ni) m->first_fn = i;
             if (m->nfn >= LAGFX_RED_MAXFN) { mod_free(m); return 0; }
@@ -354,7 +355,7 @@ typedef struct {
     uint8_t dynsel[LAGFX_RED_MAXFN], *arr_other, *arr_last, *arr_ok;
     uint32_t *lenc;
     struct { uint32_t ty; uint64_t val; uint32_t id; } ic[64];
-    uint32_t nic, c_dynconst, c_dynsel, c_ssbo, c_input, c_cxs, c_minload, c_wire;
+    uint32_t nic, c_dynconst, c_dynsel, c_ssbo, c_input, c_cxs, c_minload, c_wire, c_nanmax;
     uint8_t *insel, *cxs_var;
     uint32_t cxs_to;
     char why[160];
@@ -667,6 +668,13 @@ static int emit_function(ax_t *a, uint32_t k) {
             int e = emit_dyn(a, p, !!(B & LRD_DYN_SELECT));
             if (e < 0) return -1;
             if (e) { uint64_t cv; if (const_index(m, op == 77 ? p[4] : p[5], &cv, 0)) a->c_dynconst++; else a->c_dynsel++; continue; }
+        }
+        if ((B & LRD_NANMAX) && op == 12 && wc >= 6 && wc <= 16 && m->glsl_id && p[3] == m->glsl_id && (p[4] == 37u || p[4] == 40u || p[4] == 43u)) {   /* D2: FMin / FMax / FClamp -> NMin / NMax / NClamp, same operands */
+            uint32_t t[16];
+            memcpy(t, p, (size_t)wc * 4), t[4] = p[4] == 37u ? 79u : p[4] == 40u ? 80u : 81u;
+            if (wb_put(&a->body, t, wc)) return -1;
+            a->c_nanmax++;
+            continue;
         }
         if (op == 61 && (B & LRD_CXS_FOLD) && wc >= 4 && p[3] < m->bound && a->cxs_var[p[3]]) {
             uint32_t t[8];
@@ -1069,7 +1077,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         if (e < 0) goto done;
         if (e == 0) { snprintf(a->why, sizeof a->why, "function %u (id %u) cannot be rewritten safely (return type not null-able / unexpected layout)", k, m->fn[k].id); rc = 0; goto done; }
     }
-    uint32_t changes = a->c_stub + a->c_undef + a->c_use + a->c_sw + a->c_swc + a->c_lp + a->c_smp + a->c_lod0 + a->c_deriv + a->c_read + a->c_ia + a->c_pruned + a->c_min + a->c_dynconst + a->c_dynsel + a->c_ssbo + a->c_input + a->c_cxs + (a->cut_idx ? 1u : 0u);
+    uint32_t changes = a->c_stub + a->c_undef + a->c_use + a->c_sw + a->c_swc + a->c_lp + a->c_smp + a->c_lod0 + a->c_deriv + a->c_read + a->c_ia + a->c_pruned + a->c_min + a->c_dynconst + a->c_dynsel + a->c_ssbo + a->c_input + a->c_cxs + a->c_nanmax + (a->cut_idx ? 1u : 0u);
     if (!changes && !(B & LRD_POST_MASK)) { snprintf(a->why, sizeof a->why, "the rewrite changes nothing in this module"); rc = 0; goto done; }
     /* assemble: header + filtered global section + new globals + functions */
     wb_t fin = { 0 };
@@ -1129,7 +1137,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         ADDI(a->c_undef, "undef->null=%u ", a->c_undef); ADDI(a->c_use, "undef-operands->null=%u ", a->c_use); ADDI(a->c_sw, "switch->default=%u ", a->c_sw); ADDI(a->c_swc, "switch->frequent-case=%u ", a->c_swc);
         ADDI(a->c_lp, "loop-back-edges->one-trip=%u ", a->c_lp); ADDI(a->c_smp, "samples->null=%u ", a->c_smp); ADDI(a->c_lod0, "implicit->explicit-lod0=%u ", a->c_lod0);
         ADDI(a->c_deriv, "derivatives->null=%u ", a->c_deriv); ADDI(a->c_read, "imageread->null=%u ", a->c_read); ADDI(a->c_ia, "input-attachment-decls/loads-dropped=%u ", a->c_ia); ADDI(a->c_dynconst, "dyn-access->composite-extract/insert=%u ", a->c_dynconst); ADDI(a->c_dynsel, "dyn-access->select-chain=%u ", a->c_dynsel); ADDI(a->c_ssbo, "big-arrays-shrunk/runtime=%u ", a->c_ssbo); ADDI(a->c_input, "input-loads->null=%u ", a->c_input);
-        ADDI(a->c_cxs, "constexpr-sampler-loads-redirected=%u ", a->c_cxs); ADDI(a->c_minload, "entry-loads=%u ", a->c_minload); ADDI(a->c_wire, "outputs-wired=%u ", a->c_wire);
+        ADDI(a->c_cxs, "constexpr-sampler-loads-redirected=%u ", a->c_cxs); ADDI(a->c_nanmax, "FMin/FMax/FClamp->NMin/NMax/NClamp=%u ", a->c_nanmax); ADDI(a->c_minload, "entry-loads=%u ", a->c_minload); ADDI(a->c_wire, "outputs-wired=%u ", a->c_wire);
         ADDI(ps.blk || ps.blk_stub, "unreachable-blocks-removed=%u (+%u kept as stubs, %u instr) ", ps.blk, ps.blk_stub, ps.blk_instr); ADDI(ps.var, "unused-locals-removed=%u ", ps.var);
         ADDI(ps.wovar, "write-only-locals-removed=%u (+%u stores, %u chains) ", ps.wovar, ps.wo_store, ps.wo_chain); ADDI(ps.store, "stores-to-write-only-locals-removed=%u ", ps.store);
         ADDI(ps.load || ps.load_in || ps.chain, "unused-loads-removed=%u (+%u from Input variables) unused-access-chains-removed=%u ", ps.load, ps.load_in, ps.chain);

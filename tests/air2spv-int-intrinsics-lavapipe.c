@@ -6,6 +6,7 @@
  * vertex-language/air (intrinsic.go @3d277d16858a), none of them occurs in the device dumps of runs 231501 / 230109.
  * SPDX-License-Identifier: MIT */
 #include "air2spv/translate.h"
+#include "air2spv/translate_function.h"
 #include "air/bitcode_reader.h"
 
 #include <vulkan/vulkan.h>
@@ -213,7 +214,16 @@ static void ref_bitfield64(int x, int y, float o[4]) {
     o[2] = fold64(ref_insert(s, t, f.off, f.n, 64)); o[3] = fold64(ref_insert(t, s, f.off, f.n, 64));
 }
 
-typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); } case_t;
+/* S07 integer air.convert matrix (fixtures gen-convert-fixtures.sh): X = x, D = X - 32 */
+static void ref_conv_a(int x, int y, float o[4]) { int d = x - 32; (void)y; o[0] = (float)d; o[1] = (float)((x * 4) & 255); o[2] = d < 0 ? 65535.0f : 0.0f; o[3] = (float)(32768 + x); }
+static void ref_conv_b(int x, int y, float o[4]) { int d = x - 32; (void)y; o[0] = d < 0 ? 65535.0f : 0.0f; o[1] = (float)(d & 0xffff); o[2] = (float)d; o[3] = (float)x; }
+static void ref_conv_c(int x, int y, float o[4]) { int d = x - 32; (void)y; o[0] = d < 0 ? 65535.0f : 0.0f; o[1] = 65535.0f; o[2] = (float)(d & 0xffff); o[3] = (float)(32768 + x); }
+
+/* D2: v = 0.25 * X; (NaN-aware) fmax / fmin of (NaN, v) and (v, NaN) = v; clamp(NaN, .5, 4) = .5, clamp(v, NaN, 4) = min(v, 4), clamp(v, .5, NaN) = max(v, .5), saturate(NaN) = 0 */
+static void ref_nan_a(int x, int y, float o[4]) { float v = 0.25f * (float)x; (void)y; o[0] = o[1] = o[2] = o[3] = v; }
+static void ref_nan_b(int x, int y, float o[4]) { float v = 0.25f * (float)x; (void)y; o[0] = 0.5f; o[1] = v < 4.0f ? v : 4.0f; o[2] = v > 0.5f ? v : 0.5f; o[3] = 0.0f; }
+
+typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); int nanmax; } case_t;   /* nanmax: 0 = default translation; 1 = D2 NMin/NMax/NClamp forced on; 2 = default translation, REPORT only (what FMin/FMax/FClamp do with a NaN on this device is unspecified) */
 static const case_t cases[] = {
     { "rt_bits32_fragment.air.bc",     65, 65, ref_bits32 },
     { "rt_bitsnarrow_fragment.air.bc", 65, 65, ref_narrow },
@@ -233,6 +243,15 @@ static const case_t cases[] = {
     { "rt_bitfield_fragment.air.bc",   65, 65, ref_bitfield },
     { "rt_bitfield2_fragment.air.bc",  65, 65, ref_bitfield2 },
     { "rt_bitfield64_fragment.air.bc", 65, 65, ref_bitfield64 },
+    { "rt_convert_a_fragment.air.bc",  65, 65, ref_conv_a },
+    { "rt_convert_b_fragment.air.bc",  65, 65, ref_conv_b },
+    { "rt_convert_c_fragment.air.bc",  65, 65, ref_conv_c },
+    /* D2 candidate (opt-in LAGFX_SPV_NANMAX): with NMin / NMax / NClamp a NaN operand yields the other operand [V: GLSL.std.450 text] and lavapipe must follow it; the default FMin / FMax / FClamp row
+     * only REPORTS (undefined for NaN [V]) */
+    { "rt_nanmax_a_fragment.air.bc",   65, 65, ref_nan_a, 1 },
+    { "rt_nanmax_b_fragment.air.bc",   65, 65, ref_nan_b, 1 },
+    { "rt_nanmax_a_fragment.air.bc",   65, 65, ref_nan_a, 2 },
+    { "rt_nanmax_b_fragment.air.bc",   65, 65, ref_nan_b, 2 },
 };
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;
@@ -243,7 +262,9 @@ static int run_case(const case_t *cs) {
     lagfx_air_module_t *m = NULL;
     CHECK(lagfx_air_module_open(bc, bn, &m) == LAGFX_OK && m, "%s: module_open", cs->fixture);
     uint8_t *spv = NULL; size_t sz = 0;
+    lagfx_air2spv_set_nanmax(cs->nanmax == 1 ? 1 : 0);   /* explicit: the environment variable must not decide a test */
     CHECK(lagfx_air2spv_translate_module(m, &spv, &sz) == LAGFX_OK && spv, "%s: translate", cs->fixture);
+    lagfx_air2spv_set_nanmax(-1);
     VkDevice dev = g_dev; VkPhysicalDevice pd = g_pd; VkQueue q = g_q;
     const int W = cs->w, H = cs->h;
     VkImageCreateInfo imi = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .extent = { (uint32_t)W, H, 1 }, .mipLevels = 1, .arrayLayers = 1,
@@ -312,12 +333,17 @@ static int run_case(const case_t *cs) {
             float want[4]; cs->ref(x, y, want);
             const float *got = px + ((size_t)y * W + x) * 4;
             if (memcmp(got, want, sizeof want) != 0) {
-                if (!bad) printf("%s: first bad pixel (%d,%d): got (%g %g %g %g) want (%g %g %g %g)\n", cs->fixture, x, y, got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
+                if (!bad && cs->nanmax != 2) printf("%s: first bad pixel (%d,%d): got (%g %g %g %g) want (%g %g %g %g)\n", cs->fixture, x, y, got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
                 bad++;
             }
         }
-    CHECK(!bad, "%s: %d of %d pixels differ from the CPU reference", cs->fixture, bad, W * H);
-    printf("PASS: %s: all %d pixels match the reference\n", cs->fixture, W * H);
+    if (cs->nanmax == 2) {   /* FMin / FMax / FClamp: undefined for a NaN; say what this device does, assert nothing */
+        printf("NOTE: %s with FMin/FMax/FClamp (default translation): %d of %d pixels equal the NaN-aware (NMin/NMax/NClamp) reference%s\n", cs->fixture, W * H - bad, W * H,
+               bad ? " -> the opt-in candidate DOES change the result on this device" : " -> lavapipe's FMin/FMax/FClamp already return the non-NaN operand: no observable difference here, only the phone can tell for Adreno");
+    } else {
+        CHECK(!bad, "%s: %d of %d pixels differ from the CPU reference", cs->fixture, bad, W * H);
+        printf("PASS: %s%s: all %d pixels match the reference\n", cs->fixture, cs->nanmax == 1 ? " (NMin/NMax/NClamp)" : "", W * H);
+    }
     vkUnmapMemory(dev, bmem);
     free(spv); lagfx_air_module_free(m); free(bc);
     return 0;
@@ -348,8 +374,10 @@ int main(void) {
     VkDevice dev; VK(vkCreateDevice(pd, &dci, NULL, &dev));
     VkQueue q; vkGetDeviceQueue(dev, 0, 0, &q);
     g_pd = pd; g_dev = dev; g_q = q;
+    int failed = 0;   /* every fixture runs even after a failure, so one revert shows the whole matrix */
     for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++)
-        if (run_case(&cases[k])) return 1;
+        if (run_case(&cases[k])) failed++;
+    if (failed) { printf("FAIL air2spv-int-intrinsics-lavapipe: %d of %zu fixtures failed\n", failed, sizeof cases / sizeof cases[0]); return 1; }
     printf("PASS air2spv-int-intrinsics-lavapipe (%zu fixtures) on %s\n", sizeof cases / sizeof cases[0], pp.deviceName);
     return 0;
 }

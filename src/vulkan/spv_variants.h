@@ -31,6 +31,9 @@ int lagfx_spv_variant_undef_struct(const uint32_t *in, size_t words, uint32_t **
 
 /* (k) ONLY the OpReturnValue operands that are an OpUndef -> a fresh OpConstantNull (the OpUndef and its other uses stay). CHANGES MEANING for a returned undef (undefined -> zero). */
 int lagfx_spv_variant_undef_returns(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
+/* (n) D2 candidate: GLSL.std.450 FMin / FMax / FClamp -> NMin / NMax / NClamp (a NaN operand yields the other operand). CHANGES MEANING for NaN inputs only. The translator has the same switch at
+ * the source (LAGFX_SPV_NANMAX=1, opt-in, default off); this rewrite applies it to an already translated module for the repro / reduce ladders. */
+int lagfx_spv_variant_nanmax(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);
 /* (M2) SPIR-V 1.4 -> 1.3 (version word, OpEntryPoint interface lists trimmed to Input / Output variables, scalar-condition OpSelect of a vector rewritten with a bool-vector condition) when the module uses no other 1.4-only feature (OpCopyLogical, OpPtrEqual/NotEqual/Diff, aggregate OpSelect, ...); 0 = refused / not 1.4 (reason in info),
  * otherwise 1 + the number of interface ids dropped. Value-preserving. */
 int lagfx_spv_variant_downgrade13(const uint32_t *in, size_t words, uint32_t **out, size_t *out_words, char *info, size_t cap);

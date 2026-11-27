@@ -43,6 +43,7 @@ enum {
     LRD_SSBO_SHRINK = 1u << 14, LRD_SSBO_RT = 1u << 15, LRD_DYN_CONST = 1u << 16, LRD_DYN_SELECT = 1u << 17, LRD_INPUT_CONST = 1u << 18,
     LRD_PRUNE_BLK = 1u << 19, LRD_PRUNE_VAR = 1u << 20, LRD_PRUNE_WOVAR = 1u << 21, LRD_MEM_STORE = 1u << 22, LRD_MEM_LOAD = 1u << 23, LRD_MEM_LOAD_IN = 1u << 24,
     LRD_MIN_LOADS = 1u << 25, LRD_MIN_WIRE = 1u << 26, LRD_CXS_FOLD = 1u << 27,
+    LRD_NANMAX = 1u << 28,   /* D2 candidate: GLSL.std.450 FMin / FMax / FClamp -> NMin / NMax / NClamp (changes meaning only for NaN operands) */
     LRD_POST_MASK = LRD_PRUNE_BLK | LRD_PRUNE_VAR | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_MEM_LOAD_IN,
 };
 enum { LRD_UC_NUM = 1, LRD_UC_STRUCT = 2, LRD_UC_PTR = 4, LRD_UC_COMPOSITE = 8 };                                   /* OpUndef type classes */
