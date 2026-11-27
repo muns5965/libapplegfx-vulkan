@@ -4,6 +4,31 @@
 # this line were added with the S04-S06 / D1 tests). All four belong to the PRE-EXISTING framebuffer-fetch / input-attachment harness (the FS_U shader of test_viewport_semantics): they appear
 # identically in the pre-existing tests (test_fetch_class, test_split_*) that this branch did not touch, and none is a viewport, clear, discard or round message.
 # Windows that are NOT listed here (S04 clear, S06 discard*, D1 round, ...) saw NO message and must stay at none. Regenerate: LAGFX_VAL_BASELINE_PRINT=1 LAGFX_VK_VALIDATION=1 build/tests/arm64-render-compat-unit | grep ^VALKEY
+#
+# THIS FILE IS NOT A PERMANENT ALLOW-LIST. It records what the validation layer of THIS machine says about the pre-existing framebuffer-fetch harness. tests/arm64-render-compat-unit.c prints an analysis
+# block (test, VUID, old vs new count, first message) and FAILS on any new key or any count above baseline x execs; LAGFX_VAL_BASELINE_UPDATE=1 only lets a run continue so the block can be read: a line
+# may be added here only together with a classification in the table below (validator false positive vs real). Re-check the table whenever the layer is upgraded: a message that disappears with a
+# newer layer confirms the classification, one that stays is a real finding.
+#
+# Classification of the four baseline messages (all [V] unless marked): environment = khronos validation layer 1.3.275 (dpkg vulkan-validationlayers 1.3.275.0-1; vulkaninfo "Vulkan Instance Version: 1.3.275"),
+# lavapipe device apiVersion 1.4.318 (Mesa 25.2.8). The layer is OLDER than the Vulkan 1.4 / VK_KHR_dynamic_rendering_local_read feature the code under test uses (core in 1.4: input attachments and
+# framebuffer-space barriers inside a dynamic rendering instance, image layout VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ = 1000232000 [V: Vulkan proposal VK_KHR_dynamic_rendering_local_read: "pipeline barriers
+# are now allowed within dynamic rendering if they include VK_DEPENDENCY_BY_REGION_BIT" (framebuffer-space stages, no layout transitions), layout RENDERING_LOCAL_READ for input attachments]).
+#   VUID-vkCmdPipelineBarrier-shaderTileImageColorReadAccess-08718   VALIDATOR FALSE POSITIVE. The layer only knows the VK_EXT_shader_tile_image way of a barrier inside vkCmdBeginRendering and its text says
+#                                                                    "This can be fixed by enabling the VK_EXT_shader_tile_image features"; the recorded barrier is the local-read one (arm64_exec_run.c: VK_DEPENDENCY_BY_REGION_BIT,
+#                                                                    framebuffer-space stages only, global memory barrier, no image / layout transition), legal when dynamicRenderingLocalRead is enabled (the harness
+#                                                                    skips without it: have_local_read). A layer that knows the feature does not emit it [I: not run here, no newer layer installed].
+#   VUID-vkCmdPipelineBarrier-None-08719                             VALIDATOR FALSE POSITIVE, same cause: dstAccessMask INPUT_ATTACHMENT_READ|COLOR_ATTACHMENT_READ|WRITE is checked against the
+#                                                                    tile-image list (colour / depth attachment access only); the local-read barrier is exactly colour write -> input attachment read.
+#   VUID-VkGraphicsPipelineCreateInfo-renderPass-06061               VALIDATOR FALSE POSITIVE (version): "fragment shader includes InputAttachment capability" with renderPass = VK_NULL_HANDLE was a hard rule
+#                                                                    of Vulkan 1.3 dynamic rendering (input attachments needed a subpass); VK_KHR_dynamic_rendering_local_read removes that restriction for pipelines created with
+#                                                                    VkRenderingInputAttachmentIndexInfo [V: proposal "Input attachments with dynamic rendering"; the exact amended VUID wording was not fetched: [I]].
+#   VUID-VkWriteDescriptorSet-descriptorType-04151                   VALIDATOR FALSE POSITIVE: "invalid imageLayout Unhandled VkImageLayout": the layer prints "Unhandled" for an enum value it does not
+#                                                                    know = VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ (1000232000, arm64_exec_run.c:779), which the Vulkan 1.4 list of allowed input-attachment layouts contains [V: proposal].
+# What would NOT be a false positive (and must fail the tests): any message naming a viewport, scissor, clear value, discard / demote, SPIR-V capability or an object the library created and leaked. Two other
+# messages of the layer occur outside every audited window and are therefore not listed: VUID-vkDestroyDevice-device-05137 (shader modules / pipeline layouts the TEST harness leaks: rc_module() per run, never
+# destroyed: a harness leak, not a library defect) and VUID-VkGraphicsPipelineCreateInfo-flags-06482 (the ARM raster-order flag with the layer's renderpass = non-null assumption: the same version issue).
+
 S05 viewport	1	VUID-VkGraphicsPipelineCreateInfo-renderPass-06061 | vkCreateGraphicsPipelines(): pCreateInfos[#].pStages[#] is being created with fragment shader state and render
 S05 viewport	1	VUID-VkWriteDescriptorSet-descriptorType-04151 | vkUpdateDescriptorSets(): pDescriptorWrites[#].pImageInfo[#] Descriptor update with descriptorType VK_DESCRIPT
 S05 viewport	1	VUID-vkCmdPipelineBarrier-None-08719 | vkCmdPipelineBarrier(): pMemoryBarriers[#].dstAccessMask (VK_ACCESS_INPUT_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_
