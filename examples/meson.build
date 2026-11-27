@@ -51,6 +51,15 @@ executable('air-bcdump',
   build_by_default : true,
 )
 
+# air-pair-translate — offline vertex + fragment pair translation as the resolver does it, with the descriptor binding tables of both stages (before/after evidence
+# for a binding-layout change; exit 3 = a set+binding carries two descriptor types).
+executable('air-pair-translate',
+  'air-pair-translate.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)
+
 # air-translate — offline .air.bc → SPIR-V via the real translator
 # (per-instruction body walker + reference fallback). Used to test real
 # captured macOS shaders through our pipeline without a guest / noVNC.
