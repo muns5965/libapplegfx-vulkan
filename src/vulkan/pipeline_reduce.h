@@ -8,8 +8,8 @@
  * lagfx_pipeline_repro_run(flags | LAGFX_PIPELINE_REPRO_REDUCE). LAGFX_PIPELINE_MATRIX_DIR=<dir> (else the bundle dir) supplies the offline files, one directory layout:
  *     <dir>/<fs hash, 16 hex>.red.<name>.fs.spv      rows F:<name>  (spirv-opt outputs, plus u2/u3/u5 = the U1 module optimised)
  *     <dir>/<fs hash, 16 hex>.m8.fs.spv / .m8c.fs.spv rows M8 / M8c of the -13 matrix (pipeline_matrix.h)
- * Other switches: LAGFX_PIPELINE_REDUCE_GROUPS=<letters> (h helpers, s sampling/fetch, c control flow, u undef, i stage interface, o offline files, k cumulative chains; default hscuiok),
- * LAGFX_PIPELINE_REDUCE_MAX=<rows> (default 160), LAGFX_PIPELINE_REDUCE_ONLY=<id,id,..>, LAGFX_PIPELINE_REDUCE_FROM=<id> (resume), LAGFX_PIPELINE_REDUCE_LOG=<path> (every row line is also
+ * Other switches: LAGFX_PIPELINE_REDUCE_GROUPS=<letters> (h helpers, s sampling/fetch, c control flow, u undef, i stage interface, o offline files, k cumulative chains; default: every group = hscuiokx; x = the second-round rows XN.. XG.. XU.. PB.. IW.. CXF.., see pipeline_reduce.c),
+ * LAGFX_PIPELINE_REDUCE_MAX=<rows> (default 400), LAGFX_PIPELINE_REDUCE_ONLY=<id,id,..>, LAGFX_PIPELINE_REDUCE_FROM=<id> (resume), LAGFX_PIPELINE_REDUCE_LOG=<path> (every row line is also
  * appended and flushed there at once), LAGFX_PIPELINE_REDUCE_TIMEOUT_MS (isolated rows, default 20000), LAGFX_PIPELINE_REDUCE_CRASH_ROW / _HANG_ROW (TEST injection, isolated child only).
  *
  * One log line per row:

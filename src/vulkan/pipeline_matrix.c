@@ -445,7 +445,7 @@ void lagfx_pipeline_matrix_run(VkDevice dev, const lagfx_pipeline_desc_t *d0, co
             if (!done) line(c, "pipeline-matrix: row=M10 result=n/a ms=0 [combinations] the %u rows that changed the outcome are not combinable", nchg);
         }
     }
-    line(c, "pipeline-matrix: summary pair vs=%016llx fs=%016llx m0=%d BUILT=[%s] FAIL=[%s] N/A=[%s] built=%u failed=%u na=%u", (unsigned long long)c->vh, (unsigned long long)c->fh,
+    line(c, "pipeline-matrix: summary pair vs=%016llx fs=%016llx m0=%d BUILT=[%s] FAIL=[%s] N/A=[%s] built=%u failed=%u na=%u (rows M0..M10 only; the old a..j variant matrix with its d0/d1 stub-stage controls has its own 'variant-matrix' line)", (unsigned long long)c->vh, (unsigned long long)c->fh,
          (int)c->r0, c->ids_ok, c->ids_fail, c->ids_na, c->ok, c->fail, c->na);
     rs.m0_result = (int32_t)c->r0, rs.built = c->ok, rs.failed = c->fail, rs.na = c->na, rs.combos = c->combos;
     snprintf(rs.built_ids, sizeof rs.built_ids, "%s", c->ids_ok);

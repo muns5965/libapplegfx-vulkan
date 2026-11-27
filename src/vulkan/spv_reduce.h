@@ -16,6 +16,16 @@
 *   DYN_CONST      OpVectorExtractDynamic / InsertDynamic whose index folds to a constant -> OpCompositeExtract / Insert (value-preserving);  DYN_SELECT  the rest become OpSelect chains
  *   SSBO_SHRINK    OpTypeArray with >= 1024 elements -> 16 elements;  SSBO_RT  such an array that is only ever the LAST member of StorageBuffer structs becomes an OpTypeRuntimeArray
  *   PRUNE          (implied by CUT / MIN_ENTRY) functions no longer called are removed
+ *   MIN_LOADS      (with MIN_ENTRY) the minimal entry also OpLoads the Location inputs selected by input_sel (and the BuiltIn inputs selected by blt_sel); the loaded values stay unused
+ *   MIN_WIRE       (with MIN_ENTRY) the same loads, and every float32 Output variable receives the sum of them (chunks of the loaded scalars), i.e. the inputs are wired straight to the outputs
+ *   CXS_FOLD       the translator's constexpr-sampler variables (OpName "lagfx.cxs.*") are removed and their loads read the sampler variable with the highest binding that is NOT a constexpr one
+ *   POST passes (run on the finished module, any combination, each independent; all keep spirv-val validity and the observable behaviour of the module):
+ *     PRUNE_BLK    blocks unreachable from the function's first block are deleted (a block still named as a merge / continue target of a reachable construct stays as a one-instruction stub)
+ *     PRUNE_VAR    Function variables that no instruction refers to are deleted
+ *     PRUNE_WOVAR  Function variables that are only ever written (never loaded, never passed on) are deleted together with their stores and access chains
+ *     MEM_STORE    stores (and copies) INTO such write-only Function variables are deleted, the variable and its access chains stay
+ *     MEM_LOAD     OpLoad (not from an Input variable) whose result is unused, and access chains whose result is unused, are deleted, repeated until nothing more goes
+ *     MEM_LOAD_IN  as MEM_LOAD, and the unused loads of Input variables too
  * Each is labelled in the ladder log as meaning-preserving (an OpUndef may take any value, zero is one) or "diagnostic: meaning changed".
  */
 #ifndef LIBAPPLEGFX_VULKAN_SPV_REDUCE_H
@@ -31,6 +41,9 @@ enum {
     LRD_SW_E = 1u << 0, LRD_SW_H = 1u << 1, LRD_LP_E = 1u << 2, LRD_LP_H = 1u << 3, LRD_SMP_NULL_E = 1u << 4, LRD_SMP_NULL_H = 1u << 5, LRD_SMP_LOD0 = 1u << 6,
     LRD_DERIV_NULL = 1u << 7, LRD_READ_NULL = 1u << 8, LRD_IA_DROP = 1u << 9, LRD_CUT = 1u << 10, LRD_MIN_ENTRY = 1u << 11, LRD_SWC_E = 1u << 12, LRD_SWC_H = 1u << 13,
     LRD_SSBO_SHRINK = 1u << 14, LRD_SSBO_RT = 1u << 15, LRD_DYN_CONST = 1u << 16, LRD_DYN_SELECT = 1u << 17, LRD_INPUT_CONST = 1u << 18,
+    LRD_PRUNE_BLK = 1u << 19, LRD_PRUNE_VAR = 1u << 20, LRD_PRUNE_WOVAR = 1u << 21, LRD_MEM_STORE = 1u << 22, LRD_MEM_LOAD = 1u << 23, LRD_MEM_LOAD_IN = 1u << 24,
+    LRD_MIN_LOADS = 1u << 25, LRD_MIN_WIRE = 1u << 26, LRD_CXS_FOLD = 1u << 27,
+    LRD_POST_MASK = LRD_PRUNE_BLK | LRD_PRUNE_VAR | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_MEM_LOAD_IN,
 };
 enum { LRD_UC_NUM = 1, LRD_UC_STRUCT = 2, LRD_UC_PTR = 4, LRD_UC_COMPOSITE = 8 };                                   /* OpUndef type classes */
 enum { LRD_UU_SHUF = 1, LRD_UU_INSDYN = 2, LRD_UU_CCOMP = 4, LRD_UU_CINS = 8, LRD_UU_STORE = 16, LRD_UU_CALLARG = 32, LRD_UU_CCONS = 64, LRD_UU_EXTDYN = 128 };   /* use classes */
@@ -42,7 +55,8 @@ typedef struct {
     uint32_t use_class;        /* LRD_UU_* : the OpUndef OPERANDS of these instruction kinds -> a null of the same type */
     uint32_t cut_blocks;       /* LRD_CUT */
     uint32_t ssbo_len;         /* LRD_SSBO_SHRINK: new element count (0 = 16) */
-    uint32_t input_sel;        /* LRD_INPUT_CONST: bit k = loads of the k-th Location-decorated Input variable become OpConstantNull */
+    uint32_t input_sel;        /* LRD_INPUT_CONST: bit k = loads of the k-th Location-decorated Input variable become OpConstantNull; LRD_MIN_LOADS / MIN_WIRE: bit k = that input is loaded */
+    uint32_t blt_sel;          /* LRD_MIN_LOADS / MIN_WIRE: bit k = the k-th BuiltIn Input variable (declaration order) is loaded */
     uint32_t dyn_top;          /* LRD_DYN_*: only the dyn_top functions with the most dynamic vector accesses (0 = every function) */
     uint8_t  stub[LAGFX_RED_MAXFN];   /* by function index */
 } lagfx_red_recipe_t;
@@ -65,6 +79,10 @@ typedef struct {
     uint32_t dyn_idx_const, dyn_idx_load, dyn_idx_other;
     struct { uint32_t op, n; } i64_op[10];
     uint32_t i64_total;
+    uint32_t nblt;             /* BuiltIn Input variables (declaration order) */
+    struct { uint32_t id, builtin; } blt[8];
+    uint32_t ncxs;             /* sampler variables named lagfx.cxs.* (translator constexpr samplers) */
+    struct { uint32_t id, binding, nuse; } cxs[8];
     uint32_t nin;              /* Location-decorated Input variables (declaration order) */
     struct { uint32_t id, loc, comp, ncomp, width, kind, flat; } in[32];
     uint32_t nkill, nbit_small, nbit_total, nstruct_load, nstruct_store, ncopymem, nprivate_vecarr, nprivate_arr_max;

@@ -299,7 +299,7 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
             lagfx_pipeline_reduce_run(&cfg, &rr);
         }
         res.variants_ok = c.ok, res.variants_failed = c.fail, res.variants_na = c.na;
-        if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "matrix: %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
+        if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "variant-matrix a..j (the OLD variant rows; includes the d0/d1 stub-stage CONTROLS that build by design, NOT the -13 matrix M0..M10, whose own line is 'pipeline-matrix: summary'): %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
     }
 cleanup:
     if (c.layout && c.layout != vk->empty_layout) vkDestroyPipelineLayout(c.dev, c.layout, NULL);

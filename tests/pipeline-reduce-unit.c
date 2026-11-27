@@ -94,6 +94,53 @@ static const uint32_t k_fs[] = {
     0x00050085,0x0000000c,0x0000005d,0x00000059,0x0000005c,0x0005008e,0x00000011,0x0000005e,
     0x0000005a,0x0000005d,0x0003003e,0x00000002,0x0000005e,0x000100fd,0x00010038 };
 
+
+/* Second test module (SPIR-V 1.4, assembled with spirv-as from the source in the comment): three Location inputs (v2, v2, v4), the FragCoord BuiltIn, two outputs, Function variables that are
+ * Function variables that are written only (lv: two stores, one of them in the unreachable block), never referenced (lu) or read (lr; one of its two loads is unused), an unreachable block, one regular sampler (binding 17) and one
+ * translator constexpr sampler (OpName lagfx.cxs.*, binding 18) that one sample reads. */
+static const uint32_t k_fs2[] = {
+    0x07230203,0x00010400,0x00070000,0x00000036,0x00000000,0x00020011,0x00000001,0x0003000e,
+    0x00000000,0x00000001,0x000e000f,0x00000004,0x00000001,0x6e69616d,0x00000000,0x00000002,
+    0x00000003,0x00000004,0x00000005,0x00000006,0x00000007,0x00000008,0x00000009,0x0000000a,
+    0x00030010,0x00000001,0x00000007,0x00090005,0x0000000a,0x6667616c,0x78632e78,0x31302e73,
+    0x35343332,0x39383736,0x64636261,0x00006665,0x00040047,0x00000002,0x0000001e,0x00000000,
+    0x00040047,0x00000003,0x0000001e,0x00000001,0x00040047,0x00000004,0x0000001e,0x00000002,
+    0x00040047,0x00000005,0x0000001e,0x00000003,0x00040047,0x00000006,0x0000001e,0x00000004,
+    0x00040047,0x00000007,0x0000000b,0x0000000f,0x00040047,0x00000008,0x00000022,0x00000000,
+    0x00040047,0x00000008,0x00000021,0x00000010,0x00040047,0x00000009,0x00000022,0x00000000,
+    0x00040047,0x00000009,0x00000021,0x00000011,0x00040047,0x0000000a,0x00000022,0x00000000,
+    0x00040047,0x0000000a,0x00000021,0x00000012,0x00020013,0x0000000b,0x00030021,0x0000000c,
+    0x0000000b,0x00030016,0x0000000d,0x00000020,0x00040017,0x0000000e,0x0000000d,0x00000002,
+    0x00040017,0x0000000f,0x0000000d,0x00000004,0x00020014,0x00000010,0x00040020,0x00000011,
+    0x00000003,0x0000000f,0x00040020,0x00000012,0x00000001,0x0000000e,0x00040020,0x00000013,
+    0x00000001,0x0000000f,0x00040020,0x00000014,0x00000007,0x0000000d,0x00090019,0x00000015,
+    0x0000000d,0x00000001,0x00000000,0x00000000,0x00000000,0x00000001,0x00000000,0x00040020,
+    0x00000016,0x00000000,0x00000015,0x0002001a,0x00000017,0x00040020,0x00000018,0x00000000,
+    0x00000017,0x0003001b,0x00000019,0x00000015,0x0004002b,0x0000000d,0x0000001a,0x00000000,
+    0x0004002b,0x0000000d,0x0000001b,0x3f800000,0x00030029,0x00000010,0x0000001c,0x0004003b,
+    0x00000011,0x00000002,0x00000003,0x0004003b,0x00000011,0x00000003,0x00000003,0x0004003b,
+    0x00000012,0x00000004,0x00000001,0x0004003b,0x00000012,0x00000005,0x00000001,0x0004003b,
+    0x00000013,0x00000006,0x00000001,0x0004003b,0x00000013,0x00000007,0x00000001,0x0004003b,
+    0x00000016,0x00000008,0x00000000,0x0004003b,0x00000018,0x00000009,0x00000000,0x0004003b,
+    0x00000018,0x0000000a,0x00000000,0x00050036,0x0000000b,0x00000001,0x00000000,0x0000000c,
+    0x000200f8,0x0000001d,0x0004003b,0x00000014,0x0000001e,0x00000007,0x0004003b,0x00000014,
+    0x0000001f,0x00000007,0x0004003b,0x00000014,0x00000020,0x00000007,0x0003003e,0x0000001e,
+    0x0000001a,0x0003003e,0x00000020,0x0000001b,0x0004003d,0x0000000e,0x00000021,0x00000004,
+    0x0004003d,0x0000000e,0x00000022,0x00000005,0x0004003d,0x0000000f,0x00000023,0x00000006,
+    0x0004003d,0x0000000f,0x00000024,0x00000007,0x0004003d,0x0000000d,0x00000025,0x00000020,
+    0x0004003d,0x0000000d,0x00000026,0x00000020,0x0004003d,0x00000015,0x00000027,0x00000008,
+    0x0004003d,0x00000017,0x00000028,0x00000009,0x0004003d,0x00000017,0x00000029,0x0000000a,
+    0x00050056,0x00000019,0x0000002a,0x00000027,0x00000029,0x00050056,0x00000019,0x0000002b,
+    0x00000027,0x00000028,0x00070058,0x0000000f,0x0000002c,0x0000002a,0x00000021,0x00000002,
+    0x0000001a,0x00070058,0x0000000f,0x0000002d,0x0000002b,0x00000022,0x00000002,0x0000001a,
+    0x00050081,0x0000000f,0x0000002e,0x0000002c,0x00000023,0x00050081,0x0000000f,0x0000002f,
+    0x0000002e,0x0000002d,0x0005008e,0x0000000f,0x00000030,0x0000002f,0x00000026,0x0003003e,
+    0x00000002,0x00000030,0x0009004f,0x0000000f,0x00000031,0x00000022,0x00000022,0x00000000,
+    0x00000001,0x00000000,0x00000001,0x0003003e,0x00000003,0x00000031,0x000300f7,0x00000032,
+    0x00000000,0x000400fa,0x0000001c,0x00000033,0x00000032,0x000200f8,0x00000033,0x000200f9,
+    0x00000032,0x000200f8,0x00000032,0x000200f9,0x00000034,0x000200f8,0x00000035,0x0003003e,
+    0x0000001e,0x0000001b,0x000200f9,0x00000034,0x000200f8,0x00000034,0x000100fd,0x00010038,
+};
 typedef struct { char buf[300000]; size_t n; unsigned lines; } cap_t;
 static void emit(void *u, const char *l) { cap_t *c = u; c->lines++; c->n += (size_t)snprintf(c->buf + c->n, sizeof c->buf - c->n, "%s\n", l); }
 static VkResult no_switch(void *u, const char *row, const uint32_t *fs, size_t bytes, VkResult real) {   /* a "driver" that rejects every module that still contains an OpSwitch */
@@ -131,6 +178,8 @@ int main(void) {
         const char *must[] = { "row=R0 ", "row=HALL ", "row=SMPN ", "row=LOD0 ", "row=DERIV ", "row=IADROP ", "row=SW-H ", "row=U1 ", "row=LP-H ", "row=UN ", "row=UD0 ", "row=UU-SHUF ", "row=DYN-C ", "row=DYN-S ", "row=S1 ", "row=S4 ",
                                "row=IFA ", "row=IFC ", "row=IFF ", "row=FI-ALL ", "row=FL-NOOPT ", "row=CH1:1 ", "row=RI0:", "row=GR0:1 ", "pipeline-reduce: stats ", "pipeline-reduce: audit " };
         for (unsigned i = 0; i < sizeof must / sizeof must[0]; i++) CHECK(strstr(c0.buf, must[i]), "missing '%s'\n%s", must[i], c0.buf);
+        CHECK(find_row(c0.buf, "F:ssa", "n/a") && find_row(c0.buf, "F:hlsl", "n/a") && strstr(c0.buf, "row=F:Os result=n/a") && strstr(c0.buf, "was NOT run"), "an absent offline file is an n/a row with its own line (never silence)");
+        CHECK(strstr(c0.buf, "row=PB.ORIG ") && strstr(c0.buf, "row=PALLI.CH11 ") && strstr(c0.buf, "row=IW1.all ") && strstr(c0.buf, "row=CXF "), "second-round rows are listed");
         CHECK(strstr(c0.buf, "pipeline-reduce: smallest-failing row="), "smallest failing report");
         CHECK(strstr(c0.buf, "sha=") && strstr(c0.buf, "val=offline") && strstr(c0.buf, "[meaning-preserving]") && strstr(c0.buf, "[diagnostic: meaning changed]"), "row line fields");
         /* spirv-val every row file */
@@ -148,6 +197,99 @@ int main(void) {
         if (d) closedir(d);
         CHECK(nfile >= 60 && nbad == 0, "row files %u, spirv-val failures %u", nfile, nbad);
         printf("pipeline reduce: %u row files, spirv-val %s\n", nfile, have_val ? "all valid" : "not installed (skipped)");
+        char cmd[300];
+        snprintf(cmd, sizeof cmd, "rm -r %s", dir);
+        if (system(cmd)) {}
+    }
+
+    /* ---- 0b. second-round rewrites on k_fs2: counts, validity, "not applicable" ---- */
+    {
+        int have_val = system("command -v spirv-val >/dev/null 2>&1") == 0;
+        const size_t nw = sizeof k_fs2 / 4;
+        lagfx_red_info_t in2;
+        CHECK(lagfx_red_analyze(k_fs2, nw, &in2) && in2.nin == 3 && in2.nblt == 1 && in2.blt[0].builtin == 15, "analyse k_fs2: %u Location inputs, %u BuiltIn", in2.nin, in2.nblt);
+        CHECK(in2.ncxs == 1 && in2.cxs[0].binding == 18 && in2.cxs[0].nuse == 1, "the constexpr sampler is found: n=%u binding=%u uses=%u", in2.ncxs, in2.cxs[0].binding, in2.cxs[0].nuse);
+        struct { const char *name; uint32_t bits, in_sel, blt_sel; const char *want; int delta_inst; } t[] = {
+            { "PB", LRD_PRUNE_BLK, 0, 0, "unreachable-blocks-removed=1 (+0 kept as stubs, 3 instr)", -3 },
+            { "PV", LRD_PRUNE_VAR, 0, 0, "unused-locals-removed=1", -1 },   /* lu is never referenced */
+            { "PW", LRD_PRUNE_WOVAR, 0, 0, "write-only-locals-removed=2 (+2 stores, 0 chains)", -4 },
+            { "PS", LRD_MEM_STORE, 0, 0, "stores-to-write-only-locals-removed=2", -2 },
+            { "PL", LRD_MEM_LOAD, 0, 0, "unused-loads-removed=1 (+0 from Input variables)", -1 },
+            { "PLI", LRD_MEM_LOAD | LRD_MEM_LOAD_IN, 0, 0, "unused-loads-removed=1 (+1 from Input variables)", -2 },
+            { "IN", LRD_INPUT_CONST, 2, 0, "input-loads->null=1", 0 },
+            { "WIRE", LRD_MIN_ENTRY | LRD_MIN_WIRE, 7, 1, "entry-loads=4 outputs-wired=2", 0 },
+            { "LOADS", LRD_MIN_ENTRY | LRD_MIN_LOADS, 3, 0, "entry-loads=2", 0 },
+            { "CXS", LRD_CXS_FOLD, 0, 0, "constexpr-sampler-loads-redirected=1", -4 },   /* OpVariable + OpName + 2 OpDecorate */
+        };
+        for (unsigned i = 0; i < sizeof t / sizeof t[0]; i++) {
+            lagfx_red_recipe_t rc;
+            memset(&rc, 0, sizeof rc);
+            rc.bits = t[i].bits, rc.input_sel = t[i].in_sel, rc.blt_sel = t[i].blt_sel;
+            uint32_t *o = NULL;
+            size_t on = 0;
+            char inf[400];
+            int ar = lagfx_red_apply(k_fs2, nw, &rc, &o, &on, inf, sizeof inf);
+            if (!t[i].want) { CHECK(ar == 0 && !o, "%s: nothing to do must be n/a (got %d): %s", t[i].name, ar, inf); continue; }
+            CHECK(ar == 1 && o, "%s: applies (got %d): %s", t[i].name, ar, inf);
+            CHECK(strstr(inf, t[i].want), "%s: info '%s' lacks '%s'", t[i].name, inf, t[i].want);
+            char why[120];
+            CHECK(lagfx_red_selfcheck(o, on, why, sizeof why), "%s: self-check: %s", t[i].name, why);
+            if (!(t[i].bits & (LRD_MIN_ENTRY | LRD_INPUT_CONST))) CHECK((int)lagfx_red_count_inst(o, on) - (int)lagfx_red_count_inst(k_fs2, nw) == t[i].delta_inst, "%s: instruction delta %d (want %d)", t[i].name, (int)lagfx_red_count_inst(o, on) - (int)lagfx_red_count_inst(k_fs2, nw), t[i].delta_inst);
+            if (have_val) {
+                char path[] = "/tmp/pipereduce-k2-XXXXXX", cmd[300];
+                int fd = mkstemp(path);
+                CHECK(fd >= 0, "mkstemp");
+                CHECK(write(fd, o, on * 4) == (ssize_t)(on * 4), "write");
+                close(fd);
+                snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.2 %s >/dev/null 2>&1", path);
+                int vr = system(cmd);
+                unlink(path);
+                CHECK(vr == 0, "%s: spirv-val rejects the rewritten module", t[i].name);
+            }
+            if (t[i].bits == LRD_CXS_FOLD) { lagfx_red_info_t io; CHECK(lagfx_red_analyze(o, on, &io) && io.ncxs == 0, "the constexpr variable is gone"); }
+            if (t[i].bits == LRD_PRUNE_BLK) {   /* a second pass finds nothing */
+                uint32_t *o2 = NULL;
+                size_t n2 = 0;
+                CHECK(lagfx_red_apply(o, on, &rc, &o2, &n2, inf, sizeof inf) == 0 && !o2, "pruning twice: second pass is n/a");
+            }
+            free(o);
+        }
+        {   /* a module without a constexpr sampler: not applicable, with a reason */
+            lagfx_red_recipe_t rc;
+            memset(&rc, 0, sizeof rc);
+            rc.bits = LRD_CXS_FOLD;
+            uint32_t *o = NULL;
+            size_t on = 0;
+            char inf[200];
+            CHECK(lagfx_red_apply(k_fs, sizeof k_fs / 4, &rc, &o, &on, inf, sizeof inf) == 0 && strstr(inf, "no constexpr-sampler variable"), "CXS_FOLD n/a without a constexpr sampler: %s", inf);
+        }
+        /* every ladder row of k_fs2 (DRY): the second-round row set, spirv-val on every file, dedupe */
+        static cap_t cb;
+        char dir[] = "/tmp/pipereduce-k2rows-XXXXXX";
+        CHECK(mkdtemp(dir) != NULL, "mkdtemp");
+        lagfx_reduce_cfg_t cfg = { .fs = k_fs2, .fs_bytes = sizeof k_fs2, .dump_dir = dir, .dry = 1, .emit = emit, .user = &cb };
+        lagfx_reduce_result_t r;
+        lagfx_pipeline_reduce_run(&cfg, &r);
+        CHECK(r.invalid == 0, "k_fs2 rows invalid %u\n%s", r.invalid, cb.buf);
+        const char *must[] = { "row=XN01 ", "row=XN06 ", "row=XG2.live ", "row=XG2.null ", "row=XGnone.live ", "row=PW.ORIG ", "row=PALL.ORIG ", "row=PLI.ORIG ", "row=IW0.all ", "row=IW1.all ", "row=IW1.loc2 ", "row=IW1.loc4 ", "row=IWB1 ", "row=IWA1 ", "row=CXF ", "row=CXF.CH10 " };
+        for (unsigned i = 0; i < sizeof must / sizeof must[0]; i++) CHECK(strstr(cb.buf, must[i]), "missing '%s'\n%s", must[i], cb.buf);
+        CHECK(!strstr(cb.buf, "row=XN07 "), "3 inputs: subsets 1..6 only (the full set is CH11, the empty set CH10)");
+        CHECK(find_row(cb.buf, "PB.CH10", "n/a") && find_row(cb.buf, "IW1.all.stub", "n/a") && strstr(cb.buf, "not run again"), "a post pass that changes nothing, and a row identical to an earlier one, are n/a");
+        if (have_val) {
+            DIR *d = opendir(dir);
+            unsigned nf = 0, nb = 0;
+            for (struct dirent *e; d && (e = readdir(d));) {
+                size_t l = strlen(e->d_name);
+                if (l < 8 || strcmp(e->d_name + l - 7, ".fs.spv")) continue;
+                char cmd[600];
+                snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.2 %s/%s >/dev/null 2>&1", dir, e->d_name);
+                nf++;
+                if (system(cmd) != 0) { printf("spirv-val FAILED: %s\n", e->d_name); nb++; }
+            }
+            if (d) closedir(d);
+            CHECK(nf >= 100 && nb == 0, "k_fs2 row files %u, spirv-val failures %u", nf, nb);
+            printf("pipeline reduce: k_fs2 %u row files, spirv-val all valid\n", nf);
+        }
         char cmd[300];
         snprintf(cmd, sizeof cmd, "rm -r %s", dir);
         if (system(cmd)) {}

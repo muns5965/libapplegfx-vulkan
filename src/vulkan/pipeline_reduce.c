@@ -191,6 +191,9 @@ typedef struct {
     int r0, from_seen, adaptive_left, truncated;
     int fd_log;
     char only[1200];
+    struct { char fs[17], vs[17], id[48]; } seen[512];   /* fragment + vertex module of every row built so far in this run; rows of the second-round group (x) that repeat one are reported n/a, not run */
+    uint32_t nseen;
+    int dedupe;
 } L_t;
 
 static void add_id(char *list, size_t cap, const char *id) {
@@ -243,7 +246,7 @@ static int do_row(L_t *l, const char *id, const char *what, const char *meaning,
     char selfwhy[160] = "";
     if (cfg->list_only) { emit_line(l, "pipeline-reduce: id %s", id); return LRS_NA; }
     if (!selected(l, id)) return LRS_NA;
-    if (l->rows >= (cfg->max_rows ? cfg->max_rows : 160u)) { if (!l->truncated) { l->truncated = 1; emit_line(l, "pipeline-reduce: row limit reached (LAGFX_PIPELINE_REDUCE_MAX=%u): the remaining rows are NOT run", cfg->max_rows ? cfg->max_rows : 160u); } return LRS_NA; }
+    if (l->rows >= (cfg->max_rows ? cfg->max_rows : 400u)) { if (!l->truncated) { l->truncated = 1; emit_line(l, "pipeline-reduce: row limit reached (LAGFX_PIPELINE_REDUCE_MAX=%u): the remaining rows are NOT run", cfg->max_rows ? cfg->max_rows : 400u); } return LRS_NA; }
     (void)announce_only;
     l->rows++;
     if (!fs) {
@@ -253,6 +256,15 @@ static int do_row(L_t *l, const char *id, const char *what, const char *meaning,
         return LRS_NA;
     }
     lagfx_reduce_sha16(fs, fsn, sha);
+    char vsha[17] = "stub";
+    if (vs) lagfx_reduce_sha16(vs, vsn, vsha);
+    if (l->dedupe) for (uint32_t q = 0; q < l->nseen; q++) if (!strcmp(l->seen[q].fs, sha) && !strcmp(l->seen[q].vs, vsha) && !(flags & (CF_NOFRAG | CF_OPT_OFF | CF_FAILCR))) {
+        l->na++;
+        add_id(l->ids[4], sizeof l->ids[0], id);
+        emit_line(l, "pipeline-reduce: row=%s result=n/a vk=- ms=0 bytes=%zu inst=%u sha=%s orig=%s val=- [%s] %s: identical fragment module and vertex stage (%s) to row %s, not run again", id, fsn, lagfx_red_count_inst(fs, fsn / 4), sha, l->sha_orig, meaning, what, vs ? "real/generated VS" : "stub VS", l->seen[q].id);
+        return LRS_NA;
+    }
+    if (l->nseen < 512 && !(flags & (CF_NOFRAG | CF_OPT_OFF | CF_FAILCR))) { snprintf(l->seen[l->nseen].fs, 17, "%s", sha), snprintf(l->seen[l->nseen].vs, 17, "%s", vsha), snprintf(l->seen[l->nseen].id, 48, "%s", id), l->nseen++; }
     uint32_t ninst = lagfx_red_count_inst(fs, fsn / 4);
     int status;
     int32_t vk = 0;
@@ -316,15 +328,15 @@ static const char *MEAN_O = "optimizer output (spirv-opt claims semantics-preser
 static int row_recipe(L_t *l, const char *id, const char *what, const lagfx_red_recipe_t *r, const uint32_t *vs, size_t vsn, uint32_t flags) {
     uint32_t *o = NULL;
     size_t on = 0;
-    char info[300] = "";
-    int preserving = !(r->bits & ~(LRD_DYN_CONST | LRD_DYN_SELECT));
+    char info[480] = "";
+    int preserving = !(r->bits & ~(LRD_DYN_CONST | LRD_DYN_SELECT | LRD_POST_MASK));
     for (uint32_t k = 0; k < LAGFX_RED_MAXFN; k++) if (r->stub[k]) preserving = 0;
     if (r->cut_blocks) preserving = 0;
     if (r->ssbo_len) preserving = 0;
     if (l->cfg->list_only || !selected(l, id)) { if (l->cfg->list_only) do_row(l, id, what, "", NULL, 0, 0, NULL, 0, NULL, 0); return LRS_NA; }
     int rc = lagfx_red_apply(l->cfg->fs, l->cfg->fs_bytes / 4, r, &o, &on, info, sizeof info);
     int st;
-    if (rc == 1) { char what2[600]; snprintf(what2, sizeof what2, "%s | %s", what, info); st = do_row(l, id, what2, preserving ? MEAN_P : MEAN_D, vs, vsn, flags, o, on * 4, NULL, 0); }
+    if (rc == 1) { char what2[900]; snprintf(what2, sizeof what2, "%s | %s", what, info); st = do_row(l, id, what2, preserving ? MEAN_P : MEAN_D, vs, vsn, flags, o, on * 4, NULL, 0); }
     else st = do_row(l, id, what, preserving ? MEAN_P : MEAN_D, vs, vsn, flags, NULL, 0, rc == 0 ? info : "rewrite failed (out of memory / malformed)", 0);
     free(o);
     return st;
@@ -700,7 +712,14 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
             if (!selected(l, id)) continue;
             const char *dirs[2] = { cfg->file_dir, cfg->file_dir2 };
             for (int d = 0; d < 2 && !fw; d++) if (dirs[d] && dirs[d][0]) { snprintf(path, sizeof path, "%s/%016llx.red.%s.fs.spv", dirs[d], (unsigned long long)l->fh, FILE_NAMES[i]); fw = slurp(path, &fb); }
-            if (!fw) { nmiss++; if (strlen(missing) < 330) { strcat(missing, FILE_NAMES[i]); strcat(missing, " "); } continue; }
+            if (!fw) {   /* no file: a real n/a row (NOT silence: the Android runner runs one process per id and would otherwise report a row that printed nothing as a crash) */
+                nmiss++;
+                if (strlen(missing) < 330) { strcat(missing, FILE_NAMES[i]); strcat(missing, " "); }
+                char why2[200];
+                snprintf(why2, sizeof why2, "offline file %016llx.red.%s.fs.spv not found (no-op pass or not shipped): the row was NOT run", (unsigned long long)l->fh, FILE_NAMES[i]);
+                do_row(l, id, FILE_WHAT[i], (i >= 18) ? MEAN_D : MEAN_O, NULL, 0, 0, NULL, 0, why2, 0);
+                continue;
+            }
             do_row(l, id, FILE_WHAT[i], (i >= 18) ? MEAN_D : MEAN_O, NULL, 0, 0, fw, fb, NULL, 0);
             free(fw);
         }
@@ -734,6 +753,116 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
                 p = e + 1;
             }
         }
+    }
+    if (group_on(l, 'x')) {   /* second round: rows that separate "size / structure" from "live input loads" (see docs/ in the Henge repo: reduce-round2). Offline-designed; all diagnostic. */
+        static const uint32_t CH10 = 0x3ffu, CH11 = 0x7ffu;   /* the cumulative-chain masks of CH10 / CH11 */
+        l->dedupe = 1;
+        char id[64], loc[96];
+        const uint32_t nin = info->nin < 6 ? info->nin : 6, nblt = info->nblt < 8 ? info->nblt : 8, fullin = nin ? (1u << nin) - 1u : 0, fullblt = nblt ? (1u << nblt) - 1u : 0;
+#define LOCTXT(sel) do { size_t n_ = 0; loc[0] = 0; for (uint32_t k_ = 0; k_ < nin; k_++) if ((sel) >> k_ & 1u) n_ += (size_t)snprintf(loc + n_, sizeof loc - n_, "%s%u", n_ ? "," : "", info->in[k_].loc); } while (0)
+        /* (a) per-input nulling on CH10: every proper subset of the Location inputs nulled (the full set is CH11, the empty set CH10) */
+        if (nin > 1) for (uint32_t sel = 1; sel < fullin; sel++) {
+            recipe_from_mask(l, CH10, &r);
+            r.bits |= LRD_INPUT_CONST, r.input_sel = sel;
+            LOCTXT(sel);
+            snprintf(id, sizeof id, "XN%02x", sel);
+            snprintf(what, sizeof what, "CH10 (all reductions, inputs live) + loads of the Location inputs {%s} -> null, the other inputs stay live", loc);
+            row_recipe(l, id, what, &r, NULL, 0, 0);
+        }
+        /* (b) entry-cut position x inputs live / null, on the CH10 reductions without their own cut (L = 0: no cut; none+null is RI8, not repeated) */
+        static const uint32_t lv[] = { 1, 2, 4, 7, 15, 29, 59, 118, 236, 354, 0 };
+        for (size_t q = 0; q < sizeof lv / sizeof lv[0]; q++) for (int nul = 0; nul < 2; nul++) {
+            if (!lv[q] && nul) continue;
+            if (lv[q] && lv[q] >= info->entry_blocks) continue;
+            recipe_from_mask(l, CH10 & ~256u, &r);
+            if (lv[q]) r.bits |= LRD_CUT, r.cut_blocks = lv[q];
+            if (nul) r.bits |= LRD_INPUT_CONST, r.input_sel = 0xffffffffu;
+            if (lv[q]) snprintf(id, sizeof id, "XG%u.%s", lv[q], nul ? "null" : "live"); else snprintf(id, sizeof id, "XGnone.live");
+            snprintf(what, sizeof what, "CH10 reductions without the 1/10 cut, cut at first block >= %u (0 = no cut), Location inputs %s", lv[q], nul ? "NULLED" : "LIVE");
+            row_recipe(l, id, what, &r, NULL, 0, 0);
+        }
+        /* the plain CUT<L> rows (inputs live, nothing else reduced) with the inputs nulled */
+        for (int i = 0; i < 6; i++) {
+            static const uint32_t cm[6] = { 1, 1, 1, 1, 1, 3 }, cd[6] = { 64, 16, 8, 4, 2, 4 };
+            uint32_t nb = info->entry_blocks * cm[i] / cd[i];
+            memset(&r, 0, sizeof r);
+            r.bits = LRD_CUT | LRD_INPUT_CONST, r.cut_blocks = nb ? nb : 1, r.input_sel = 0xffffffffu;
+            snprintf(id, sizeof id, "XU%u.null", r.cut_blocks);
+            snprintf(what, sizeof what, "the plain CUT%u row (nothing else reduced) + loads of every Location input -> null", r.cut_blocks);
+            row_recipe(l, id, what, &r, NULL, 0, 0);
+        }
+        /* (c) prune unreachable blocks / unused locals / unneeded memory accesses, each measured on its own and combined, on four bases */
+        static const struct { const char *id, *what; uint32_t bits; } po[] = {
+            { "PB", "unreachable blocks deleted", LRD_PRUNE_BLK }, { "PV", "unused Function variables deleted", LRD_PRUNE_VAR },
+            { "PW", "write-only Function variables deleted with their stores and access chains", LRD_PRUNE_WOVAR }, { "PBW", "unreachable blocks + write-only locals deleted", LRD_PRUNE_BLK | LRD_PRUNE_WOVAR },
+            { "PS", "stores into write-only locals deleted (variables stay)", LRD_MEM_STORE }, { "PL", "unused loads (not of Input variables) and unused access chains deleted", LRD_MEM_LOAD },
+            { "PLI", "unused loads incl. the Input-variable loads and unused access chains deleted", LRD_MEM_LOAD | LRD_MEM_LOAD_IN }, { "PM", "unneeded memory accesses: stores into write-only locals + unused loads (not Input) + chains", LRD_MEM_STORE | LRD_MEM_LOAD },
+            { "PALL", "blocks + write-only locals + unneeded memory accesses (Input loads kept)", LRD_PRUNE_BLK | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD },
+            { "PALLI", "blocks + write-only locals + unneeded memory accesses incl. unused Input loads", LRD_PRUNE_BLK | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_MEM_LOAD_IN } };
+        static const char *bn[4] = { "CH10", "CH11", "CUT7", "ORIG" };
+        for (int b = 0; b < 4; b++) for (size_t q = 0; q < sizeof po / sizeof po[0]; q++) {
+            memset(&r, 0, sizeof r);
+            if (b < 2) recipe_from_mask(l, b ? CH11 : CH10, &r);
+            else if (b == 2) { uint32_t nb = info->entry_blocks / 64; r.bits = LRD_CUT, r.cut_blocks = nb ? nb : 1; }
+            r.bits |= po[q].bits;
+            snprintf(id, sizeof id, "%s.%s", po[q].id, bn[b]);
+            snprintf(what, sizeof what, "%s: %s%s", bn[b], po[q].what, b == 0 ? " (inputs live)" : b == 1 ? " (inputs nulled)" : b == 2 ? " (plain CUT, inputs live)" : " (the original module)");
+            row_recipe(l, id, what, &r, NULL, 0, 0);
+        }
+        /* (d) minimal fragment stage (every declaration + interface kept) that loads the inputs and wires them straight to the outputs: tests the INTERFACE itself, without the 1944 locals / 473 blocks */
+        if (nin) {
+            static const struct { const char *id; uint32_t bits; int real_vs; int mirror; } iw[] = { { "IW0.all", LRD_MIN_ENTRY | LRD_MIN_LOADS, 1, 0 }, { "IW1.all", LRD_MIN_ENTRY | LRD_MIN_WIRE, 1, 0 },
+                { "IW1.all.stub", LRD_MIN_ENTRY | LRD_MIN_WIRE, 0, 0 } };
+            for (size_t q = 0; q < sizeof iw / sizeof iw[0]; q++) {
+                memset(&r, 0, sizeof r);
+                r.bits = iw[q].bits, r.input_sel = fullin;
+                snprintf(what, sizeof what, "minimal FS (IFC shape) that %s all %u Location input(s)%s; %s", iw[q].bits & LRD_MIN_WIRE ? "loads and WIRES to the outputs" : "loads (results unused)", nin, "", iw[q].real_vs ? "REAL VS" : "STUB VS");
+                row_recipe(l, iw[q].id, what, &r, iw[q].real_vs ? rvs : NULL, iw[q].real_vs ? rvsn : 0, 0);
+            }
+            {   /* the same wiring against the generated VS that writes every Location the ORIGINAL FS reads */
+                uint32_t *gv = NULL;
+                size_t gn = 0;
+                char gi[160] = "";
+                int g = lagfx_red_make_vs_for_fs(cfg->fs, cfg->fs_bytes / 4, &gv, &gn, gi, sizeof gi);
+                memset(&r, 0, sizeof r);
+                r.bits = LRD_MIN_ENTRY | LRD_MIN_WIRE, r.input_sel = fullin;
+                if (g == 1) row_recipe(l, "IW1.all.mirror", "minimal FS wiring all Location inputs to the outputs; GENERATED mirror VS (writes every Location the original FS reads)", &r, gv, gn * 4, 0);
+                else do_row(l, "IW1.all.mirror", "minimal wiring FS + generated mirror VS", MEAN_D, NULL, 0, 0, NULL, 0, gi[0] ? gi : "cannot mirror the inputs", 0);
+                free(gv);
+            }
+            for (uint32_t k = 0; k < nin; k++) {
+                memset(&r, 0, sizeof r);
+                r.bits = LRD_MIN_ENTRY | LRD_MIN_WIRE, r.input_sel = 1u << k;
+                snprintf(id, sizeof id, "IW1.loc%u", info->in[k].loc);
+                snprintf(what, sizeof what, "minimal FS that loads and wires ONLY Location %u (kind %u x%u) to the outputs; REAL VS", info->in[k].loc, info->in[k].kind, info->in[k].ncomp);
+                row_recipe(l, id, what, &r, rvs, rvsn, 0);
+            }
+            if (nblt) {
+                static const struct { const char *id; uint32_t bits; } ib[] = { { "IWB0", LRD_MIN_ENTRY | LRD_MIN_LOADS }, { "IWB1", LRD_MIN_ENTRY | LRD_MIN_WIRE } };
+                for (size_t q = 0; q < 2; q++) {
+                    memset(&r, 0, sizeof r);
+                    r.bits = ib[q].bits, r.blt_sel = fullblt;
+                    row_recipe(l, ib[q].id, ib[q].bits & LRD_MIN_WIRE ? "minimal FS that loads and wires only the BuiltIn inputs (FragCoord / PointCoord) to the outputs; REAL VS" : "minimal FS that loads only the BuiltIn inputs (results unused); REAL VS", &r, rvs, rvsn, 0);
+                }
+                static const struct { const char *id; uint32_t bits; } ia[] = { { "IWA0", LRD_MIN_ENTRY | LRD_MIN_LOADS }, { "IWA1", LRD_MIN_ENTRY | LRD_MIN_WIRE } };
+                for (size_t q = 0; q < 2; q++) {
+                    memset(&r, 0, sizeof r);
+                    r.bits = ia[q].bits, r.input_sel = fullin, r.blt_sel = fullblt;
+                    row_recipe(l, ia[q].id, ia[q].bits & LRD_MIN_WIRE ? "minimal FS that loads and wires EVERY input read by the original (Location + BuiltIn); REAL VS" : "minimal FS that loads every input read by the original (Location + BuiltIn), results unused; REAL VS", &r, rvs, rvsn, 0);
+                }
+            }
+        }
+        /* (e) the translator's constexpr samplers (OpName lagfx.cxs.*) folded onto the older sampler binding: removes the extra sampler bindings (39/40 of the 348,036 B module; 40 collides with an input attachment) */
+        memset(&r, 0, sizeof r);
+        r.bits = LRD_CXS_FOLD;
+        row_recipe(l, "CXF", "constexpr-sampler variables removed, their loads read the highest-binding non-constexpr sampler (original module otherwise unchanged)", &r, NULL, 0, 0);
+        recipe_from_mask(l, CH10, &r);
+        r.bits |= LRD_CXS_FOLD;
+        row_recipe(l, "CXF.CH10", "CH10 + constexpr samplers folded", &r, NULL, 0, 0);
+        recipe_from_mask(l, CH11, &r);
+        r.bits |= LRD_CXS_FOLD;
+        row_recipe(l, "CXF.CH11", "CH11 + constexpr samplers folded", &r, NULL, 0, 0);
+#undef LOCTXT
     }
     if (!cfg->list_only) {
         emit_line(l, "pipeline-reduce: summary fs=%016llx R0=%s BUILT=[%s] FAIL=[%s] CRASH=[%s] TIMEOUT=[%s] N/A=[%s] INVALID=[%s] rows=%u built=%u fail=%u crash=%u timeout=%u invalid=%u na=%u (BUILT = pipeline creation only, nothing about rendering)",

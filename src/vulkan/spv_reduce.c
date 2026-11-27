@@ -20,6 +20,7 @@ static int wb_reserve(wb_t *b, size_t add) {
     return 0;
 }
 static int wb_put(wb_t *b, const uint32_t *s, size_t n) {
+    if (!n) return 0;
     if (wb_reserve(b, n)) return -1;
     memcpy(b->w + b->n, s, n * 4), b->n += n;
     return 0;
@@ -148,6 +149,9 @@ static int is_id_pos(uint32_t op, uint32_t pos, uint32_t wc) {
 
 static int rp_has_ty(uint32_t op) { return res_pos(op) == 2; }
 
+/* OpName of a translator constexpr-sampler variable ("lagfx.cxs.<16 hex>") */
+static int is_cxs_name(const uint32_t *p) { return WCN(p[0]) >= 5 && !strncmp((const char *)(p + 2), "lagfx.cxs.", 10); }
+
 /* ---- analysis ---- */
 static int kclass(const mod_t *m, uint32_t ty) {
     if (ty >= m->bound) return 7;
@@ -215,8 +219,9 @@ int lagfx_red_analyze(const uint32_t *w, size_t words, lagfx_red_info_t *info) {
         const uint32_t *p = m.w + m.off[i];
         uint32_t op = OPC(p[0]), wc = WCN(p[0]);
         if (op == 59 && wc >= 4 && p[3] == 1 && info->nin < 32) {
-            uint32_t id = p[2], loc = ~0u, comp = 0, flat = 0, bi = 0;
-            for (uint32_t j = 0; j < m.first_fn; j++) { const uint32_t *d = m.w + m.off[j]; if (OPC(d[0]) == 71 && d[1] == id) { if (d[2] == 30) loc = d[3]; else if (d[2] == 24) comp = d[3]; else if (d[2] == 14) flat = 1; else if (d[2] == 11) bi = 1; } }
+            uint32_t id = p[2], loc = ~0u, comp = 0, flat = 0, bi = 0, bival = 0;
+            for (uint32_t j = 0; j < m.first_fn; j++) { const uint32_t *d = m.w + m.off[j]; if (OPC(d[0]) == 71 && d[1] == id) { if (d[2] == 30) loc = d[3]; else if (d[2] == 24) comp = d[3]; else if (d[2] == 14) flat = 1; else if (d[2] == 11) bi = 1, bival = d[3]; } }
+            if (bi && info->nblt < 8) { info->blt[info->nblt].id = id, info->blt[info->nblt].builtin = bival; info->nblt++; }
             if (loc != ~0u && !bi) {
                 uint32_t pt = m.w[m.defoff[p[1]] + 3], nc = 1, base = pt;
                 if (pt < m.bound && m.op_of[pt] == 23) nc = m.w[m.defoff[pt] + 3], base = m.w[m.defoff[pt] + 2];
@@ -238,6 +243,14 @@ int lagfx_red_analyze(const uint32_t *w, size_t words, lagfx_red_info_t *info) {
     for (uint32_t i = 0; i < m.ni && i < m.first_fn; i++) {
         const uint32_t *p = m.w + m.off[i];
         if (OPC(p[0]) == 43 && WCN(p[0]) >= 4) { info->k[kclass(&m, p[1])].uses += kuse[p[2]]; info->kuses_total += kuse[p[2]]; }
+    }
+    for (uint32_t i = 0; i < m.first_fn; i++) {   /* translator constexpr samplers: OpName "lagfx.cxs.<hex>" */
+        const uint32_t *p = m.w + m.off[i];
+        if (OPC(p[0]) != 5 || !is_cxs_name(p) || p[1] >= m.bound || m.op_of[p[1]] != 59 || info->ncxs >= 8) continue;
+        uint32_t k = info->ncxs++, nuse = 0, bnd = ~0u;
+        for (uint32_t j = 0; j < m.first_fn; j++) { const uint32_t *d = m.w + m.off[j]; if (OPC(d[0]) == 71 && d[1] == p[1] && d[2] == 33) bnd = d[3]; }
+        for (uint32_t j = m.first_fn; j < m.ni; j++) { const uint32_t *d = m.w + m.off[j]; if (OPC(d[0]) == 61 && WCN(d[0]) >= 4 && d[3] == p[1]) nuse++; }
+        info->cxs[k].id = p[1], info->cxs[k].binding = bnd, info->cxs[k].nuse = nuse;
     }
     /* distinct (type,value) among OpConstant: quadratic over a bounded prefix, exact below 8000 constants */
     {
@@ -320,8 +333,9 @@ typedef struct {
     uint8_t dynsel[LAGFX_RED_MAXFN], *arr_other, *arr_last, *arr_ok;
     uint32_t *lenc;
     struct { uint32_t ty; uint64_t val; uint32_t id; } ic[64];
-    uint32_t nic, c_dynconst, c_dynsel, c_ssbo, c_input;
-    uint8_t *insel;
+    uint32_t nic, c_dynconst, c_dynsel, c_ssbo, c_input, c_cxs, c_minload, c_wire;
+    uint8_t *insel, *cxs_var;
+    uint32_t cxs_to;
     char why[160];
 } ax_t;
 
@@ -534,6 +548,21 @@ static int emit_stub(ax_t *a, uint32_t k) {
     return 1;
 }
 
+/* 0 = not an interface variable this code selects, 1 = Location input, 2 = BuiltIn input */
+static int input_kind(const mod_t *m, uint32_t var) {
+    int loc = 0, bi = 0;
+    for (uint32_t j = 0; j < m->first_fn; j++) { const uint32_t *d = m->w + m->off[j]; if (OPC(d[0]) == 71 && d[1] == var) { if (d[2] == 30) loc = 1; if (d[2] == 11) bi = 1; } }
+    return bi ? 2 : loc;
+}
+/* float32 scalar (1) or vector: *nc = component count, *sty = the scalar type; 0 = anything else */
+static int f32_shape(const mod_t *m, uint32_t ty, uint32_t *nc, uint32_t *sty) {
+    if (ty == 0 || ty >= m->bound) return 0;
+    const uint32_t *p = m->w + m->defoff[ty];
+    if (m->op_of[ty] == 22 && p[2] == 32) { *nc = 1, *sty = ty; return 1; }
+    if (m->op_of[ty] == 23 && p[2] < m->bound && m->op_of[p[2]] == 22 && m->w[m->defoff[p[2]] + 2] == 32 && p[3] >= 2 && p[3] <= 4) { *nc = p[3], *sty = p[2]; return 1; }
+    return 0;
+}
+
 static int emit_min_entry(ax_t *a, uint32_t k) {
     const mod_t *m = &a->m;
     uint32_t i0 = m->fn[k].i0, i1 = m->fn[k].i1, i = i0 + 1;
@@ -542,13 +571,50 @@ static int emit_min_entry(ax_t *a, uint32_t k) {
     while (i < i1 && iop(m, i) != 248) { if (wb_put(&a->body, m->w + m->off[i], WCN(m->w[m->off[i]]))) return -1; i++; }
     if (iop(m, i) != 248) return 0;
     if (wb_put(&a->body, m->w + m->off[i], WCN(m->w[m->off[i]]))) return -1;
+    uint32_t flat[32], nf = 0;
+    if (a->r->bits & (LRD_MIN_LOADS | LRD_MIN_WIRE)) {   /* load the selected inputs (and, when wiring, spread their float32 lanes into flat[]) */
+        uint32_t lo = 0, bo = 0;
+        for (uint32_t g = 0; g < m->first_fn; g++) {
+            const uint32_t *p = m->w + m->off[g];
+            if (OPC(p[0]) != 59 || WCN(p[0]) < 4 || p[3] != 1 || a->dead[p[2]]) continue;
+            int kd = input_kind(m, p[2]);
+            if (!kd) continue;
+            uint32_t ord = kd == 1 ? lo++ : bo++, sel = kd == 1 ? a->r->input_sel : a->r->blt_sel;
+            if (ord >= 32 || !((sel >> ord) & 1u)) continue;
+            uint32_t pt = m->w[m->defoff[p[1]] + 3], id = newid(a), ops[3] = { pt, id, p[2] };
+            if (wb_inst(&a->body, 61, ops, 3)) return -1;
+            a->c_minload++;
+            uint32_t nc, sty;
+            if (!(a->r->bits & LRD_MIN_WIRE) || !f32_shape(m, pt, &nc, &sty)) continue;
+            if (nc == 1) { if (nf < 32) flat[nf++] = id; continue; }
+            for (uint32_t c = 0; c < nc && nf < 32; c++) { uint32_t e = newid(a), eo[4] = { sty, e, id, c }; if (wb_inst(&a->body, 81, eo, 4)) return -1; flat[nf++] = e; }
+        }
+    }
+    uint32_t oj = 0;
     for (uint32_t g = 0; g < m->first_fn; g++) {
         const uint32_t *p = m->w + m->off[g];
         if (OPC(p[0]) != 59 || p[3] != 3 /* Output */ || a->dead[p[2]]) continue;
-        uint32_t pt = m->w[m->defoff[p[1]] + 3], nn = nullof(a, pt);
-        if (!nn) return 0;
-        uint32_t ops[2] = { p[2], nn };
+        uint32_t pt = m->w[m->defoff[p[1]] + 3], nc, sty, val = 0;
+        if (nf && (a->r->bits & LRD_MIN_WIRE) && f32_shape(m, pt, &nc, &sty)) {   /* sum of the chunks of nc loaded lanes (lane (chunk*nc+i+oj) mod nf) */
+            uint32_t nch = (nf + nc - 1) / nc;
+            for (uint32_t c = 0; c < nch; c++) {
+                uint32_t ch;
+                if (nc == 1) ch = flat[(c + oj) % nf];
+                else {
+                    uint32_t co[6] = { pt, newid(a) };
+                    for (uint32_t t = 0; t < nc; t++) co[2 + t] = flat[(c * nc + t + oj) % nf];
+                    if (wb_inst(&a->body, 80, co, 2 + nc)) return -1;
+                    ch = co[1];
+                }
+                if (c == 0) val = ch;
+                else { uint32_t fo[4] = { pt, newid(a), val, ch }; if (wb_inst(&a->body, 129, fo, 4)) return -1; val = fo[1]; }
+            }
+            a->c_wire++;
+        } else val = nullof(a, pt);
+        if (!val) return 0;
+        uint32_t ops[2] = { p[2], val };
         if (wb_inst(&a->body, 62, ops, 2)) return -1;
+        oj++;
     }
     if (wb_inst(&a->body, 253, NULL, 0) || wb_inst(&a->body, 56, NULL, 0)) return -1;
     mark_dead_range(a, i + 1, i1 - 1);
@@ -580,6 +646,14 @@ static int emit_function(ax_t *a, uint32_t k) {
             int e = emit_dyn(a, p, !!(B & LRD_DYN_SELECT));
             if (e < 0) return -1;
             if (e) { uint64_t cv; if (const_index(m, op == 77 ? p[4] : p[5], &cv, 0)) a->c_dynconst++; else a->c_dynsel++; continue; }
+        }
+        if (op == 61 && (B & LRD_CXS_FOLD) && wc >= 4 && p[3] < m->bound && a->cxs_var[p[3]]) {
+            uint32_t t[8];
+            if (wc > 8) return -1;
+            memcpy(t, p, (size_t)wc * 4), t[3] = a->cxs_to;
+            if (wb_put(&a->body, t, wc)) return -1;
+            a->c_cxs++;
+            continue;
         }
         if (op == 61 && (B & LRD_INPUT_CONST) && p[3] < m->bound && a->insel[p[3]]) {
             uint32_t nn = nullof(a, p[1]);
@@ -673,6 +747,196 @@ static int plan_keep(ax_t *a, char *why, size_t wcap) {
 
 static int is_annot(uint32_t op) { return op == 5 || op == 6 || op == 71 || op == 72 || op == 332 || op == 5632 || op == 5633 || op == 73 || op == 74 || op == 75 || op == 76; }
 
+/* ---- post passes: prune unreachable blocks / unused locals / unneeded memory accesses, on a finished module ---- */
+typedef struct { uint32_t blk, blk_instr, blk_stub, var, wovar, wo_store, wo_chain, store, load, load_in, chain; } post_t;
+
+static int is_chain_op(uint32_t op) { return op == 65 || op == 66 || op == 67 || op == 70; }
+
+typedef struct {
+    mod_t m;
+    uint8_t *rm, *stubk, *dead, *readf, *fv, *stublab;
+    uint32_t *uses, *parent, *stubh, *lab2blk;
+} px_t;
+
+static void px_free(px_t *x) { free(x->rm), free(x->stubk), free(x->dead), free(x->readf), free(x->fv), free(x->stublab), free(x->uses), free(x->parent), free(x->stubh), free(x->lab2blk); mod_free(&x->m); }
+
+/* removes instruction i: its id operands lose a use, its result id is dead */
+static void px_rm(px_t *x, uint32_t i) {
+    const mod_t *m = &x->m;
+    const uint32_t *p = m->w + m->off[i];
+    uint32_t op = OPC(p[0]), wc = WCN(p[0]), rp = (uint32_t)res_pos(op);
+    for (uint32_t t = 1; t < wc; t++) {
+        if (t == rp || (rp == 2 && t == 1)) continue;
+        if (is_id_pos(op, t, wc) && p[t] < m->bound && x->uses[p[t]]) x->uses[p[t]]--;
+    }
+    if (rp && wc > rp && p[rp] < m->bound) x->dead[p[rp]] = 1;
+    x->rm[i] = 1;
+}
+static uint32_t px_root(const px_t *x, uint32_t id) { for (int d = 0; d < 64 && id < x->m.bound && x->parent[id]; d++) id = x->parent[id]; return id; }
+
+/* 1 = changed (*out malloc'd), 2 = nothing to do, 0 = not applicable (why), -1 = OOM / malformed */
+static int post_prune(const uint32_t *w, size_t n, uint32_t B, uint32_t **out, size_t *outn, post_t *ps, char *why, size_t wcap) {
+    px_t x;
+    memset(&x, 0, sizeof x);
+    int mo = mod_open(&x.m, w, n), rc = -1;
+    if (mo <= 0) { if (why && wcap) snprintf(why, wcap, "post pass: module not handled"); return mo < 0 ? -1 : 0; }
+    const mod_t *m = &x.m;
+    x.rm = calloc(m->ni + 1, 1), x.stubk = calloc(m->ni + 1, 1), x.stubh = calloc(m->ni + 1, 4);
+    x.dead = calloc(m->bound + 1, 1), x.readf = calloc(m->bound + 1, 1), x.fv = calloc(m->bound + 1, 1), x.stublab = calloc(m->bound + 1, 1);
+    x.uses = calloc(m->bound + 1, 4), x.parent = calloc(m->bound + 1, 4), x.lab2blk = calloc(m->bound + 1, 4);
+    if (!x.rm || !x.stubk || !x.stubh || !x.dead || !x.readf || !x.fv || !x.stublab || !x.uses || !x.parent || !x.lab2blk) goto done;
+    memset(ps, 0, sizeof *ps);
+    if (B & LRD_PRUNE_BLK) {
+        for (uint32_t k = 0; k < m->nfn; k++) {
+            uint32_t i0 = m->fn[k].i0, i1 = m->fn[k].i1, nb = 0;
+            for (uint32_t i = i0; i <= i1; i++) if (iop(m, i) == 248) nb++;
+            if (nb < 2) continue;
+            uint32_t *bf = malloc((size_t)nb * 4 * 4), *stack_ = NULL;
+            if (!bf) goto done;
+            uint32_t *be = bf + nb, *hdr = bf + 2 * nb;   /* first / last instruction index of block b, loop header label for a continue target */
+            uint8_t *reach = calloc(nb, 1), *sref = calloc(nb, 1);
+            stack_ = bf + 3 * nb;
+            if (!reach || !sref) { free(reach), free(sref), free(bf); goto done; }
+            uint32_t b = 0;
+            for (uint32_t i = i0; i <= i1; i++) {
+                if (iop(m, i) == 248) { bf[b] = i, x.lab2blk[m->w[m->off[i] + 1]] = b + 1; if (b) be[b - 1] = i - 1; b++; }
+            }
+            be[nb - 1] = i1 - 1;   /* the instruction before OpFunctionEnd */
+            for (b = 0; b < nb; b++) hdr[b] = 0;
+            uint32_t sp = 0;
+            reach[0] = 1, stack_[sp++] = 0;
+            while (sp) {
+                uint32_t cur = stack_[--sp];
+#define GO(lbl) do { uint32_t l_ = (lbl); if (l_ < m->bound && x.lab2blk[l_]) { uint32_t t_ = x.lab2blk[l_] - 1; if (!reach[t_]) { reach[t_] = 1; stack_[sp++] = t_; } } } while (0)
+                const uint32_t *t = m->w + m->off[be[cur]];
+                uint32_t top = OPC(t[0]), twc = WCN(t[0]);
+                if (top == 249) GO(t[1]);
+                else if (top == 250) { GO(t[2]); GO(t[3]); }
+                else if (top == 251) {
+                    uint32_t sty = t[1] < m->bound ? m->ty_of[t[1]] : 0, lw = (sty && sty < m->bound && m->op_of[sty] == 21 && m->w[m->defoff[sty] + 2] == 64) ? 2u : 1u;
+                    GO(t[2]);
+                    for (uint32_t q = 3; q + lw < twc; q += lw + 1) GO(t[q + lw]);
+                }
+#undef GO
+            }
+            /* structured-construct targets of the reachable blocks */
+            for (b = 0; b < nb; b++) {
+                if (!reach[b]) continue;
+                uint32_t lab = m->w[m->off[bf[b]] + 1];
+                for (uint32_t i = bf[b]; i <= be[b]; i++) {
+                    const uint32_t *p = m->w + m->off[i];
+                    uint32_t op = OPC(p[0]);
+                    if (op == 247 && p[1] < m->bound && x.lab2blk[p[1]]) { if (!reach[x.lab2blk[p[1]] - 1]) sref[x.lab2blk[p[1]] - 1] |= 1; }
+                    else if (op == 246) {
+                        if (p[1] < m->bound && x.lab2blk[p[1]] && !reach[x.lab2blk[p[1]] - 1]) sref[x.lab2blk[p[1]] - 1] |= 1;
+                        if (p[2] < m->bound && x.lab2blk[p[2]] && !reach[x.lab2blk[p[2]] - 1]) sref[x.lab2blk[p[2]] - 1] |= 2, hdr[x.lab2blk[p[2]] - 1] = lab;
+                    }
+                }
+            }
+            for (b = 0; b < nb; b++) {
+                if (reach[b]) continue;
+                uint32_t lab = m->w[m->off[bf[b]] + 1];
+                if (sref[b]) {   /* stays as a one-instruction block */
+                    x.stubk[bf[b]] = (sref[b] & 2) ? 2 : 1, x.stubh[bf[b]] = hdr[b], x.stublab[lab] = 1;
+                    for (uint32_t i = bf[b] + 1; i <= be[b]; i++) { px_rm(&x, i); ps->blk_instr++; }
+                    ps->blk_stub++;
+                } else {
+                    for (uint32_t i = bf[b]; i <= be[b]; i++) { px_rm(&x, i); ps->blk_instr++; }
+                    ps->blk++;
+                }
+            }
+            for (uint32_t i = i0; i <= i1; i++) if (iop(m, i) == 248) x.lab2blk[m->w[m->off[i] + 1]] = 0;
+            free(reach), free(sref), free(bf);
+        }
+    }
+    if (B & (LRD_PRUNE_VAR | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_MEM_LOAD_IN)) {
+        for (uint32_t i = m->first_fn; i < m->ni; i++) {   /* use counts and the read / write classification of every pointer */
+            if (x.rm[i]) continue;
+            const uint32_t *p = m->w + m->off[i];
+            uint32_t op = OPC(p[0]), wc = WCN(p[0]), rp = (uint32_t)res_pos(op);
+            for (uint32_t t = 1; t < wc; t++) {
+                if (t == rp || (rp == 2 && t == 1)) continue;
+                if (is_id_pos(op, t, wc) && p[t] < m->bound) x.uses[p[t]]++;
+            }
+            if (op == 59 && wc >= 4 && p[3] == 7 && p[2] < m->bound) x.fv[p[2]] = 1;
+            if (op == 61 && wc >= 4) { if (p[3] < m->bound) x.readf[p[3]] = 1; }
+            else if (op == 62 && wc >= 3) { if (p[2] < m->bound) x.readf[p[2]] = 1; }
+            else if (op == 63 || op == 64) { if (wc >= 3 && p[2] < m->bound) x.readf[p[2]] = 1; }
+            else if (is_chain_op(op) && wc >= 5 && p[2] < m->bound && p[3] < m->bound) x.parent[p[2]] = p[3];
+            else for (uint32_t t = 1; t < wc; t++) { if (t == rp || (rp == 2 && t == 1)) continue; if (is_id_pos(op, t, wc) && p[t] < m->bound) x.readf[p[t]] = 1; }
+        }
+        for (uint32_t i = m->ni; i-- > m->first_fn;) {   /* a chain that is read makes its base read (bases are defined first: one backward pass) */
+            if (x.rm[i]) continue;
+            const uint32_t *p = m->w + m->off[i];
+            if (is_chain_op(OPC(p[0])) && WCN(p[0]) >= 5 && p[2] < m->bound && p[3] < m->bound && x.readf[p[2]]) x.readf[p[3]] = 1;
+        }
+#define WO_VAR(id) ((id) < m->bound && x.fv[id] && !x.readf[id])
+        for (uint32_t i = m->first_fn; i < m->ni; i++) {
+            if (x.rm[i]) continue;
+            const uint32_t *p = m->w + m->off[i];
+            uint32_t op = OPC(p[0]), wc = WCN(p[0]);
+            if (op == 59 && wc >= 4 && (B & LRD_PRUNE_VAR) && p[3] == 7 && x.uses[p[2]] == 0) { px_rm(&x, i); ps->var++; continue; }
+            if (op == 59 && wc >= 4 && (B & LRD_PRUNE_WOVAR) && p[3] == 7 && WO_VAR(p[2])) { px_rm(&x, i); ps->wovar++; continue; }
+            if (is_chain_op(op) && wc >= 5 && (B & LRD_PRUNE_WOVAR) && WO_VAR(px_root(&x, p[3]))) { px_rm(&x, i); ps->wo_chain++; continue; }
+            if ((op == 62 || op == 63 || op == 64) && wc >= 3 && (B & (LRD_PRUNE_WOVAR | LRD_MEM_STORE)) && WO_VAR(px_root(&x, p[1]))) {
+                px_rm(&x, i);
+                if (B & LRD_PRUNE_WOVAR) ps->wo_store++; else ps->store++;
+                continue;
+            }
+        }
+#undef WO_VAR
+        if (B & (LRD_MEM_LOAD | LRD_MEM_LOAD_IN)) {
+            for (int again = 1, iter = 0; again && iter < 256; iter++) {
+                again = 0;
+                for (uint32_t i = m->ni; i-- > m->first_fn;) {
+                    if (x.rm[i]) continue;
+                    const uint32_t *p = m->w + m->off[i];
+                    uint32_t op = OPC(p[0]), wc = WCN(p[0]);
+                    if (op == 61 && wc >= 4 && p[2] < m->bound && x.uses[p[2]] == 0 && !(wc > 4 && (p[4] & 1u))) {
+                        uint32_t r = px_root(&x, p[3]);
+                        int inp = r < m->bound && m->op_of[r] == 59 && m->w[m->defoff[r] + 3] == 1;
+                        if (inp && !(B & LRD_MEM_LOAD_IN)) continue;
+                        px_rm(&x, i), again = 1;
+                        if (inp) ps->load_in++; else ps->load++;
+                    } else if (is_chain_op(op) && wc >= 5 && p[2] < m->bound && x.uses[p[2]] == 0) { px_rm(&x, i), again = 1, ps->chain++; }
+                }
+            }
+        }
+    }
+    if (!(ps->blk + ps->blk_stub + ps->var + ps->wovar + ps->wo_store + ps->wo_chain + ps->store + ps->load + ps->load_in + ps->chain)) { rc = 2; goto done; }
+    for (uint32_t i = m->first_fn; i < m->ni; i++) {   /* no kept instruction may name a removed id; a phi must not name a stubbed predecessor */
+        if (x.rm[i]) continue;
+        const uint32_t *p = m->w + m->off[i];
+        uint32_t op = OPC(p[0]), wc = WCN(p[0]), rp = (uint32_t)res_pos(op);
+        for (uint32_t t = 1; t < wc; t++) {
+            if (t == rp || (rp == 2 && t == 1)) continue;
+            if (!is_id_pos(op, t, wc) || p[t] >= m->bound) continue;
+            if (x.dead[p[t]] || (op == 245 && t >= 4 && ((t - 4) & 1u) == 0 && x.stublab[p[t]])) {
+                if (why && wcap) snprintf(why, wcap, "post pass: removing code would leave instruction %u (op %u) using id %u: not applicable", i, op, p[t]);
+                rc = 0;
+                goto done;
+            }
+        }
+    }
+    {
+        wb_t o = { 0 };
+        if (wb_put(&o, w, 5)) { free(o.w); goto done; }
+        for (uint32_t i = 0; i < m->ni; i++) {
+            const uint32_t *p = m->w + m->off[i];
+            uint32_t op = OPC(p[0]), wc = WCN(p[0]);
+            if (i < m->first_fn && is_annot(op) && wc >= 2 && p[1] < m->bound && x.dead[p[1]]) continue;
+            if (i >= m->first_fn && x.rm[i]) continue;
+            if (wb_put(&o, p, wc)) { free(o.w); goto done; }
+            if (x.stubk[i]) { uint32_t hh = x.stubh[i]; if (x.stubk[i] == 2 ? wb_inst(&o, 249, &hh, 1) : wb_inst(&o, 255, NULL, 0)) { free(o.w); goto done; } }
+        }
+        *out = o.w, *outn = o.n;
+        rc = 1;
+    }
+done:
+    px_free(&x);
+    return rc;
+}
+
 int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r, uint32_t **out, size_t *out_words, char *info, size_t cap) {
     ax_t *a = calloc(1, sizeof *a);
     int rc = -1;
@@ -685,8 +949,8 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
     a->r = r, a->next = m->bound;
     a->dead = calloc(m->bound + 1, 1), a->keep = calloc(m->nfn + 1, 1), a->seen_hdr = calloc(m->bound + 1, 1);
     a->nullmap = calloc(m->bound + 1, 4), a->hdr_merge = calloc(m->bound + 1, 4), a->cont_hdr = calloc(m->bound + 1, 4), a->refd = calloc(m->bound + 1, 1), a->lenc = calloc(m->bound + 1, 4);
-    a->arr_other = calloc(m->bound + 1, 1), a->arr_last = calloc(m->bound + 1, 1), a->arr_ok = calloc(m->bound + 1, 1), a->insel = calloc(m->bound + 1, 1);
-    if (!a->dead || !a->keep || !a->seen_hdr || !a->nullmap || !a->hdr_merge || !a->cont_hdr || !a->refd || !a->lenc || !a->arr_other || !a->arr_last || !a->arr_ok || !a->insel) goto done;
+    a->arr_other = calloc(m->bound + 1, 1), a->arr_last = calloc(m->bound + 1, 1), a->arr_ok = calloc(m->bound + 1, 1), a->insel = calloc(m->bound + 1, 1), a->cxs_var = calloc(m->bound + 1, 1);
+    if (!a->dead || !a->keep || !a->seen_hdr || !a->nullmap || !a->hdr_merge || !a->cont_hdr || !a->refd || !a->lenc || !a->arr_other || !a->arr_last || !a->arr_ok || !a->insel || !a->cxs_var) goto done;
     if (m->entry_id == 0) { snprintf(a->why, sizeof a->why, "no entry point"); rc = 0; goto done; }
     if (!plan_keep(a, a->why, sizeof a->why)) { rc = 0; goto done; }
     const uint32_t B = r->bits;
@@ -713,6 +977,20 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         }
         for (uint32_t i = m->first_fn; i < m->ni; i++) { const uint32_t *p = m->w + m->off[i]; if ((OPC(p[0]) == 65 || OPC(p[0]) == 66 || OPC(p[0]) == 67) && p[3] < m->bound && a->insel[p[3]] && p[2] < m->bound) a->insel[p[2]] = 1; }
     }
+    if (B & LRD_CXS_FOLD) {   /* the constexpr-sampler variables, and the sampler variable their loads are redirected to */
+        uint32_t best = 0, bestb = 0, ptr = 0;
+        for (uint32_t i = 0; i < m->first_fn; i++) { const uint32_t *p = m->w + m->off[i]; if (OPC(p[0]) == 5 && is_cxs_name(p) && p[1] < m->bound && m->op_of[p[1]] == 59) { a->cxs_var[p[1]] = 1; ptr = m->ty_of[p[1]]; } }
+        if (!ptr) { snprintf(a->why, sizeof a->why, "the module has no constexpr-sampler variable (OpName lagfx.cxs.*)"); rc = 0; goto done; }
+        for (uint32_t i = 0; i < m->first_fn; i++) {
+            const uint32_t *p = m->w + m->off[i];
+            if (OPC(p[0]) != 59 || WCN(p[0]) < 4 || p[3] != 0 || p[1] != ptr || a->cxs_var[p[2]]) continue;
+            uint32_t bnd = 0;
+            for (uint32_t j = 0; j < m->first_fn; j++) { const uint32_t *d = m->w + m->off[j]; if (OPC(d[0]) == 71 && d[1] == p[2] && d[2] == 33) bnd = d[3]; }
+            if (!best || bnd >= bestb) best = p[2], bestb = bnd;
+        }
+        if (!best) { snprintf(a->why, sizeof a->why, "no sampler variable that is not a constexpr sampler to read instead"); rc = 0; goto done; }
+        a->cxs_to = best;
+    }
     if (B & (LRD_DYN_CONST | LRD_DYN_SELECT)) {
         uint32_t cnt[LAGFX_RED_MAXFN] = { 0 };
         for (uint32_t k = 0; k < m->nfn; k++) for (uint32_t i = m->fn[k].i0; i <= m->fn[k].i1; i++) { uint32_t op = iop(m, i); if (op == 77 || op == 78) cnt[k]++; }
@@ -729,6 +1007,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         const uint32_t *p = m->w + m->off[i];
         uint32_t op = OPC(p[0]), wc = WCN(p[0]);
         if (op == 59 && (B & LRD_IA_DROP) && p[2] < m->bound && m->ia_var[p[2]]) { a->dead[p[2]] = 1; a->c_ia++; continue; }
+        if (op == 59 && (B & LRD_CXS_FOLD) && wc >= 4 && p[2] < m->bound && a->cxs_var[p[2]]) { a->dead[p[2]] = 1; continue; }
         if (op == 20 && !a->booltype) a->booltype = p[1];
         if (op == 22 && wc >= 3 && p[2] == 32 && !a->f32type) a->f32type = p[1];
         if (op == 43 && wc == 4 && p[3] == 0 && p[1] == a->f32type && a->f32type && !a->f32zero) a->f32zero = p[2];
@@ -769,8 +1048,8 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         if (e < 0) goto done;
         if (e == 0) { snprintf(a->why, sizeof a->why, "function %u (id %u) cannot be rewritten safely (return type not null-able / unexpected layout)", k, m->fn[k].id); rc = 0; goto done; }
     }
-    uint32_t changes = a->c_stub + a->c_undef + a->c_use + a->c_sw + a->c_swc + a->c_lp + a->c_smp + a->c_lod0 + a->c_deriv + a->c_read + a->c_ia + a->c_pruned + a->c_min + a->c_dynconst + a->c_dynsel + a->c_ssbo + a->c_input + (a->cut_idx ? 1u : 0u);
-    if (!changes) { snprintf(a->why, sizeof a->why, "the rewrite changes nothing in this module"); rc = 0; goto done; }
+    uint32_t changes = a->c_stub + a->c_undef + a->c_use + a->c_sw + a->c_swc + a->c_lp + a->c_smp + a->c_lod0 + a->c_deriv + a->c_read + a->c_ia + a->c_pruned + a->c_min + a->c_dynconst + a->c_dynsel + a->c_ssbo + a->c_input + a->c_cxs + (a->cut_idx ? 1u : 0u);
+    if (!changes && !(B & LRD_POST_MASK)) { snprintf(a->why, sizeof a->why, "the rewrite changes nothing in this module"); rc = 0; goto done; }
     /* assemble: header + filtered global section + new globals + functions */
     wb_t fin = { 0 };
     if (wb_put(&fin, w, 5)) goto done;
@@ -808,6 +1087,17 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
             p += wc;
         }
     }
+    post_t ps;
+    memset(&ps, 0, sizeof ps);
+    if (B & LRD_POST_MASK) {
+        uint32_t *o2 = NULL;
+        size_t n2 = 0;
+        int pr = post_prune(fin.w, fin.n, B, &o2, &n2, &ps, a->why, sizeof a->why);
+        if (pr < 0) { free(fin.w); goto done; }
+        if (pr == 0) { free(fin.w); rc = 0; goto done; }
+        if (pr == 2) { free(fin.w); snprintf(a->why, sizeof a->why, "the post pass finds nothing to remove in this module (the result would equal its base)"); rc = 0; goto done; }
+        if (pr == 1) { free(fin.w); fin.w = o2, fin.n = n2; }
+    }
     *out = fin.w, *out_words = fin.n;
     if (info && cap) {
         char *o = info;
@@ -818,6 +1108,10 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         ADDI(a->c_undef, "undef->null=%u ", a->c_undef); ADDI(a->c_use, "undef-operands->null=%u ", a->c_use); ADDI(a->c_sw, "switch->default=%u ", a->c_sw); ADDI(a->c_swc, "switch->frequent-case=%u ", a->c_swc);
         ADDI(a->c_lp, "loop-back-edges->one-trip=%u ", a->c_lp); ADDI(a->c_smp, "samples->null=%u ", a->c_smp); ADDI(a->c_lod0, "implicit->explicit-lod0=%u ", a->c_lod0);
         ADDI(a->c_deriv, "derivatives->null=%u ", a->c_deriv); ADDI(a->c_read, "imageread->null=%u ", a->c_read); ADDI(a->c_ia, "input-attachment-decls/loads-dropped=%u ", a->c_ia); ADDI(a->c_dynconst, "dyn-access->composite-extract/insert=%u ", a->c_dynconst); ADDI(a->c_dynsel, "dyn-access->select-chain=%u ", a->c_dynsel); ADDI(a->c_ssbo, "big-arrays-shrunk/runtime=%u ", a->c_ssbo); ADDI(a->c_input, "input-loads->null=%u ", a->c_input);
+        ADDI(a->c_cxs, "constexpr-sampler-loads-redirected=%u ", a->c_cxs); ADDI(a->c_minload, "entry-loads=%u ", a->c_minload); ADDI(a->c_wire, "outputs-wired=%u ", a->c_wire);
+        ADDI(ps.blk || ps.blk_stub, "unreachable-blocks-removed=%u (+%u kept as stubs, %u instr) ", ps.blk, ps.blk_stub, ps.blk_instr); ADDI(ps.var, "unused-locals-removed=%u ", ps.var);
+        ADDI(ps.wovar, "write-only-locals-removed=%u (+%u stores, %u chains) ", ps.wovar, ps.wo_store, ps.wo_chain); ADDI(ps.store, "stores-to-write-only-locals-removed=%u ", ps.store);
+        ADDI(ps.load || ps.load_in || ps.chain, "unused-loads-removed=%u (+%u from Input variables) unused-access-chains-removed=%u ", ps.load, ps.load_in, ps.chain);
 #undef ADDI
         size_t l = strlen(info);
         if (l && info[l - 1] == ' ') info[l - 1] = 0;
@@ -825,7 +1119,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
     rc = 1;
 done:
     if (rc == 0 && info && cap) snprintf(info, cap, "%s", a->why);
-    free(a->gout.w), free(a->gtail.w), free(a->body.w), free(a->dead), free(a->keep), free(a->seen_hdr), free(a->nullmap), free(a->hdr_merge), free(a->cont_hdr), free(a->refd), free(a->lenc), free(a->arr_other), free(a->arr_last), free(a->arr_ok), free(a->insel);
+    free(a->gout.w), free(a->gtail.w), free(a->body.w), free(a->dead), free(a->keep), free(a->seen_hdr), free(a->nullmap), free(a->hdr_merge), free(a->cont_hdr), free(a->refd), free(a->lenc), free(a->arr_other), free(a->arr_last), free(a->arr_ok), free(a->insel), free(a->cxs_var);
     mod_free(&a->m);
     free(a);
     return rc;
