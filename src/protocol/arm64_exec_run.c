@@ -2,6 +2,7 @@
  * libapplegfx-vulkan — ARM64 GPU exec (0x43 / 0x45): execution of Render segments on Vulkan. See arm64_exec_run.h.
  */
 #include "arm64_exec_run.h"
+#include "../air2spv/spv_reflect.h"
 #include "arm64_objects.h"
 #include "arm64_pipeline.h"
 #include "arm64_depth_stencil.h"
@@ -56,6 +57,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #define A64_MAX_FB    32u
 #define A64_MAX_FSAMP 16u
 #define A64_PIPE_CACHE 8u
+#define A64_FS_VARIANTS 8u
 #define A64_GATHER_MAX (8ull << 20)
 /* Gather limits per exec. A64_GATHER_CACHE bounds the number of private copies (each is one of the exec's MAX_TMP=64 scratch slots, which blit tail staging also
  * uses: 32 leaves 32 for those). A64_GATHER_BUDGET bounds their total bytes: 64 MiB = the worst case the old limits allowed (8 copies x A64_GATHER_MAX 8 MiB), so
@@ -79,8 +81,11 @@ typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded dept
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | 0x10 for the alt (explicit LOD) fragment shader */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | (1 + variant index) << 4 for an unnormalized-sampler shader variant */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
     uint32_t ncache;
+    /* Shader variants for draws that bind an unnormalized-coordinates sampler (spv_unnorm.c): keyed by the set of unnormalized sampler slots of the vertex / fragment table. rc 0 = the shader never
+     * samples through them (original shader), 1 = rewritten module(s), -1 = an unsupported use (draw skipped). Built lazily at the first such draw, owned by this object. */
+    struct { uint32_t vmask, fmask; int rc; VkShaderModule vm, fm; } fv[A64_FS_VARIANTS]; uint32_t nfv;
     uint32_t ref;
 } a64_pipe_t;
 
@@ -167,6 +172,7 @@ static void destroy_obj_now(a64_run_t *r, void *obj) {
     if (h->kind == K_PIPE) {
         a64_pipe_t *pp = obj;
         for (uint32_t i = 0; i < pp->ncache; i++) destroy_pipeline_vk(r->vk, pp->cache[i].pl);
+        for (uint32_t i = 0; r->vk && i < pp->nfv; i++) { if (pp->fv[i].vm) vkDestroyShaderModule(r->vk->device, pp->fv[i].vm, NULL); if (pp->fv[i].fm) vkDestroyShaderModule(r->vk->device, pp->fv[i].fm, NULL); }
         if (pp->src.release) pp->src.release(pp->src.user);
         free(pp);
     } else if (h->kind == K_SAMP) {
@@ -450,11 +456,14 @@ static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
-    const uint32_t key = topo; topo &= 15u;   /* bit 4 of the key: build with the explicit-LOD fragment shader */
+    const uint32_t key = topo; topo &= 15u;   /* bits 4..6 of the key: 1 + index of the unnormalized-sampler shader variant of the pipeline (0 = the shaders as resolved) */
     for (uint32_t i = 0; i < pp->ncache; i++)
         if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
-    if (key & 16u) d.fragment_shader = pp->src.alt_fragment_shader;
+    if (key >> 4) {
+        const uint32_t vi = (key >> 4) - 1u;
+        if (vi < pp->nfv) { if (pp->fv[vi].vm) d.vertex_shader = pp->fv[vi].vm; if (pp->fv[vi].fm) d.fragment_shader = pp->fv[vi].fm; }
+    }
     d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
     if (nslots == 1u && fmts[0] == VK_FORMAT_UNDEFINED) d.no_color = 1;   /* a depth/stencil-only pass: the one colour slot is unused */
     if (vk_core13(r->vk)) {   /* cull / front face / depth bias and the depth / stencil state are encoder state, set dynamically before each draw (see apply_encoder_state) */
@@ -716,6 +725,60 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     return true;
 }
 
+/* The slots of one stage's sampler table (0 vertex, 1 fragment) that this draw feeds with an unnormalized-coordinates sampler, restricted to the sampler bindings the pipeline declares. */
+static uint32_t unnorm_mask(const a64_run_t *r, const a64_pipe_t *pp, uint32_t stage) {
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < pp->src.n_bind; i++) {
+        const lagfx_a64_bind_t *b = &pp->src.bind[i];
+        if (b->stage != stage || b->kind != LAGFX_A64_BIND_SAMPLER || b->cxs || b->metal_index < 0 || (uint32_t)b->metal_index >= A64_MAX_FSAMP) continue;
+        const a64_samp_t *sm = stage ? r->fsamp[b->metal_index] : r->vsamp[b->metal_index];
+        if (sm && sm->ci.unnormalizedCoordinates) m |= 1u << b->metal_index;
+    }
+    return m;
+}
+
+/* The shader variant for a draw whose samplers at vmask / fmask are unnormalized. Returns 0 = the shaders as resolved (they never sample through those samplers: NOT a reason to skip),
+ * 1 + index = a variant of the pipeline (rewritten per use by lagfx_spv_unnorm_rewrite), -1 = skip the draw (an unsupported use, no SPIR-V to analyse, or the module could not be made; counted). */
+static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uint32_t vmask, uint32_t fmask) {
+    for (uint32_t i = 0; i < pp->nfv; i++)
+        if (pp->fv[i].vmask == vmask && pp->fv[i].fmask == fmask) return pp->fv[i].rc < 0 ? -1 : pp->fv[i].rc == 0 ? 0 : (int)i + 1;
+    if (pp->nfv == A64_FS_VARIANTS) { CNT(p).ext_unnorm_unsup[4]++; return -1; }   /* more distinct sampler situations than the table holds (not seen in any capture) */
+    const uint32_t slot = pp->nfv++;
+    pp->fv[slot].vmask = vmask, pp->fv[slot].fmask = fmask, pp->fv[slot].rc = 0, pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE;
+    int rc_all = 0;
+    for (uint32_t st = 0; st < 2u; st++) {
+        const uint32_t mask = st ? fmask : vmask;
+        if (!mask) continue;
+        uint32_t bn[A64_MAX_FSAMP], nb = 0;
+        for (uint32_t i = 0; i < pp->src.n_bind && nb < A64_MAX_FSAMP; i++) {
+            const lagfx_a64_bind_t *b = &pp->src.bind[i];
+            if (b->stage == st && b->kind == LAGFX_A64_BIND_SAMPLER && !b->cxs && b->metal_index >= 0 && (uint32_t)b->metal_index < A64_MAX_FSAMP && (mask >> b->metal_index & 1u)) bn[nb++] = b->binding;
+        }
+        const uint8_t *spv = (const uint8_t *)(st ? pp->src.desc.fragment_spv : pp->src.desc.vertex_spv);
+        const size_t sz = st ? pp->src.desc.fragment_spv_bytes : pp->src.desc.vertex_spv_bytes;
+        uint8_t *o = NULL; size_t osz = 0; lagfx_spv_unnorm_report_t rep;
+        int rc = spv ? lagfx_spv_unnorm_rewrite(spv, sz, bn, nb, 1, &o, &osz, &rep) : -2;
+        if (rc == -2) { CNT(p).ext_unnorm_unsup[4]++; rc_all = -1; continue; }   /* the resolver gave no SPIR-V: the uses cannot be judged */
+        CNT(p).ext_unnorm_use_implicit0 += rep.implicit_to_lod0, CNT(p).ext_unnorm_use_bias_dropped += rep.bias_dropped, CNT(p).ext_unnorm_use_offset_folded += rep.offset_folded;
+        CNT(p).ext_unnorm_use_explicit_kept += rep.explicit_kept, CNT(p).ext_unnorm_use_grad_kept += rep.grad_kept, CNT(p).ext_unnorm_use_gather_kept += rep.gather_kept, CNT(p).ext_unnorm_use_unresolved += rep.uses_unresolved;
+        if (rc < 0) {
+            CNT(p).ext_unnorm_unsup[0] += rep.unsup_dref, CNT(p).ext_unnorm_unsup[1] += rep.unsup_proj, CNT(p).ext_unnorm_unsup[2] += rep.unsup_sparse, CNT(p).ext_unnorm_unsup[3] += rep.unsup_image_dim, CNT(p).ext_unnorm_unsup[4] += rep.unsup_other;
+            LAGFX_WARN("arm64 pipeline %u: %s shader samples through an unnormalized-coordinates sampler in a way Vulkan forbids (dref %u proj %u sparse %u image_dim %u other %u): draws with this sampler are skipped (counted)",
+                       pp->ref, st ? "fragment" : "vertex", rep.unsup_dref, rep.unsup_proj, rep.unsup_sparse, rep.unsup_image_dim, rep.unsup_other);
+            rc_all = -1;
+        } else if (rc == 1) {
+            VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = osz, .pCode = (const uint32_t *)(const void *)o };
+            VkShaderModule m = VK_NULL_HANDLE;
+            if (vkCreateShaderModule(r->vk->device, &ci, NULL, &m) != VK_SUCCESS) { CNT(p).ext_unnorm_variant_fail++; rc_all = -1; }
+            else { if (st) pp->fv[slot].fm = m; else pp->fv[slot].vm = m; CNT(p).ext_unnorm_variants++; if (rc_all == 0) rc_all = 1; }
+        }
+        free(o);
+    }
+    if (rc_all < 0) { if (pp->fv[slot].vm) vkDestroyShaderModule(r->vk->device, pp->fv[slot].vm, NULL); if (pp->fv[slot].fm) vkDestroyShaderModule(r->vk->device, pp->fv[slot].fm, NULL); pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE; }
+    pp->fv[slot].rc = rc_all;
+    return rc_all < 0 ? -1 : rc_all == 0 ? 0 : (int)slot + 1;
+}
+
 /* Everything a draw needs besides the vertex buffer: the VkPipeline of this primitive type (Metal 0 point, 1 line, 2 line strip, 3 triangle, 4 triangle strip =
  * the VkPrimitiveTopology values) bound in the open pass, and the descriptor set. False = draw skipped (counted). */
 static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
@@ -726,14 +789,16 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
     VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
     for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) fmts[i] = r->rts[i]->format;
-    uint32_t alt = 0;   /* an unnormalized-coordinates sampler in a fragment sampler slot of this pipeline: only explicit-LOD sampling is valid, so the LOD 0 variant of the fragment shader */
-    for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) {
-        const int16_t mi = r->pipe->src.bind[i].metal_index;
-        if (r->pipe->src.bind[i].stage != 1 || r->pipe->src.bind[i].kind != LAGFX_A64_BIND_SAMPLER || mi < 0 || (uint32_t)mi >= A64_MAX_FSAMP) continue;
-        if (r->fsamp[mi] && r->fsamp[mi]->ci.unnormalizedCoordinates) alt = 16u;
+    uint32_t alt = 0;   /* unnormalized-coordinates samplers in this draw: the shader USES that sample through them are rewritten (per OpSampledImage, spv_unnorm.c); a shader that never samples through them runs unchanged */
+    {
+        const uint32_t vmask = unnorm_mask(r, r->pipe, 0), fmask = unnorm_mask(r, r->pipe, 1);
+        if (vmask | fmask) {
+            int v = unnorm_variant(r, p, r->pipe, vmask, fmask);
+            if (v < 0) { CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
+            if (v == 0) CNT(p).ext_unnorm_unused++;
+            else alt = (uint32_t)v << 4, CNT(p).ext_unnorm_lod0++;
+        }
     }
-    if (alt && !r->pipe->src.alt_fragment_shader) { CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
-    if (alt) CNT(p).ext_unnorm_lod0++;
     VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim | alt);
     if (!vp) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[2]++; CNT(p).draws_skipped++; return false; }   /* 2: vkCreateGraphicsPipelines failed (now or earlier: failures are cached) */
     if (r->bound_vk != vp) {

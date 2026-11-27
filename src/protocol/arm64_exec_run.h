@@ -49,7 +49,6 @@ typedef struct {
     /* Resources of set 0 (all zero = the pipeline has none: desc.layout is the empty layout). Each: the Vulkan binding, its kind, the stage whose Metal
      * table feeds it (0 vertex buffers table = tag 125, 1 fragment tables = tags 110/114/112) and the Metal index into that table. */
     VkDescriptorSetLayout dsl;
-    VkShaderModule alt_fragment_shader;   /* optional: desc.fragment_shader with explicit LOD 0 sampling, used instead while an unnormalized-coordinates sampler is bound to a fragment sampler slot */
     uint64_t layout_key;            /* lagfx_ba_key of the pipeline's set-0 binding table (0 = none: no descriptors / a tile pipeline): part of the VkPipeline cache key */
     uint32_t n_bind;
     lagfx_a64_bind_t bind[LAGFX_A64_MAX_BINDINGS];   /* writable: a buffer the shader may write (air.write / air.read_write) */

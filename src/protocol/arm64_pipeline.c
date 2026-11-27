@@ -388,7 +388,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 
 typedef struct {
     VkDevice dev;
-    VkShaderModule vs, fs, fs_alt;   /* fs_alt: fs with explicit LOD 0 sampling, for pipelines that are drawn with an unnormalized-coordinates sampler */
+    VkShaderModule vs, fs;
     VkDescriptorSetLayout dsl;
     VkPipelineLayout pl;
     char vname[64], fname[64];
@@ -405,7 +405,6 @@ static void pres_release(void *u) {
     if (r->dsl) vkDestroyDescriptorSetLayout(r->dev, r->dsl, NULL);
     if (r->vs) vkDestroyShaderModule(r->dev, r->vs, NULL);
     if (r->fs) vkDestroyShaderModule(r->dev, r->fs, NULL);
-    if (r->fs_alt) vkDestroyShaderModule(r->dev, r->fs_alt, NULL);
     free(r->vspv); free(r->fspv); free(r->vbc); free(r->fbc);
     free(r);
 }
@@ -591,20 +590,10 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     if (vkCreateShaderModule(vk->device, &ci, NULL, &r->vs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
     ci.codeSize = fsz, ci.pCode = (const uint32_t *)fspv;
     if (vkCreateShaderModule(vk->device, &ci, NULL, &r->fs) != VK_SUCCESS) { CNTP(p).rf_module++; goto done; }
-    {   /* a fragment shader that samples with implicit LOD cannot be used with an unnormalized sampler: keep a variant with explicit LOD 0 (the exec picks it per draw) */
-        bool fsamp = false;
-        for (uint32_t k = 0; k < out->n_bind; k++) fsamp |= out->bind[k].stage == 1 && out->bind[k].kind == LAGFX_A64_BIND_SAMPLER;
-        uint8_t *alt = NULL; size_t altsz = 0;
-        if (fsamp && lagfx_spv_explicit_lod0(fspv, fsz, &alt, &altsz) == 1) {
-            ci.codeSize = altsz, ci.pCode = (const uint32_t *)alt;
-            if (vkCreateShaderModule(vk->device, &ci, NULL, &r->fs_alt) != VK_SUCCESS) r->fs_alt = VK_NULL_HANDLE;
-            free(alt);
-        }
-    }
     if (!spv_entry_name(vspv, vsz, r->vname, sizeof r->vname)) strcpy(r->vname, "main");
     if (!spv_entry_name(fspv, fsz, r->fname, sizeof r->fname)) strcpy(r->fname, "main");
 
-    out->desc.vertex_shader = r->vs, out->desc.fragment_shader = r->fs, out->alt_fragment_shader = r->fs_alt;
+    out->desc.vertex_shader = r->vs, out->desc.fragment_shader = r->fs;
     out->desc.vertex_entry_point = r->vname, out->desc.fragment_entry_point = r->fname;
     out->desc.layout = r->pl ? r->pl : vk->empty_layout;
     out->dsl = r->dsl;

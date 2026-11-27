@@ -68,10 +68,7 @@ static bool res_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t 
         out->desc.fragment_shader = mod(vk, 4, k_fs_unorm_spv, sizeof k_fs_unorm_spv);
         out->desc.layout = layout(vk, 4, b, 2, &out->dsl);
         out->n_bind = 2, setb(out, 0, 24, LAGFX_A64_BIND_IMAGE, 1, 0), setb(out, 1, 25, LAGFX_A64_BIND_SAMPLER, 1, 0);
-        if (!g_r.no_alt) {   /* exactly what arm64_pipeline.c does: the same SPIR-V rewritten to explicit LOD 0 */
-            if (!g_alt_spv) assert(lagfx_spv_explicit_lod0((const uint8_t *)k_fs_unorm_spv, sizeof k_fs_unorm_spv, &g_alt_spv, &g_alt_bytes) == 1);
-            out->alt_fragment_shader = mod(vk, 5, (const uint32_t *)g_alt_spv, g_alt_bytes);
-        }
+        if (!g_r.no_alt) out->desc.fragment_spv = k_fs_unorm_spv, out->desc.fragment_spv_bytes = sizeof k_fs_unorm_spv;   /* what arm64_pipeline.c hands over: the exec rewrites it per use (spv_unnorm.c) */
         break;
     }
     case M_SBUF: {
@@ -210,7 +207,7 @@ static void test_unnormalized(void) {
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
-    assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_samp_unnorm == 1);
+    assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_samp_unnorm == 1 && R->ext_unnorm_variants == 1 && R->ext_unnorm_use_implicit0 == 1 && R->ext_unnorm_skipped == 0);
     assert(px(img, 5, 8) == RED && px(img, 10, 8) == GREEN);   /* coordinates are texels: left half red, right half green (clamped normalized ones would give one colour) */
     done(p);
     p = res_run(M_UNORM, 0x86000000u);   /* SYNTHETIC state word (not captured); */ /* a normalized sampler keeps the implicit-LOD shader */
@@ -218,11 +215,11 @@ static void test_unnormalized(void) {
     res_exec(p, k_cmds_unorm, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.ext_unnorm_lod0 == 0 && px(img, 5, 8) == px(img, 10, 8));
     done(p);
-    g_r.no_alt = 1; memset(&g_mods[5], 0, sizeof g_mods[5]);
-    p = res_run(M_UNORM, 0x06000000u);   /* no explicit-LOD variant available: skipped and counted (never an invalid draw) */
+    g_r.no_alt = 1;
+    p = res_run(M_UNORM, 0x06000000u);   /* the resolver gave no SPIR-V, so the uses cannot be judged: skipped and counted (never an invalid draw) */
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
-    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_unnorm_skipped == 1 && px(img, 5, 8) == BLUE);
+    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_unnorm_skipped == 1 && p->diag2.exec.run.ext_unnorm_unsup[4] == 1 && px(img, 5, 8) == BLUE);
     done(p);
     g_r.no_alt = 0;
     /* the rewrite itself */
