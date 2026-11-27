@@ -7,6 +7,7 @@
 #include "devinfo.h"
 #include "common/log.h"
 
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +34,29 @@ typedef struct { VkStructureType sType; void *pNext; VkBool32 color, depth, sten
 typedef struct { VkStructureType sType; void *pNext; VkImageViewType imageViewType; } view_fmt_info_t;
 typedef struct { VkStructureType sType; void *pNext; VkBool32 filterCubic, filterCubicMinmax; } cubic_view_props_t;
 
+/* ABI / header-clash guards: the local structs have their own names (no clash with any Vulkan header type). Where a header that ships the extension is in use, the sType numbers are
+ * cross-checked against it at compile time (the extension macro is defined by exactly the headers that declare the enum). LP64 layout is asserted for the local structs. */
+#ifdef VK_QCOM_tile_shading
+_Static_assert((int)ST_TILE_SHADING_FEATURES_QCOM == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_SHADING_FEATURES_QCOM, "tile shading features sType");
+_Static_assert((int)ST_TILE_SHADING_PROPERTIES_QCOM == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_TILE_SHADING_PROPERTIES_QCOM, "tile shading properties sType");
+#endif
+#ifdef VK_EXT_shader_tile_image
+_Static_assert((int)ST_SHADER_TILE_IMAGE_FEATURES == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TILE_IMAGE_FEATURES_EXT, "tile image features sType");
+_Static_assert((int)ST_SHADER_TILE_IMAGE_PROPERTIES == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_TILE_IMAGE_PROPERTIES_EXT, "tile image properties sType");
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+_Static_assert((int)ST_LOCAL_READ_FEATURES == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR, "local read features sType");
+#endif
+#ifdef VK_EXT_rasterization_order_attachment_access
+_Static_assert((int)ST_RASTER_ORDER_FEATURES == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, "raster order features sType");
+#endif
+#ifdef VK_EXT_filter_cubic
+_Static_assert((int)ST_VIEW_FORMAT_INFO == (int)VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_VIEW_IMAGE_FORMAT_INFO_EXT && (int)ST_FILTER_CUBIC_PROPS == (int)VK_STRUCTURE_TYPE_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT, "filter cubic sTypes");
+#endif
+#if UINTPTR_MAX == 0xffffffffffffffffu   /* LP64 (x86-64, aarch64 incl. Android arm64-v8a): header layouts of the Khronos structs are 4-byte sType + padding + 8-byte pNext */
+_Static_assert(sizeof(tile_shading_feat_t) == 72 && sizeof(tile_shading_prop_t) == 40 && sizeof(tile_image_feat_t) == 32 && sizeof(tile_image_prop_t) == 32 && sizeof(local_read_feat_t) == 24, "local struct layout (LP64)");
+#endif
+
 /* format feature bits used below (core values; written as numbers because the cubic bit is named differently across header generations) */
 #define FF_SAMPLED_IMAGE 0x0001u
 #define FF_COLOR_ATTACHMENT 0x0080u
@@ -42,11 +66,11 @@ typedef struct { VkStructureType sType; void *pNext; VkBool32 filterCubic, filte
 #define FF_SAMPLED_FILTER_LINEAR 0x1000u
 #define FF_SAMPLED_FILTER_CUBIC 0x2000u
 
-typedef struct { lagfx_vkdev_emit_fn fn; void *user; size_t n; int overflow; size_t cap; } sink_t;
+typedef struct { lagfx_vkdev_emit_fn fn; void *user; size_t n; int overflow; size_t cap; size_t dropped; } sink_t;
 
 static void put(sink_t *s, const char *fmt, ...) {
     char buf[LAGFX_VKDEV_LINE_MAX + 64];
-    if (s->n >= s->cap) { s->overflow = 1; return; }
+    if (s->n >= s->cap) { s->overflow = 1, s->dropped++; return; }
     int w = snprintf(buf, sizeof buf, "g7-vkdev: ");
     va_list ap;
     va_start(ap, fmt);
@@ -114,23 +138,14 @@ static void sc_text(char *o, size_t cap, uint32_t m) {
     if (!o[0]) snprintf(o, cap, "none");
 }
 
-static int en_key(const char *list, const char *key) {   /* "key=value" in a space separated list; -1 = absent */
-    if (!list) return -2;
-    size_t kl = strlen(key);
-    for (const char *p = list; (p = strstr(p, key)); p += kl) {
-        if ((p == list || p[-1] == ' ') && p[kl] == '=') return atoi(p + kl + 1);
-    }
-    return -1;
-}
-static int en_ext(const char *list, const char *name) {
-    if (!list) return -2;
-    size_t l = strlen(name);
-    for (const char *p = list; (p = strstr(p, name)); p += l) if ((p == list || p[-1] == ',') && (p[l] == ',' || p[l] == 0)) return 1;
+static int en_ext(const lagfx_vkdev_enabled_t *en, const char *name) {   /* membership in the REAL ppEnabledExtensionNames array; -2 = not recorded */
+    if (!en || !en->exts) return -2;
+    for (uint32_t i = 0; i < en->n_exts; i++) if (en->exts[i] && !strcmp(en->exts[i], name)) return 1;
     return 0;
 }
-static const char *ev(char *b, int v) { if (v == -2) return "n/a"; if (v == -3) return "not-recorded"; snprintf(b, 16, "%d", v < 0 ? 0 : v); return b; }
+static const char *ev(char *b, int v) { if (v < 0) return "not-recorded"; snprintf(b, 16, "%d", v); return b; }   /* -1 / -2 = not recorded */
 
-static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkExtensionProperties *ex, uint32_t ne, const char *en_exts, const char *en_feats, const VkPhysicalDeviceProperties *p) {
+static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkExtensionProperties *ex, uint32_t ne, const lagfx_vkdev_enabled_t *en_p, const VkPhysicalDeviceProperties *p) {
     const uint32_t amaj = VK_API_VERSION_MAJOR(api), amin = VK_API_VERSION_MINOR(api);
     const int pd2 = amaj > 1 || amin >= 1, core12 = amaj > 1 || amin >= 2, core13 = amaj > 1 || amin >= 3;
     const VkPhysicalDeviceLimits *L = &p->limits;
@@ -153,24 +168,37 @@ static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkEx
         put(s, "desc_limits_uab perStage[Samplers=%u SampledImages=%u StorageBuffers=%u InputAttachments=%u Resources=%u] set[StorageBuffers=%u SampledImages=%u InputAttachments=%u] maxUpdateAfterBindDescriptorsInAllPools=%u",
             uab[0], uab[1], uab[2], uab[3], uab[4], uab[5], uab[6], uab[7], di.maxUpdateAfterBindDescriptorsInAllPools);
     } else put(s, "desc_limits_uab n/a (no core 1.2 / VK_EXT_descriptor_indexing)");
-    /* the failing PSO layout (bundle pipefail_50a6804e2e421a09 / b7d3e8365670fd6c): 1 set, 30 bindings = 13 storage buffers (stage VS|FS), 12 sampled images (VS|FS),
-     * 3 samplers (VS|FS), 2 input attachments (FS only). Fragment stage sees all 30, vertex stage 28 (no input attachments). */
+    /* The failing PSO layout (bundle pipefail_50a6804e2e421a09 / b7d3e8365670fd6c state file): 1 set; per binding type: STORAGE_BUFFER x13 (stage VS|FS = 17), SAMPLED_IMAGE x12 (17),
+     * SAMPLER x3 (17), INPUT_ATTACHMENT x2 (FS = 16); 2 colour attachments. Counts are DERIVED from this table. Assumptions printed in the line: descriptorCount=1 per binding, no UPDATE_AFTER_BIND.
+     * maxPerStageResources (spec, limits chapter): plain SAMPLER descriptors are NOT counted, sampled images / storage buffers / input attachments are, and in the fragment stage the
+     * framebuffer colour attachments count too. */
     {
-        static const struct { const char *n; uint32_t fs, vs, set; } c[] = { { "StorageBuffers", 13, 13, 13 }, { "SampledImages", 12, 12, 12 }, { "Samplers", 3, 3, 3 }, { "InputAttachments", 2, 0, 2 } };
-        const uint32_t lim[4] = { L->maxPerStageDescriptorStorageBuffers, L->maxPerStageDescriptorSampledImages, L->maxPerStageDescriptorSamplers, L->maxPerStageDescriptorInputAttachments };
+        static const struct { VkDescriptorType type; const char *n; uint32_t count, stages; } tab[] = {
+            { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, "StorageBuffers", 13, 1u | 16u }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, "SampledImages", 12, 1u | 16u },
+            { VK_DESCRIPTOR_TYPE_SAMPLER, "Samplers", 3, 1u | 16u }, { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, "InputAttachments", 2, 16u } };
+        const uint32_t color_att = 2, lim[4] = { L->maxPerStageDescriptorStorageBuffers, L->maxPerStageDescriptorSampledImages, L->maxPerStageDescriptorSamplers, L->maxPerStageDescriptorInputAttachments };
         const uint32_t setl[4] = { L->maxDescriptorSetStorageBuffers, L->maxDescriptorSetSampledImages, L->maxDescriptorSetSamplers, L->maxDescriptorSetInputAttachments };
-        char o[620];
-        size_t n = (size_t)snprintf(o, sizeof o, "layout_vs_limits layout=1set/30bindings(13SB,12SI,3S,2IA) fragment[");
-        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", c[i].n, c[i].fs, lim[i], c[i].fs <= lim[i]);
-        n += (size_t)snprintf(o + n, sizeof o - n, " Resources 30<=%u:%d] vertex[", L->maxPerStageResources, 30u <= L->maxPerStageResources);
-        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", c[i].n, c[i].vs, lim[i], c[i].vs <= lim[i]);
-        n += (size_t)snprintf(o + n, sizeof o - n, " Resources 28<=%u:%d] set[", L->maxPerStageResources, 28u <= L->maxPerStageResources);
-        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", c[i].n, c[i].set, setl[i], c[i].set <= setl[i]);
-        n += (size_t)snprintf(o + n, sizeof o - n, "] colorOut 2<=%u:%d fsOutRes 2<=%u:%d", L->maxFragmentOutputAttachments, 2u <= L->maxFragmentOutputAttachments, L->maxFragmentCombinedOutputResources, 2u <= L->maxFragmentCombinedOutputResources);
-        (void)n;
+        uint32_t cnt_vs = 0, cnt_fs = 0, used_vs = 0, used_fs = 0, per_vs[4], per_fs[4], total = 0;
+        for (int i = 0; i < 4; i++) {
+            per_vs[i] = (tab[i].stages & 1u) ? tab[i].count : 0, per_fs[i] = (tab[i].stages & 16u) ? tab[i].count : 0;
+            cnt_vs += per_vs[i], cnt_fs += per_fs[i], total += tab[i].count;
+            if (tab[i].type != VK_DESCRIPTOR_TYPE_SAMPLER) used_vs += per_vs[i], used_fs += per_fs[i];
+        }
+        used_fs += color_att;
+        char o[640];
+        size_t n = (size_t)snprintf(o, sizeof o, "layout_vs_limits layout=1set/%ubindings(13SB,12SI,3S,2IA) assumes descriptorCount=1 per binding, no UPDATE_AFTER_BIND; fragment[", total);
+        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", tab[i].n, per_fs[i], lim[i], per_fs[i] <= lim[i]);
+        n += (size_t)snprintf(o + n, sizeof o - n, "] vertex[");
+        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", tab[i].n, per_vs[i], lim[i], per_vs[i] <= lim[i]);
+        n += (size_t)snprintf(o + n, sizeof o - n, "] set[");
+        for (int i = 0; i < 4; i++) n += (size_t)snprintf(o + n, sizeof o - n, "%s%s %u<=%u:%d", i ? " " : "", tab[i].n, tab[i].count, setl[i], tab[i].count <= setl[i]);
+        n += (size_t)snprintf(o + n, sizeof o - n, "] colorOut %u<=%u:%d", color_att, L->maxFragmentOutputAttachments, color_att <= L->maxFragmentOutputAttachments);
         put(s, "%s", o);
-        if (have_uab) put(s, "layout_vs_limits_uab fragment[StorageBuffers 13<=%u:%d SampledImages 12<=%u:%d Samplers 3<=%u:%d InputAttachments 2<=%u:%d Resources 30<=%u:%d] (only meaningful if the layout used UPDATE_AFTER_BIND; the recorded layout has no binding flags)",
-            uab[2], 13u <= uab[2], uab[1], 12u <= uab[1], uab[0], 3u <= uab[0], uab[3], 2u <= uab[3], uab[4], 30u <= uab[4]);
+        put(s, "layout_vs_limits_res descriptor_count[VS=%u FS=%u] (all bindings, descriptorCount=1) maxPerStageResources_used[VS=%u FS=%u] (SAMPLER not counted; FS = storage+sampled+input attachments + %u colour attachments) vs maxPerStageResources=%u: VS %u<=%u:%d FS %u<=%u:%d | fsOutputResources %u<=%u:%d",
+            cnt_vs, cnt_fs, used_vs, used_fs, color_att, L->maxPerStageResources, used_vs, L->maxPerStageResources, used_vs <= L->maxPerStageResources, used_fs, L->maxPerStageResources, used_fs <= L->maxPerStageResources,
+            color_att, L->maxFragmentCombinedOutputResources, color_att <= L->maxFragmentCombinedOutputResources);
+        if (have_uab) put(s, "layout_vs_limits_uab (meaningful only if the layout used UPDATE_AFTER_BIND; the recorded layout has no binding flags) fragment[StorageBuffers %u<=%u:%d SampledImages %u<=%u:%d Samplers %u<=%u:%d InputAttachments %u<=%u:%d] maxPerStageUpdateAfterBindResources_used[FS=%u] %u<=%u:%d",
+            per_fs[0], uab[2], per_fs[0] <= uab[2], per_fs[1], uab[1], per_fs[1] <= uab[1], per_fs[2], uab[0], per_fs[2] <= uab[0], per_fs[3], uab[3], per_fs[3] <= uab[3], used_fs, used_fs, uab[4], used_fs <= uab[4]);
     }
     /* (b) MSAA */
     {
@@ -211,7 +239,8 @@ static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkEx
             n += (size_t)snprintf(o + n, sizeof o - n, "heap%u[%llu MiB flags=0x%x%s] ", i, (unsigned long long)(mp.memoryHeaps[i].size >> 20), mp.memoryHeaps[i].flags, (mp.memoryHeaps[i].flags & 1) ? " DEVICE_LOCAL" : "");
         put(s, "mem heaps n=%u %s", mp.memoryHeapCount, o);
     }
-    /* (d) supported vs ENABLED features. supported: queried here; enabled: parsed from what lagfx_vk_init gave vkCreateDevice (devinfo.h) */
+    /* (d) supported vs ENABLED. extension_*: name in the device's list / in the REAL ppEnabledExtensionNames array given to vkCreateDevice. feature_*: queried here / the value in the feature
+     * structs given to vkCreateDevice (lagfx_vkdev_enabled_t, filled in instance.c from feat2/feat11/feat12/feat13/lr_en/ro_en). Not derived from extension names. */
     {
         VkPhysicalDeviceVulkan11Features f11 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES };
         VkPhysicalDeviceVulkan12Features f12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
@@ -232,45 +261,70 @@ static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkEx
         if (pd2 && (core14 || ext_lr)) { VkPhysicalDeviceFeatures2 t = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &lr }; vkGetPhysicalDeviceFeatures2(pd, &t); }
         if (pd2 && (ro_e || ro_a)) { VkPhysicalDeviceFeatures2 t = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ro }; vkGetPhysicalDeviceFeatures2(pd, &t); }
         if (pd2 && ext_ti) { VkPhysicalDeviceFeatures2 t = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &ti }; vkGetPhysicalDeviceFeatures2(pd, &t); }
-        /* enabled for the extension-only features: the extension must be in the enabled list AND its feature bit is only requested by the library together with it */
-        const int en_lr_ext = en_ext(en_exts, "VK_KHR_dynamic_rendering_local_read"), en_ro = en_exts ? (en_ext(en_exts, "VK_EXT_rasterization_order_attachment_access") || en_ext(en_exts, "VK_ARM_rasterization_order_attachment_access")) : -2;
-        const int en_ti = en_ext(en_exts, "VK_EXT_shader_tile_image");
+        /* extensions */
+        {
+            static const char *const en[] = { "VK_KHR_dynamic_rendering", "VK_KHR_dynamic_rendering_local_read", "VK_EXT_rasterization_order_attachment_access", "VK_ARM_rasterization_order_attachment_access",
+                                              "VK_EXT_shader_tile_image", "VK_QCOM_tile_shading", "VK_EXT_filter_cubic", "VK_EXT_subgroup_size_control", "VK_KHR_variable_pointers", "VK_KHR_shader_float16_int8", "VK_KHR_8bit_storage", "VK_KHR_16bit_storage" };
+            char o[620];
+            size_t n = 0;
+            uint32_t part = 0;
+            o[0] = 0;
+            for (size_t i = 0; i < sizeof en / sizeof en[0]; i++) {
+                char eb[16], t[200];
+                int w = snprintf(t, sizeof t, "%s extension_supported=%d extension_enabled=%s; ", en[i], ex ? has_ext(ex, ne, en[i]) : 0, ev(eb, en_ext(en_p, en[i])));
+                if (n && n + (size_t)w > 560) { put(s, "ext_state part=%u %s", ++part, o); n = 0, o[0] = 0; }
+                memcpy(o + n, t, (size_t)w + 1), n += (size_t)w;
+            }
+            if (n) put(s, "ext_state part=%u %s", ++part, o);
+        }
         struct { const char *n; int sup; int en; } r[] = {
-            { "dynamicRendering", core13 ? (int)f13.dynamicRendering : 0, en_key(en_feats, "dynamicRendering") },
-            { "dynamicRenderingLocalRead", (core14 || ext_lr) ? (int)lr.dynamicRenderingLocalRead : 0, en_key(en_feats, "dynamicRenderingLocalRead") },
-            { "rasterizationOrderColorAttachmentAccess", (ro_e || ro_a) ? (int)ro.color : 0, en_key(en_feats, "rasterizationOrderColorAttachmentAccess") },
-            { "shaderTileImageColorReadAccess", ext_ti ? (int)ti.shaderTileImageColorReadAccess : 0, en_ti == -2 ? -2 : en_ti },
-            { "shaderTileImageDepthReadAccess", ext_ti ? (int)ti.shaderTileImageDepthReadAccess : 0, en_ti == -2 ? -2 : en_ti },
-            { "shaderTileImageStencilReadAccess", ext_ti ? (int)ti.shaderTileImageStencilReadAccess : 0, en_ti == -2 ? -2 : en_ti },
-            { "subgroupSizeControl", core13 ? (int)f13.subgroupSizeControl : 0, en_key(en_feats, "subgroupSizeControl") },
-            { "computeFullSubgroups", core13 ? (int)f13.computeFullSubgroups : 0, -3 },
-            { "shaderFloat16", core12 ? (int)f12.shaderFloat16 : 0, en_key(en_feats, "shaderFloat16") },
-            { "shaderInt64", (int)q.features.shaderInt64, en_key(en_feats, "shaderInt64") },
-            { "shaderInt8", core12 ? (int)f12.shaderInt8 : 0, en_key(en_feats, "shaderInt8") },
-            { "storageBuffer16BitAccess", core12 ? (int)f11.storageBuffer16BitAccess : 0, en_key(en_feats, "storageBuffer16BitAccess") },
-            { "storageBuffer8BitAccess", core12 ? (int)f12.storageBuffer8BitAccess : 0, en_key(en_feats, "storageBuffer8BitAccess") },
-            { "variablePointers", core12 ? (int)f11.variablePointers : 0, en_key(en_feats, "variablePointers") },
-            { "variablePointersStorageBuffer", core12 ? (int)f11.variablePointersStorageBuffer : 0, en_key(en_feats, "variablePointersStorageBuffer") },
+            { "dynamicRendering", core13 ? (int)f13.dynamicRendering : 0, en_p ? en_p->dynamicRendering : -1 },
+            { "dynamicRenderingLocalRead", (core14 || ext_lr) ? (int)lr.dynamicRenderingLocalRead : 0, en_p ? en_p->dynamicRenderingLocalRead : -1 },
+            { "rasterizationOrderColorAttachmentAccess", (ro_e || ro_a) ? (int)ro.color : 0, en_p ? en_p->rasterizationOrderColorAttachmentAccess : -1 },
+            { "shaderTileImageColorReadAccess", ext_ti ? (int)ti.shaderTileImageColorReadAccess : 0, en_p ? en_p->shaderTileImageColorReadAccess : -1 },
+            { "shaderTileImageDepthReadAccess", ext_ti ? (int)ti.shaderTileImageDepthReadAccess : 0, en_p ? en_p->shaderTileImageDepthReadAccess : -1 },
+            { "shaderTileImageStencilReadAccess", ext_ti ? (int)ti.shaderTileImageStencilReadAccess : 0, en_p ? en_p->shaderTileImageStencilReadAccess : -1 },
+            { "subgroupSizeControl", core13 ? (int)f13.subgroupSizeControl : 0, en_p ? en_p->subgroupSizeControl : -1 },
+            { "computeFullSubgroups", core13 ? (int)f13.computeFullSubgroups : 0, en_p ? en_p->computeFullSubgroups : -1 },
+            { "shaderFloat16", core12 ? (int)f12.shaderFloat16 : 0, en_p ? en_p->shaderFloat16 : -1 },
+            { "shaderInt64", (int)q.features.shaderInt64, en_p ? en_p->shaderInt64 : -1 },
+            { "shaderInt8", core12 ? (int)f12.shaderInt8 : 0, en_p ? en_p->shaderInt8 : -1 },
+            { "storageBuffer16BitAccess", core12 ? (int)f11.storageBuffer16BitAccess : 0, en_p ? en_p->storageBuffer16BitAccess : -1 },
+            { "storageBuffer8BitAccess", core12 ? (int)f12.storageBuffer8BitAccess : 0, en_p ? en_p->storageBuffer8BitAccess : -1 },
+            { "variablePointers", core12 ? (int)f11.variablePointers : 0, en_p ? en_p->variablePointers : -1 },
+            { "variablePointersStorageBuffer", core12 ? (int)f11.variablePointersStorageBuffer : 0, en_p ? en_p->variablePointersStorageBuffer : -1 },
         };
-        (void)en_lr_ext, (void)en_ro;
         char o[620];
         size_t n = 0;
         uint32_t part = 0;
         o[0] = 0;
         for (size_t i = 0; i < sizeof r / sizeof r[0]; i++) {
-            char eb[16], t[160];
-            int w = snprintf(t, sizeof t, "%s supported=%d enabled=%s; ", r[i].n, r[i].sup, ev(eb, r[i].en));
+            char eb[16], t[200];
+            int w = snprintf(t, sizeof t, "%s feature_supported=%d feature_enabled=%s; ", r[i].n, r[i].sup, ev(eb, r[i].en));
             if (n && n + (size_t)w > 560) { put(s, "feat part=%u %s", ++part, o); n = 0, o[0] = 0; }
             memcpy(o + n, t, (size_t)w + 1), n += (size_t)w;
         }
         if (n) put(s, "feat part=%u %s", ++part, o);
-        put(s, "feat enabled_exts=%s", en_exts ? en_exts : "n/a");
-        put(s, "feat note: enabled= is what vkCreateDevice was given (n/a = enabled set not passed in; shaderTileImage* enabled = its extension is in the enabled list; computeFullSubgroups enabled=not-recorded because lagfx_vk_state keeps no value for it)");
+        /* the complete enabled-extension list from the real array (no fixed-size string) */
+        if (!en_p || !en_p->exts) put(s, "feat enabled_exts=not-recorded");
+        else {
+            uint32_t i = 0, k = 0;
+            put(s, "feat enabled_exts n=%u (from the ppEnabledExtensionNames array passed to vkCreateDevice)", en_p->n_exts);
+            while (i < en_p->n_exts) {
+                char l[620];
+                size_t m = 0;
+                l[0] = 0;
+                while (i < en_p->n_exts && m + strlen(en_p->exts[i]) + 2 < 560) m += (size_t)snprintf(l + m, sizeof l - m, "%s%s", m ? " " : "", en_p->exts[i]), i++;
+                if (!m) break;
+                put(s, "feat enabled_exts part=%u %s", ++k, l);
+            }
+        }
+        put(s, "feat note: feature_enabled = value in the feature structs given to vkCreateDevice (not derived from extension names; core-promoted features need no extension string); extension_enabled = name in ppEnabledExtensionNames; not-recorded = the caller passed no enabled set");
     }
 }
 
-size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const char *en_exts, const char *en_feats, lagfx_vkdev_emit_fn emit, void *user) {
-    sink_t s = { emit, user, 0, 0, LAGFX_VKDEV_MAX_LINES };
+size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const lagfx_vkdev_enabled_t *en, lagfx_vkdev_emit_fn emit, void *user) {
+    sink_t s = { emit, user, 0, 0, LAGFX_VKDEV_MAX_LINES, 0 };
     if (!pd || !emit) return 0;
     VkPhysicalDeviceProperties p;
     memset(&p, 0, sizeof p);
@@ -398,21 +452,39 @@ size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const char *en_exts, con
     /* formats: Metal 80 (BGRA8Unorm) -> VK 44, Metal 115 (RGBA16Float) -> VK 97 */
     fmt_line(&s, pd, 80, VK_FORMAT_B8G8R8A8_UNORM, pd2, ext_cubic);
     fmt_line(&s, pd, 115, VK_FORMAT_R16G16B16A16_SFLOAT, pd2, ext_cubic);
-    extra_lines(&s, pd, p.apiVersion, ex, ne, en_exts, en_feats, &p);
-    if (s.overflow) { s.cap++; put(&s, "truncated: line cap %u reached, later lines dropped", LAGFX_VKDEV_MAX_LINES); }
+    extra_lines(&s, pd, p.apiVersion, ex, ne, en, &p);
+    if (s.overflow) { s.cap++; put(&s, "truncated: line cap %u reached, omitted_lines=%zu", LAGFX_VKDEV_MAX_LINES, s.dropped); }
     free(ex);
     return s.n;
 }
 
-size_t lagfx_vk_devinfo_collect(VkPhysicalDevice pd, lagfx_vkdev_emit_fn emit, void *user) { return lagfx_vk_devinfo_collect_ex(pd, NULL, NULL, emit, user); }
+size_t lagfx_vk_devinfo_collect(VkPhysicalDevice pd, lagfx_vkdev_emit_fn emit, void *user) { return lagfx_vk_devinfo_collect_ex(pd, NULL, emit, user); }
 
 static void warn_emit(void *u, const char *line) { (void)u; LAGFX_WARN("%s", line); }
 
-size_t lagfx_vk_devinfo_log_once_ex(VkPhysicalDevice pd, const char *en_exts, const char *en_feats) {
+size_t lagfx_vk_devinfo_log_once_ex(VkPhysicalDevice pd, const lagfx_vkdev_enabled_t *en) {
     static int done;
     if (done) return 0;
     done = 1;
-    return lagfx_vk_devinfo_collect_ex(pd, en_exts, en_feats, warn_emit, NULL);
+    return lagfx_vk_devinfo_collect_ex(pd, en, warn_emit, NULL);
 }
-size_t lagfx_vk_devinfo_log_once(VkPhysicalDevice pd) { return lagfx_vk_devinfo_log_once_ex(pd, NULL, NULL); }
+size_t lagfx_vk_devinfo_log_once(VkPhysicalDevice pd) { return lagfx_vk_devinfo_log_once_ex(pd, NULL); }
+
+void lagfx_vk_devinfo_note_staging(VkPhysicalDevice pd, uint32_t chosen, uint32_t bits, uint64_t size, uint32_t usage) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static uint32_t seen[4], nseen;
+    if (!pd) return;
+    pthread_mutex_lock(&mu);
+    for (uint32_t i = 0; i < nseen; i++) if (seen[i] == chosen) { pthread_mutex_unlock(&mu); return; }
+    if (nseen >= 4) { pthread_mutex_unlock(&mu); return; }
+    seen[nseen++] = chosen;
+    pthread_mutex_unlock(&mu);
+    VkPhysicalDeviceMemoryProperties mp;
+    vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    if (chosen == UINT32_MAX || chosen >= mp.memoryTypeCount) { LAGFX_WARN("g7-vkdev: staging make_buf memoryTypeIndex=none(no type matched HOST_VISIBLE|HOST_COHERENT) memoryTypeBits=0x%x size=%llu usage=0x%x", bits, (unsigned long long)size, usage); return; }
+    const uint32_t f = mp.memoryTypes[chosen].propertyFlags;
+    LAGFX_WARN("g7-vkdev: staging make_buf memoryTypeIndex=%u heap=%u propertyFlags=0x%x[%s%s%s%s%s] memoryTypeBits=0x%x size=%llu usage=0x%x (first allocation with this type; selection = first index in memoryTypeBits with HOST_VISIBLE|HOST_COHERENT)",
+               chosen, mp.memoryTypes[chosen].heapIndex, f, (f & 1) ? " DEVICE_LOCAL" : "", (f & 2) ? " HOST_VISIBLE" : "", (f & 4) ? " HOST_COHERENT" : "", (f & 8) ? " HOST_CACHED" : "", (f & 16) ? " LAZILY_ALLOCATED" : "",
+               bits, (unsigned long long)size, usage);
+}
 #endif /* LAGFX_HAVE_VULKAN */

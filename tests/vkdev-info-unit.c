@@ -63,9 +63,14 @@ int main(void) {
         {   /* the production call passes the enabled set: numeric enabled= values, not n/a */
             f = fopen(logpath, "r");
             CHECK(f, "log file 2");
-            int en_num = 0, en_na = 0;
-            while (fgets(buf, sizeof buf, f)) if (strstr(buf, "g7-vkdev: feat part=")) { if (strstr(buf, "enabled=n/a")) en_na++; if (strstr(buf, "dynamicRendering supported=") && (strstr(buf, " enabled=0") || strstr(buf, " enabled=1"))) en_num++; }
+            int en_num = 0, en_na = 0, ext_state = 0, ext_list = 0;
+            while (fgets(buf, sizeof buf, f)) {
+                if (strstr(buf, "g7-vkdev: feat part=")) { if (strstr(buf, "feature_enabled=not-recorded")) en_na++; if (strstr(buf, "dynamicRendering feature_supported=") && (strstr(buf, "dynamicRendering feature_supported=0 feature_enabled=") || strstr(buf, "dynamicRendering feature_supported=1 feature_enabled=")) && !strstr(strstr(buf, "dynamicRendering feature_supported="), "feature_enabled=not-recorded")) en_num++; }
+                if (strstr(buf, "g7-vkdev: ext_state part=") && strstr(buf, "extension_supported=") && strstr(buf, "extension_enabled=") && !strstr(buf, "extension_enabled=not-recorded")) ext_state++;
+                if (strstr(buf, "g7-vkdev: feat enabled_exts part=")) ext_list++;
+            }
             fclose(f);
+            CHECK(ext_state >= 1 && ext_list >= 1, "ext_state/enabled_exts lines of the production log: %d %d", ext_state, ext_list);
             CHECK(en_na == 0 && en_num == 1, "feat lines of the production log: n/a=%d numeric=%d", en_na, en_num);
         }
         CHECK(lagfx_vk_devinfo_log_once(pd) == 0, "second log_once must be a no-op");
@@ -135,13 +140,15 @@ int main(void) {
         CHECK(l && strstr(l, "perStage[StorageBuffers=") && strstr(l, "maxColorAttachments="), "desc_limits line");
         CHECK(find_line("desc_limits_uab "), "desc_limits_uab line");
         l = find_line("layout_vs_limits layout=1set/30bindings");
-        CHECK(l && strstr(l, "StorageBuffers 13<=") && strstr(l, "SampledImages 12<=") && strstr(l, "Samplers 3<=") && strstr(l, "InputAttachments 2<=") && strstr(l, "Resources 30<="), "layout_vs_limits line: %s", l ? l : "(none)");
+        CHECK(l && strstr(l, "StorageBuffers 13<=") && strstr(l, "SampledImages 12<=") && strstr(l, "Samplers 3<=") && strstr(l, "InputAttachments 2<=") && strstr(l, "assumes descriptorCount=1") && strstr(l, "no UPDATE_AFTER_BIND"), "layout_vs_limits line: %s", l ? l : "(none)");
+        l = find_line("layout_vs_limits_res ");
+        CHECK(l && strstr(l, "descriptor_count[VS=28 FS=30]") && strstr(l, "maxPerStageResources_used[VS=25 FS=29]"), "layout_vs_limits_res line: %s", l ? l : "(none)");
         CHECK(find_line("msaa limits framebufferColorSampleCounts="), "msaa limits");
         CHECK(find_line("msaa fmt mtl=80 vk=44 ") && find_line("msaa fmt mtl=115 vk=97 "), "msaa fmt lines");
         CHECK(find_line("mem types n=") && find_line("mem heaps n="), "mem lines");
         l = find_line("feat part=1 ");
-        CHECK(l && strstr(l, "dynamicRendering supported=") && strstr(l, "enabled=n/a"), "feat line (collect() passes no enabled set -> n/a)");
-        CHECK(find_line("feat enabled_exts=n/a"), "feat enabled_exts");
+        CHECK(l && strstr(l, "dynamicRendering feature_supported=") && strstr(l, "feature_enabled=not-recorded"), "feat line (collect() passes no enabled set -> not-recorded)");
+        CHECK(find_line("feat enabled_exts=not-recorded") && find_line("ext_state part=1 ") && strstr(find_line("ext_state part=1 "), "extension_enabled=not-recorded"), "ext_state / enabled_exts");
     }
     for (size_t i = 0; i < n; i++) printf("%s\n", g_lines[i]);
     unlink(logpath);

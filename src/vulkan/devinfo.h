@@ -25,10 +25,22 @@
 
 typedef void (*lagfx_vkdev_emit_fn)(void *user, const char *line);
 
-/* Same, plus the ENABLED set: `enabled_exts` = comma-separated device extension names given to vkCreateDevice (struct lagfx_vk_state::dev_exts), `enabled_features` =
- * "key=value key=value ..." of the features given to vkCreateDevice (::dev_features). Either may be NULL: the `feat` lines then print enabled=n/a. */
-size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const char *enabled_exts, const char *enabled_features, lagfx_vkdev_emit_fn emit, void *user);
-size_t lagfx_vk_devinfo_log_once_ex(VkPhysicalDevice pd, const char *enabled_exts, const char *enabled_features);
+/* What vkCreateDevice was actually given. `exts`/`n_exts` = the real ppEnabledExtensionNames array; every int32 = the VkBool32 VALUE in the feature struct that was chained into the
+ * device create info (0 when the struct was not chained at all), or -1 = not recorded. Filled in instance.c right where those structs live (the values are not derived from extension names). */
+typedef struct {
+    const char *const *exts;
+    uint32_t n_exts;
+    int32_t dynamicRendering, dynamicRenderingLocalRead, rasterizationOrderColorAttachmentAccess, shaderTileImageColorReadAccess, shaderTileImageDepthReadAccess, shaderTileImageStencilReadAccess,
+            subgroupSizeControl, computeFullSubgroups, shaderFloat16, shaderInt64, shaderInt8, storageBuffer16BitAccess, storageBuffer8BitAccess, variablePointers, variablePointersStorageBuffer;
+} lagfx_vkdev_enabled_t;
+
+/* Same, plus the ENABLED set (NULL = not recorded: the lines then say feature_enabled=not-recorded). */
+size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const lagfx_vkdev_enabled_t *enabled, lagfx_vkdev_emit_fn emit, void *user);
+size_t lagfx_vk_devinfo_log_once_ex(VkPhysicalDevice pd, const lagfx_vkdev_enabled_t *enabled);
+
+/* Read-only record of a host-visible buffer allocation (make_buf in src/protocol/arm64_resources.c): logs `g7-vkdev: staging ...` the first time each distinct memoryTypeIndex is chosen
+ * (at most 4 distinct lines per process). Never changes the allocation; pass the index the caller already selected. */
+void lagfx_vk_devinfo_note_staging(VkPhysicalDevice pd, uint32_t chosen_type, uint32_t memory_type_bits, uint64_t size, uint32_t usage);
 
 /* Produces every line through `emit` (no logging, no global state); returns the number of lines. */
 size_t lagfx_vk_devinfo_collect(VkPhysicalDevice pd, lagfx_vkdev_emit_fn emit, void *user);
