@@ -2141,3 +2141,14 @@ msaa_test = executable('vulkan-msaa-unit',
   build_by_default : true,
 )
 test('vulkan msaa colour path (unit, lavapipe + injected devices)', msaa_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+# Idle-gap diagnostics: gap detector, op 0x0009 line, first swaps / pass / draws after a gap (no device).
+if fs.is_file(meson.current_source_dir() / 'gap-diag-unit.c')
+  gap_diag_unit_test = executable('gap-diag-unit',
+    'gap-diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('idle-gap diagnostics (unit)', gap_diag_unit_test)
+endif
