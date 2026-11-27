@@ -25,6 +25,7 @@
 #include "ce_cast.h"
 #include "common/log.h"
 #include "constexpr_sampler.h"
+#include "vertex_fetch.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -2472,6 +2473,13 @@ static void emit_prologue(xlate_ctx_t *c) {
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
         }
         uint32_t loc = 0u;
+        /* A driver-generated vertex fetch wrapper (air.vertexFetchFunction) loads each stage-in value from the vertex buffer at a constant byte offset and passes
+         * it positionally to this function: name each such Input with its source so the runtime can pair it with the PSO attribute at that offset. */
+        lagfx_vfetch_in_t vfin[LAGFX_MAX_VERTEX_ARGS]; size_t n_vfin = 0;
+        {
+            uint32_t nfn = 0; const lagfx_air_function_t *fnv = lagfx_air_module_functions(c->m, &nfn);
+            if (fnv && c->fn >= fnv && (uint32_t)(c->fn - fnv) < nfn) n_vfin = lagfx_air_vertex_fetch_inputs(c->m, (uint32_t)(c->fn - fnv), vfin, LAGFX_MAX_VERTEX_ARGS);
+        }
         for (uint32_t i = 0; i < n_va; i++) {
             lagfx_varg_kind_t k = vertex_arg_kind(c, i);
             if (k == LAGFX_VARG_VID) {
@@ -2483,6 +2491,16 @@ static void emit_prologue(xlate_ctx_t *c) {
                 uint32_t ops[] = { c->arg_input_var_ids[i],
                                     LAGFX_SPV_DECORATION_LOCATION, loc++ };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
+                if (i < n_vfin && vfin[i].unfed) {
+                    uint32_t pre[] = { c->arg_input_var_ids[i] };
+                    lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, LAGFX_VIN_NAME_UNFED, NULL, 0);
+                } else if (i < n_vfin && vfin[i].offset >= 0) {
+                    char nm[64]; int w = snprintf(nm, sizeof nm, LAGFX_VIN_NAME_PREFIX "%d", (int)vfin[i].offset);
+                    if (vfin[i].bytes >= 0) w += snprintf(nm + w, sizeof nm - (size_t)w, ".s%d", (int)vfin[i].bytes);
+                    if (vfin[i].buffer >= 0) snprintf(nm + w, sizeof nm - (size_t)w, ".b%d", (int)vfin[i].buffer);
+                    uint32_t pre[] = { c->arg_input_var_ids[i] };
+                    lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, nm, NULL, 0);
+                }
             }
         }
         /* Vertex output varyings: Location k (matches the fragment's Location-k

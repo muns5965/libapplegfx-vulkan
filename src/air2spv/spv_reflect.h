@@ -67,6 +67,13 @@ size_t lagfx_spv_reflect_constexpr_samplers(const uint8_t *spv, size_t spv_len, 
 typedef struct {
     uint32_t location;
     uint32_t components;  /* 1..4 */
+    /* Source in the vertex buffer, when the translator knew it (a vertex fetch wrapper's constant-offset load; OpName "lagfx.vin.o<off>[.s<bytes>][.b<slot>]").
+     * has_src_offset = 0 means UNKNOWN (offset 0 is a valid offset, so the flag is separate). Other inputs/modules: all three flags 0. */
+    uint8_t  has_src_offset, has_src_bytes, has_src_buffer;
+    uint8_t  src_unfed;   /* 1 = the vertex fetch wrapper passes undef for this input (OpName "lagfx.vin.u"): no buffer source exists */
+    uint32_t src_offset;  /* byte offset inside the per-vertex record */
+    uint32_t src_bytes;   /* store size of the loaded value */
+    uint32_t src_buffer;  /* Metal buffer slot */
 } lagfx_spv_vertex_input_t;
 
 /* Reflect vertex stage-in attributes (Location-decorated Input vars) from a

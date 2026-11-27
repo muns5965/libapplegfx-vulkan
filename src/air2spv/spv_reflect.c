@@ -325,8 +325,11 @@ bool lagfx_spv_has_image_sample(const uint8_t *spv, size_t spv_len) {
     return false;
 }
 
+typedef struct { uint32_t id, off, bytes, buf; uint8_t has_off, has_bytes, has_buf, unfed; } vin_src_t;
+
 size_t lagfx_spv_reflect_vertex_inputs(const uint8_t *spv, size_t spv_len,
                                        lagfx_spv_vertex_input_t *out, size_t cap) {
+    vin_src_t vin_tab[16]; uint32_t vin_n = 0;
     if (!spv || spv_len < 20u) return 0;
     if (lagfx_le32(spv) != SPV_MAGIC) return 0;
     size_t nwords = spv_len / 4u;
@@ -369,6 +372,29 @@ size_t lagfx_spv_reflect_vertex_inputs(const uint8_t *spv, size_t spv_len,
                  * via vec_comp=1 so a non-vector float attribute still resolves. */
                 if (wc >= 2u && W(1) < MAXID) vec_comp[W(1)] = 1u;
                 break;
+            case 5u: /* OpName: "lagfx.vin.o<off>[.s<bytes>][.b<slot>]" */
+                if (wc >= 3u && W(1) < MAXID) {
+                    const char *str = (const char *)(spv + (i + 2u) * 4u);
+                    size_t maxlen = (size_t)(wc - 2u) * 4u, k = 0;
+                    while (k < maxlen && str[k]) k++;
+                    static const char pre[] = "lagfx.vin.o";
+                    if (k < maxlen && !strcmp(str, "lagfx.vin.u") && vin_n < 16u) {
+                        vin_src_t *e = &vin_tab[vin_n++]; memset(e, 0, sizeof *e); e->id = W(1); e->unfed = 1;
+                    } else if (k < maxlen && k > sizeof pre - 1u && !memcmp(str, pre, sizeof pre - 1u) && vin_n < 16u) {
+                        vin_src_t *e = &vin_tab[vin_n]; memset(e, 0, sizeof *e); e->id = W(1);
+                        const char *q = str + sizeof pre - 1u; char tag = 'o'; bool bad = false;
+                        while (*q && !bad) {
+                            if (*q < '0' || *q > '9') { bad = true; break; }
+                            uint64_t v = 0; while (*q >= '0' && *q <= '9') { v = v * 10u + (uint64_t)(*q++ - '0'); if (v > 0x7fffffffu) bad = true; }
+                            if (tag == 'o') e->off = (uint32_t)v, e->has_off = 1; else if (tag == 's') e->bytes = (uint32_t)v, e->has_bytes = 1; else e->buf = (uint32_t)v, e->has_buf = 1;
+                            if (!*q) break;
+                            if (*q != '.' || (q[1] != 's' && q[1] != 'b')) { bad = true; break; }
+                            tag = q[1]; q += 2;
+                        }
+                        if (!bad && e->has_off) vin_n++;
+                    }
+                }
+                break;
             case OP_VARIABLE:
                 if (wc >= 4u && W(2) < MAXID) {
                     is_var[W(2)] = 1; var_ptr[W(2)] = W(1); var_sc[W(2)] = W(3);
@@ -389,6 +415,15 @@ size_t lagfx_spv_reflect_vertex_inputs(const uint8_t *spv, size_t spv_len,
         if (total < cap) {
             out[total].location = dec_loc[id];
             out[total].components = comp;
+            out[total].has_src_offset = out[total].has_src_bytes = out[total].has_src_buffer = 0;
+            out[total].src_offset = out[total].src_bytes = out[total].src_buffer = 0;
+            out[total].src_unfed = 0;
+            for (uint32_t t = 0; t < vin_n; t++) if (vin_tab[t].id == id) {
+                if (vin_tab[t].unfed) { out[total].src_unfed = 1; continue; }
+                out[total].has_src_offset = 1, out[total].src_offset = vin_tab[t].off;
+                if (vin_tab[t].has_bytes) out[total].has_src_bytes = 1, out[total].src_bytes = vin_tab[t].bytes;
+                if (vin_tab[t].has_buf) out[total].has_src_buffer = 1, out[total].src_buffer = vin_tab[t].buf;
+            }
         }
         total++;
     }

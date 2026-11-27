@@ -158,14 +158,36 @@ VkFormat lagfx_pso_vertex_format_to_vk(uint32_t f) {
  *    float-packed (no dumped arm64 PSO has fewer decoded attributes than reflected inputs with the current decoder: tools dump-vtxattrs over the 231501/230109 dumps;
  *    the only dumped undercounts came from the pre-ea60375 decoder that dropped attribute 0).
  *  - otherwise (x86 draw path, hand-built descriptors): n_pso_attrs >= count uses the decoded attributes; fewer (incl. 0) = reflected float tight-pack for all. */
+static uint32_t vk_format_components(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R16_SNORM: return 1u;
+    case VK_FORMAT_R32G32_SFLOAT: case VK_FORMAT_R32G32_UINT: return 2u;
+    case VK_FORMAT_R32G32B32_SFLOAT: return 3u;
+    case VK_FORMAT_R32G32B32A32_SFLOAT: case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UNORM: return 4u;
+    default: return 0u;
+    }
+}
+
 bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
                                  VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr) {
+    return lagfx_pipeline_vertex_input_ex(desc, vbind, vattr, out_n, bad_attr, NULL);
+}
+
+bool lagfx_pipeline_vertex_input_ex(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
+                                    VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr, int *why) {
+    if (why) *why = LAGFX_VIN_OK;
     uint32_t nvi = desc->n_vtx_inputs > 8u ? 8u : desc->n_vtx_inputs;
     uint32_t off = 0u;
     bool ok = true;
     bool serialized = desc->pso_attrs_serialized != 0u;
     uint32_t npa = desc->n_pso_attrs > 8u ? 8u : desc->n_pso_attrs;
     bool use_pso_attrs = serialized || desc->n_pso_attrs >= nvi;
+    /* Source-offset pairing: when the vertex shader is a vertex fetch wrapper the translator knows, per input, the buffer offset (and slot) it loads from. Such an
+     * input uses the decoded attribute with the SAME buffer slot (when both sides know it) and offset, whatever its position in the list (the descriptor may declare
+     * attributes the shader does not read). Positional pairing remains only for modules where no input has a known offset. */
+    bool by_offset = false;
+    for (uint32_t a = 0; a < nvi; a++) if (desc->vtx_in_src_known[a]) by_offset = true;   /* an unfed input alone does not switch the mode */
+    by_offset = by_offset && use_pso_attrs;
     for (uint32_t a = 0; a < nvi; a++) {
         uint32_t c = desc->vtx_in_comp[a]; if (c < 1u) c = 1u; if (c > 4u) c = 4u;
         VkFormat fmt = (c == 1u) ? VK_FORMAT_R32_SFLOAT :
@@ -173,7 +195,38 @@ bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInpu
                        (c == 3u) ? VK_FORMAT_R32G32B32_SFLOAT :
                                    VK_FORMAT_R32G32B32A32_SFLOAT;
         uint32_t aoff = off;
-        if (use_pso_attrs) {
+        if (use_pso_attrs && by_offset) {
+            uint32_t hit = npa, nhit = 0, hit_ok = npa, nhit_ok = 0;
+            if (desc->vtx_in_src_known[a] && !desc->vtx_in_src_unfed[a]) {
+                for (uint32_t k = 0; k < npa; k++) {
+                    if (desc->pso_attr_off[k] != desc->vtx_in_src_off[a]) continue;
+                    if (desc->vtx_in_buf_known[a] && desc->pso_attr_buf_known && desc->pso_attr_buf[k] != desc->vtx_in_buf[a]) continue;
+                    nhit++, hit = k;
+                    if (vk_format_components(lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[k])) >= c) nhit_ok++, hit_ok = k;
+                }
+            }
+            int r = LAGFX_VIN_OK;
+            aoff = 0u; fmt = VK_FORMAT_UNDEFINED;
+            if (desc->vtx_in_src_unfed[a]) {
+                /* The wrapper hands the real function `undef` for this input: nothing it could read is wrong, and it consumes no source offset. It keeps the positional
+                 * pairing this input had before offsets were known (decoded attribute a, else the reflected float format at offset 0), so the layout of these PSOs does not change. */
+                if (a < npa) { aoff = desc->pso_attr_off[a]; fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]); if (fmt == VK_FORMAT_UNDEFINED) r = LAGFX_VIN_UNKNOWN_FMT; }
+                else fmt = (c == 1u) ? VK_FORMAT_R32_SFLOAT : (c == 2u) ? VK_FORMAT_R32G32_SFLOAT : (c == 3u) ? VK_FORMAT_R32G32B32_SFLOAT : VK_FORMAT_R32G32B32A32_SFLOAT;
+                goto paired;
+            }
+            if (!desc->vtx_in_src_known[a]) r = LAGFX_VIN_UNKNOWN_SRC;
+            else if (nhit == 0u) r = LAGFX_VIN_NO_ATTR_AT_OFFSET;
+            else if (nhit_ok > 1u) r = LAGFX_VIN_AMBIGUOUS_OFFSET;        /* two attributes with this slot+offset and both fit: never pick the first silently */
+            else if (nhit_ok == 0u) r = LAGFX_VIN_INCOMPATIBLE;           /* fewer components than the shader loads */
+            else {
+                hit = hit_ok;
+                aoff = desc->pso_attr_off[hit]; fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[hit]);
+                if (fmt == VK_FORMAT_UNDEFINED) r = LAGFX_VIN_UNKNOWN_FMT;
+            }
+            (void)hit;
+paired:
+            if (r != LAGFX_VIN_OK && ok) { ok = false; if (bad_attr) *bad_attr = a; if (why) *why = r; }
+        } else if (use_pso_attrs) {
             if (a < npa) {
                 aoff = desc->pso_attr_off[a];
                 fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);
@@ -181,7 +234,7 @@ bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInpu
                 aoff = 0u;
                 fmt = VK_FORMAT_UNDEFINED;
             }
-            if (fmt == VK_FORMAT_UNDEFINED && ok) { ok = false; if (bad_attr) *bad_attr = a; }
+            if (fmt == VK_FORMAT_UNDEFINED && ok) { ok = false; if (bad_attr) *bad_attr = a; if (why) *why = a < npa ? LAGFX_VIN_UNKNOWN_FMT : LAGFX_VIN_NO_ATTR; }
         }
         vattr[a] = (VkVertexInputAttributeDescription){
             .location = desc->vtx_in_loc[a], .binding = 0u, .format = fmt, .offset = aoff,
@@ -248,13 +301,21 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     };
     if (desc->n_vtx_inputs > 0u) {
         uint32_t bad_attr = 0u;
-        if (!lagfx_pipeline_vertex_input(desc, &vbind, vattr, &nvi_out, &bad_attr)) {
+        int why = 0;
+        if (!lagfx_pipeline_vertex_input_ex(desc, &vbind, vattr, &nvi_out, &bad_attr, &why)) {
             /* Hardening (P06): an attribute whose MTLVertexFormat is not in the table, or (serialized descriptor) a reflected input with no decoded attribute, is an
              * explicit error for THIS pipeline. Neither is re-interpreted (no guess at the Apple GPU's reading of the format or at a layout) and the other
              * attributes are not re-packed as float either. Callers already treat a non-OK status as "this PSO is unusable": the arm64 path caches the failure and
              * skips its draws, the x86 path skips the draw. One warning per failing build (the callers cache the result per pipeline). */
             if (!g_quiet) {
-                if (bad_attr >= desc->n_pso_attrs)
+                if (why == LAGFX_VIN_NO_ATTR_AT_OFFSET || why == LAGFX_VIN_AMBIGUOUS_OFFSET || why == LAGFX_VIN_INCOMPATIBLE || why == LAGFX_VIN_UNKNOWN_SRC)
+                    LAGFX_WARN("pipeline-build: vertex input location %u (reflected input %u of %u, %u components) source buffer %d offset %u: %s (the descriptor decoded %u attributes); pipeline not built",
+                               (unsigned)desc->vtx_in_loc[bad_attr], bad_attr, (unsigned)desc->n_vtx_inputs, (unsigned)desc->vtx_in_comp[bad_attr],
+                               desc->vtx_in_buf_known[bad_attr] ? (int)desc->vtx_in_buf[bad_attr] : -1, (unsigned)desc->vtx_in_src_off[bad_attr],
+                               why == LAGFX_VIN_NO_ATTR_AT_OFFSET ? "no decoded attribute at that offset" : why == LAGFX_VIN_AMBIGUOUS_OFFSET ? "more than one decoded attribute at that offset"
+                               : why == LAGFX_VIN_INCOMPATIBLE ? "the decoded attribute has fewer components than the shader loads" : "source offset unknown while other inputs have one",
+                               (unsigned)desc->n_pso_attrs);
+                else if (bad_attr >= desc->n_pso_attrs)
                     LAGFX_WARN("pipeline-build: vertex input location %u (reflected input %u of %u) has no decoded attribute (the serialized descriptor decoded %u); pipeline not built",
                                (unsigned)desc->vtx_in_loc[bad_attr], bad_attr, (unsigned)desc->n_vtx_inputs, (unsigned)desc->n_pso_attrs);
                 else

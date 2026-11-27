@@ -55,6 +55,13 @@ typedef struct {
     uint8_t          vtx_in_loc[8];
     uint8_t          vtx_in_comp[8];            /* 1..4 components per attribute */
     uint8_t          n_vtx_inputs;
+    /* Source of each reflected input in the vertex buffer, when the translator knew it (a driver-generated vertex fetch wrapper loads it from a constant offset; see
+     * lagfx_spv_vertex_input_t). *_known[a] = 0 means unknown (offset 0 is valid, hence the flag; zero-initialised descriptors have no known source). */
+    uint8_t          vtx_in_src_known[8];
+    uint32_t         vtx_in_src_off[8];
+    uint8_t          vtx_in_src_unfed[8];       /* 1 = the vertex fetch wrapper passes undef for this input (nothing is read from the buffer) */
+    uint8_t          vtx_in_buf_known[8];
+    uint32_t         vtx_in_buf[8];
     /* Real per-vertex stride decoded from the PSO's MTLVertexDescriptor
      * (lagfx_parse_pso_vertex_stride). 0 = unknown → fall back to round8(sum).
      * The round8 heuristic is wrong for the CoreAnimation composites (real 48,
@@ -66,6 +73,9 @@ typedef struct {
     uint32_t         pso_attr_fmt[8];
     uint32_t         pso_attr_off[8];
     uint8_t          n_pso_attrs;
+    /* Metal buffer index of each decoded attribute; valid when pso_attr_buf_known = 1 (arm64 PSO resolve). */
+    uint32_t         pso_attr_buf[8];
+    uint8_t          pso_attr_buf_known;
     /* 1 = the attributes come from a serialized MTLVertexDescriptor (arm64 PSO resolve): pso_attr_* are the only source of vertex layout for this pipeline, so a
      * reflected Location with no decoded attribute (n_pso_attrs < n_vtx_inputs, including 0) fails the pipeline (LAGFX_ERR_PROTOCOL, one warning with the counts)
      * instead of being float-packed from the reflection. 0 (every other caller, notably the x86 draw path, whose attribute list is parsed heuristically) keeps the
@@ -150,6 +160,10 @@ VkFormat lagfx_pso_vertex_format_to_vk(uint32_t mtl_vertex_format);   /* VK_FORM
 /* Vertex-input state of desc (n_vtx_inputs > 0): binding 0 into *vbind, up to 8 attributes into vattr, their count into *out_n. Returns false (and the index of the first
  * attribute in *bad_attr) when a decoded PSO attribute has a Metal vertex format that is not in the table; that attribute's format is VK_FORMAT_UNDEFINED, the others
  * are filled normally. lagfx_pipeline_build() fails the pipeline with LAGFX_ERR_PROTOCOL in that case. */
+/* Why lagfx_pipeline_vertex_input failed (reported through lagfx_pipeline_vertex_input_ex). */
+enum { LAGFX_VIN_OK = 0, LAGFX_VIN_UNKNOWN_FMT, LAGFX_VIN_NO_ATTR, LAGFX_VIN_NO_ATTR_AT_OFFSET, LAGFX_VIN_AMBIGUOUS_OFFSET, LAGFX_VIN_INCOMPATIBLE, LAGFX_VIN_UNKNOWN_SRC };
+bool lagfx_pipeline_vertex_input_ex(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
+                                    VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr, int *why);
 bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
                                  VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr);
 #endif
