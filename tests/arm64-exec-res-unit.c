@@ -68,10 +68,7 @@ static bool res_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t 
         out->desc.fragment_shader = mod(vk, 4, k_fs_unorm_spv, sizeof k_fs_unorm_spv);
         out->desc.layout = layout(vk, 4, b, 2, &out->dsl);
         out->n_bind = 2, setb(out, 0, 24, LAGFX_A64_BIND_IMAGE, 1, 0), setb(out, 1, 25, LAGFX_A64_BIND_SAMPLER, 1, 0);
-        if (!g_r.no_alt) {   /* exactly what arm64_pipeline.c does: the same SPIR-V rewritten to explicit LOD 0 */
-            if (!g_alt_spv) assert(lagfx_spv_explicit_lod0((const uint8_t *)k_fs_unorm_spv, sizeof k_fs_unorm_spv, &g_alt_spv, &g_alt_bytes) == 1);
-            out->alt_fragment_shader = mod(vk, 5, (const uint32_t *)g_alt_spv, g_alt_bytes);
-        }
+        if (!g_r.no_alt) out->desc.fragment_spv = k_fs_unorm_spv, out->desc.fragment_spv_bytes = sizeof k_fs_unorm_spv;   /* what arm64_pipeline.c hands over: the exec rewrites it per use (spv_unnorm.c) */
         break;
     }
     case M_SBUF: {
@@ -210,7 +207,7 @@ static void test_unnormalized(void) {
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
-    assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_samp_unnorm == 1);
+    assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_samp_unnorm == 1 && R->ext_unnorm_variants == 1 && R->ext_unnorm_use_implicit0 == 1 && R->ext_unnorm_skipped == 0);
     assert(px(img, 5, 8) == RED && px(img, 10, 8) == GREEN);   /* coordinates are texels: left half red, right half green (clamped normalized ones would give one colour) */
     done(p);
     p = res_run(M_UNORM, 0x86000000u);   /* SYNTHETIC state word (not captured); */ /* a normalized sampler keeps the implicit-LOD shader */
@@ -218,11 +215,11 @@ static void test_unnormalized(void) {
     res_exec(p, k_cmds_unorm, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.ext_unnorm_lod0 == 0 && px(img, 5, 8) == px(img, 10, 8));
     done(p);
-    g_r.no_alt = 1; memset(&g_mods[5], 0, sizeof g_mods[5]);
-    p = res_run(M_UNORM, 0x06000000u);   /* no explicit-LOD variant available: skipped and counted (never an invalid draw) */
+    g_r.no_alt = 1;
+    p = res_run(M_UNORM, 0x06000000u);   /* the resolver gave no SPIR-V, so the uses cannot be judged: skipped and counted (never an invalid draw) */
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
-    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_unnorm_skipped == 1 && px(img, 5, 8) == BLUE);
+    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_unnorm_skipped == 1 && p->diag2.exec.run.ext_unnorm_unsup[4] == 1 && px(img, 5, 8) == BLUE);
     done(p);
     g_r.no_alt = 0;
     /* the rewrite itself */
@@ -240,21 +237,24 @@ static void test_unnormalized(void) {
 
 /* The guest's 4 x 4 x 4 BGRA8 3D texture (MTLTextureType 3D = 7): texel (i, j, k) = R 20 + 50 i, G 20 + 50 j, B 30 + 60 k, A 255. Mirror layout as build_objects() writes the 2D ones. */
 static uint32_t tex3d_px(uint32_t i, uint32_t j, uint32_t k) { return 255u << 24 | (20u + 50u * i) << 16 | (20u + 50u * j) << 8 | (30u + 60u * k); }   /* = the raw u32 of bytes B G R A */
+static uint32_t g_tex3_mips = 1;   /* 2: the same texture with a second 2 x 2 x 2 level (its bytes follow level 0) */
 static void put_tex3d(void) {
-    static uint32_t data[64];
+    static uint32_t data[72];
     for (uint32_t k = 0; k < 4; k++) for (uint32_t j = 0; j < 4; j++) for (uint32_t i = 0; i < 4; i++) data[(k * 4 + j) * 4 + i] = tex3d_px(i, j, k);
+    for (uint32_t i = 0; i < 8; i++) data[64 + i] = 0xff808080u;
     va_write((uint64_t)VPN_TEX3 << 14, data, sizeof data);
-    uint8_t t[220]; memset(t, 0, sizeof t);
-    uint64_t tlen = sizeof data; uint32_t tvp = VPN_TEX3;
+    uint8_t t[260]; memset(t, 0, sizeof t);
+    uint64_t tlen = g_tex3_mips > 1 ? sizeof data : 64 * 4; uint32_t tvp = VPN_TEX3;
     memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
-    t[12] = 1;
+    t[12] = (uint8_t)g_tex3_mips;
     { uint8_t *mp = t + 12 + 0x18; uint64_t row = 16; uint32_t mw = 4, mh = 4, md = 4; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
-    uint32_t rec = 12 + 0x18 + 36, tag = 0x14;
+    if (g_tex3_mips > 1) { uint8_t *mp = t + 12 + 0x18 + 36; uint64_t off = 256, row = 8; uint32_t mw = 2, mh = 2, md = 2; memcpy(mp, &off, 8); memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+    uint32_t rec = 12 + 0x18 + 36 * g_tex3_mips, tag = 0x14;
     memcpy(t + rec, &tag, 4);
     uint8_t *d = t + rec + 12;
     d[0] = 7; d[2] = 80;                                   /* MTLTextureType3D, BGRA8Unorm */
     uint32_t w = 4, h = 4, dep = 4; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &dep, 4);
-    d[16] = 1; d[18] = 1;                                  /* 1 mip, 1 sample */
+    d[16] = (uint8_t)g_tex3_mips; d[18] = 1;               /* mips, 1 sample */
     uint32_t tsize = rec + 12 + 28;
     va_write(VA_PAY + 0x600, t, tsize);
     entry(REF_TEX3, LAGFX_A64_OBJ_TEXTURE, tsize, VA_PAY + 0x600);
@@ -268,7 +268,7 @@ static void test_tex3d(void) {
     put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
     res_exec(p, k_cmds_bind, img, NULL);
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
-    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_dim_mismatch == 0 && p->diag2.exec.pipe.desc_unbound == 0);
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_dim_mismatch == 0 && p->diag2.exec.pipe.desc_unbound == 0 && R->ext_tex_mips_base_only == 0 && R->ext_tex_layers_base_only == 0);
     unsigned drawn = 0;
     for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
         uint32_t got = px(img, x, y);
@@ -309,6 +309,16 @@ static void test_tex3d(void) {
     assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_tex_dim_mismatch == 1 && px(img, 5, 8) == BLUE);
     done(p);
     g_res_tex3 = false; g_bind_ref = REF_TEX2;
+    /* a 3D texture with a second mip level: the view is level 0 only (APPROX), the draw is NOT refused, the base level is what is sampled, and the omission is counted */
+    g_tex3_mips = 2; g_r.mode = M_TEX3D;
+    p = res_run(M_TEX3D, 0x84000000u);
+    put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
+    res_exec(p, k_cmds_bind, img, NULL);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_mips_base_only == 1 && R->ext_tex_layers_base_only == 0);
+    { unsigned base = 0, drawn2 = 0; for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) { uint32_t got = px(img, x, y); if (got == BLUE) continue; drawn2++; if (got != 0xff808080u) base++; } assert(drawn2 > 0 && base == drawn2); }
+    done(p);
+    g_tex3_mips = 1;
     puts("PASS: 3D mirror texture (MTLTextureType 3D): VK_IMAGE_VIEW_TYPE_3D sampled by a Dim3D shader (nearest = exact texels of slice 1, linear at z = 0.5 = mean of slices 1 and 2); 2D<->3D mismatch skipped + counted");
 }
 

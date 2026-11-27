@@ -38,12 +38,13 @@ typedef struct {
     uint64_t cxs_distinct_words_logged;           /* DISTINCT words that produced a log line (capped at SD_LOGGED_MAX = 64); not a count of words seen */
     uint64_t cxs_words_log_suppressed;   /* state builds whose word was not logged because the 64-word table was full (counting itself is never capped); the same word may be counted more than once */
     uint64_t rt_sampler_objs_addr_out_of_range;            /* runtime sampler OBJECT creations (not draws) with an address field 6 or 7: outside the public Metal enum range, mapped to clamp-to-edge. Same event as state.h ext_samp_addr_unknown (that pair is what diag.c prints) */
+    uint64_t rt_sampler_objs_filter_out_of_range;         /* runtime sampler OBJECT creations whose min or mag filter field (2 bits, INFER) was 2 or 3: outside MTLSamplerMinMagFilter 0..1, mapped to LINEAR. Same event as ext_samp_filter_unknown */
     uint64_t rt_sampler_objs_mip_out_of_range;             /* runtime sampler OBJECT creations with mip field 3: outside the public Metal enum range. Same event as ext_samp_mip_unknown */
 } lagfx_sampler_diag_t;
 
 void lagfx_sampler_diag_get(lagfx_sampler_diag_t *out);        /* snapshot (zeros without Vulkan) */
 void lagfx_sampler_diag_reset(void);                           /* tests only: zero the counters and forget the logged words */
-void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t state_word);   /* the runtime sampler: count + log once per distinct state word */
+void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, bool filter_unknown, uint32_t state_word);   /* the runtime sampler: count + log once per distinct state word */
 
 #ifdef LAGFX_HAVE_VULKAN
 #include <vulkan/vulkan.h>

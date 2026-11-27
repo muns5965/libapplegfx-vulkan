@@ -591,6 +591,13 @@ typedef struct lagfx_protocol {
                 uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
                 uint64_t ext_cxs_binds, ext_tex3d_binds, ext_tex_dim_mismatch;   /* constexpr-sampler descriptors bound from the decoded AIR word / Dim3D sampled-image descriptors bound / draws skipped because the texture's dimensionality is not the shader's (2D vs 3D) */
+                /* Unnormalized-coordinate samplers, per USE (arm64_exec_run.c, src/air2spv/spv_unnorm.c; printed as g7-gpu-unnorm). Variant counters count shader-module builds (one per distinct draw situation of a pipeline), not draws. */
+                uint64_t ext_tex_mips_base_only, ext_tex_layers_base_only;   /* sampled-texture descriptors per draw whose texture has >1 mip levels / array layers: the view covers level 0 / layer 0 only */
+                uint64_t ext_unnorm_unused;                       /* draws with an unnormalized sampler bound whose shader never samples through it: the shader is used unchanged, the draw is NOT skipped */
+                uint64_t ext_unnorm_variants, ext_unnorm_variant_fail;   /* rewritten fragment / vertex modules built / module creation or allocation failed (draw skipped, counted in ext_unnorm_skipped) */
+                uint64_t ext_unnorm_use_implicit0, ext_unnorm_use_bias_dropped, ext_unnorm_use_offset_folded, ext_unnorm_use_explicit_kept, ext_unnorm_use_grad_kept, ext_unnorm_use_gather_kept, ext_unnorm_use_unresolved;   /* per sample instruction, counted when a variant is built */
+                uint64_t ext_unnorm_unsup[5];                     /* sample uses Vulkan forbids with an unnormalized sampler (draw skipped): 0 Dref, 1 Proj, 2 sparse, 3 image 3D / cube / arrayed / multisampled, 4 other (QueryLod, ConstOffsets, no SPIR-V to analyse) */
+                uint64_t ext_samp_filter_unknown;                 /* sampler object creations whose min / mag filter field has its upper bit set (value 2/3: outside MTLSamplerMinMagFilter 0..1; INFER: could be a bicubic code): mapped to LINEAR, counted */
                 uint64_t ext_tex_prepared;   /* textures a pass bound for sampling that the mirror did not hold yet (not in the resource list): created before the pass opened */
             } run;
             /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */

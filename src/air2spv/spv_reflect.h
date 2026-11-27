@@ -118,6 +118,30 @@ void lagfx_spv_offset_bindings(uint8_t *spv, size_t spv_len, uint32_t base);
  * sample (nothing to change, *out untouched), -1 when it cannot be rewritten (sample with Bias / Grad / MinLod operands, no float32 type, malformed). */
 int lagfx_spv_explicit_lod0(const uint8_t *spv, size_t spv_len, uint8_t **out, size_t *out_len);
 
+/* Legacy whole-module rewrite (every OpImageSampleImplicitLod, whatever its sampler). Production no longer uses it (lagfx_spv_unnorm_rewrite works per use); kept for tests. */
+
+/* Per-use rewrite for unnormalized-coordinates samplers (src/air2spv/spv_unnorm.c). `bindings` = the descriptor binding numbers (set 0) of the sampler variables that are
+ * unnormalized in THIS draw. Only samples whose OpSampledImage sampler traces (OpLoad / access chain -> OpVariable -> Binding) to one of them are touched:
+ *   OpImageSampleImplicitLod  -> OpImageSampleExplicitLod Lod 0.0 (Bias / MinLod dropped: Metal coord::pixel samples level 0 only); Const/Offset folded into the coordinate;
+ *   OpImageSampleExplicitLod  -> unchanged (Lod / Grad are clamped by the sampler's lod range 0..0), except Const/Offset which is folded into the coordinate;
+ *   OpImageGather / DrefGather -> unchanged (not covered by the Vulkan restrictions on OpImageSample*);
+ *   Dref / Proj / sparse / OpImageQueryLod, or a 3D / cube / arrayed / multisampled image behind the sampled image -> UNSUPPORTED (Vulkan forbids them with an unnormalized sampler).
+ * A sample whose sampler cannot be traced (function parameter, phi) counts as unresolved and is converted only when convert_unresolved is non-zero.
+ * Returns 1 and a malloc'ed module in *out (NULL out = analysis only), 0 when no sample uses a listed sampler (or none needs a change: *out untouched), -1 when an unsupported use
+ * exists (or malformed input). *rep (optional) is filled in every case. */
+typedef struct {
+    uint32_t samples_total;      /* OpImageSample* / Gather / Sparse / QueryLod instructions seen */
+    uint32_t uses_unnorm;        /* of them: sampler traced to a listed binding */
+    uint32_t uses_unresolved;    /* sampler could not be traced to a variable */
+    uint32_t implicit_to_lod0;   /* ImplicitLod -> ExplicitLod 0.0 */
+    uint32_t bias_dropped, minlod_dropped, offset_folded;
+    uint32_t explicit_kept, grad_kept, gather_kept;
+    uint32_t unsup_dref, unsup_proj, unsup_sparse, unsup_image_dim, unsup_other;
+    uint32_t module_changed;     /* 1 when a rewritten module was produced */
+} lagfx_spv_unnorm_report_t;
+int lagfx_spv_unnorm_rewrite(const uint8_t *spv, size_t spv_len, const uint32_t *bindings, uint32_t nb, int convert_unresolved,
+                             uint8_t **out, size_t *out_len, lagfx_spv_unnorm_report_t *rep);
+
 #ifdef __cplusplus
 }
 #endif

@@ -26,6 +26,7 @@ air2spv_sources = files(
     'translate_function.c',
     'spv_undef_report.c',
     'spv_reflect.c',
+    'spv_unnorm.c',
     'binding_alloc.c',
     'vertex_fetch.c',
   )
