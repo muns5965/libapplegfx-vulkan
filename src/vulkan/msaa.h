@@ -23,8 +23,18 @@
 #include <vulkan/vulkan.h>
 
 #include "format_caps.h"
+#include "msaa_stats.h"
 
 struct lagfx_vk_state;
+
+/* ---- policy: exact (default) vs compat (opt-in) ----
+ * EXACT: the guest-requested sample count is used only if the device / format / usage / extent supports exactly that count; otherwise the multisampled resource is REFUSED (counted,
+ * never approximated). COMPAT (env LAGFX_MSAA_COMPAT=1, default OFF): clamp-down to the largest supported power of two and a 1x image with a resolve-by-copy are permitted. Both are
+ * NOT exact MSAA and are counted separately (ms_compat_clamped, ms_compat_1x). The sample-count reduction 4x -> 2x -> 1x changes the coverage pattern and the number of resolved
+ * levels; a one-sample copy is not a resolve of N samples. */
+typedef enum { LAGFX_MSAA_MODE_EXACT = 0, LAGFX_MSAA_MODE_COMPAT = 1 } lagfx_msaa_mode_t;
+lagfx_msaa_mode_t lagfx_msaa_mode(void);   /* LAGFX_MSAA_COMPAT=1 -> compat, read at every call */
+static inline const char *lagfx_msaa_mode_name(lagfx_msaa_mode_t m) { return m == LAGFX_MSAA_MODE_COMPAT ? "compat" : "exact"; }
 
 /* Pick the sample count: the largest power of two <= `requested` (1..16) that is in `supported` (a VkSampleCountFlags mask). Always at least 1. *clamped (optional) = the
  * result differs from the request (the caller counts it: never a silent downgrade). requested 0 is treated as 1. */
@@ -51,7 +61,7 @@ typedef struct {
     bool clamped;                       /* samples < requested */
 } lagfx_msaa_target_t;
 
-enum { LAGFX_MSAA_OK = 0, LAGFX_MSAA_NO_FORMAT, LAGFX_MSAA_VK_FAIL };
+enum { LAGFX_MSAA_OK = 0, LAGFX_MSAA_NO_FORMAT, LAGFX_MSAA_VK_FAIL, LAGFX_MSAA_EXACT_REFUSED };   /* EXACT_REFUSED: exact mode, the requested count is not offered exactly */
 
 /* Create the multisampled colour image (+ view) and, when want_resolve and the granted count is > 1, the single-sample resolve image (+ view; COLOR_ATTACHMENT | TRANSFER_SRC | TRANSFER_DST |
  * SAMPLED where the format offers them). Capability comes from `be` (production backend: lagfx_fmtcap_device_backend; tests inject one). When the device cannot render to the
@@ -88,6 +98,11 @@ typedef struct {
  * with `required`. requested <= 1 gives samples = 1 without clamped / fallback_1x. */
 int lagfx_msaa_plan(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
                     VkImageUsageFlags optional_1x, lagfx_msaa_plan_t *out);
+/* Same planner with the policy named. lagfx_msaa_plan() above is the COMPAT planner (clamp / 1x fallback).
+ * EXACT: requested <= 1 -> single sample (as above). requested > 1 -> ONLY that count: it must be a power of two <= 16 and the whole usage mask (required + optional_ms) must be
+ * granted for it by the device / format / extent; otherwise LAGFX_MSAA_EXACT_REFUSED (out->samples stays 0). Never clamped, never fallback_1x. */
+int lagfx_msaa_plan_mode(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
+                         VkImageUsageFlags optional_1x, lagfx_msaa_mode_t mode, lagfx_msaa_plan_t *out);
 
 /* A device-local 2D image of `samples` (any aspect of the format) with `usage`, memory bound, optional whole-image view (NULL = none). false on any Vulkan failure (nothing leaks). */
 bool lagfx_msaa_image_create(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageAspectFlags aspect,

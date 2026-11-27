@@ -387,8 +387,43 @@ static int check_plan_injected(void) {
     return 0;
 }
 
+/* EXACT policy of the planner (lagfx_msaa_plan_mode): the requested count or a refusal, never a clamp / 1x fallback. 2x is only checked against INJECTED devices (lavapipe has 1|4). */
+static int check_plan_exact_injected(void) {
+    const VkFormatFeatureFlags f = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+    model_t all = { f, 1 | 2 | 4 | 8 }, no4 = { f, 1 | 2 }, only1 = { f, 1 }, one4 = { f, 1 | 4 }, noatt = { f & ~(VkFormatFeatureFlags)VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT, 1 | 2 | 4 };
+    lagfx_fmtcap_backend_t ba = { &all, m_fp, m_ifp }, b4 = { &no4, m_fp, m_ifp }, b1 = { &only1, m_fp, m_ifp }, b14 = { &one4, m_fp, m_ifp }, bn = { &noatt, m_fp, m_ifp };
+    lagfx_msaa_plan_t p;
+    const VkImageUsageFlags C = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, ms = VK_IMAGE_USAGE_SAMPLED_BIT, x1 = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    const lagfx_msaa_mode_t E = LAGFX_MSAA_MODE_EXACT, K = LAGFX_MSAA_MODE_COMPAT;
+    const VkFormat fmts[2] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT };
+    for (int i = 0; i < 2; i++) {
+        const VkFormat F = fmts[i];
+        CHECK(lagfx_msaa_plan_mode(&ba, F, W, H, 4, C, ms, x1, E, &p) == LAGFX_MSAA_OK && p.samples == 4 && !p.clamped && !p.fallback_1x, "exact 4x on a 1|2|4|8 device");
+        CHECK(lagfx_msaa_plan_mode(&ba, F, W, H, 2, C, ms, x1, E, &p) == LAGFX_MSAA_OK && p.samples == 2 && !p.clamped && !p.fallback_1x, "exact 2x on a device that reports 2 (injected)");
+        CHECK(lagfx_msaa_plan_mode(&ba, F, W, H, 8, C, ms, x1, E, &p) == LAGFX_MSAA_OK && p.samples == 8, "exact 8x on a device that reports 8");
+        CHECK(lagfx_msaa_plan_mode(&b14, F, W, H, 2, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED && p.samples == 0, "exact 2x on a 1|4 device (lavapipe-like): refused, not 4x, not 1x");
+        CHECK(lagfx_msaa_plan_mode(&b14, F, W, H, 8, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 8x on a 1|4 device: refused, not clamped to 4");
+        CHECK(lagfx_msaa_plan_mode(&b4, F, W, H, 4, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 4x on a 1|2 device: refused, not clamped to 2");
+        CHECK(lagfx_msaa_plan_mode(&b1, F, W, H, 4, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 4x on a 1-only device: refused, no 1x fallback");
+        CHECK(lagfx_msaa_plan_mode(&ba, F, W, H, 3, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 3 samples: not a power of two, refused (compat would take 2)");
+        CHECK(lagfx_msaa_plan_mode(&ba, F, W, H, 32, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 32 samples: refused");
+        CHECK(lagfx_msaa_plan_mode(&b1, F, W, H, 1, C, ms, x1, E, &p) == LAGFX_MSAA_OK && p.samples == 1 && !p.fallback_1x && !p.clamped, "exact 1 sample is a plain image");
+        CHECK(lagfx_msaa_plan_mode(&b1, F, W, H, 0, C, ms, x1, E, &p) == LAGFX_MSAA_OK && p.samples == 1, "exact 0 treated as 1");
+        CHECK(lagfx_msaa_plan_mode(&bn, F, W, H, 4, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 4x without the attachment feature: refused");
+        CHECK(lagfx_msaa_plan_mode(&ba, F, 32768, H, 4, C, ms, x1, E, &p) == LAGFX_MSAA_EXACT_REFUSED, "exact 4x beyond maxExtent: refused, not shrunk");
+        /* the same inputs in compat mode keep the old downgrade behaviour (and lagfx_msaa_plan IS the compat planner) */
+        CHECK(lagfx_msaa_plan_mode(&b14, F, W, H, 2, C, ms, x1, K, &p) == LAGFX_MSAA_OK && p.samples == 1 && p.fallback_1x, "compat 2x on 1|4: 1x fallback (counted by the caller)");
+        CHECK(lagfx_msaa_plan_mode(&b14, F, W, H, 8, C, ms, x1, K, &p) == LAGFX_MSAA_OK && p.samples == 4 && p.clamped, "compat 8x on 1|4: clamped to 4");
+        CHECK(lagfx_msaa_plan(&b14, F, W, H, 8, C, ms, x1, &p) == LAGFX_MSAA_OK && p.samples == 4 && p.clamped, "lagfx_msaa_plan is the compat planner");
+    }
+    puts("PASS exact planner (injected devices, BGRA8 + RGBA16F): requested count or EXACT_REFUSED (2x on 1|4, 8x on 1|4, 4x on 1|2, 1-only, 3 / 32 samples, no attachment feature, oversized); compat keeps clamp / 1x fallback");
+    return 0;
+}
+
 int main(void) {
     int rc = check_plan_injected();
+    if (rc) return rc;
+    rc = check_plan_exact_injected();
     if (rc) return rc;
     struct lagfx_vk_state *vk = NULL;
     lagfx_device_descriptor_t dd; memset(&dd, 0, sizeof dd);

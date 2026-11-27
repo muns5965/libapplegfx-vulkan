@@ -6,6 +6,10 @@
  *
  * Every refusal / downgrade of the multisample path is counted here and printed: nothing is dropped, clamped or approximated silently.
  * Evidence level of the guest fields behind these counters is in docs/metal-vulkan-compatibility.md section 5 ("MSAA"): no guest capture of a multisampled pass exists yet.
+ *
+ * Policy (docs section 5): default "exact" mode uses the guest-requested sample count only when the device / format supports exactly that count, otherwise the multisampled texture
+ * is refused (ms_exact_refused, ms_tex_refused) and a pass that names it skips the attachment (ms_pass_refused). Opt-in "compat" mode (LAGFX_MSAA_COMPAT=1, default OFF) permits a
+ * clamp-down (ms_compat_clamped) and a 1x image with a resolve-by-copy (ms_compat_1x, resolves_by_copy): NOT exact MSAA. The line below always names the mode.
  */
 #ifndef LAGFX_VULKAN_MSAA_STATS_H
 #define LAGFX_VULKAN_MSAA_STATS_H
@@ -13,13 +17,15 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 typedef struct lagfx_msaa_stats {
     /* textures (guest descriptor sample count > 1) */
     uint64_t ms_images_created;        /* device images made with more than one sample */
-    uint64_t ms_images_clamped;        /* ... of those, with fewer samples than the guest asked for (device or format limit), still > 1 */
-    uint64_t ms_fallback_1x;           /* guest asked for > 1 sample, the image is single sample (device / format cannot do any count > 1 for this use): explicit downgrade */
-    uint64_t ms_tex_refused;           /* multisampled texture descriptors refused (no usable format, bad shape, creation failed): the texture does not exist for the guest */
+    uint64_t ms_compat_clamped;        /* COMPAT mode only: image granted with fewer samples than the guest asked for (largest supported lower power of two), still > 1: NOT exact */
+    uint64_t ms_compat_1x;             /* COMPAT mode only: guest asked for > 1 sample, the image is single sample (no count > 1 usable for this use): NOT exact, "resolve" is a copy */
+    uint64_t ms_exact_refused;         /* EXACT mode (default): the guest's sample count is not offered exactly (not a power of two <= 16, or the device / format / usage / extent lacks it): texture refused */
+    uint64_t ms_tex_refused;           /* multisampled texture descriptors refused (exact count unavailable, no usable format, creation failed; bad shape is counted separately): the texture does not exist for the guest */
     uint64_t ms_tex_bad_shape;         /* descriptor shape the mirror does not model: sample count with a non-multisample type, multisample type with 1 sample, 2D multisample ARRAY, mips > 1, layers > 1 */
     /* passes */
     uint64_t ms_passes;                /* passes whose colour attachments are multisampled */
@@ -32,7 +38,8 @@ typedef struct lagfx_msaa_stats {
     uint64_t deferred_store_tags;      /* tags 0x66 (SetColorStoreAction) / 0x96 (SetColorResolveTexture) applied to the pass (payload layout from the x86-era table, NOT verified on ARM64) */
     uint64_t attach_mixed_ignored;     /* attachments of the pass with another sample count than the first colour attachment (Vulkan needs one count): ignored */
     uint64_t ds_mismatch_ignored;      /* a depth / stencil attachment whose sample count differs from the colour attachments: ignored */
-    uint64_t ds_resolve_unsupported;   /* a depth / stencil attachment with a resolve texture or a resolve store action: stored only, resolve not recorded */
+    uint64_t ms_pass_refused;          /* a pass attachment skipped: it names a refused multisample texture, or (exact mode) an image whose host count differs from the guest's */
+    uint64_t ds_resolve_unsupported;   /* UNSUPPORTED: a depth / stencil attachment with a resolve texture or a resolve store action: stored only, resolve not recorded */
     /* draws */
     uint64_t pipes_ms;                 /* pipelines built with rasterizationSamples > 1 (count taken from the pass: the pipeline descriptor field is not decoded) */
     uint64_t draws_ms;                 /* draws recorded into a multisampled pass */
@@ -55,16 +62,24 @@ static inline uint64_t lagfx_msaa_stats_any(const lagfx_msaa_stats_t *s) {
     return a;
 }
 
-/* The one-line summary (<= 1000 chars). Returns the length written. */
+/* Compat mode: exactly the string "1" in LAGFX_MSAA_COMPAT (read at every call; default exact). */
+static inline int lagfx_msaa_compat_env(void) {
+    const char *e = getenv("LAGFX_MSAA_COMPAT");
+    return e && e[0] == '1' && e[1] == 0;
+}
+
+/* The one-line summary (<= 1000 chars). Returns the length written. The unsupported[...] group is everything that is NOT implemented: depth / stencil resolve, shader reads of a
+ * multisampled texture (texture2d_ms), [[sample_id]] / [[sample_mask]] builtins, framebuffer fetch / tile shaders / blits / capture of multisampled attachments. */
 static inline int lagfx_msaa_stats_line(const lagfx_msaa_stats_t *s, char *buf, size_t cap) {
 #define LU(f) (unsigned long long)s->f
     return snprintf(buf, cap,
-        "g7-gpu-msaa: images[ms_created=%llu clamped=%llu fallback_1x=%llu refused=%llu bad_shape=%llu] passes[ms=%llu attach=%llu resolves=%llu by_copy=%llu store_unknown=%llu resolve_no_target=%llu resolve_on_1x=%llu "
-        "deferred_tags=%llu mixed_ignored=%llu ds_mismatch=%llu ds_resolve_unsupported=%llu] draws[pipes_ms=%llu draws_ms=%llu] unsupported[sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu "
-        "air_ms_ops=%llu air_sample_builtins=%llu] devinfo_clamped=%llu",
-        LU(ms_images_created), LU(ms_images_clamped), LU(ms_fallback_1x), LU(ms_tex_refused), LU(ms_tex_bad_shape), LU(ms_passes), LU(ms_attach), LU(resolves), LU(resolves_by_copy), LU(store_unknown),
-        LU(resolve_no_target), LU(resolve_on_1x), LU(deferred_store_tags), LU(attach_mixed_ignored), LU(ds_mismatch_ignored), LU(ds_resolve_unsupported), LU(pipes_ms), LU(draws_ms), LU(sampled_ms_refused),
-        LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped));
+        "g7-gpu-msaa: mode=%s images[ms_created=%llu exact_refused=%llu compat_clamped=%llu compat_1x=%llu refused=%llu bad_shape=%llu] passes[ms=%llu attach=%llu resolves=%llu by_copy=%llu store_unknown=%llu "
+        "resolve_no_target=%llu resolve_on_1x=%llu deferred_tags=%llu mixed_ignored=%llu ds_mismatch=%llu pass_refused=%llu] draws[pipes_ms=%llu draws_ms=%llu] "
+        "unsupported[ds_resolve=%llu sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu air_ms_ops=%llu air_sample_id_mask=%llu] devinfo_clamped=%llu",
+        lagfx_msaa_compat_env() ? "compat" : "exact",
+        LU(ms_images_created), LU(ms_exact_refused), LU(ms_compat_clamped), LU(ms_compat_1x), LU(ms_tex_refused), LU(ms_tex_bad_shape), LU(ms_passes), LU(ms_attach), LU(resolves), LU(resolves_by_copy),
+        LU(store_unknown), LU(resolve_no_target), LU(resolve_on_1x), LU(deferred_store_tags), LU(attach_mixed_ignored), LU(ds_mismatch_ignored), LU(ms_pass_refused), LU(pipes_ms), LU(draws_ms),
+        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped));
 #undef LU
 }
 

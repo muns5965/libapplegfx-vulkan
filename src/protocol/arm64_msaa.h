@@ -43,8 +43,15 @@ enum { LAGFX_A64_MSAA_PLAIN = 0, LAGFX_A64_MSAA_YES, LAGFX_A64_MSAA_REFUSE };
 int lagfx_a64_msaa_tex_gate(lagfx_protocol_t *p, uint32_t mtype, uint32_t samples, uint32_t mips, uint32_t layers, uint32_t *req);
 
 /* Sample count and usage mask of the image of guest texture `o` (o->samples_req > 1): colour or depth / stencil; the device's answer is asked for the whole mask. false = no image
- * can be made at all (counted ms_tex_refused). On true: *ns = the granted count (may be lower than asked: counted ms_images_clamped, or 1 = ms_fallback_1x), cu->usage the mask. */
+ * can be made at all (counted ms_tex_refused). On true: *ns = the granted count (lower than asked only in COMPAT mode: counted ms_compat_clamped, or 1 = ms_compat_1x; in EXACT mode, the default, a count that is not offered exactly returns false and is counted ms_exact_refused), cu->usage the mask. */
 bool lagfx_a64_msaa_plan_image(lagfx_protocol_t *p, const lagfx_fmtcap_backend_t *be, lagfx_a64_obj_t *o, VkSampleCountFlagBits *ns, lagfx_fmtcap_usage_t *cu);
+
+/* Exact-mode guard of a pass attachment: false (counted ms_pass_refused) when the guest texture is multisampled but the host image has another sample count (only possible when the
+ * image was made in compat mode and the mode was switched afterwards): an exact-mode pass never renders into an approximation. Always true for a plain texture and in compat mode. */
+bool lagfx_a64_msaa_attach_ok(lagfx_protocol_t *p, const lagfx_a64_obj_t *t);
+
+/* A pass names `ref` and the mirror has no such texture: counts ms_pass_refused when the creation was refused by the multisample plan / shape gate (the attachment is skipped). */
+void lagfx_a64_msaa_note_missing(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, uint32_t ref);
 
 /* ---- one render pass ---- */
 typedef struct {

@@ -1,6 +1,7 @@
 /* libapplegfx-vulkan — ARM64 exec: guest-visible multisample path (see arm64_msaa.h). SPDX-License-Identifier: MIT */
 #include "arm64_msaa.h"
 #include "../common/le.h"
+#include "../common/log.h"
 
 #ifdef LAGFX_HAVE_VULKAN
 #include <string.h>
@@ -24,18 +25,40 @@ bool lagfx_a64_msaa_plan_image(lagfx_protocol_t *p, const lagfx_fmtcap_backend_t
     const VkImageUsageFlags opt_ms = ds ? 0u : VK_IMAGE_USAGE_SAMPLED_BIT;   /* texelFetch of a sample; no transfers (a multisampled image cannot take part in a buffer copy) */
     const VkImageUsageFlags opt_1x = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (ds ? 0u : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT));
     lagfx_msaa_plan_t pl;
+    const lagfx_msaa_mode_t mode = lagfx_msaa_mode();
     memset(cu, 0, sizeof *cu);
-    if (lagfx_msaa_plan(be, o->format, o->width, o->height, o->samples_req, req, opt_ms, opt_1x, &pl) != LAGFX_MSAA_OK) {
+    const int rc = lagfx_msaa_plan_mode(be, o->format, o->width, o->height, o->samples_req, req, opt_ms, opt_1x, mode, &pl);
+    if (rc != LAGFX_MSAA_OK) {
         MS(p).ms_tex_refused++;
-        p->diag2.exec.fmt.refused[LAGFX_FMTCAP_NO_REQUIRED]++;
+        if (rc == LAGFX_MSAA_EXACT_REFUSED) {   /* exact mode: the guest's count is not offered exactly: the texture does not exist (never approximated) */
+            static unsigned logged;
+            MS(p).ms_exact_refused++;
+            if (logged++ < 8u) LAGFX_WARN("g7-gpu-msaa: mode=exact refused %ux multisample texture fmt=%d %ux%u (not offered exactly; LAGFX_MSAA_COMPAT=1 would clamp / fall back to 1x, NOT exact MSAA)", (unsigned)o->samples_req, (int)o->format, (unsigned)o->width, (unsigned)o->height);
+        } else p->diag2.exec.fmt.refused[LAGFX_FMTCAP_NO_REQUIRED]++;
         return false;
     }
     cu->usage = pl.usage, cu->dropped = pl.dropped, cu->why = LAGFX_FMTCAP_OK;
     *ns = pl.samples;
     o->samples = (uint8_t)pl.samples;
-    if (pl.samples > 1u) { MS(p).ms_images_created++; if (pl.clamped) MS(p).ms_images_clamped++; }
-    else MS(p).ms_fallback_1x++;
+    if (pl.samples > 1u) MS(p).ms_images_created++;
+    if (pl.clamped && pl.samples > 1u) MS(p).ms_compat_clamped++;   /* only reachable in compat mode */
+    if (pl.fallback_1x) MS(p).ms_compat_1x++;                       /* only reachable in compat mode */
+    if ((pl.clamped && pl.samples > 1u) || pl.fallback_1x) {
+        static unsigned logged;
+        if (logged++ < 8u) LAGFX_WARN("g7-gpu-msaa: mode=compat %ux multisample texture granted %ux (NOT exact MSAA)", (unsigned)o->samples_req, (unsigned)pl.samples);
+    }
     return true;
+}
+
+bool lagfx_a64_msaa_attach_ok(lagfx_protocol_t *p, const lagfx_a64_obj_t *t) {
+    if (!t || t->samples_req <= 1u || lagfx_msaa_mode() == LAGFX_MSAA_MODE_COMPAT) return true;
+    if (t->samples == t->samples_req) return true;
+    MS(p).ms_pass_refused++;
+    return false;
+}
+
+void lagfx_a64_msaa_note_missing(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, uint32_t ref) {
+    if (ref && lagfx_a64_res_fail_why(x, ref) == TEXWHY_C_MSAA) MS(p).ms_pass_refused++;
 }
 
 void lagfx_a64_msaa_pass_reset(lagfx_a64_msaa_pass_t *ms) { memset(ms, 0, sizeof *ms); }

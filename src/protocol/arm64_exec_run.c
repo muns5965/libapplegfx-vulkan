@@ -1034,7 +1034,8 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         uint64_t lin0 = lagfx_a64_res_stats(p)->linear_unsupported;
         lagfx_a64_obj_t *t = lagfx_a64_res_object(r->x, d.colors[k].texture_ref);
         if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
-        if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; continue; }
+        if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; if (!t) lagfx_a64_msaa_note_missing(p, r->x, d.colors[k].texture_ref); continue; }
+        if (!lagfx_a64_msaa_attach_ok(p, t)) { CNT(p).no_target++; continue; }   /* exact mode: never render into an image whose host sample count is not the guest's */
         if (first && lagfx_a64_msaa_obj_samples(t) != r->ms.samples) { CNT(p).extra_attach_ignored++; p->diag2.exec.msaa.attach_mixed_ignored++; continue; }   /* one sample count per pass (Vulkan: every attachment equals rasterizationSamples) */
         uint32_t load = d.colors[k].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
         VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -1071,6 +1072,8 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         if (!vk_core13(r->vk)) { CNT(p).ds_no_device_support++; p->diag2.exec.pipe.stub_depth_stencil++; }
         else {
             o = lagfx_a64_res_object(r->x, dref ? dref : sref);
+            if (!o) lagfx_a64_msaa_note_missing(p, r->x, dref ? dref : sref);
+            else if (!lagfx_a64_msaa_attach_ok(p, o)) o = NULL;   /* counted below as ds_attach_unsupported */
             if (!o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || (dref && !(o->ds_aspects & 1u)) || (!dref && !(o->ds_aspects & 2u))) { CNT(p).ds_attach_unsupported++; o = NULL; }
             else if (dref && sref && sref != dref) { CNT(p).ds_split_ignored++; }   /* the stencil lives in another texture: only the depth one is attached */
             else if (dref && d.depth_level) { CNT(p).ds_attach_unsupported++; o = NULL; }
