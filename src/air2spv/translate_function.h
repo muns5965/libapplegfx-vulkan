@@ -142,4 +142,13 @@ bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_ins
 } /* extern "C" */
 #endif
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* std430-style size and alignment of an AIR type under the AIR data layout (LLVM alloc size: <3 x float> is 16 bytes, align 16). Exposed for tests. */
+bool lagfx_air2spv_type_layout(const lagfx_air_module_t *m, uint32_t ty, uint32_t *size, uint32_t *align);
+#ifdef __cplusplus
+}
+#endif
+
 #endif /* LIBAPPLEGFX_AIR2SPV_TRANSLATE_FUNCTION_H */
