@@ -364,6 +364,19 @@ static void test_discard_fragment(void) {
     puts("PASS: air.discard_fragment discards (OpKill in a split block; OpDemoteToHelperInvocation when the device enables it): branch shader keeps x<8 at the clear, unconditional discard leaves the target untouched");
 }
 
+/* D1: MSL round() rounds halves away from zero. GLSL.std.450 Round leaves halves unspecified and lavapipe (like most drivers) rounds to even: 2.5 -> 2. The fixture computes
+ * (round(2.5)/4, -round(-2.5)/4, round(0.5)/2, -round(-0.5)/2): (0.75, 0.75, 0.5, 0.5) for half-away, (0.5, 0.5, 0, 0) for ties-to-even. */
+static void test_round_halves_away(void) {
+    static rc_res_t r; const uint32_t refs_f[2] = { REF_TEX2, 0 };
+    g_rc.fs = FS_DISC;
+    assert(load_disc("spec_round_fragment.air.bc", false));
+    rc_run(refs_f, ZERO4, NULL, b_list1, false, &r);
+    assert(r.draws == 1 && r.pipe_fail == 0);
+    assert(h16(r.half, 12, 14, 0) == 0x3a00u && h16(r.half, 12, 14, 1) == 0x3a00u && h16(r.half, 12, 14, 2) == 0x3800u && h16(r.half, 12, 14, 3) == 0x3800u);
+    free(g_disc_spv); g_disc_spv = NULL;
+    puts("PASS: air.round rounds halves away from zero (2.5 -> 3, -2.5 -> -3, 0.5 -> 1, -0.5 -> -1) on the device, not to even");
+}
+
 /* ---- injected less-capable device (wraps the real queries; overrides one format / usage) ---- */
 typedef struct { lagfx_fmtcap_backend_t real; VkFormat fmt; VkFormatFeatureFlags clear; VkImageUsageFlags refuse_any; VkImageUsageFlags refuse_all; } inj_t;
 static inj_t g_inj; static lagfx_fmtcap_backend_t g_inj_be;
@@ -461,6 +474,7 @@ int main(void) {
     test_clear_integer_class();
     test_viewport_semantics();
     test_discard_fragment();
+    test_round_halves_away();
     test_injected_formats();
     test_msaa_texture_refused();
     lagfx_device_free(g_dev);

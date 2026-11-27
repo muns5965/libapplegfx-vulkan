@@ -4899,6 +4899,48 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         }
     }
 
+    /* === air.round / air.fast_round / air.precise_round: MSL round() = nearest integer, HALVES AWAY FROM ZERO (D1) ===
+     * GLSL.std.450 Round leaves halves unspecified (drivers use ties-to-even: lavapipe rounds 2.5 to 2). Emulation, exact in the operand's own float type:
+     *   t = Trunc(x); r = (|x - t| >= 0.5) ? t + FSign(x) : t
+     * (x - t is exact; keeps -0 for -0.0 / -0.3; +-Inf and NaN pass through as t because the ordered compare is false). */
+    if ((strncmp(fn_name, "air.round.", 10u) == 0 || strncmp(fn_name, "air.fast_round.", 15u) == 0 || strncmp(fn_name, "air.precise_round.", 18u) == 0) &&
+        result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE && inst->num_ops > callee_slot_idx + 1u) {
+        uint32_t n_types = 0;
+        const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
+        uint32_t elem = result_ty_air, lanes = 1u;
+        if (elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_VECTOR && ts[elem].num_op >= 2u) { lanes = ts[elem].op[0]; elem = ts[elem].op[1]; }
+        const bool is_half = elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_HALF, is_float = elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_FLOAT;
+        if ((is_half || is_float) && lanes >= 1u && lanes <= 4u) {
+            uint32_t rty = emit_air_type(c, result_ty_air);
+            uint32_t x = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[callee_slot_idx + 1u], next_val_id), rty);
+            uint32_t half_c;
+            if (is_half) { half_c = lagfx_spv_builder_alloc_id(c->b); uint32_t o[] = { emit_type_half(c), half_c, 0x3800u /* 0.5h */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
+            else half_c = emit_const_float32(c, 0.5f);
+            if (lanes > 1u) {
+                uint32_t v[6] = { rty, lagfx_spv_builder_alloc_id(c->b) };
+                for (uint32_t k = 0; k < lanes; k++) v[2 + k] = half_c;
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, v, 2u + lanes);
+                half_c = v[1];
+            }
+            uint32_t bty = lanes > 1u ? emit_type_vec(c, emit_type_bool(c), lanes) : emit_type_bool(c);
+            uint32_t t = lagfx_spv_builder_alloc_id(c->b), d = lagfx_spv_builder_alloc_id(c->b), ad = lagfx_spv_builder_alloc_id(c->b), ge = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t sg = lagfx_spv_builder_alloc_id(c->b), sum = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t res = resolve_value_spv(c, result_value_id);
+            if (!res) res = lagfx_spv_builder_alloc_id(c->b);
+            { uint32_t o[] = { rty, t, c->id_glsl, LAGFX_SPV_GLSL_TRUNC, x }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { rty, d, x, t }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FSUB, o, 4); }
+            { uint32_t o[] = { rty, ad, c->id_glsl, LAGFX_SPV_GLSL_FABS, d }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { bty, ge, ad, half_c }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FORD_GREATER_EQUAL, o, 4); }
+            { uint32_t o[] = { rty, sg, c->id_glsl, LAGFX_SPV_GLSL_FSIGN, x }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { rty, sum, t, sg }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FADD, o, 4); }
+            { uint32_t o[] = { rty, res, ge, sum, t }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+            bind_value_spv(c, result_value_id, res);
+            set_result_air_type(c, result_value_id, result_ty_air);
+            set_value_spv_type(c, result_value_id, rty);
+            return;
+        }
+    }
+
     /* === air.fast_saturate.<ty> → OpExtInst FClamp(x, 0, 1) ===
      * saturate(x) clamps to [0,1]. Not a GLSL ext-inst by itself; lower to
      * FClamp with synthesized 0/1. For a vector result, splat the scalar

@@ -8,6 +8,7 @@
  *  2. A struct { <3 x float>, float } under the AIR data layout (v96:128:128) has the second member at byte 16 (LLVM alloc size of <3 x float> is 16; checked with
  *     opt instcombine on the same data layout): the Block's Offset decorations must say 16, not 12.
  *  3. [[instance_id]] is Vulkan InstanceIndex (BuiltIn 43), not a second VertexIndex (BuiltIn 42).
+ *  6. air.round: halves away from zero (Trunc + select), not GLSL Round.
  *  5. air.discard_fragment: OpKill (split block) by default, OpDemoteToHelperInvocation + capability + extension when enabled; both counted.
  *  4. int -> int air.convert extends by the SOURCE signedness (OpSConvert for a signed source, OpUConvert for an unsigned one); same width is OpBitcast.
  */
@@ -112,6 +113,11 @@ int main(void) {
         EXPECT(count_op(w, nw, 113u) == 1, "convert int: OpUConvert count %d, want 1 (unsigned i16 source zero-extends)", count_op(w, nw, 113u));
         EXPECT(count_op(w, nw, 124u) == 1, "convert int: OpBitcast count %d, want 1 (same-width i32 -> i32)", count_op(w, nw, 124u));
         EXPECT(ct.int_int >= 3u && ct.int_int_unhandled == 0u, "convert int: lowered %llu unhandled %llu", (unsigned long long)ct.int_int, (unsigned long long)ct.int_int_unhandled);
+        free(w);
+    }
+    w = translate("spec_round_half_vec_fragment.air.bc", false, &nw);   /* 6. air.round on <3 x half>: emulation (OpSelect + ordered >= 0.5), valid module (spirv-val run by hand) */
+    if (w) {
+        EXPECT(count_op(w, nw, 169u) == 1 && count_op(w, nw, 190u) == 1, "round: OpSelect %d OpFOrdGreaterThanEqual %d, want 1 / 1", count_op(w, nw, 169u), count_op(w, nw, 190u));
         free(w);
     }
     /* 5. air.discard_fragment (S06): OpKill in a split block by default, OpDemoteToHelperInvocation (+ capability + extension) when the device has the feature */
