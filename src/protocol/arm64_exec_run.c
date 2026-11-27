@@ -135,7 +135,7 @@ typedef struct {
     uint64_t gen_ctr; VkDeviceSize min_sb_align;
     VkSampler fvar[A64_MAX_FSAMP];                                 /* fragment sampler slot overridden by a LOD-clamp bind (0x71): a variant owned by fsamp[i], else NULL */
     VkDeviceSize max_sb_range;
-    struct { uint64_t gen, off, range; VkBuffer buf; } gc[A64_GATHER_CACHE]; uint32_t ngc; uint64_t gc_bytes, gc_budget; uint32_t gc_cap;   /* aligned copies made in this exec (gather_copy) */
+    struct { uint64_t gen, wgen, off, range; VkBuffer buf; } gc[A64_GATHER_CACHE]; uint32_t ngc; uint64_t gc_bytes, gc_budget; uint32_t gc_cap;   /* aligned copies made in this exec (gather_copy) */
     lagfx_draw_region_t region;
     /* depth / stencil attachment of the open pass (NULL / UNDEFINED = none) and the encoder state Metal keeps outside the pipeline; all of it is reset by a new pass
      * (a new Metal encoder starts from the defaults) and applied as Vulkan dynamic state before each draw */
@@ -667,7 +667,7 @@ static bool descriptor_pool(a64_run_t *r) {
  * mirror buffer are copied (host side, at record time) into an exec-owned scratch buffer and that is bound at offset 0. Reference: the independent pvg-vulkan
  * runtime does the same ("gather") for guest binds that are not zero-copyable. Limits: the copy is a snapshot of the mirror at this draw (GPU writes of the same
  * exec to that buffer, e.g. by an earlier blit, or writes by the shader itself, are not seen / not written back), and ranges above A64_GATHER_MAX are refused.
- * One copy per (buffer generation, offset) and exec; a later bind whose range lies inside an earlier copy at an alignment-multiple distance reuses it (*doff). NULL = not possible (the draw is skipped, counted as desc_unaligned). */
+ * One copy per (buffer generation, write generation wgen, offset) and exec: a write the mirror recorded since the copy (wgen moved) makes the copy stale, so it is not reused; a later bind whose range lies inside an earlier copy at an alignment-multiple distance reuses it (*doff). NULL = not possible (the draw is skipped, counted as desc_unaligned). */
 static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t range, VkDeviceSize *doff) {
     *doff = 0;
     if (!b->map) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[0]++; return VK_NULL_HANDLE; }
@@ -676,7 +676,7 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
      * the device alignment: bind it at that offset (the same bytes, the same snapshot, the same descriptor range). Equal (off, range) is the distance 0 case. */
     for (uint32_t i = 0; i < r->ngc; i++) {
         const __typeof__(r->gc[0]) *c = &r->gc[i];
-        if (c->gen != b->gen || c->off > off || off + range > c->off + c->range || (off - c->off) % r->min_sb_align) continue;
+        if (c->gen != b->gen || c->wgen != b->wgen || c->off > off || off + range > c->off + c->range || (off - c->off) % r->min_sb_align) continue;
         *doff = off - c->off;
         if (*doff) CNT(p).ext_gather_reused++;
         return c->buf;
@@ -686,7 +686,7 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
     if (range > r->gc_budget - r->gc_bytes) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[4]++; return VK_NULL_HANDLE; }   /* total bytes of this exec's copies would exceed A64_GATHER_BUDGET */
     if (!lagfx_a64_res_scratch(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
     memcpy(mp, b->map + off, (size_t)range);
-    r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
+    r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].wgen = b->wgen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
     r->gc_bytes += range;
     CNT(p).ext_gathered++, CNT(p).ext_gather_bytes += range;
     return sb;
