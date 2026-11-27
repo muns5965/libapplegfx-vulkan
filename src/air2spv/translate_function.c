@@ -1624,7 +1624,7 @@ static bool air_type_size_align_m(const lagfx_air_module_t *m, uint32_t ty,
             uint32_t elem  = t->num_op >= 2u ? t->op[1] : 0u;
             uint32_t es, ea; if (!air_type_size_align_m(m, elem, &es, &ea)) return false;
             *align = (lanes == 2u) ? es * 2u : es * 4u; /* vec3/4 align 4*elem (data layout v96:128:128, v48:64:64) */
-            *size  = es * lanes; /* LLVM alloc size (and MSL float3): <3 x float> occupies 16 bytes, so the NEXT struct member starts at +16 */
+            *size  = lagfx_round_up(es * lanes, *align); /* LLVM alloc size (and MSL float3): <3 x float> occupies 16 bytes, so the NEXT struct member starts at +16 */
             return true;
         }
         case LAGFX_AIR_TYPE_ARRAY: {
@@ -2509,7 +2509,7 @@ static void emit_prologue(xlate_ctx_t *c) {
                 const bool inst = c->iface_own_in && i < c->iface_own_in->n && strcmp(c->iface_own_in->key[i], "air.instance_id") == 0;
                 uint32_t ops[] = { c->arg_input_var_ids[i],
                                     LAGFX_SPV_DECORATION_BUILTIN,
-                                    LAGFX_SPV_BUILTIN_VERTEX_INDEX };
+                                    inst ? 43u /* InstanceIndex */ : LAGFX_SPV_BUILTIN_VERTEX_INDEX };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
             } else if (k == LAGFX_VARG_ATTR) {
                 uint32_t ops[] = { c->arg_input_var_ids[i],
@@ -6389,7 +6389,7 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
         case 3:  /* BINOP_UDIV → UDiv         */ spv_op = LAGFX_SPV_OP_UDIV; break;
         case 4:  /* BINOP_SDIV → FDiv / SDiv  */ spv_op = is_float ? LAGFX_SPV_OP_FDIV : LAGFX_SPV_OP_SDIV; break;
         case 5:  /* BINOP_UREM → UMod         */ spv_op = LAGFX_SPV_OP_UMOD; break;
-        case 6:  /* BINOP_SREM → FRem / SRem  */ spv_op = is_float ? LAGFX_SPV_OP_FREM : LAGFX_SPV_OP_SMOD; break;   /* srem: the result has the sign of the DIVIDEND (OpSRem); OpSMod takes the divisor's */
+        case 6:  /* BINOP_SREM → FRem / SRem  */ spv_op = is_float ? LAGFX_SPV_OP_FREM : LAGFX_SPV_OP_SREM; break;   /* srem: the result has the sign of the DIVIDEND (OpSRem); OpSMod takes the divisor's */
         case 7:  /* BINOP_SHL  → ShiftLeftLogical */     spv_op = LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL; break;
         case 8:  /* BINOP_LSHR → ShiftRightLogical */    spv_op = LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL; break;
         case 9:  /* BINOP_ASHR → ShiftRightArithmetic */ spv_op = LAGFX_SPV_OP_SHIFT_RIGHT_ARITHMETIC; break;
