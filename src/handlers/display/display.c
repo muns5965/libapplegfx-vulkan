@@ -10,6 +10,7 @@
 #include "../../display.h"  /* LAGFX_DISPLAY_DEFAULT_W / _H / _BPP */
 #include "common/le.h"
 #include "common/log.h"
+#include "protocol/display_diag.h"
 #ifdef LAGFX_HAVE_VULKAN
 #include "../../device.h"             /* dev->vk for the C1 frame-blit drain */
 #include "../../vulkan/display_blit.h"
@@ -236,6 +237,8 @@ lagfx_handler_status_t lagfx_display_cursor_glyph(lagfx_protocol_t *p, const lag
     LAGFX_LOG("[cursor] glyph_upload: display_id=%u size=%ux%d hotspot=(%u,%u) bytes_per_row=%u VA=0x%llx",
               display_id, width, height, hot_x, hot_y, bytes_per_row, (unsigned long long)glyph_va);
 
+    lagfx_dd_note_cursor_glyph(display_id, width, height);   /* diagnostics only */
+
     /* Stamp the device-shared cursor_glyph state so
      * lagfx_display_submit_clear_color picks up the new metadata.
      * Captured pixel payload is Stage 25 work — read via
@@ -297,6 +300,8 @@ lagfx_handler_status_t lagfx_display_cursor_show(lagfx_protocol_t *p, const lagf
               display_id, x, y, visible, hot_x, hot_y);
     LAGFX_LOG("[cursor] cursor_move: display_id=%u pos=(%d,%d) visible=%u hotspot=(%u,%u)",
               display_id, x, y, (int)visible, hot_x, hot_y);
+
+    lagfx_dd_note_cursor_show(display_id, x, y, visible);   /* diagnostics only */
 
     /* Stamp the device-shared cursor_show state. macOS publishes one
      * cursor across all attached displays — see device.h "Cursor

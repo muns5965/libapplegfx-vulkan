@@ -1936,3 +1936,13 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-fragment-position-unit.c')
   test('air2spv fragment [[position]] binding (unit)', air2spv_fpos_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# Display diagnostics helpers (standalone — header-only pure functions: format names, gamma region summarizer, identity check).
+if fs.is_file(meson.current_source_dir() / 'display-diag-unit.c')
+  display_diag_unit_test = executable('display-diag-unit',
+    'display-diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    build_by_default : true,
+  )
+  test('display diagnostics helpers (unit)', display_diag_unit_test)
+endif

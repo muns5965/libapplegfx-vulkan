@@ -8,6 +8,7 @@
 #include "arm64_resources.h"
 #include "../vulkan/command.h"
 #include "../vulkan/caps.h"
+#include "display_diag.h"
 #include "../common/log.h"
 
 #include <stdio.h>
@@ -50,6 +51,7 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
     uint64_t n = ++p->diag2.op_count[src][op & 0xff];
     if (src == LAGFX_DIAG_COMPUTE && op == 0x20) p->diag2.exec_20++;
     if (op == 0x43 || op == 0x45) p->diag2.exec_43_45++;
+    lagfx_dd_note_cmd(p, src, chan, raw, length);   /* display diagnostics: counts / read-only captures, no effect on dispatch */
     /* Bounded: the first 64 of each (source, opcode) and every 64th after that; root commands only the first 16. Counters above never stop. */
     uint64_t cap = src == LAGFX_DIAG_ROOT ? 16u : 64u;
     if (n > cap && (n % 64u) != 0u) return;
@@ -295,5 +297,6 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         fprintf(stderr, "%s\n", gl);
         LAGFX_LOG("%s", gl);
     }
+    lagfx_dd_log_stats(final);   /* g7-pvg-ops: display-path counters (capped) */
     lagfx_draw_diag_flush(p, final);   /* per-draw tuples seen since the last statistics (bounded; formats and logs outside the draw path) */
 }

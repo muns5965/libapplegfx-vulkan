@@ -4,6 +4,7 @@
  */
 #include "arm64_resources.h"
 #include "arm64_exec_decode.h"
+#include "display_diag.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -52,6 +53,7 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t w) { (void)p
 bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { (void)p; return false; }
 uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) { (void)p; return 0; }
 uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) { (void)p; (void)mapping; return 0; }
+bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t *w, uint32_t *h, uint32_t *fourcc, uint32_t *mtl_format, int32_t *vk_format) { (void)p; (void)mapping; (void)w; (void)h; (void)fourcc; (void)mtl_format; (void)vk_format; return false; }
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return 0; }
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) { (void)p; (void)hdr; return false; }
@@ -94,7 +96,7 @@ int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = th
  * Every mapped-texture object (any ref / task) naming the same mapping id and size holds a reference; host_valid / guest_stale are the surface's, not the object's. */
 typedef struct lagfx_a64_msurf {
     mgr2_t *m;
-    uint32_t mapping, w, h, refs, fourcc, bpp;
+    uint32_t mapping, w, h, refs, fourcc, bpp, mtl_fmt;   /* mtl_fmt: the Metal pixel format number of the guest description (diagnostics only) */
     VkFormat format; VkImageUsageFlags usage;
     VkImage img; VkDeviceMemory img_mem;
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
@@ -538,7 +540,7 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
         if (!make_buf(vk, (VkDeviceSize)gs.width * gs.height * gs.bpp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &ms->stage, &ms->stage_mem, &ms->stage_map)) {
             free(ms); MRUN(p).mapped_unsupported++; return false;
         }
-        ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->fourcc = gs.fourcc, ms->bpp = gs.bpp, ms->format = o->format, ms->usage = o->usage;
+        ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->fourcc = gs.fourcc, ms->bpp = gs.bpp, ms->format = o->format, ms->usage = o->usage, ms->mtl_fmt = fmt;
         ms->img = o->img, ms->img_mem = o->img_mem;   /* ownership moves to the surface */
         o->img_mem = VK_NULL_HANDLE;
         m->ms[m->nms++] = ms;
@@ -1339,6 +1341,23 @@ uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) {
     return 0;
 }
 
+/* Diagnostics only (no side effects): size / fourcc / Metal format number / VkFormat number of the mirror surface a swap names. */
+bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t *w, uint32_t *h, uint32_t *fourcc, uint32_t *mtl_format, int32_t *vk_format) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    if (!m || mapping > 0xffffffffull) return false;
+    for (uint32_t i = m->nms; i-- > 0;) {
+        const msurf_t *ms = m->ms[i];
+        if (!ms || ms->mapping != (uint32_t)mapping) continue;
+        if (w) *w = ms->w;
+        if (h) *h = ms->h;
+        if (fourcc) *fourcc = ms->fourcc;
+        if (mtl_format) *mtl_format = ms->mtl_fmt;
+        if (vk_format) *vk_format = (int32_t)ms->format;
+        return true;
+    }
+    return false;
+}
+
 /* ---- render targets and readback ---- */
 
 static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsageFlags need) {
@@ -1659,7 +1678,14 @@ void lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         p->diag2.disp.op_swap++;
         uint32_t skip = (uint32_t)hdr->arg_count_8b * 8u;
         if (!hdr->payload || hdr->payload_size < skip + 40u) { p->diag2.disp.swap_short++; return; }
-        uint32_t r = lagfx_a64_res_display_note(p, lagfx_le64(hdr->payload + skip + 8u));
+        uint64_t mapping_id = lagfx_le64(hdr->payload + skip + 8u);
+        uint32_t r = lagfx_a64_res_display_note(p, mapping_id);
+        {   /* g7-pvg-swap: diagnostics only */
+            lagfx_dd_surface_t si; memset(&si, 0, sizeof si);
+            si.resolved = (r & LAGFX_A64_DSP_RESOLVED) != 0u, si.gpu = (r & LAGFX_A64_DSP_GPU) != 0u, si.guest_current = (r & LAGFX_A64_DSP_WRITTEN) != 0u;
+            if (si.resolved) lagfx_a64_res_display_info(p, mapping_id, &si.w, &si.h, &si.fourcc, &si.mtl_format, &si.vk_format);
+            lagfx_dd_note_swap(mapping_id, &si);
+        }
         if (!(r & LAGFX_A64_DSP_RESOLVED)) { p->diag2.disp.surface_unresolved++; return; }
         p->diag2.disp.surface_resolved++;
         if (!(r & LAGFX_A64_DSP_GPU)) return;

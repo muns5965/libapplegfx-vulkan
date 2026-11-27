@@ -9,6 +9,7 @@
 #include "timer.h"
 #include "libapplegfx-vulkan.h"
 #include "../common/log.h"
+#include "../protocol/display_diag.h"
 #ifdef LAGFX_HAVE_VULKAN
 #include "../device.h"
 #include "../protocol/state.h"
@@ -84,7 +85,19 @@ bool lagfx_timer_tick_vblank(
         uint32_t enabled_mask = 0u;
         if (!read_memory(shell_opaque, ss_gpa + 0x104u, sizeof(enabled_mask), &enabled_mask)) {
             LAGFX_LOG("timer_tick_vblank: display[%u] skip (no read)", i);
+            lagfx_dd_note_vbl_tick(i, 0u, false, false);   /* diagnostics only */
             continue;
+        }
+        {   /* diagnostics only: after our raise, read the pending word back for a few ticks to see whether the guest cleared it (read-only) */
+            static unsigned rb_left[LAGFX_MAX_DISPLAYS];
+            if (rb_left[i] > 0u) {
+                uint32_t pw = 0u;
+                rb_left[i]--;
+                lagfx_dd_note_vbl_readback(i, read_memory(shell_opaque, ss_gpa + 0x100u, sizeof(pw), &pw) ? (int64_t)pw : -1);
+            }
+            bool raise_now = enabled_mask == 0xCu && !(dev->display_ss_enabled & (1u << i));   /* the condition of the raise below (an attempt: the write may still fail) */
+            lagfx_dd_note_vbl_tick(i, enabled_mask, raise_now, true);
+            if (raise_now) rb_left[i] = 16u;
         }
 
         /* DEBUG: Log every tick to confirm timer fires */
