@@ -1928,6 +1928,16 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
        workdir : meson.current_source_dir() / '..')
 endif
 
+# The descriptor binding allocator / table: sequential allocation, sharing, every incompatibility, growth + overflow, the table key, reflected translator output.
+binding_alloc_test = executable('binding-alloc-unit',
+  'binding-alloc-unit.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('descriptor binding allocator (unit)', binding_alloc_test, workdir : meson.current_source_dir() / '..')
+
 # Descriptor bindings of translated modules: no set+binding with two descriptor types (many resources + constexpr samplers + input attachments), growth, VS+FS table.
 air2spv_binding_translate_test = executable('air2spv-binding-translate-unit',
   'air2spv-binding-translate-unit.c',

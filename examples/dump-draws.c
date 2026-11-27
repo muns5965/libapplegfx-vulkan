@@ -38,7 +38,7 @@ static const char *fnfile(const char *dir, uint32_t task, uint32_t ref, char *ou
 static const char *mapsurf(uint32_t task, uint32_t ref) { for (int i = 0; i < g_nmap; i++) if (g_map[i].task == task && g_map[i].ref == ref) return g_map[i].surf; return NULL; }
 static const char *objtag(uint32_t task, uint32_t ref) { for (int i = 0; i < g_nobj; i++) if (g_obj[i].task == task && g_obj[i].ref == ref) return g_obj[i].tag == 3 ? "sampler-state" : "pso/other"; return NULL; }
 
-/* translates + maps the bindings of a PSO; same sequence as lagfx_a64_pipeline_resolve (vertex first for its stage keys, fragment offset by LAGFX_A64_FRAG_BINDING_BASE) */
+/* translates + maps the bindings of a PSO; same sequence as lagfx_a64_pipeline_resolve (vertex first for its stage keys, fragment offset by lagfx_a64_frag_base) */
 static void resolve_pso(const char *dir, const psoent_t *ps, resolved_t *R) {
     memset(R, 0, sizeof *R);
     const lagfx_metallib_function_t *vf = NULL, *ff = NULL; uint8_t *libs[16] = { NULL }; lagfx_metallib_function_t fns[16][8]; size_t nfn[16] = { 0 };
@@ -64,7 +64,7 @@ static void resolve_pso(const char *dir, const psoent_t *ps, resolved_t *R) {
                 nvab = lagfx_air_arg_bindings(vm, vab, LAGFX_A64_MAX_ARGS), nfab = lagfx_air_arg_bindings(fm, fab, LAGFX_A64_MAX_ARGS);
                 if (nvab > 16) nvab = 16;
                 if (nfab > 16) nfab = 16;
-                lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+                lagfx_spv_offset_bindings(fspv, fsz, lagfx_a64_frag_base(vspv, vsz));
                 R->ok = true;
                 R->rc[0] = lagfx_a64_map_stage_bindings(vspv, vsz, 0, vab, nvab, true, true, R->b, &R->nb, &R->why[0]);
                 if (R->rc[0] == LAGFX_A64_MAP_OK) R->rc[1] = lagfx_a64_map_stage_bindings(fspv, fsz, 1, fab, nfab, true, true, R->b, &R->nb, &R->why[1]);

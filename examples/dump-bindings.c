@@ -70,7 +70,7 @@ int main(int argc, char **argv) {
         if (lagfx_air_module_open(vf->bitcode, vf->bitcode_len, &vm) != LAGFX_OK || lagfx_air_module_open(ff->bitcode, ff->bitcode_len, &fm) != LAGFX_OK) { printf("module_open failed\n"); continue; }
         if (!lagfx_air_stage_keys(vm, true, &vk)) memset(&vk, 0, sizeof vk);
         if (lagfx_air2spv_translate_module_ex(vm, NULL, &vspv, &vsz) != LAGFX_OK || lagfx_air2spv_translate_module_ex(fm, &vk, &fspv, &fsz) != LAGFX_OK) { printf("translate failed (%s / %s)\n", vf->name, ff->name); continue; }
-        lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+        lagfx_spv_offset_bindings(fspv, fsz, lagfx_a64_frag_base(vspv, vsz));
         uint8_t *blobs[2] = { vspv, fspv }; size_t lens[2] = { vsz, fsz };
         printf("%s + %s\n", vf->name, ff->name);
         uint32_t n_bind = 0; int verdict = 0;
@@ -83,8 +83,8 @@ int main(int argc, char **argv) {
             printf("\n");
             for (size_t t = 0; t < nt; t++) {
                 if (tmp[t].set == 0u && tmp[t].kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT) {
-                    int why = lagfx_a64_fbfetch_check(st, local_read, tmp[t].binding, n_bind);
-                    printf("  input attachment at binding %u: %s\n", tmp[t].binding, why ? lagfx_a64_fbfetch_reason_name(why) : "ok");
+                    int why = lagfx_a64_fbfetch_check(st, local_read, tmp[t].role_index, n_bind);
+                    printf("  input attachment %u at binding %u: %s\n", tmp[t].role_index, tmp[t].binding, why ? lagfx_a64_fbfetch_reason_name(why) : "ok");
                     if (why && !verdict) verdict = why;
                     nfetch++;
                 }

@@ -1,6 +1,6 @@
 /* For every render PSO of an arm64 GPU dump: translates the vertex + fragment function EXACTLY as lagfx_a64_pipeline_resolve() does (first vertex / first fragment
  * function of the PSO's libraries in function_refs order, vertex translated first, fragment translated with the vertex stage keys, then
- * lagfx_spv_offset_bindings(fragment, LAGFX_A64_FRAG_BINDING_BASE)) and prints the byte size and the FNV-1a-64 hash of both modules in the SAME form as the
+ * lagfx_spv_offset_bindings(fragment, lagfx_a64_frag_base(vertex))) and prints the byte size and the FNV-1a-64 hash of both modules in the SAME form as the
  * "pipeline-build-fail:" device log line (src/vulkan/pipeline_build.c fnv64) - so a device log line can be matched against a dump offline.
  * usage: dump-pairhash <dump dir> [vs-size fs-size | vs-hash fs-hash]   (a filter: only print matching pairs). SPDX-License-Identifier: MIT */
 #include "air/bitcode_reader.h"
@@ -49,7 +49,7 @@ static int cross(const char *dir, const char *fsprefix) {
             if (lagfx_air_module_open(fn[k].bitcode, fn[k].bitcode_len, &vm) != LAGFX_OK || lagfx_air_module_open(ff->bitcode, ff->bitcode_len, &fm) != LAGFX_OK) continue;
             if (!lagfx_air_stage_keys(vm, true, &vk)) memset(&vk, 0, sizeof vk);
             if (lagfx_air2spv_translate_module_ex(vm, NULL, &vspv, &vsz) == LAGFX_OK && lagfx_air2spv_translate_module_ex(fm, &vk, &fspv, &fsz) == LAGFX_OK) {
-                lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+                lagfx_spv_offset_bindings(fspv, fsz, lagfx_a64_frag_base(vspv, vsz));
                 printf("vs lib %.*s %s + fs %s: vs[bytes=%zu hash=%016llx] fs[bytes=%zu hash=%016llx]\n", (int)strlen(e->d_name) - 8, e->d_name + 4, fn[k].name, ff->name, vsz, (unsigned long long)fnv64(vspv, vsz), fsz, (unsigned long long)fnv64(fspv, fsz));
             }
             free(vspv); free(fspv); lagfx_air_module_free(vm); lagfx_air_module_free(fm);
@@ -104,7 +104,7 @@ int main(int argc, char **argv) {
         if (!lagfx_air_stage_keys(vm, true, &vk)) memset(&vk, 0, sizeof vk);
         if (lagfx_air2spv_translate_module_ex(vm, NULL, &vspv, &vsz) != LAGFX_OK || lagfx_air2spv_translate_module_ex(fm, &vk, &fspv, &fsz) != LAGFX_OK) { printf("pso task=%u ref=%u %s+%s: translate failed\n", task, ref, vf->name, ff->name); continue; }
         size_t fsz_raw = fsz; uint64_t fh_raw = fnv64(fspv, fsz);
-        lagfx_spv_offset_bindings(fspv, fsz, LAGFX_A64_FRAG_BINDING_BASE);
+        lagfx_spv_offset_bindings(fspv, fsz, lagfx_a64_frag_base(vspv, vsz));
         uint64_t vh = fnv64(vspv, vsz), fh = fnv64(fspv, fsz);
         int show = 1;
         if (argc >= 4) {

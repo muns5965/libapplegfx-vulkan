@@ -266,6 +266,22 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
         }
     } else c.layout = vk->empty_layout;
     rp(&rep, "layout: %u set(s), %u binding(s), %u push range(s): %s\n", b.n_sets, b.n_dsl, b.n_push, lr == VK_SUCCESS ? "created" : "FAILED to create");
+    {   /* the binding table of the bundle's SPIR-V, derived NOW by the shared derivation (air2spv/binding_alloc.h): the recorded layout above is what the writer saw */
+        VkDescriptorSetLayoutBinding nb[LAGFX_LAYOUT_MAX_BINDINGS];
+        const uint8_t *bl[2] = { b.vs_spv, b.fs_spv };
+        const size_t ln[2] = { b.vs_bytes, b.fs_bytes };
+        uint32_t nn = 0;
+        lagfx_layout_info_t li;
+        lagfx_status_t ds = lagfx_layout_derive(bl, ln, 2, nb, LAGFX_LAYOUT_MAX_BINDINGS, &nn, &li);
+        if (ds != LAGFX_OK) {
+            rp(&rep, "BINDING TABLE INVALID (%u conflict(s), %u overflow(s)): two descriptor types on one set+binding cannot be a layout; a layout derived by the old builder kept ONE of them (recorded layout: %u binding(s), %s):\n",
+               li.n_conflict, li.n_overflow, b.n_dsl, b.layout_error ? "writer already flagged layout.error" : "no layout.error line: bundle from before the check");
+            for (const char *q = li.report; *q;) { const char *e = strchr(q, '\n'); size_t l = e ? (size_t)(e - q) : strlen(q); rp(&rep, "  %.*s\n", (int)l, q); q += l + (e ? 1 : 0); }
+        } else {
+            rp(&rep, "binding table: %u binding(s) derived now, key %016llx (bundle %s %016llx)%s\n", nn, (unsigned long long)li.key, b.layout_key ? "says" : "has no key; ", (unsigned long long)b.layout_key,
+               nn != b.n_dsl ? "; DIFFERS from the recorded layout (count)" : (b.layout_key && b.layout_key != li.key ? "; DIFFERS from the recorded key" : ""));
+        }
+    }
     if (lr != VK_SUCCESS) { rp(&rep, "cannot create the recorded pipeline layout (%d): stopping\n", (int)lr); status = LAGFX_OK; goto cleanup; }
     {
         const uint32_t *vs = (const uint32_t *)b.vs_spv, *fs = (const uint32_t *)b.fs_spv;

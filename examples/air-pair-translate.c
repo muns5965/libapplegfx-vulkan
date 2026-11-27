@@ -13,6 +13,7 @@
  *   exit:  0 = translated, no collision; 1 = translate / I/O failure; 3 = translated but the table has a collision (the SPIR-V is still written)
  */
 #include "air/bitcode_reader.h"
+#include "air2spv/binding_alloc.h"
 #include "air2spv/spv_reflect.h"
 #include "air2spv/translate.h"
 #include "libapplegfx-vulkan.h"
@@ -76,7 +77,7 @@ int main(int argc, char **argv) {
     uint8_t *vs = NULL, *fs = NULL;
     size_t vsn = 0, fsn = 0;
     if (lagfx_air2spv_translate_module_ex(vm, NULL, &vs, &vsn) != LAGFX_OK || lagfx_air2spv_translate_module_ex(fm, &k, &fs, &fsn) != LAGFX_OK) { fprintf(stderr, "error: translate\n"); return 1; }
-    lagfx_spv_offset_bindings(fs, fsn, LAGFX_A64_FRAG_BINDING_BASE);
+    lagfx_spv_offset_bindings(fs, fsn, lagfx_a64_frag_base(vs, vsn));
     char path[1024];
     snprintf(path, sizeof path, "%s.vs.spv", argv[3]);
     int rc = write_file(path, vs, vsn);
@@ -88,18 +89,21 @@ int main(int argc, char **argv) {
     size_t nv = 0, nf = 0;
     table("vertex", vs, vsn, vt, &nv);
     table("fragment", fs, fsn, ft, &nf);
-    /* merged set-0 table: any (set, binding) holding two different kinds */
+    /* merged table through the SAME code the layout builder uses: stages, input-attachment indices and every set+binding holding two incompatible descriptors */
     int ncol = 0;
-    lagfx_spv_binding_t *all[2] = { vt, ft };
-    size_t cnt[2] = { nv, nf };
-    for (int a = 0; a < 2; a++)
-        for (size_t i = 0; i < cnt[a]; i++)
-            for (int b = a; b < 2; b++)
-                for (size_t j = (b == a ? i + 1 : 0); j < cnt[b]; j++)
-                    if (all[a][i].set == all[b][j].set && all[a][i].binding == all[b][j].binding && all[a][i].kind != all[b][j].kind) {
-                        printf("COLLISION set %u binding %u: %s vs %s\n", all[a][i].set, all[a][i].binding, kind_name(all[a][i].kind), kind_name(all[b][j].kind));
-                        ncol++;
-                    }
+    {
+        lagfx_ba_t *ba = malloc(sizeof *ba);
+        const uint8_t *bl[2] = { vs, fs };
+        const size_t ln[2] = { vsn, fsn };
+        char txt[8192];
+        if (!ba) return 1;
+        lagfx_ba_init(ba);
+        lagfx_ba_merge_modules(ba, bl, ln, 2);
+        lagfx_ba_describe(ba, txt, sizeof txt);
+        printf("== merged set-0 table (layout key %016llx)\n%s", (unsigned long long)lagfx_ba_key(ba), txt);
+        ncol = (int)(ba->nconflict + ba->noverflow);
+        free(ba);
+    }
     printf("collisions: %d\n", ncol);
     free(vs); free(fs);
     lagfx_air_module_free(vm); lagfx_air_module_free(fm);
