@@ -12,6 +12,9 @@
 #include "../vulkan/sampler_cache.h"
 #include "display_diag.h"
 #include "gap_diag.h"
+#include "gamma_diag.h"
+#include "arm64_exec_decode.h"
+#include "handlers/compute/task_translate.h"
 #include "object_resolver.h"
 #include "../common/log.h"
 
@@ -42,9 +45,27 @@ static bool diag_init_clock(lagfx_protocol_t *p, uint64_t t) {
     return __atomic_compare_exchange_n(&p->diag2.t0_ns, &zero, t, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
 }
 
-static bool dd_read_region(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out) {
+/* Status-returning diagnostic task read (gamma_diag.h). It follows the page-table geometry of the real path (lagfx_proto_arm64): 16 KiB pages / root pfn << 14 for arm64-vmapple,
+ * the legacy 4 KiB reader only for x86. dd_read_region used to call lagfx_task_read_virtual unconditionally, which cannot translate anything on an arm64 device. */
+int lagfx_gd_task_read(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out) {
     lagfx_task_entry_t *t = lagfx_protocol_find_task(p, task_id);
-    return t && lagfx_task_read_virtual(p, t, va, len, out);
+    if (!t || !out) return LAGFX_GD_RD_NO_TASK;
+    if (!len) return LAGFX_GD_RD_OK;
+    if (va + len < va) return LAGFX_GD_RD_UNMAPPED;
+    const bool a64 = lagfx_proto_arm64(p);   /* the switch every real arm64 path uses */
+    if (a64 ? lagfx_arm64_task_read(p, t, va, out, len) : lagfx_task_read_virtual(p, t, va, len, out)) return LAGFX_GD_RD_OK;
+    /* Classify the failure with the same geometry: some page does not translate (unmapped), or all translate and the guest-physical read failed. */
+    const uint64_t pg = a64 ? 0x4000u : 0x1000u;
+    for (uint64_t cur = va; cur < va + len; cur = (cur & ~(pg - 1u)) + pg) {
+        uint64_t gpa;
+        if (!(a64 ? lagfx_arm64_task_translate(p, t, cur, &gpa) : lagfx_task_translate(p, t, cur, &gpa))) return LAGFX_GD_RD_UNMAPPED;
+    }
+    return LAGFX_GD_RD_PHYS_FAIL;
+}
+bool lagfx_gd_task_read_bool(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out) { return lagfx_gd_task_read(p, task_id, va, len, out) == LAGFX_GD_RD_OK; }
+
+static bool dd_read_region(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out) {
+    return lagfx_gd_task_read_bool(p, task_id, va, len, out);
 }
 
 static bool dd_owner(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task) { return lagfx_a64_res_display_owner(p, mapping, task); }
@@ -63,6 +84,7 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
     if (src == LAGFX_DIAG_COMPUTE && op == 0x20) p->diag2.exec_20++;
     if (op == 0x43 || op == 0x45) p->diag2.exec_43_45++;
     lagfx_dd_set_reader(dd_read_region);
+    lagfx_gd_set_reader(lagfx_gd_task_read);
     lagfx_dd_set_owner_lookup(dd_owner);
     lagfx_dd_note_cmd(p, src, chan, raw, length);   /* display diagnostics: counts / read-only captures, no effect on dispatch */
     lagfx_gap_note_cmd(t, p->diag2.t0_ns, src, chan, seq, n, raw, length);   /* idle-gap diagnostics (default on; LAGFX_GAPDIAG=0 off): lines only, no effect on dispatch */

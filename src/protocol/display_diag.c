@@ -10,6 +10,7 @@
 #include "display_diag.h"
 #include "state.h"
 #include "object_resolver.h"
+#include "gamma_diag.h"
 #include "../common/log.h"
 
 #include <stdlib.h>
@@ -32,7 +33,7 @@ void lagfx_dd_set_owner_lookup(lagfx_dd_owner_t f) { s_owner = f; }
 
 static void dd_say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void dd_say(const char *fmt, ...) {
-    char line[1500];
+    char line[2000];
     va_list ap; va_start(ap, fmt); vsnprintf(line, sizeof line, fmt, ap); va_end(ap);
     fprintf(stderr, "%s\n", line);
     LAGFX_LOG("%s", line);
@@ -50,7 +51,7 @@ static uint64_t s_cursor_show, s_cursor_glyph, s_cursor_lines, s_cursor_poschg, 
 static int s_cursor_have_pos, s_cursor_have_glyph;
 static int s_cx, s_cy; static uint32_t s_cvis, s_cgw, s_cgh;
 static uint64_t s_vbl_ticks, s_vbl_raises, s_vbl_noread, s_vbl_readbacks, s_vbl_pending_set, s_vbl_readback_zero, s_vbl_readback_fail, s_vbl_lines;
-static uint64_t s_gamma_raw_lines, s_gamma_attempts, s_gamma_done, s_stat_lines;
+static uint64_t s_gamma_raw_lines, s_stat_lines;
 
 static void op_seen(opseen_t *o, uint32_t op, uint32_t chan) {
     if (__atomic_add_fetch(&o->n, 1u, __ATOMIC_RELAXED) == 1u) {
@@ -89,7 +90,8 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
     op_seen(&s_op08, op, chan);
     if (chan != 4u) return;
     uint64_t n = INC(s_op08_ch4);
-    if (n > 3u) return;   /* the raw dump and the gamma search: the first 3 channel-4 op 0x08 only */
+    lagfx_gd_note_op8(p, chan, pl, plen, skip, s_reader, s_owner);   /* EVERY channel-4 op 0x08: descriptor change log, region read, address-space probes (gamma_diag.c) */
+    if (n > 3u) return;   /* the raw dump: the first 3 channel-4 op 0x08 only */
     {
         char hx[3 * 96 + 8]; size_t o = 0; uint32_t shown = plen < 96u ? plen : 96u;
         for (uint32_t i = 0; i < shown; i++) o += (size_t)snprintf(hx + o, sizeof hx - o, "%02x ", pl[i]);
@@ -98,43 +100,6 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
         INC(s_gamma_raw_lines);
         dd_say("g7-pvg-gamma: op8 raw #%llu ch=%u arg8=%u payload_len=%u found_word_index[0x118000]=%d [0x4000]=%d [257]=%d [0x48400000]=%d (-1 = absent; INFER: positions searched, not assumed) bytes: %s%s",
                   (unsigned long long)n, chan, arg8, plen, w_off, w_len, w_cnt, w_ck, hx, shown < plen ? "..." : "");
-        if (w_off >= 0 && GET(s_gamma_done) == 0u && GET(s_gamma_attempts) < 3u) {
-            INC(s_gamma_attempts);
-            /* The task that CREATED the display mapping (named by this very op 0x08) owns the region: ask it first. The last 0x44 is only a guess (vm2: last 0x44 = task 6, the
-             * surface was created by task 2) and the same VA can be mapped in several tasks, so the scan over every other live task is a DIAGNOSTIC FALLBACK, reported as such. */
-            uint64_t mapping = skip + 16u <= plen ? lagfx_dd_rd32(pl + skip + 8u) | (uint64_t)lagfx_dd_rd32(pl + skip + 12u) << 32 : 0;
-            uint32_t owner = 0; bool have_owner = s_owner && skip + 16u <= plen && s_owner(p, mapping, &owner);
-            const bool have_task = p->diag2.last44_global_valid != 0;
-            if ((!have_task && !have_owner) || !s_reader) {
-                dd_say("g7-pvg-gamma: region not read: %s (valid=%d task=%u owner=%s)", s_reader ? "no live task for the last 0x44 and no owner task of the mapping" : "no reader registered", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task, have_owner ? "known" : "unknown");
-            } else {
-                uint8_t *buf = (uint8_t *)malloc(0x4000u);
-                uint32_t task = have_owner ? owner : p->diag2.last44_global_task, tried = 0;
-                const char *via = have_owner ? "owner" : "last44";
-                bool ok = false;
-                if (buf) {
-                    ok = s_reader(p, task, 0x118000u, 0x4000u, buf), tried = 1;
-                    if (!ok && have_owner && have_task && p->diag2.last44_global_task != owner) {
-                        tried++;
-                        if (s_reader(p, p->diag2.last44_global_task, 0x118000u, 0x4000u, buf)) ok = true, task = p->diag2.last44_global_task, via = "last44(owner failed)";
-                    }
-                    for (uint32_t i = 0; !ok && i < LAGFX_MAX_TASKS; i++) {
-                        if (!p->tasks[i].live || (have_owner && p->tasks[i].id == owner) || (have_task && p->tasks[i].id == p->diag2.last44_global_task)) continue;
-                        tried++;
-                        if (s_reader(p, p->tasks[i].id, 0x118000u, 0x4000u, buf)) ok = true, task = p->tasks[i].id, via = "scan(DIAGNOSTIC FALLBACK: neither the owner nor the last 0x44 could read it; the same VA may exist in several tasks)";
-                    }
-                }
-                if (ok) {
-                    lagfx_dd_gamma_t g; char line[420];
-                    lagfx_dd_gamma_summarize(buf, 0x4000u, &g); lagfx_dd_gamma_format(line, sizeof line, &g);
-                    __atomic_store_n(&s_gamma_done, 1u, __ATOMIC_RELAXED);
-                    dd_say("g7-pvg-gamma: region task=%u via=%s (owner=%d last 0x44 task=%u, %u task(s) tried) va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", task, via, have_owner ? (int)owner : -1, p->diag2.last44_global_task, tried, line);
-                } else {
-                    dd_say("g7-pvg-gamma: region read FAILED task=%u owner=%d (%u task(s) tried) va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", task, have_owner ? (int)owner : -1, tried, (unsigned long long)GET(s_gamma_attempts));
-                }
-                free(buf);
-            }
-        }
     }
 }
 
@@ -193,10 +158,12 @@ void lagfx_dd_note_vbl_readback(unsigned display, int64_t pending_word) {
 }
 
 size_t lagfx_dd_stats_line(char *out, size_t cap) {
+    lagfx_gd_stats_t gs; char gsuf[400];
+    lagfx_gd_stats_get(&gs); lagfx_gd_stats_suffix(gsuf, sizeof gsuf);
     int n = snprintf(out, cap,
         "g7-pvg-ops: t=+%llus op37=%llu(first +%llums ch%u) op22=%llu(first +%llums ch%u) op08=%llu(ch4=%llu first +%llums ch%u) op0a=%llu(identity=%llu other=%llu first +%llums ch%u) "
         "swaps=%llu(unresolved=%llu gpu=%llu last mapping=%llu %ux%u mtl=%u(%s) vk=%d(%s)) cursor[ops_show=%llu ops_glyph=%llu pos_changes=%llu vis_changes=%llu glyph_updates=%llu(size_changes) last=(%d,%d) vis=%u glyph=%ux%u] "
-        "vbl[ticks=%llu raise_attempts=%llu tick_noread=%llu readbacks=%llu readback_zero(consumed INFER)=%llu readback_nonzero=%llu readback_failed=%llu] gamma[raw_lines=%llu read_attempts=%llu read_done=%llu]",
+        "vbl[ticks=%llu raise_attempts=%llu tick_noread=%llu readbacks=%llu readback_zero(consumed INFER)=%llu readback_nonzero=%llu readback_failed=%llu] gamma[raw_lines=%llu read_attempts=%llu read_done=%llu%s]",
         (unsigned long long)(dd_ms() / 1000ull),
         (unsigned long long)GET(s_op37.n), (unsigned long long)s_op37.first_ms, s_op37.first_chan, (unsigned long long)GET(s_op22.n), (unsigned long long)s_op22.first_ms, s_op22.first_chan,
         (unsigned long long)GET(s_op08.n), (unsigned long long)GET(s_op08_ch4), (unsigned long long)s_op08.first_ms, s_op08.first_chan,
@@ -205,13 +172,13 @@ size_t lagfx_dd_stats_line(char *out, size_t cap) {
         s_last_mtl, lagfx_dd_mtl_name(s_last_mtl), (int)s_last_vk, lagfx_dd_vk_name(s_last_vk),
         (unsigned long long)GET(s_cursor_show), (unsigned long long)GET(s_cursor_glyph), (unsigned long long)GET(s_cursor_poschg), (unsigned long long)GET(s_cursor_vischg), (unsigned long long)GET(s_cursor_glyph_chg), s_cx, s_cy, s_cvis, s_cgw, s_cgh,
         (unsigned long long)GET(s_vbl_ticks), (unsigned long long)GET(s_vbl_raises), (unsigned long long)GET(s_vbl_noread), (unsigned long long)GET(s_vbl_readbacks), (unsigned long long)GET(s_vbl_readback_zero), (unsigned long long)GET(s_vbl_pending_set), (unsigned long long)GET(s_vbl_readback_fail),
-        (unsigned long long)GET(s_gamma_raw_lines), (unsigned long long)GET(s_gamma_attempts), (unsigned long long)GET(s_gamma_done));
+        (unsigned long long)GET(s_gamma_raw_lines), (unsigned long long)gs.read_attempts, (unsigned long long)gs.read_done, gsuf);
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
 void lagfx_dd_log_stats(bool final) {
     if (!final && __atomic_fetch_add(&s_stat_lines, 1u, __ATOMIC_RELAXED) >= 40u) return;
-    char line[1400];
+    char line[2000];
     lagfx_dd_stats_line(line, sizeof line);
     dd_say("%s", line);
 }

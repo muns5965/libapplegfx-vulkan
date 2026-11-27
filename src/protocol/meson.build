@@ -27,6 +27,7 @@ lagfx_sources += files(
   'draw_diag.c',    # bounded per-draw diagnostics (G7_DRAW_DIAG)
   'diag.c',         # command diagnostics (logging + counters only)
   'gap_diag.c',     # idle-gap diagnostics (default on): gap detector, op 0x0009 line, first swaps / pass / draw after a gap
+  'gamma_diag.c',   # gamma descriptor diagnostics (read-only): arm64 16 KiB reads, split counters, address-space probes
   'display_diag.c', # display-path diagnostics: swap format, gamma capture (read-only), cursor/vbl counters
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write
    'object_resolver.c',  # Phase B object ID resolver for metallib lookup

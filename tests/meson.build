@@ -2149,6 +2149,17 @@ if fs.is_file(meson.current_source_dir() / 'display-diag-gamma-owner-unit.c')
   test('display diagnostics: gamma region read prefers the mapping owner task (unit)', display_diag_gamma_owner_test)
 endif
 
+# Gamma descriptor diagnostics: 16 KiB task reads (arm64 geometry) vs the legacy 4 KiB reader, split counters, 257-entry table layout, address-space probes (synthetic page tables, no Vulkan device).
+if fs.is_file(meson.current_source_dir() / 'gamma-diag-unit.c')
+  gamma_diag_test = executable('gamma-diag-unit',
+    'gamma-diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('display diagnostics: gamma descriptor 16 KiB reads, counters, layout (unit)', gamma_diag_test)
+endif
+
 # Format / usage / blend / sample-count capability queries (vkGetPhysicalDeviceFormatProperties2 / ImageFormatProperties2) with injected less-capable devices; real lavapipe sweep skips (B) without an ICD.
 format_caps_test = executable('vulkan-format-caps-unit',
   'vulkan-format-caps-unit.c',
