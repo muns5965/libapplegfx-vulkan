@@ -17,10 +17,43 @@
 
 #include "air2spv/constexpr_sampler.h"
 
+/* Process-wide fidelity counters of the constexpr-sampler mapping (and of the runtime sampler's undefined enum values). Each counter counts sampler-state BUILDS
+ * (one per constexpr bind, plus test calls) in which the condition held; the log line is printed once per distinct word. The names say what the host did, not what
+ * Metal does: cxs_bicubic_as_linear counts a bicubic request that was sampled with plain LINEAR; real bicubic filtering is NOT implemented. */
+typedef struct {
+    uint64_t cxs_bicubic_as_linear;      /* mag or min filter 2 (bicubic) mapped to VK_FILTER_LINEAR (approximation) */
+    uint64_t cxs_clamp_zero_as_border;   /* address 0 (clamp_to_zero) mapped to clamp-to-border + transparent black (approximation) */
+    uint64_t cxs_addr_unsupported;       /* address value 5..7 (undefined): fell back to clamp-to-edge */
+    uint64_t cxs_filter_unsupported;     /* mag/min filter value 3 (undefined): fell back to LINEAR (as before) */
+    uint64_t cxs_mip_unsupported;        /* mip filter value 3 (undefined): fell back to nearest (as before) */
+    uint64_t cxs_compare_ignored;        /* compare function field != 8 (no compare): not mapped */
+    uint64_t cxs_unnorm_illegal_addr;    /* pixel word with repeat / mirrored repeat on S or T: no Vulkan unnormalized sampler (the state stays normalized) */
+    uint64_t cxs_words_logged;           /* distinct words that produced a log line */
+    uint64_t rt_addr_unknown;            /* runtime sampler address mode 6 / 7 (undefined) mapped to clamp-to-edge */
+    uint64_t rt_mip_unknown;             /* runtime sampler mip filter 3 (undefined) */
+} lagfx_sampler_diag_t;
+
+void lagfx_sampler_diag_get(lagfx_sampler_diag_t *out);        /* snapshot (zeros without Vulkan) */
+void lagfx_sampler_diag_reset(void);                           /* tests only: zero the counters and forget the logged words */
+void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t state_word);   /* the runtime sampler: count + log once per distinct state word */
+
 #ifdef LAGFX_HAVE_VULKAN
 #include <vulkan/vulkan.h>
 
 #define LAGFX_SAMPLER_CACHE_MAX 32u
+
+typedef enum { LAGFX_CXS_EXACT = 0, LAGFX_CXS_APPROX = 1, LAGFX_CXS_UNSUPPORTED = 2 } lagfx_cxs_fid_t;
+
+/* THE mapper of the constexpr address-mode field (INFER numbering, see constexpr_sampler.h; NOT the runtime / MTLSamplerAddressMode numbering):
+ * 0 clamp_to_zero -> CLAMP_TO_BORDER (APPROX), 1 clamp_to_edge, 2 repeat, 3 mirrored_repeat, 4 clamp_to_border (transparent black) -> EXACT;
+ * 5..7 -> CLAMP_TO_EDGE, UNSUPPORTED (never wraps onto another mode). Shared by from_constexpr and from_constexpr_norm (the production path). */
+lagfx_cxs_fid_t lagfx_cxs_map_address(uint32_t v, VkSamplerAddressMode *out);
+/* Filter field: 0 nearest, 1 linear EXACT; 2 bicubic -> LINEAR APPROX; 3.. -> LINEAR UNSUPPORTED. */
+lagfx_cxs_fid_t lagfx_cxs_map_filter(uint32_t v, VkFilter *out);
+/* Mip filter field: 0 none (NEAREST mode, level 0 only), 1 nearest, 2 linear EXACT; 3.. -> NEAREST UNSUPPORTED. */
+lagfx_cxs_fid_t lagfx_cxs_map_mip(uint32_t v, VkSamplerMipmapMode *out);
+/* Vulkan: unnormalized coordinates need clamp-to-edge or clamp-to-border on U and V. */
+bool lagfx_cxs_address_unnorm_legal(VkSamplerAddressMode m);
 
 typedef struct {
     VkFilter             mag_filter, min_filter;

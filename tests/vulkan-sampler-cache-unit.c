@@ -78,6 +78,23 @@ int main(void) {
         CHECK(lagfx_sampler_cache_get(&c, &st) == ws[i]);
         for (int j = 0; j < i; j++) CHECK(ws[i] != ws[j]);
     }
+    /* Undefined address values 5..7 fall back to clamp-to-edge: the same post-mapping state as raw 1 shares ONE cache entry (the key is the mapped state). */
+    {
+        uint32_t n0 = lagfx_sampler_cache_count(&c);
+        VkSampler first = VK_NULL_HANDLE;
+        for (unsigned a = 1; a <= 7; a++) {
+            if (a >= 2 && a <= 4) continue;
+            uint64_t w = 0x807bff0000080a00ull | (uint64_t)a | (uint64_t)a << 3 | (uint64_t)a << 6;
+            lagfx_constexpr_sampler_t cx;
+            CHECK(lagfx_constexpr_sampler_decode(w, &cx));
+            lagfx_sampler_state_t sx = lagfx_sampler_state_from_constexpr_norm(&cx);
+            VkSampler h = lagfx_sampler_cache_get(&c, &sx);
+            CHECK(h != VK_NULL_HANDLE);
+            if (!first) first = h;
+            CHECK(h == first);
+        }
+        CHECK(lagfx_sampler_cache_count(&c) == n0 + 0u || lagfx_sampler_cache_count(&c) == n0 + 1u);   /* 0: the edge / linear state was already cached by the captured word 0x...a49 */
+    }
     /* Undecodable word / NULL -> the default state. */
     lagfx_constexpr_sampler_t bad;
     CHECK(!lagfx_constexpr_sampler_decode(0x0ull, &bad));

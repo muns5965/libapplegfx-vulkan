@@ -8,6 +8,7 @@
 #include "arm64_resources.h"
 #include "../vulkan/command.h"
 #include "../vulkan/caps.h"
+#include "../vulkan/sampler_cache.h"
 #include "display_diag.h"
 #include "object_resolver.h"
 #include "../common/log.h"
@@ -195,6 +196,15 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->ext_gather_why[0], (unsigned long long)R->ext_gather_why[1], (unsigned long long)R->ext_gather_why[2], (unsigned long long)R->ext_gather_why[3], (unsigned long long)R->ext_gather_why[4], (unsigned long long)R->ext_gather_bytes, (unsigned long long)R->ext_gather_reused,
                  (unsigned long long)R->no_pipeline_why[0], (unsigned long long)R->no_pipeline_why[1], (unsigned long long)R->no_pipeline_why[2], (unsigned long long)R->no_pipeline_why[3], (unsigned long long)X->pipe.desc_linear_stale, (unsigned long long)R->ext_tex_prepared,
                  (unsigned long long)R->ext_cxs_binds, (unsigned long long)R->ext_tex3d_binds, (unsigned long long)R->ext_tex_dim_mismatch);
+        fprintf(stderr, "%s\n", el);
+        LAGFX_LOG("%s", el);
+        lagfx_sampler_diag_t sd;
+        lagfx_sampler_diag_get(&sd);
+        snprintf(el, sizeof el,
+                 "g7-gpu-cxs: cxs[bicubic_as_linear=%llu clamp_zero_as_border=%llu addr_unsupported=%llu filter_unsupported=%llu mip_unsupported=%llu compare_ignored=%llu unnorm_illegal_addr=%llu words_logged=%llu] runtime[addr_unknown=%llu mip_unknown=%llu]",
+                 (unsigned long long)sd.cxs_bicubic_as_linear, (unsigned long long)sd.cxs_clamp_zero_as_border, (unsigned long long)sd.cxs_addr_unsupported, (unsigned long long)sd.cxs_filter_unsupported,
+                 (unsigned long long)sd.cxs_mip_unsupported, (unsigned long long)sd.cxs_compare_ignored, (unsigned long long)sd.cxs_unnorm_illegal_addr, (unsigned long long)sd.cxs_words_logged,
+                 (unsigned long long)R->ext_samp_addr_unknown, (unsigned long long)R->ext_samp_mip_unknown);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);
     }

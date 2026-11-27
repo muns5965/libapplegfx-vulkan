@@ -59,6 +59,8 @@ uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_ani
     if (cmp) flags |= LAGFX_A64_SAMP_COMPARE_IGNORED;
     if (!have_mirror_clamp && (am[0] == 1u || am[1] == 1u || am[2] == 1u)) flags |= LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX;
     if (st & 0x10u) flags |= LAGFX_A64_SAMP_LODAVG_IGNORED;
+    if (am[0] > 5u || am[1] > 5u || am[2] > 5u) flags |= LAGFX_A64_SAMP_ADDR_UNKNOWN;   /* the mapping above is unchanged: 6 / 7 stay clamp-to-edge */
+    if ((st >> 24 & 3u) == 3u) flags |= LAGFX_A64_SAMP_MIP_UNKNOWN;
     return flags;
 }
 #endif

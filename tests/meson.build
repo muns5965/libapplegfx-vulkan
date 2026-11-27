@@ -1935,6 +1935,22 @@ if fs.is_file(meson.current_source_dir() / 'vulkan-sampler-cache-unit.c')
        workdir : meson.current_source_dir() / '..')
 endif
 
+# Sampler address / filter / mip mapping + fidelity counters (state level, no device): the one mapper, production vs test-only path, undefined values.
+if fs.is_file(meson.current_source_dir() / 'vulkan-sampler-mapping-unit.c')
+  sampler_map_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    sampler_map_deps += [vulkan_dep]
+  endif
+  sampler_map_test = executable('vulkan-sampler-mapping-unit',
+    'vulkan-sampler-mapping-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : sampler_map_deps,
+    build_by_default : true,
+  )
+  test('vulkan sampler mapping + fidelity counters (unit)', sampler_map_test,
+       workdir : meson.current_source_dir() / '..')
+endif
+
 # Fragment [[position]]: BuiltIn FragCoord only with the pair keys (translate_module_ex), Location fallback without. Hand-written fixture.
 if fs.is_file(meson.current_source_dir() / 'air2spv-fragment-position-unit.c')
   air2spv_fpos_test = executable('air2spv-fragment-position-unit',
