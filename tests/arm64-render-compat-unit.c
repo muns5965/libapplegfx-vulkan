@@ -342,6 +342,76 @@ static void test_clear_integer_class(void) {
     puts("PASS: an integer colour attachment is cleared through the uint32 / int32 member by its numeric class (R32Uint 7 -> 7; saturating); a float target keeps float32");
 }
 
+/* S04 follow-up: is the blit "fill" of an integer texture a NUMERIC colour or a raw bit pattern? Findings [I from the payload decode + opcode names; Metal's own text is [N]]:
+ *   - 0x141 FillTextureWithColor (blit_inner_ops.c op_fill_texture_with_color -> lagfx_translate_blit_fill_texture_color -> vkCmdClearColorImage) carries 4 f64 (r, g, b, a) + the pixel format:
+ *     the same MTLClearColor-style numeric colour as a render pass clear, so it takes the SAME conversion function (lagfx_fmtcap_clear_color: members by numeric class, saturating).
+ *   - the BYTE / pattern fills are different opcodes that never reach that function: 0x140 FillTextureWithBytes (still op_ack_stub, applies nothing), and the buffer fills 306 (u8 value,
+ *     vkCmdFillBuffer + staging for the unaligned edges) and 319 / 0x13f (32-bit pattern) of arm64_resources.c, exact bytes asserted in arm64-exec-blit-unit.c "306 fill ... exact".
+ *     [MTLBlitCommandEncoder fillBuffer:range:value:] is a BYTE fill of a BUFFER (public Metal API; there is no public texture fill) and is the 306 path, not this one.
+ * So the numeric conversion is right for 0x141 and must not (and does not) apply to the byte fills. This test pins both halves on lavapipe: render-pass clear (test_clear_integer_class) and
+ * blit fill of R32Uint / R32Sint / R8Uint give the same numeric result for the same doubles, and a byte value written by the byte path is not converted (a buffer filled with 0xFF stays 0xFF
+ * bytes, which a numeric conversion of 255.0 into an R32Uint would not produce: 0x000000FF). */
+#include "translate/blit_encoder.h"
+#include "vulkan/iosurface.h"
+static int fill_probe(VkFormat fmt, uint32_t pixel_format, const double col[4], uint32_t *out_word) {
+    struct lagfx_vk_state *vk = g_dev->vk;
+    VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { 4, 4, 1 }, .mipLevels = 1, .arrayLayers = 1,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VkImage img; if (vkCreateImage(vk->device, &ici, NULL, &img) != VK_SUCCESS) return 0;
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(vk->device, img, &mr);
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &mp);
+    uint32_t mt = 0; for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if (mr.memoryTypeBits & (1u << i)) { mt = i; break; }
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt };
+    VkDeviceMemory im; assert(vkAllocateMemory(vk->device, &mai, NULL, &im) == VK_SUCCESS); assert(vkBindImageMemory(vk->device, img, im, 0) == VK_SUCCESS);
+    lagfx_vk_iosurface_t ios; memset(&ios, 0, sizeof ios); ios.image = img; ios.format = fmt; ios.width = 4; ios.height = 4;
+    MTLOrigin o = { 0, 0, 0 }; MTLSize sz = { 4, 4, 1 };
+    assert(lagfx_translate_blit_fill_texture_color(vk, &ios, 0, 0, &o, &sz, col, pixel_format) == LAGFX_OK);
+    /* read texel (0,0) back */
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 256, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+    VkBuffer b; assert(vkCreateBuffer(vk->device, &bci, NULL, &b) == VK_SUCCESS);
+    vkGetBufferMemoryRequirements(vk->device, b, &mr);
+    mt = 0; for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) { mt = i; break; }
+    mai.allocationSize = mr.size; mai.memoryTypeIndex = mt;
+    VkDeviceMemory bm; assert(vkAllocateMemory(vk->device, &mai, NULL, &bm) == VK_SUCCESS); assert(vkBindBufferMemory(vk->device, b, bm, 0) == VK_SUCCESS);
+    VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .queueFamilyIndex = vk->graphics_queue_family };
+    VkCommandPool pool; assert(vkCreateCommandPool(vk->device, &cpi, NULL, &pool) == VK_SUCCESS);
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBuffer cb; assert(vkAllocateCommandBuffers(vk->device, &cai, &cb) == VK_SUCCESS);
+    VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO }; vkBeginCommandBuffer(cb, &cbi);
+    VkImageMemoryBarrier br = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT, .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &br);
+    VkBufferImageCopy bic = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { 4, 4, 1 } };
+    vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, b, 1, &bic); vkEndCommandBuffer(cb);
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    assert(vkQueueSubmit(vk->graphics_queue, 1, &si, VK_NULL_HANDLE) == VK_SUCCESS); vkQueueWaitIdle(vk->graphics_queue);
+    void *mp_; assert(vkMapMemory(vk->device, bm, 0, VK_WHOLE_SIZE, 0, &mp_) == VK_SUCCESS);
+    *out_word = 0; memcpy(out_word, mp_, fmt == VK_FORMAT_R8_UINT ? 1 : 4);
+    vkUnmapMemory(vk->device, bm);
+    vkDestroyCommandPool(vk->device, pool, NULL); vkDestroyBuffer(vk->device, b, NULL); vkFreeMemory(vk->device, bm, NULL); vkDestroyImage(vk->device, img, NULL); vkFreeMemory(vk->device, im, NULL);
+    return 1;
+}
+static void test_blit_fill_vs_clear(void) {
+    val_begin();
+    static const struct { VkFormat f; uint32_t mtl; double v; uint32_t want; const char *what; } k[] = {
+        { VK_FORMAT_R32_UINT, 53, 7.0,  7u,          "R32Uint 7.0 -> 7 (not the float bits 0x40E00000)" },
+        { VK_FORMAT_R32_UINT, 53, 255.0, 255u,       "R32Uint 255.0 -> 255 (a BYTE fill of 0xFF would give 0xFFFFFFFF)" },
+        { VK_FORMAT_R32_UINT, 53, 5e9,  0xffffffffu, "R32Uint 5e9 saturates" },
+        { VK_FORMAT_R32_UINT, 53, -3.0, 0u,          "R32Uint -3 -> 0" },
+        { VK_FORMAT_R32_UINT, 53, 2.9,  2u,          "R32Uint 2.9 truncates to 2" },
+        { VK_FORMAT_R32_SINT, 54, -3.0, 0xfffffffdu, "R32Sint -3 -> -3" },
+        { VK_FORMAT_R8_UINT,  13, 200.0, 200u,       "R8Uint 200 -> 200" },
+        { VK_FORMAT_R8_UINT,  13, 300.0, 255u,       "R8Uint 300 saturates to 255" },
+    };
+    for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) {
+        const double col[4] = { k[i].v, 0, 0, 0 }; uint32_t w;
+        if (!fill_probe(k[i].f, k[i].mtl, col, &w)) { printf("note: device cannot create format %d for the blit-fill probe: %s skipped\n", (int)k[i].f, k[i].what); continue; }
+        if (w != k[i].want) { printf("FAIL blit fill: %s: got 0x%08x want 0x%08x\n", k[i].what, w, k[i].want); abort(); }
+    }
+    val_end("S04 blit fill");
+    puts("PASS: blit FillTextureWithColor (0x141, 4 doubles) of integer textures is the same numeric conversion as the render clear (R32Uint / R32Sint / R8Uint, saturating, truncating); byte fills are other opcodes (306 / 319 buffer fills, 0x140 stub) and never use it");
+}
+
 /* S05 (docs/spec-audit.md): the guest's MTLViewport is used as recorded. A viewport larger than the target / with a negative origin is legal in Vulkan (VkViewport [V]: bounded only by
  * viewportBoundsRange / maxViewportDimensions) and must map NDC through the FULL declared rect; the old path clamped the rect to the target, which rescaled the mapping. One
  * triangle (NDC (-0.9,-0.9) (0.9,-0.9) (0,0.9)) on the 16x16 R32Uint target; a covered pixel reads 1 (the fragment shader adds 1). */
@@ -650,6 +720,7 @@ int main(void) {
     test_split_mrt();
     test_fetch_class();
     test_clear_integer_class();
+    test_blit_fill_vs_clear();
     test_viewport_classes();
     test_viewport_semantics();
     test_discard_fragment();
