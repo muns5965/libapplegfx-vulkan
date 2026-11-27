@@ -16,6 +16,7 @@
 #include "common/policy.h"
 #include "device.h"
 #include "protocol/state.h"
+#include "protocol/xlate_guard.h"
 #include "vulkan/iosurface.h"
 #include "vulkan/display_blit.h"
 #include "vulkan/pipeline_build.h"
@@ -88,6 +89,8 @@ bool lagfx_read_resource_backing(lagfx_protocol_t *p,
         if (lagfx_task_translate(p, task, gpa, &probe_gpa))
             return lagfx_read_virtual_besteffort(p, task, gpa, len, buf);
     }
+    if (lagfx_xg_legacy_entered(p, "backing_raw_gpa", NULL))
+        return false;   /* ARM64 mode: an address that did not translate is never read as a raw GPA */
     lagfx_device_t *dev = p ? (lagfx_device_t *)p->dev : NULL;
     if (dev && dev->desc.shell.read_memory
         && dev->desc.shell.read_memory(dev->desc.shell.opaque, gpa, len, buf))

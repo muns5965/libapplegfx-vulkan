@@ -13,6 +13,7 @@
 #include "protocol/state.h"
 #include "protocol/display_diag.h"
 #include "protocol/gamma_diag.h"
+#include "protocol/xlate_guard.h"
 #include "protocol/diag.h"
 #include "protocol/arm64_exec_decode.h"
 #include "protocol/object_resolver.h"
@@ -86,9 +87,17 @@ static bool getdesc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len)
 static uint32_t g_owner_task; static uint64_t g_owner_map; static bool g_owner_on;
 static bool owner_fn(lagfx_protocol_t *p, uint64_t m, uint32_t *t) { (void)p; if (!g_owner_on || m != g_owner_map) return false; *t = g_owner_task; return true; }
 /* the BEFORE state: dd_read_region called the legacy reader unconditionally and nothing classified failures */
+/* The legacy 4 KiB walk as it ran BEFORE g7-addrfix: lagfx_task_read_virtual now redirects to the arm64 reader whenever protocol_mode is arm64, so the old geometry
+ * is exercised by presenting the same tables in x86 mode (integ6: this test's fail-before premise was invalidated by the addrfix redirect). */
+static bool legacy_geom_read(lagfx_protocol_t *p, lagfx_task_entry_t *te, uint64_t va, uint32_t len, uint8_t *out) {
+    uint32_t m = p->protocol_mode; p->protocol_mode = 0;
+    bool ok = lagfx_task_read_virtual(p, te, va, len, out);
+    p->protocol_mode = m;
+    return ok;
+}
 static bool legacy_bool(lagfx_protocol_t *p, uint32_t task, uint64_t va, uint32_t len, uint8_t *out) {
     lagfx_task_entry_t *t = lagfx_protocol_find_task(p, task);
-    return t && lagfx_task_read_virtual(p, t, va, len, out);
+    return t && legacy_geom_read(p, t, va, len, out);
 }
 static void use_fixed(void) { lagfx_dd_set_reader(lagfx_gd_task_read_bool); lagfx_gd_set_reader(lagfx_gd_task_read); lagfx_dd_set_owner_lookup(owner_fn); }
 static void use_legacy(void) { lagfx_dd_set_reader(legacy_bool); lagfx_gd_set_reader(NULL); lagfx_dd_set_owner_lookup(owner_fn); }
@@ -124,10 +133,15 @@ int main(void) {
         tbl_t t = tbl_new(); add_task(p, 2, t.root);
         map_new(t, 0x118000u >> 14); fill_va(t, 0x118000, 0x4000, 7);
         lagfx_task_entry_t *te = lagfx_protocol_find_task(p, 2);
-        assert(!lagfx_task_read_virtual(p, te, 0x118000, 0x4000, buf));                 /* FAIL BEFORE: legacy geometry on a 16 KiB table */
+        assert(!legacy_geom_read(p, te, 0x118000, 0x4000, buf));                       /* FAIL BEFORE: legacy geometry on a 16 KiB table */
         memset(buf, 0, sizeof buf);
         assert(lagfx_gd_task_read(p, 2, 0x118000, 0x4000, buf) == LAGFX_GD_RD_OK);       /* PASS AFTER */
         assert(check_va(buf, 0x118000, 0x4000, 7));
+        { lagfx_xg_stats_t xs; lagfx_xg_reset(); memset(buf, 0, sizeof buf);   /* integ6: the gamma read goes straight to the arm64 reader, it does not touch the legacy-xlate guard counters */
+          assert(lagfx_gd_task_read(p, 2, 0x118000, 0x4000, buf) == LAGFX_GD_RD_OK); lagfx_xg_snapshot(&xs);
+          assert(xs.legacy_xlate_in_arm64 == 0 && xs.blocked == 0 && xs.redirected == 0);
+          assert(lagfx_task_read_virtual(p, te, 0x118000, 0x4000, buf)); lagfx_xg_snapshot(&xs);   /* any OTHER caller of the legacy API: one redirected entry */
+          assert(xs.legacy_xlate_in_arm64 == 1 && xs.redirected == 1 && xs.blocked == 0); lagfx_xg_reset(); }
         uint64_t g1; assert(lagfx_arm64_task_translate(p, te, 0x118000, &g1) && (g1 & 0x3fff) == 0);
         assert(lagfx_gd_task_read(p, 99, 0x118000, 16, buf) == LAGFX_GD_RD_NO_TASK);
         fin(p);
@@ -162,7 +176,8 @@ int main(void) {
         assert(lagfx_gd_task_read(p, 2, va, 0x10, buf) == LAGFX_GD_RD_OK && check_va(buf, va, 0x10, 3));
         assert(lagfx_gd_task_read(p, 2, 0x45 * 0x4000ull, 0x10, buf) == LAGFX_GD_RD_OK && check_va(buf, 0x45 * 0x4000ull, 0x10, 3));
         lagfx_task_entry_t *te = lagfx_protocol_find_task(p, 2);
-        assert(!lagfx_task_read_virtual(p, te, 0x45 * 0x4000ull - 0x80, 0x100, buf));   /* fail-before */
+        assert(!legacy_geom_read(p, te, 0x45 * 0x4000ull - 0x80, 0x100, buf));   /* fail-before (legacy geometry) */
+        assert(lagfx_task_read_virtual(p, te, 0x45 * 0x4000ull - 0x80, 0x100, buf) && check_va(buf, 0x45 * 0x4000ull - 0x80, 0x100, 3));   /* g7-addrfix: arm64 mode redirects the legacy API to the 16 KiB reader */
         fin(p);
     }
 
