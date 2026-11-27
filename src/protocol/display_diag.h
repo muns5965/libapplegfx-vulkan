@@ -122,6 +122,9 @@ static inline int lagfx_dd_is_identity3x3(const uint8_t *b, size_t len) {
 typedef struct lagfx_protocol lagfx_protocol_t;
 
 /* Every command the three drain loops see (called from lagfx_diag_cmd): counts ops 0x37 / 0x22 / 0x08 / 0x0a with first-seen time, gamma capture on channel 4 op 0x08, op 0x0a identity check. */
+/* the one read of guest memory (gamma region): registered by diag.c so this module does not pull the protocol/device layers into every static-library consumer */
+typedef bool (*lagfx_dd_reader_t)(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out);
+void lagfx_dd_set_reader(lagfx_dd_reader_t r);
 void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_t *raw, uint32_t length);
 /* One op-0x08 swap named `mapping`; info is what the surface registry knows (resolved == false: nothing). */
 typedef struct { bool resolved, gpu, guest_current; uint32_t w, h, fourcc, mtl_format; int32_t vk_format; } lagfx_dd_surface_t;

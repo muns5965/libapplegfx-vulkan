@@ -25,6 +25,9 @@ static uint64_t dd_ms(void) {   /* ms since the first call of this module (INFER
 }
 
 /* One tagged line to stderr (like the g7-gpu statistics lines, so it reaches the runner's log) and to the lagfx log. Bounded by the callers' caps. */
+static lagfx_dd_reader_t s_reader;
+void lagfx_dd_set_reader(lagfx_dd_reader_t r) { s_reader = r; }
+
 static void dd_say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void dd_say(const char *fmt, ...) {
     char line[1500];
@@ -93,19 +96,19 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
                   (unsigned long long)n, chan, arg8, plen, w_off, w_len, w_cnt, w_ck, hx, shown < plen ? "..." : "");
         if (w_off >= 0 && GET(s_gamma_done) == 0u && GET(s_gamma_attempts) < 3u) {
             INC(s_gamma_attempts);
-            lagfx_task_entry_t *t = p->diag2.last44_global_valid ? lagfx_protocol_find_task(p, p->diag2.last44_global_task) : NULL;
-            if (!t) {
-                dd_say("g7-pvg-gamma: region not read: no live task for the last 0x44 (valid=%d task=%u)", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task);
+            const bool have_task = p->diag2.last44_global_valid != 0;
+            if (!have_task || !s_reader) {
+                dd_say("g7-pvg-gamma: region not read: %s (valid=%d task=%u)", s_reader ? "no live task for the last 0x44" : "no reader registered", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task);
             } else {
                 uint8_t *buf = (uint8_t *)malloc(0x4000u);
-                bool ok = buf && lagfx_task_read_virtual(p, t, 0x118000u, 0x4000u, buf);
+                bool ok = buf && s_reader(p, p->diag2.last44_global_task, 0x118000u, 0x4000u, buf);
                 if (ok) {
                     lagfx_dd_gamma_t g; char line[420];
                     lagfx_dd_gamma_summarize(buf, 0x4000u, &g); lagfx_dd_gamma_format(line, sizeof line, &g);
                     __atomic_store_n(&s_gamma_done, 1u, __ATOMIC_RELAXED);
-                    dd_say("g7-pvg-gamma: region task=%u va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", t->id, line);
+                    dd_say("g7-pvg-gamma: region task=%u va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", p->diag2.last44_global_task, line);
                 } else {
-                    dd_say("g7-pvg-gamma: region read FAILED task=%u va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", t->id, (unsigned long long)GET(s_gamma_attempts));
+                    dd_say("g7-pvg-gamma: region read FAILED task=%u va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", p->diag2.last44_global_task, (unsigned long long)GET(s_gamma_attempts));
                 }
                 free(buf);
             }
