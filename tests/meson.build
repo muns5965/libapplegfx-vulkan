@@ -2021,3 +2021,15 @@ format_caps_test = executable('vulkan-format-caps-unit',
   build_by_default : true,
 )
 test('vulkan format / usage / blend / sample-count capabilities (unit, lavapipe + injected devices)', format_caps_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+# ARM64 render compatibility: framebuffer-fetch ordering fallback (split draws), format/usage/blend injected-limit cases, MSAA texture refusal counter. Includes arm64-exec-run-unit.c as its harness.
+if fs.is_file(meson.current_source_dir() / 'arm64-render-compat-unit.c') and vulkan_dep.found()
+  rc_test = executable('arm64-render-compat-unit',
+    'arm64-render-compat-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 render compat (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1'])
+  test('arm64 render compat, raster order forced off (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
+endif
