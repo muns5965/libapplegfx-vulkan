@@ -201,9 +201,9 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         lagfx_sampler_diag_t sd;
         lagfx_sampler_diag_get(&sd);
         snprintf(el, sizeof el,
-                 "g7-gpu-cxs: cxs[bicubic_as_linear=%llu clamp_zero_as_border=%llu addr_unsupported=%llu filter_unsupported=%llu mip_unsupported=%llu compare_ignored=%llu unnorm_illegal_addr=%llu words_logged=%llu] runtime[addr_unknown=%llu mip_unknown=%llu]",
-                 (unsigned long long)sd.cxs_bicubic_as_linear, (unsigned long long)sd.cxs_clamp_zero_as_border, (unsigned long long)sd.cxs_addr_unsupported, (unsigned long long)sd.cxs_filter_unsupported,
-                 (unsigned long long)sd.cxs_mip_unsupported, (unsigned long long)sd.cxs_compare_ignored, (unsigned long long)sd.cxs_unnorm_illegal_addr, (unsigned long long)sd.cxs_words_logged,
+                 "g7-gpu-cxs: cxs_state_builds[bicubic_as_linear=%llu clamp_zero_as_border=%llu addr_outside_table=%llu filter_outside_table=%llu mip_outside_table=%llu compare_field_not8=%llu] cxs_testpath_state_builds[unnorm_illegal_addr=%llu] cxs_log[distinct_words_logged=%llu words_log_suppressed=%llu] rt_sampler_objs[addr_out_of_range=%llu mip_out_of_range=%llu]",
+                 (unsigned long long)sd.cxs_state_builds_bicubic_as_linear, (unsigned long long)sd.cxs_state_builds_clamp_zero_as_border, (unsigned long long)sd.cxs_state_builds_addr_outside_table, (unsigned long long)sd.cxs_state_builds_filter_outside_table,
+                 (unsigned long long)sd.cxs_state_builds_mip_outside_table, (unsigned long long)sd.cxs_state_builds_compare_field_not8, (unsigned long long)sd.cxs_testpath_state_builds_unnorm_illegal_addr, (unsigned long long)sd.cxs_distinct_words_logged, (unsigned long long)sd.cxs_words_log_suppressed,
                  (unsigned long long)R->ext_samp_addr_unknown, (unsigned long long)R->ext_samp_mip_unknown);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);

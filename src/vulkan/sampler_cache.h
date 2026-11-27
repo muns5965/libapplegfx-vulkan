@@ -17,26 +17,28 @@
 
 #include "air2spv/constexpr_sampler.h"
 
-/* 0: real bicubic sampling does not exist; a bicubic request (filter 2) is mapped to plain LINEAR and counted (cxs_bicubic_as_linear). Flip only when real
+/* 0: real bicubic sampling does not exist; a bicubic request (filter 2) is mapped to plain LINEAR and counted (cxs_state_builds_bicubic_as_linear). Flip only when real
  * bicubic sampling exists. Tests include this header and use the same macro. */
 #ifndef LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
 #define LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED 0
 #endif
 
-/* Process-wide fidelity counters of the constexpr-sampler mapping (and of the runtime sampler's undefined enum values). Each counter counts sampler-state BUILDS
- * (one per constexpr bind, plus test calls) in which the condition held; the log line is printed once per distinct word. The names say what the host did, not what
- * Metal does: cxs_bicubic_as_linear counts a bicubic request that was sampled with plain LINEAR; while LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED is 0 real bicubic filtering is not implemented. */
+/* Process-wide fidelity counters of the constexpr-sampler mapping (and of the runtime sampler's out-of-range enum values). Each cxs_state_builds_* counter counts sampler-STATE BUILDS
+ * (one per constexpr bind / descriptor build, plus test calls) in which the condition held. None of them is a count of guest sampler requests or of samples; the log line is printed once per distinct word. The names say what the host did, not what
+ * Metal does: cxs_state_builds_bicubic_as_linear counts state builds with a bicubic filter value that were sampled with plain LINEAR; while LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED is 0 real bicubic filtering is not implemented. */
 typedef struct {
-    uint64_t cxs_bicubic_as_linear;      /* mag or min filter 2 (bicubic) mapped to VK_FILTER_LINEAR (approximation) */
-    uint64_t cxs_clamp_zero_as_border;   /* address 0 (clamp_to_zero) mapped to clamp-to-border + transparent black (approximation) */
-    uint64_t cxs_addr_unsupported;       /* address value 5..7 (undefined): fell back to clamp-to-edge */
-    uint64_t cxs_filter_unsupported;     /* mag/min filter value 3 (undefined): fell back to LINEAR (as before) */
-    uint64_t cxs_mip_unsupported;        /* mip filter value 3 (undefined): fell back to nearest (as before) */
-    uint64_t cxs_compare_ignored;        /* compare function field != 8 (no compare): not mapped */
-    uint64_t cxs_unnorm_illegal_addr;    /* pixel word with repeat / mirrored repeat on S or T: no Vulkan unnormalized sampler (the state stays normalized) */
-    uint64_t cxs_words_logged;           /* distinct words that produced a log line */
-    uint64_t rt_addr_unknown;            /* runtime sampler address mode 6 / 7 (undefined) mapped to clamp-to-edge */
-    uint64_t rt_mip_unknown;             /* runtime sampler mip filter 3 (undefined) */
+    uint64_t cxs_state_builds_bicubic_as_linear;      /* mag or min filter 2 (bicubic) mapped to VK_FILTER_LINEAR (approximation) */
+    uint64_t cxs_state_builds_clamp_zero_as_border;   /* address 0 (clamp_to_zero) mapped to clamp-to-border + transparent black (approximation) */
+    uint64_t cxs_state_builds_addr_outside_table;       /* address value 5..7 (outside our INFER table 0..4): fell back to clamp-to-edge */
+    uint64_t cxs_state_builds_filter_outside_table;     /* mag/min filter value 3+ (outside our INFER table 0..2): fell back to LINEAR (as before) */
+    uint64_t cxs_state_builds_mip_outside_table;        /* mip filter value 3+ (outside our INFER table 0..2): fell back to nearest (as before) */
+    uint64_t cxs_state_builds_compare_field_not8;        /* compare function field != 8: not mapped. 8 appears in all 4 captured words; its meaning ("no compare") is unverified */
+    uint64_t cxs_testpath_state_builds_unnorm_illegal_addr;    /* TEST-ONLY path (lagfx_sampler_state_from_constexpr): pixel word with repeat / mirrored repeat on S or T, no Vulkan unnormalized sampler (the state stays normalized).
+                                                       * It can NOT fire in production: from_constexpr_norm forces normalized = true, so cxs_note is always called with unnorm_illegal = false. A zero here says nothing about pixel words met in a real run. */
+    uint64_t cxs_distinct_words_logged;           /* DISTINCT words that produced a log line (capped at SD_LOGGED_MAX = 64); not a count of words seen */
+    uint64_t cxs_words_log_suppressed;   /* state builds whose word was not logged because the 64-word table was full (counting itself is never capped); the same word may be counted more than once */
+    uint64_t rt_sampler_objs_addr_out_of_range;            /* runtime sampler OBJECT creations (not draws) with an address field 6 or 7: outside the public Metal enum range, mapped to clamp-to-edge. Same event as state.h ext_samp_addr_unknown (that pair is what diag.c prints) */
+    uint64_t rt_sampler_objs_mip_out_of_range;             /* runtime sampler OBJECT creations with mip field 3: outside the public Metal enum range. Same event as ext_samp_mip_unknown */
 } lagfx_sampler_diag_t;
 
 void lagfx_sampler_diag_get(lagfx_sampler_diag_t *out);        /* snapshot (zeros without Vulkan) */

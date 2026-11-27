@@ -34,21 +34,21 @@ void lagfx_sampler_diag_reset(void) {
     pthread_mutex_unlock(&g_sd_lock);
 }
 
-/* true the first time a key is seen (a full table keeps answering false: no log flood). */
-static bool sd_first_cxs(uint64_t w) {
-    bool first = false;
+/* 1 = first time (log it), 0 = already logged, -1 = new word but the table is full (not logged). */
+static int sd_first_cxs(uint64_t w) {
+    int first = 0;
     pthread_mutex_lock(&g_sd_lock);
     uint32_t i = 0;
     while (i < g_sd_cxs_n && g_sd_cxs_seen[i] != w) i++;
-    if (i == g_sd_cxs_n && g_sd_cxs_n < SD_LOGGED_MAX) g_sd_cxs_seen[g_sd_cxs_n++] = w, first = true;
+    if (i == g_sd_cxs_n) { if (g_sd_cxs_n < SD_LOGGED_MAX) g_sd_cxs_seen[g_sd_cxs_n++] = w, first = 1; else first = -1; }
     pthread_mutex_unlock(&g_sd_lock);
     return first;
 }
 
 void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t st) {
     if (!addr_unknown && !mip_unknown) return;
-    if (addr_unknown) SD_ADD(rt_addr_unknown, 1);
-    if (mip_unknown) SD_ADD(rt_mip_unknown, 1);
+    if (addr_unknown) SD_ADD(rt_sampler_objs_addr_out_of_range, 1);
+    if (mip_unknown) SD_ADD(rt_sampler_objs_mip_out_of_range, 1);
     bool first = false;
     pthread_mutex_lock(&g_sd_lock);
     uint32_t i = 0;
@@ -56,7 +56,7 @@ void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t s
     if (i == g_sd_rt_n && g_sd_rt_n < SD_LOGGED_MAX) g_sd_rt_seen[g_sd_rt_n++] = st, first = true;
     pthread_mutex_unlock(&g_sd_lock);
     if (first)
-        LAGFX_WARN("sampler(runtime) state=0x%08x: undefined enum value%s%s%s -> address 6/7 = clamp-to-edge, mip 3 = nearest (counted, logged once per state word)",
+        LAGFX_WARN("sampler(runtime) state=0x%08x: value outside the public Metal enum range%s%s%s -> address 6/7 = clamp-to-edge, mip 3 = nearest (counted, logged once per state word)",
                    st, addr_unknown ? " address_mode(6|7)" : "", addr_unknown && mip_unknown ? "," : "", mip_unknown ? " mip_filter(3)" : "");
 }
 
@@ -133,20 +133,22 @@ static void cxs_note(const lagfx_constexpr_sampler_t *cs, bool unnorm_illegal) {
     filt_unsup = a == LAGFX_CXS_UNSUPPORTED || b == LAGFX_CXS_UNSUPPORTED;
     mip_unsup = lagfx_cxs_map_mip(cs->mip_filter, &mm) == LAGFX_CXS_UNSUPPORTED;
     if (!(clampz || addr_unsup || bic || filt_unsup || mip_unsup || cmp || unnorm_illegal)) return;
-    if (bic) SD_ADD(cxs_bicubic_as_linear, 1);
-    if (clampz) SD_ADD(cxs_clamp_zero_as_border, 1);
-    if (addr_unsup) SD_ADD(cxs_addr_unsupported, 1);
-    if (filt_unsup) SD_ADD(cxs_filter_unsupported, 1);
-    if (mip_unsup) SD_ADD(cxs_mip_unsupported, 1);
-    if (cmp) SD_ADD(cxs_compare_ignored, 1);
-    if (unnorm_illegal) SD_ADD(cxs_unnorm_illegal_addr, 1);
-    if (!sd_first_cxs(cs->raw)) return;
-    SD_ADD(cxs_words_logged, 1);
+    if (bic) SD_ADD(cxs_state_builds_bicubic_as_linear, 1);
+    if (clampz) SD_ADD(cxs_state_builds_clamp_zero_as_border, 1);
+    if (addr_unsup) SD_ADD(cxs_state_builds_addr_outside_table, 1);
+    if (filt_unsup) SD_ADD(cxs_state_builds_filter_outside_table, 1);
+    if (mip_unsup) SD_ADD(cxs_state_builds_mip_outside_table, 1);
+    if (cmp) SD_ADD(cxs_state_builds_compare_field_not8, 1);
+    if (unnorm_illegal) SD_ADD(cxs_testpath_state_builds_unnorm_illegal_addr, 1);
+    int fl = sd_first_cxs(cs->raw);
+    if (fl < 0) SD_ADD(cxs_words_log_suppressed, 1);
+    if (fl <= 0) return;
+    SD_ADD(cxs_distinct_words_logged, 1);
     char n[256]; int o = 0;
 #define NOTE(...) do { if (o < (int)sizeof n) o += snprintf(n + o, sizeof n - (size_t)o, __VA_ARGS__); } while (0)
-    if (addr_unsup) NOTE(" addr_unsupported[%u,%u,%u]->clamp_to_edge", cs->addr[0], cs->addr[1], cs->addr[2]);
-    if (filt_unsup) NOTE(" filter_unsupported[mag=%u,min=%u]->linear", cs->mag_filter, cs->min_filter);
-    if (mip_unsup) NOTE(" mip_unsupported[%u]->nearest", cs->mip_filter);
+    if (addr_unsup) NOTE(" addr_outside_table[%u,%u,%u]->clamp_to_edge", cs->addr[0], cs->addr[1], cs->addr[2]);
+    if (filt_unsup) NOTE(" filter_outside_table[mag=%u,min=%u]->linear", cs->mag_filter, cs->min_filter);
+    if (mip_unsup) NOTE(" mip_outside_table[%u]->nearest", cs->mip_filter);
     if (unnorm_illegal) NOTE(" unnorm_illegal_addr[%u,%u]->kept_normalized", cs->addr[0], cs->addr[1]);
 #if LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
     if (bic) NOTE(" bicubic_as_linear[mag=%u,min=%u](compat mapping)", cs->mag_filter, cs->min_filter);
@@ -157,7 +159,7 @@ static void cxs_note(const lagfx_constexpr_sampler_t *cs, bool unnorm_illegal) {
     if (cmp) NOTE(" compare_ignored[%u]", cs->compare_func);
 #undef NOTE
     if (addr_unsup || filt_unsup || mip_unsup || unnorm_illegal)
-        LAGFX_WARN("cxs word=0x%016llx fidelity=UNSUPPORTED:%s", (unsigned long long)cs->raw, n);
+        LAGFX_WARN("cxs word=0x%016llx fidelity=OUTSIDE_TABLE:%s", (unsigned long long)cs->raw, n);
     else
         LAGFX_LOG("cxs word=0x%016llx fidelity=APPROX:%s", (unsigned long long)cs->raw, n);
 }

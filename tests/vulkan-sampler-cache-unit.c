@@ -78,7 +78,8 @@ int main(void) {
         CHECK(lagfx_sampler_cache_get(&c, &st) == ws[i]);
         for (int j = 0; j < i; j++) CHECK(ws[i] != ws[j]);
     }
-    /* Undefined address values 5..7 fall back to clamp-to-edge: the same post-mapping state as raw 1 shares ONE cache entry (the key is the mapped state). */
+    /* SYNTHETIC words (0x807bff0000080a00 | address fields; derived from the captured ...88a00 / ...80a49 by clearing bit 15 and varying the address fields, NOT captured).
+     * Address values 5..7 (outside our INFER table 0..4) fall back to clamp-to-edge: the same post-mapping state as raw 1 shares ONE cache entry (the key is the mapped state). */
     {
         uint32_t n0 = lagfx_sampler_cache_count(&c);
         VkSampler first = VK_NULL_HANDLE;

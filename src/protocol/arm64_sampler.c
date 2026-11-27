@@ -31,6 +31,8 @@ uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_ani
     if (!(lod_min >= 0.f)) lod_min = 0.f;                        /* also NaN */
     if (!(lod_max >= lod_min)) lod_max = 32.f, lod_min = 0.f;    /* an inverted range is a guest error: the defaults */
     if (lod_max > VK_LOD_CLAMP_NONE) lod_max = VK_LOD_CLAMP_NONE;   /* the FLT_MAX default */
+    /* NOTE: the address fields are extracted with `& 7` (3 bits). Bits 11 / 15 / 19 are ignored and NOT counted anywhere; if the real field is 4 bits wide (the older
+     * Henge decoder used 4) a set bit there would be dropped silently. The width is unverified (INFER). */
     uint32_t mip = (st >> 24) & 3u, am[3] = { (st >> 8) & 7u, (st >> 12) & 7u, (st >> 16) & 7u }, bc = (st >> 20) & 3u, aniso = (st >> 26) & 31u, cmp = (st >> 5) & 7u;
     bool border = am[0] == 5u || am[1] == 5u || am[2] == 5u;
     *ci = (VkSamplerCreateInfo){ .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,

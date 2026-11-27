@@ -585,7 +585,7 @@ typedef struct lagfx_protocol {
                 /* arm64_exec_run.c extensions: draw variants / sampler fidelity / misaligned buffer binds (printed as g7-gpu-ext) */
                 uint64_t ext_draw_instanced, ext_draw_base, ext_draw_wide, ext_draw_indirect, ext_draw_indirect_bad, ext_draw_zero, ext_noop_hint, ext_noop_fence, ext_barrier;
                 uint64_t ext_samp_compare, ext_samp_unnorm, ext_samp_mirror_clamp, ext_samp_lod_dropped, ext_samp_lod_binds;
-                uint64_t ext_samp_addr_unknown, ext_samp_mip_unknown;   /* runtime sampler objects with an undefined address mode (6/7) / mip filter (3): mapped to the compat fallback */
+                uint64_t ext_samp_addr_unknown, ext_samp_mip_unknown;   /* sampler object creations (same event as sampler_cache.h rt_sampler_objs_*, not draws or guest requests) with an address field 6/7 / mip field 3, outside the public Metal enum range: mapped to the compat fallback */
                 uint64_t ext_gather_why[5]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather copy count full (A64_GATHER_CACHE), 3 scratch allocation, 4 per-exec byte budget (A64_GATHER_BUDGET) */
                 uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;

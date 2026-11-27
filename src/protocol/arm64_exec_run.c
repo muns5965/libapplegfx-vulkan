@@ -217,7 +217,7 @@ static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_en
     if (sf & LAGFX_A64_SAMP_COMPARE_IGNORED) CNT(p).ext_samp_compare++;
     if (sf & LAGFX_A64_SAMP_UNNORM_APPLIED) CNT(p).ext_samp_unnorm++;
     if (sf & LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX) CNT(p).ext_samp_mirror_clamp++;
-    if (sf & (LAGFX_A64_SAMP_ADDR_UNKNOWN | LAGFX_A64_SAMP_MIP_UNKNOWN)) {   /* undefined enum values: counted + logged once per state word (sampler_cache.c) */
+    if (sf & (LAGFX_A64_SAMP_ADDR_UNKNOWN | LAGFX_A64_SAMP_MIP_UNKNOWN)) {   /* enum values outside the public Metal range: counted + logged once per state word (sampler_cache.c) */
         if (sf & LAGFX_A64_SAMP_ADDR_UNKNOWN) CNT(p).ext_samp_addr_unknown++;
         if (sf & LAGFX_A64_SAMP_MIP_UNKNOWN) CNT(p).ext_samp_mip_unknown++;
         lagfx_sampler_diag_rt_count((sf & LAGFX_A64_SAMP_ADDR_UNKNOWN) != 0, (sf & LAGFX_A64_SAMP_MIP_UNKNOWN) != 0, lagfx_le32(d + 12));

@@ -43,8 +43,8 @@ enum {
     LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX = 8u,  /* mirror clamp to edge was mapped to mirror repeat */
     LAGFX_A64_SAMP_ANISO_APPLIED      = 16u,
     LAGFX_A64_SAMP_LODAVG_IGNORED     = 32u,  /* lodAverage (state bit 4) was set: not mapped */
-    LAGFX_A64_SAMP_ADDR_UNKNOWN       = 64u,  /* an address mode field was 6 or 7 (undefined): mapped to clamp-to-edge (compat fallback, counted) */
-    LAGFX_A64_SAMP_MIP_UNKNOWN        = 128u, /* the mip filter field was 3 (undefined): treated as nearest-with-LOD (compat fallback, counted) */
+    LAGFX_A64_SAMP_ADDR_UNKNOWN       = 64u,  /* an address mode field (read as 3 bits: `& 7`) was 6 or 7: outside the public MTLSamplerAddressMode range 0..5 as we read it (INFER); mapped to clamp-to-edge (compat fallback, counted). Bits 11/15/19 are ignored and never counted; if the hardware field is 4 bits wide (the older Henge decoder used 4) a set bit there is silently dropped (width unverified) */
+    LAGFX_A64_SAMP_MIP_UNKNOWN        = 128u, /* the mip filter field was 3: outside the public MTLSamplerMipFilter range 0..2 (INFER); treated as nearest-with-LOD (compat fallback, counted) */
 };
 
 /* d = the first n >= 20 bytes of the payload (a record that ends before the LOD clamps gets the descriptor defaults 0 / FLT_MAX). Pure: no Vulkan calls.
