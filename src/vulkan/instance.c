@@ -405,7 +405,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
 
     /* Required (core-1.3 promoted but still enumerated as extensions
      * on some ICDs; ask explicitly for widest compatibility). */
-    const char *wanted_dev_exts[16];
+    const char *wanted_dev_exts[24];
     uint32_t    wanted_dev_n = 0;
     bool want_dyn_rendering =
         has_ext(dext, dext_n, "VK_KHR_dynamic_rendering");
@@ -439,6 +439,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     typedef struct { VkStructureType sType; void *pNext; VkBool32 dynamicRenderingLocalRead; } local_read_feat_t;   /* older headers lack the type */
     const bool ext_ro_ext = has_ext(dext, dext_n, "VK_EXT_rasterization_order_attachment_access");
     const bool ext_ro_arm = has_ext(dext, dext_n, "VK_ARM_rasterization_order_attachment_access");
+    const bool ext_af = has_ext(dext, dext_n, "VK_EXT_shader_atomic_float");   /* float atomics: queried below, enabled per feature only when reported (caps.h LAGFX_VK_CAP_ATOMIC_F32_*) */
     const bool ext_qct_ts = has_ext(dext, dext_n, "VK_QCOM_tile_shading"), ext_qct_tp = has_ext(dext, dext_n, "VK_QCOM_tile_properties"), ext_qct_heap = has_ext(dext, dext_n, "VK_QCOM_tile_memory_heap");
     free(dext);
 
@@ -583,7 +584,23 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe11.storageInputOutput16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
     if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
-    if (probe12.shaderBufferInt64Atomics && probe12.shaderSharedInt64Atomics && have_shader_int64) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64);   /* Int64Atomics on StorageBuffer AND Workgroup memory (the translator emits both) */
+    {   /* atomics: 64-bit integer (VkPhysicalDeviceVulkan12Features::shaderBufferInt64Atomics for device memory, shaderSharedInt64Atomics for threadgroup memory, SEPARATE caps; both need shaderInt64) and
+         * 32-bit float (VK_EXT_shader_atomic_float, queried with its own pNext struct; five features, five caps). lagfx_vk_atomic_feat_inject (tests) can only turn features off. */
+        VkPhysicalDeviceShaderAtomicFloatFeaturesEXT paf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT };
+        if (ext_af) {
+            VkPhysicalDeviceFeatures2 q = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &paf };
+            vkGetPhysicalDeviceFeatures2(s->phys_device, &q);
+        }
+        lagfx_vk_atomic_feat_t af = { .shader_int64 = have_shader_int64, .buffer_int64_atomics = probe12.shaderBufferInt64Atomics == VK_TRUE, .shared_int64_atomics = probe12.shaderSharedInt64Atomics == VK_TRUE,
+            .af_ext = ext_af, .buffer_f32 = ext_af && paf.shaderBufferFloat32Atomics, .buffer_f32_add = ext_af && paf.shaderBufferFloat32AtomicAdd,
+            .shared_f32 = ext_af && paf.shaderSharedFloat32Atomics, .shared_f32_add = ext_af && paf.shaderSharedFloat32AtomicAdd, .image_f32 = ext_af && paf.shaderImageFloat32Atomics };
+        const lagfx_vk_atomic_feat_t *inj = lagfx_vk_atomic_feat_inject;
+        if (inj) {
+            af.shader_int64 &= inj->shader_int64; af.buffer_int64_atomics &= inj->buffer_int64_atomics; af.shared_int64_atomics &= inj->shared_int64_atomics; af.af_ext &= inj->af_ext;
+            af.buffer_f32 &= inj->buffer_f32; af.buffer_f32_add &= inj->buffer_f32_add; af.shared_f32 &= inj->shared_f32; af.shared_f32_add &= inj->shared_f32_add; af.image_f32 &= inj->image_f32;
+        }
+        caps_en |= lagfx_vk_atomic_caps(&af);
+    }
     if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
@@ -608,14 +625,29 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         }
     }
     caps_en &= ~caps_off;
+    if (!(caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)))   /* 64-bit atomics need shaderInt64 enabled (also when LAGFX_VK_CAPS_OFF turned int64 off) */
+        caps_en &= ~(LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED));
     if (!spirv14_core && have_spirv14_ext && (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14))) {
         wanted_dev_exts[wanted_dev_n++] = "VK_KHR_spirv_1_4";
         wanted_dev_exts[wanted_dev_n++] = "VK_KHR_shader_float_controls";
     }
     feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
     feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
-    feat12.shaderBufferInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64)) ? VK_TRUE : VK_FALSE;
-    feat12.shaderSharedInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64)) ? VK_TRUE : VK_FALSE;
+    feat12.shaderBufferInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF)) ? VK_TRUE : VK_FALSE;      /* each feature follows its own cap: a device with only one of them is still created */
+    feat12.shaderSharedInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED)) ? VK_TRUE : VK_FALSE;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT af_en = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT,
+        .shaderBufferFloat32Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF)) ? VK_TRUE : VK_FALSE,
+        .shaderBufferFloat32AtomicAdd = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD)) ? VK_TRUE : VK_FALSE,
+        .shaderSharedFloat32Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED)) ? VK_TRUE : VK_FALSE,
+        .shaderSharedFloat32AtomicAdd = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD)) ? VK_TRUE : VK_FALSE,
+        .shaderImageFloat32Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE)) ? VK_TRUE : VK_FALSE,
+    };
+    if (caps_en & (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED) |
+                   LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE))) {   /* only a supported feature is requested; the extension only when one is */
+        af_en.pNext = feat13.pNext; feat13.pNext = &af_en;
+        wanted_dev_exts[wanted_dev_n++] = "VK_EXT_shader_atomic_float";
+    }
     feat12.storageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8)) ? VK_TRUE : VK_FALSE;
     feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)) ? VK_TRUE : VK_FALSE;
     feat12.storagePushConstant8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8)) ? VK_TRUE : VK_FALSE;

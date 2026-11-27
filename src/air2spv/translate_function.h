@@ -157,13 +157,40 @@ uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap);
 void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out);
 
 /* Atomics (air.atomic.*): 32-bit integer load / store / exchange / compare-exchange / add sub and or xor min max on device (StorageBuffer) and threadgroup (Workgroup) memory,
- * 64-bit integer (needs LAGFX_VK_CAP_ATOMIC64) and 32-bit float add (needs LAGFX_VK_CAP_ATOMIC_F32_ADD). An air.atomic.* call whose name, operand shape or type the translator does
- * not implement is NEVER dropped or emulated: the translation FAILS (LAGFX_ERR_PROTOCOL, any stage) and is counted.
+ * 64-bit integer (needs LAGFX_VK_CAP_ATOMIC64_BUF for device memory / LAGFX_VK_CAP_ATOMIC64_SHARED for threadgroup memory) and 32-bit float add (needs the per-storage-class
+ * LAGFX_VK_CAP_ATOMIC_F32_*_ADD). An air.atomic.* call whose name, operand shape or type the translator does
+ * not implement is NEVER dropped or emulated: the translation FAILS (LAGFX_ERR_PROTOCOL, any stage) and is counted, per named reason.
+ * STRICT operand grammar (default): only the operand combinations seen in real Apple modules are accepted: load(ptr, 0, 2, true), store(ptr, v, 0, 2, true),
+ * rmw(ptr, v, 0, 2, 0, true); any other literal in the order / scope / extra / final-flag position, or a different operand count, is refused with a named reason (LAGFX_ATOMIC_R_*).
+ * Float atomics are refused (their AIR spelling was never observed) and a 64-bit atomic whose declared return is not void is refused (return type unobserved).
+ * LAGFX_ATOMIC_LENIENT=1 (or lagfx_air2spv_set_atomic_lenient(1) in tests) restores the earlier permissive grammar for experiments: scope / extra / flag literals are not
+ * checked, float add and a non-void 64-bit return are accepted; the memory order operand must still be 0 and the CAS form guard still applies. Calls that strict mode would
+ * have refused but lenient mode accepted are counted (lenient_accepted).
  *   lagfx_air2spv_last_unsupported_atomic  the calling thread's last translation: number of refused atomic calls (0 = none) and the first one's name (first_name may be NULL)
- *   lagfx_air2spv_atomic_totals            process-wide: translations that contained atomics, atomic calls translated, calls refused, modules rejected */
-typedef struct { uint64_t modules, translated, refused, modules_rejected; } lagfx_atomic_totals_t;
+ *   lagfx_air2spv_last_atomic_reason       the calling thread's last translation: LAGFX_ATOMIC_R_* of the first refused call (LAGFX_ATOMIC_R_NONE = none)
+ *   lagfx_air2spv_atomic_totals            process-wide: translations that contained atomics, atomic calls translated, calls refused, modules rejected, refusals per reason */
+typedef enum {
+    LAGFX_ATOMIC_R_NONE = 0,
+    LAGFX_ATOMIC_R_SPELLING,        /* name / type combination not in the implemented grammar (float load, signedness-less min, ...) */
+    LAGFX_ATOMIC_R_OPERAND_COUNT,   /* argument count differs from the observed form (strict) or is too small */
+    LAGFX_ATOMIC_R_ORDER,           /* memory order operand is not the literal 0 (relaxed); always refused */
+    LAGFX_ATOMIC_R_SCOPE,           /* scope operand is not the observed literal 2 (strict) */
+    LAGFX_ATOMIC_R_RMW_EXTRA,       /* the extra i32 operand of the rmw form is not the observed literal 0 (strict) */
+    LAGFX_ATOMIC_R_FLAG,            /* the final i1 operand is not the observed constant true (strict) */
+    LAGFX_ATOMIC_R_FLOAT,           /* float atomic: AIR spelling never observed (strict) */
+    LAGFX_ATOMIC_R_I64_RETURN,      /* 64-bit atomic whose declared return is not void: the real AIR return type is unknown (strict) */
+    LAGFX_ATOMIC_R_CAS_FORM,        /* compare-exchange not in the one implemented (synthetic) form: expected by pointer in function memory, i1 result */
+    LAGFX_ATOMIC_R_POINTER,         /* the atomic's pointer does not resolve to device (StorageBuffer) / threadgroup (Workgroup) memory of the spelled address space */
+    LAGFX_ATOMIC_R_TYPE,            /* the module has no scalar type of the atomic's element type */
+    LAGFX_ATOMIC_R_HELPER,          /* the atomic sits in a helper function whose call could not be wired (unregistered signature, e.g. a device-pointer parameter, or an argument type mismatch): the call would degrade to an undefined value */
+    LAGFX_ATOMIC_R_COUNT
+} lagfx_atomic_reason_t;
+typedef struct { uint64_t modules, translated, refused, modules_rejected; uint64_t reason[LAGFX_ATOMIC_R_COUNT]; uint64_t lenient_accepted, cas_synthetic; } lagfx_atomic_totals_t;
 uint32_t lagfx_air2spv_last_unsupported_atomic(char *first_name, size_t cap);
+unsigned lagfx_air2spv_last_atomic_reason(void);
+const char *lagfx_air2spv_atomic_reason_name(unsigned reason);
 void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out);
+void lagfx_air2spv_set_atomic_lenient(int mode);   /* tests: 1 / 0 force lenient on / off, -1 back to the LAGFX_ATOMIC_LENIENT environment (default off) */
 
 /* Internal (tests): look up an AIR math-intrinsic callee name in the GLSL.std.450 dispatch table. On a hit returns true and fills the GLSL.std.450 instruction
  * number, the operand count and whether it is a chained three-operand form (fmax3/fmin3); any out pointer may be NULL. */

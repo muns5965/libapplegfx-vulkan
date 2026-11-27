@@ -311,7 +311,7 @@ EOT
 llvm-as atomic_frag_discard.ll -o atomic_frag_discard.air.bc
 
 # ---- atomic_i64: 64-bit integer atomics [N spelling: .i64, void result as MSL's atomic_min/max on atomic_ulong, device memory only: MSL 6.16.4.6] -> OpCapability Int64Atomics
-#      (LAGFX_VK_CAP_ATOMIC64). c[0] = umax(tid * 0x100000001), c[1] = umin((tid + 5) * 0x100000001 + 7) (c[1] starts at ~0) ----
+#      (LAGFX_VK_CAP_ATOMIC64_BUF). c[0] = umax(tid * 0x100000001), c[1] = umin((tid + 5) * 0x100000001 + 7) (c[1] starts at ~0) ----
 {
   cat <<EOT
 declare void @air.atomic.global.max.u.i64(ptr addrspace(1), i64, i32, i32, i32, i1)
@@ -357,4 +357,217 @@ entry:
 }
 EOT
 } | build atomic_f32 "$KMD1"
+
+# ======================================================================================================================================================================
+# Review fixtures (research/g7-atomic2). HAND-WRITTEN, NOT Apple output.
+#
+# (a) atomic_x_*: ONE atomic call whose operand differs from the combination seen in real Apple modules in exactly one position. The translator's strict grammar must refuse each
+#     (named reason, counter); LAGFX_ATOMIC_LENIENT=1 accepts them (tests/air2spv-atomic-strict-unit.c). The observed combinations are load(ptr,0,2,true), store(ptr,v,0,2,true),
+#     rmw(ptr,v,0,2,0,true) [V]; the compare-exchange layout (ptr, ptr expected, desired, order, order, scope, i1) is [N].
+# ======================================================================================================================================================================
+gen_x() {   # $1 = stem, $2 = declarations, $3 = body lines (may use %c %tid %t1 %p0 %p1), $4 = prologue (default: the two i32 element pointers %p0 %p1)
+  local pro="${4-  %p0 = getelementptr i32, ptr addrspace(1) %c, i64 0
+  %p1 = getelementptr i32, ptr addrspace(1) %c, i64 1}"
+  {
+    printf '%s\n' "$2"
+    cat <<EOT
+define void @$1(ptr addrspace(1) %c, i32 %tid) {
+entry:
+  %t1 = add i32 %tid, 1
+$pro
+$3
+  ret void
+}
+EOT
+  } | build "$1" "$KMD1"
+}
+D_LOAD='declare i32 @air.atomic.global.load.i32(ptr addrspace(1), i32, i32, i1)'
+D_STORE='declare void @air.atomic.global.store.i32(ptr addrspace(1), i32, i32, i32, i1)'
+D_RMW='declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)'
+D_CAS='declare i1 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr, i32, i32, i32, i32, i1)'
+gen_x atomic_x_load_scope1  "$D_LOAD"  '  %r = call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p0, i32 0, i32 1, i1 true)'
+gen_x atomic_x_load_flag0   "$D_LOAD"  '  %r = call i32 @air.atomic.global.load.i32(ptr addrspace(1) %p0, i32 0, i32 2, i1 false)'
+gen_x atomic_x_store_scope1 "$D_STORE" '  call void @air.atomic.global.store.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 1, i1 true)'
+gen_x atomic_x_store_flag0  "$D_STORE" '  call void @air.atomic.global.store.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i1 false)'
+gen_x atomic_x_rmw_scope1   "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 1, i32 0, i1 true)'
+gen_x atomic_x_rmw_scope3   "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 3, i32 0, i1 true)'
+gen_x atomic_x_rmw_scope0   "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 0, i32 0, i1 true)'
+gen_x atomic_x_rmw_extra1   "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i32 1, i1 true)'
+gen_x atomic_x_rmw_flag0    "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i32 0, i1 false)'
+gen_x atomic_x_rmw_scopevar "$D_RMW"   '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 %tid, i32 0, i1 true)'
+gen_x atomic_x_rmw_flagvar  "$D_RMW"   '  %b = icmp eq i32 %tid, 0
+  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i32 0, i1 %b)'
+gen_x atomic_x_rmw_argc5 'declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i1)' '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i1 true)'
+gen_x atomic_x_rmw_argc7 'declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1, i32)' '  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p0, i32 %t1, i32 0, i32 2, i32 0, i1 true, i32 0)'
+gen_x atomic_x_cas_scope1 "$D_CAS" '  %exp = alloca i32, align 4
+  store i32 0, ptr %exp, align 4
+  %ok = call i1 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p0, ptr %exp, i32 %t1, i32 0, i32 0, i32 1, i1 true)'
+gen_x atomic_x_cas_flag0 "$D_CAS" '  %exp = alloca i32, align 4
+  store i32 0, ptr %exp, align 4
+  %ok = call i1 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p0, ptr %exp, i32 %t1, i32 0, i32 0, i32 2, i1 false)'
+# compare-exchange forms the translator does not implement: expected BY VALUE (result i32); i32 result with a pointer; i1 result with the expected pointer in DEVICE memory
+gen_x atomic_x_cas_byval 'declare i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), i32, i32, i32, i32, i32, i1)' '  %r = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p0, i32 0, i32 %t1, i32 0, i32 0, i32 2, i1 true)'
+gen_x atomic_x_cas_i32ret 'declare i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr, i32, i32, i32, i32, i1)' '  %exp = alloca i32, align 4
+  store i32 0, ptr %exp, align 4
+  %r = call i32 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p0, ptr %exp, i32 %t1, i32 0, i32 0, i32 2, i1 true)'
+gen_x atomic_x_cas_devptr 'declare i1 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1), ptr addrspace(1), i32, i32, i32, i32, i1)' '  %ok = call i1 @air.atomic.global.cmpxchg.weak.i32(ptr addrspace(1) %p0, ptr addrspace(1) %p1, i32 %t1, i32 0, i32 0, i32 2, i1 true)'
+# 64-bit: declared return value (the real AIR return type is unobserved); 64-bit load
+gen_x atomic_x_i64_ret 'declare i64 @air.atomic.global.max.u.i64(ptr addrspace(1), i64, i32, i32, i32, i1)' '  %q = getelementptr i64, ptr addrspace(1) %c, i64 0
+  %r = call i64 @air.atomic.global.max.u.i64(ptr addrspace(1) %q, i64 5, i32 0, i32 2, i32 0, i1 true)' ''
+gen_x atomic_x_i64_load 'declare i64 @air.atomic.global.load.i64(ptr addrspace(1), i32, i32, i1)' '  %q = getelementptr i64, ptr addrspace(1) %c, i64 0
+  %r = call i64 @air.atomic.global.load.i64(ptr addrspace(1) %q, i32 0, i32 2, i1 true)' ''
+# threadgroup add with scope operand 1 (the scope of threadgroup atomics in real AIR is unobserved: strict accepts only 2)
+{
+  cat <<EOT
+@tgx = internal unnamed_addr addrspace(3) global [1 x i32] undef, align 4
+declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i32, i1)
+define void @atomic_x_tg_scope1(ptr addrspace(1) %c, i32 %tid) {
+entry:
+  %w = getelementptr inbounds [1 x i32], ptr addrspace(3) @tgx, i64 0, i64 0
+  %r = call i32 @air.atomic.local.add.u.i32(ptr addrspace(3) %w, i32 1, i32 0, i32 1, i32 0, i1 true)
+  ret void
+}
+EOT
+} | build atomic_x_tg_scope1 "$KMD1"
+
+# (b) 64-bit threadgroup atomics (void result, MSL-style), 64-bit device + threadgroup in one kernel, and a threadgroup float add. They exist to prove the CAPABILITY attribution
+#     (Int64Atomics on StorageBuffer -> shaderBufferInt64Atomics, on Workgroup -> shaderSharedInt64Atomics; AtomicFloat32AddEXT per storage class) and to run on lavapipe.
+#     atomic_i64_tg: 64 threads: local.max.u.i64 of tid * 0x100000001 on @tg64[0], barrier, thread 0 copies @tg64[0] (plain load) to c[0].
+{
+  cat <<EOT
+@tg64 = internal unnamed_addr addrspace(3) global [1 x i64] undef, align 8
+declare void @air.wg.barrier(i32, i32)
+declare void @air.atomic.local.store.i64(ptr addrspace(3), i64, i32, i32, i1)
+declare void @air.atomic.local.max.u.i64(ptr addrspace(3), i64, i32, i32, i32, i1)
+define void @atomic_i64_tg(ptr addrspace(1) %c, i32 %tid) {
+entry:
+  %w = getelementptr inbounds [1 x i64], ptr addrspace(3) @tg64, i64 0, i64 0
+  call void @air.atomic.local.store.i64(ptr addrspace(3) %w, i64 0, i32 0, i32 2, i1 true)
+  call void @air.wg.barrier(i32 2, i32 1)
+  %t = zext i32 %tid to i64
+  %m = mul i64 %t, 4294967297
+  call void @air.atomic.local.max.u.i64(ptr addrspace(3) %w, i64 %m, i32 0, i32 2, i32 0, i1 true)
+  call void @air.wg.barrier(i32 2, i32 1)
+  %v = load i64, ptr addrspace(3) %w, align 8
+  %p0 = getelementptr i64, ptr addrspace(1) %c, i64 0
+  store i64 %v, ptr addrspace(1) %p0
+  ret void
+}
+EOT
+} | build atomic_i64_tg "$KMD1"
+# atomic_i64_both: device AND threadgroup 64-bit atomics in one kernel (needs both caps)
+{
+  cat <<EOT
+@tg64 = internal unnamed_addr addrspace(3) global [1 x i64] undef, align 8
+declare void @air.atomic.global.max.u.i64(ptr addrspace(1), i64, i32, i32, i32, i1)
+declare void @air.atomic.local.max.u.i64(ptr addrspace(3), i64, i32, i32, i32, i1)
+define void @atomic_i64_both(ptr addrspace(1) %c, i32 %tid) {
+entry:
+  %w = getelementptr inbounds [1 x i64], ptr addrspace(3) @tg64, i64 0, i64 0
+  %t = zext i32 %tid to i64
+  %p0 = getelementptr i64, ptr addrspace(1) %c, i64 0
+  call void @air.atomic.global.max.u.i64(ptr addrspace(1) %p0, i64 %t, i32 0, i32 2, i32 0, i1 true)
+  call void @air.atomic.local.max.u.i64(ptr addrspace(3) %w, i64 %t, i32 0, i32 2, i32 0, i1 true)
+  ret void
+}
+EOT
+} | build atomic_i64_both "$KMD1"
+# atomic_f32_tg: local.add.f32 on a threadgroup float (needs shaderSharedFloat32AtomicAdd); thread 0 copies the sum (plain load after a barrier) to c[0]
+{
+  cat <<EOT
+@tgf = internal unnamed_addr addrspace(3) global [1 x float] undef, align 4
+declare void @air.wg.barrier(i32, i32)
+declare void @air.atomic.local.store.i32(ptr addrspace(3), i32, i32, i32, i1)
+declare float @air.atomic.local.add.f32(ptr addrspace(3), float, i32, i32, i32, i1)
+define void @atomic_f32_tg(ptr addrspace(1) %c, i32 %tid) {
+entry:
+  %w = getelementptr inbounds [1 x float], ptr addrspace(3) @tgf, i64 0, i64 0
+  store float 0.0, ptr addrspace(3) %w, align 4
+  call void @air.wg.barrier(i32 2, i32 1)
+  %r = call float @air.atomic.local.add.f32(ptr addrspace(3) %w, float 1.0, i32 0, i32 2, i32 0, i1 true)
+  call void @air.wg.barrier(i32 2, i32 1)
+  %v = load float, ptr addrspace(3) %w, align 4
+  %p0 = getelementptr float, ptr addrspace(1) %c, i64 0
+  store float %v, ptr addrspace(1) %p0
+  ret void
+}
+EOT
+} | build atomic_f32_tg "$KMD1"
+
+# (c) helper functions (non-entry) containing atomics: the pointer is a parameter; two call sites; one nested call (a helper calling a helper which holds the atomic).
+#     256 invocations: c[0] += 1 (site A) and += 4 (nested, 2 x +2), c[1] += tid + 1 (site B), c[2] ticket (site C) -> o[tid].
+#     The ENTRY function must come first in the module (the translator picks the first non-prototype function, as clang emits the kernel before the static helpers it calls).
+{
+  cat <<EOT
+declare i32 @air.atomic.global.add.u.i32(ptr addrspace(1), i32, i32, i32, i32, i1)
+define void @atomic_helper(ptr addrspace(1) %c, ptr addrspace(1) %o, i32 %tid) {
+entry:
+  %t1 = add i32 %tid, 1
+  %t64 = zext i32 %tid to i64
+  %p0 = getelementptr i32, ptr addrspace(1) %c, i64 0
+  %p1 = getelementptr i32, ptr addrspace(1) %c, i64 1
+  %p2 = getelementptr i32, ptr addrspace(1) %c, i64 2
+  %ra = call i32 @bump(ptr addrspace(1) %p0, i32 1)
+  %rb = call i32 @bump(ptr addrspace(1) %p1, i32 %t1)
+  %rn = call i32 @bump_twice(ptr addrspace(1) %p0, i32 2)
+  %rc = call i32 @bump(ptr addrspace(1) %p2, i32 1)
+  %op = getelementptr i32, ptr addrspace(1) %o, i64 %t64
+  store i32 %rc, ptr addrspace(1) %op
+  ret void
+}
+define internal i32 @bump(ptr addrspace(1) %p, i32 %v) {
+entry:
+  %r = call i32 @air.atomic.global.add.u.i32(ptr addrspace(1) %p, i32 %v, i32 0, i32 2, i32 0, i1 true)
+  ret i32 %r
+}
+define internal i32 @bump_twice(ptr addrspace(1) %p, i32 %v) {
+entry:
+  %a = call i32 @bump(ptr addrspace(1) %p, i32 %v)
+  %b = call i32 @bump(ptr addrspace(1) %p, i32 %v)
+  %s = add i32 %a, %b
+  ret i32 %s
+}
+EOT
+} | build atomic_helper "$KMD"
+
+# (d) helper functions holding THREADGROUP atomics on a module-level threadgroup static (no pointer parameter): value parameters only, so the helpers are registered and emitted.
+#     4 groups x 64: every thread does tg_add(1) (site A), tg_add(lid + 1) (site B, a different call site), tg_twice(2) (nested: tg_twice -> tg_add x2 = +4); after a barrier o[gid] = the word.
+#     Expected per group: 64 * 1 + (64 * 65 / 2) + 64 * 4 = 2400.
+{
+  cat <<EOT
+@tgh = internal unnamed_addr addrspace(3) global [1 x i32] undef, align 4
+declare void @air.wg.barrier(i32, i32)
+declare void @air.atomic.local.store.i32(ptr addrspace(3), i32, i32, i32, i1)
+declare i32 @air.atomic.local.add.u.i32(ptr addrspace(3), i32, i32, i32, i32, i1)
+define void @atomic_helper_tg(ptr addrspace(1) %o, i32 %lid, i32 %gid) {
+entry:
+  %w = getelementptr inbounds [1 x i32], ptr addrspace(3) @tgh, i64 0, i64 0
+  call void @air.atomic.local.store.i32(ptr addrspace(3) %w, i32 0, i32 0, i32 2, i1 true)
+  call void @air.wg.barrier(i32 2, i32 1)
+  %l1 = add i32 %lid, 1
+  %ra = call i32 @tg_add(i32 1)
+  %rb = call i32 @tg_add(i32 %l1)
+  %rn = call i32 @tg_twice(i32 2)
+  call void @air.wg.barrier(i32 2, i32 1)
+  %v = load i32, ptr addrspace(3) %w, align 4
+  %g64 = zext i32 %gid to i64
+  %op = getelementptr i32, ptr addrspace(1) %o, i64 %g64
+  store i32 %v, ptr addrspace(1) %op
+  ret void
+}
+define internal i32 @tg_add(i32 %v) {
+entry:
+  %w = getelementptr inbounds [1 x i32], ptr addrspace(3) @tgh, i64 0, i64 0
+  %r = call i32 @air.atomic.local.add.u.i32(ptr addrspace(3) %w, i32 %v, i32 0, i32 2, i32 0, i1 true)
+  ret i32 %r
+}
+define internal i32 @tg_twice(i32 %v) {
+entry:
+  %a = call i32 @tg_add(i32 %v)
+  %b = call i32 @tg_add(i32 %v)
+  %s = add i32 %a, %b
+  ret i32 %s
+}
+EOT
+} | build atomic_helper_tg "$KMDTG"
 echo "generated"
