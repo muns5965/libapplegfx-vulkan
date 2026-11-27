@@ -1843,6 +1843,19 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-unnorm-use-lavapipe.c') and 
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Sampler accuracy (#14) and 3D textures (#17) against a CPU model of the Vulkan spec (lavapipe + validation). Skips (77) without a device.
+if fs.is_file(meson.current_source_dir() / 'texture-compat-lavapipe.c') and vulkan_dep.found()
+  texcompat_vk_test = executable('texture-compat-lavapipe',
+    'texture-compat-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('texture compat (sampler accuracy + 3D) on lavapipe', texcompat_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # OpUndef usage report + fail-closed translation (fixtures undefctl_fragment / i1const_fragment).
 if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
   air2spv_undef_test = executable('air2spv-undef-report-unit',

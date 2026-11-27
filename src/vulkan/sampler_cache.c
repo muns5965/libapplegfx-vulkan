@@ -45,10 +45,11 @@ static int sd_first_cxs(uint64_t w) {
     return first;
 }
 
-void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t st) {
-    if (!addr_unknown && !mip_unknown) return;
+void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, bool filter_unknown, uint32_t st) {
+    if (!addr_unknown && !mip_unknown && !filter_unknown) return;
     if (addr_unknown) SD_ADD(rt_sampler_objs_addr_out_of_range, 1);
     if (mip_unknown) SD_ADD(rt_sampler_objs_mip_out_of_range, 1);
+    if (filter_unknown) SD_ADD(rt_sampler_objs_filter_out_of_range, 1);
     bool first = false;
     pthread_mutex_lock(&g_sd_lock);
     uint32_t i = 0;
@@ -56,8 +57,8 @@ void lagfx_sampler_diag_rt_count(bool addr_unknown, bool mip_unknown, uint32_t s
     if (i == g_sd_rt_n && g_sd_rt_n < SD_LOGGED_MAX) g_sd_rt_seen[g_sd_rt_n++] = st, first = true;
     pthread_mutex_unlock(&g_sd_lock);
     if (first)
-        LAGFX_WARN("sampler(runtime) state=0x%08x: value outside the public Metal enum range%s%s%s -> address 6/7 = clamp-to-edge, mip 3 = nearest (counted, logged once per state word)",
-                   st, addr_unknown ? " address_mode(6|7)" : "", addr_unknown && mip_unknown ? "," : "", mip_unknown ? " mip_filter(3)" : "");
+        LAGFX_WARN("sampler(runtime) state=0x%08x: value outside the public Metal enum range%s%s%s%s%s -> address 6/7 = clamp-to-edge, mip 3 = nearest, min/mag filter 2/3 = linear (counted, logged once per state word)",
+                   st, addr_unknown ? " address_mode(6|7)" : "", addr_unknown && mip_unknown ? "," : "", mip_unknown ? " mip_filter(3)" : "", (addr_unknown || mip_unknown) && filter_unknown ? "," : "", filter_unknown ? " min/mag_filter(2|3)" : "");
 }
 
 #ifdef LAGFX_HAVE_VULKAN

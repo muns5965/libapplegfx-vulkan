@@ -5,7 +5,7 @@
  * Payload: 36 bytes were observed in our own dump (all six captured samplers); the field offsets inside it below are INFER (see "Evidence"): {u32 tag = 3,
  * u32 size, u32 ref, u32 state, u8 flags, f32 lod min, f32 lod max}. The decoder reads only the first 28 bytes (the "28 of 36 written" extent, the flags
  * byte and the unused tail are INFER, not measured by us). state bit fields:
- *   [0] min filter  [2] mag filter  [4] lodAverage  [7:5] compare function  [10:8] / [14:12] / [18:16] address mode S / T / R  [21:20] border colour
+ *   [1:0] min filter  [3:2] mag filter (2-bit fields INFER; public values 0 nearest, 1 linear; 2 / 3 = LAGFX_A64_SAMP_FILTER_UNKNOWN)  [4] lodAverage  [7:5] compare function  [10:8] / [14:12] / [18:16] address mode S / T / R  [21:20] border colour
  *   [25:24] mip filter (0 not mip mapped, 1 nearest, 2 linear)  [30:26] max anisotropy (1..16, verbatim)  [31] normalized coordinates (1 = normalized)
  * MTLSamplerAddressMode: 0 clamp to edge, 1 mirror clamp to edge, 2 repeat, 3 mirror repeat, 4 clamp to zero, 5 clamp to border colour.
  * MTLSamplerBorderColor: 0 transparent black, 1 opaque black, 2 opaque white. MTLCompareFunction 0..7 = VkCompareOp order.
@@ -44,6 +44,7 @@ enum {
     LAGFX_A64_SAMP_ANISO_APPLIED      = 16u,
     LAGFX_A64_SAMP_LODAVG_IGNORED     = 32u,  /* lodAverage (state bit 4) was set: not mapped */
     LAGFX_A64_SAMP_ADDR_UNKNOWN       = 64u,  /* an address mode field (read as 3 bits: `& 7`) was 6 or 7: outside the public MTLSamplerAddressMode range 0..5 as we read it (INFER); mapped to clamp-to-edge (compat fallback, counted). Bits 11/15/19 are ignored and never counted; if the hardware field is 4 bits wide (the older Henge decoder used 4) a set bit there is silently dropped (width unverified) */
+    LAGFX_A64_SAMP_FILTER_UNKNOWN     = 256u, /* the min or mag field (2 bits [1:0] / [3:2], INFER) was 2 or 3: outside MTLSamplerMinMagFilter 0..1; mapped to LINEAR (the old decoder read bit 0 only: 2 became NEAREST), counted. Real bicubic sampling is not implemented (see sampler_cache.h) */
     LAGFX_A64_SAMP_MIP_UNKNOWN        = 128u, /* the mip filter field was 3: outside the public MTLSamplerMipFilter range 0..2 (INFER); treated as nearest-with-LOD (compat fallback, counted) */
 };
 

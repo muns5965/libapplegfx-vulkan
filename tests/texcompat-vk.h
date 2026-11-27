@@ -15,6 +15,7 @@
 
 static VkInstance tcv_inst; static VkPhysicalDevice tcv_pd; static VkDevice tcv_dev; static VkQueue tcv_q;
 static int tcv_validation;                 /* 1 when the Khronos validation layer is active */
+static int tcv_mirror_clamp;               /* samplerMirrorClampToEdge enabled on the device */
 static char tcv_devname[256];
 static VkPhysicalDeviceFeatures tcv_feat;  /* supported features */
 static VkPhysicalDeviceLimits tcv_limits;
@@ -66,6 +67,7 @@ static int tcv_init(int want_validation, const char **dev_exts, uint32_t n_dev_e
     VkPhysicalDeviceVulkan12Features p12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES };
     VkPhysicalDeviceFeatures2 pf2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &p12 };
     vkGetPhysicalDeviceFeatures2(tcv_pd, &pf2);
+    tcv_mirror_clamp = p12.samplerMirrorClampToEdge == VK_TRUE;
     float prio = 1.0f;
     VkDeviceQueueCreateInfo dq = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = 0, .queueCount = 1, .pQueuePriorities = &prio };
     VkPhysicalDeviceVulkan13Features f13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE };

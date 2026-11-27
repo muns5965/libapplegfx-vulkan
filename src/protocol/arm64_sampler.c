@@ -34,9 +34,10 @@ uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_ani
     /* NOTE: the address fields are extracted with `& 7` (3 bits). Bits 11 / 15 / 19 are ignored and NOT counted anywhere; if the real field is 4 bits wide (the older
      * Henge decoder used 4) a set bit there would be dropped silently. The width is unverified (INFER). */
     uint32_t mip = (st >> 24) & 3u, am[3] = { (st >> 8) & 7u, (st >> 12) & 7u, (st >> 16) & 7u }, bc = (st >> 20) & 3u, aniso = (st >> 26) & 31u, cmp = (st >> 5) & 7u;
+    uint32_t fmin = st & 3u, fmag = (st >> 2) & 3u;
     bool border = am[0] == 5u || am[1] == 5u || am[2] == 5u;
     *ci = (VkSamplerCreateInfo){ .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
-        .minFilter = (st & 1u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .magFilter = ((st >> 2) & 1u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
+        .minFilter = fmin ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .magFilter = fmag ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,   /* 2-bit fields [1:0] / [3:2] (INFER, as Henge's decoder): 0 nearest, 1 linear, 2 / 3 outside MTLSamplerMinMagFilter -> LINEAR, counted */
         .mipmapMode = mip == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
         .addressModeU = vk_addr(am[0], have_mirror_clamp), .addressModeV = vk_addr(am[1], have_mirror_clamp), .addressModeW = vk_addr(am[2], have_mirror_clamp),
         .minLod = mip ? lod_min : 0.f, .maxLod = mip ? lod_max : 0.25f,
@@ -63,6 +64,7 @@ uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_ani
     if (st & 0x10u) flags |= LAGFX_A64_SAMP_LODAVG_IGNORED;
     if (am[0] > 5u || am[1] > 5u || am[2] > 5u) flags |= LAGFX_A64_SAMP_ADDR_UNKNOWN;   /* the mapping above is unchanged: 6 / 7 stay clamp-to-edge */
     if ((st >> 24 & 3u) == 3u) flags |= LAGFX_A64_SAMP_MIP_UNKNOWN;
+    if (fmin > 1u || fmag > 1u) flags |= LAGFX_A64_SAMP_FILTER_UNKNOWN;   /* 2 or 3: not nearest / linear; mapped to linear (the closest of the two public values for a would-be bicubic code, INFER) */
     return flags;
 }
 #endif

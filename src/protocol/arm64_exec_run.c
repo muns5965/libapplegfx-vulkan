@@ -223,10 +223,11 @@ static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_en
     if (sf & LAGFX_A64_SAMP_COMPARE_IGNORED) CNT(p).ext_samp_compare++;
     if (sf & LAGFX_A64_SAMP_UNNORM_APPLIED) CNT(p).ext_samp_unnorm++;
     if (sf & LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX) CNT(p).ext_samp_mirror_clamp++;
-    if (sf & (LAGFX_A64_SAMP_ADDR_UNKNOWN | LAGFX_A64_SAMP_MIP_UNKNOWN)) {   /* enum values outside the public Metal range: counted + logged once per state word (sampler_cache.c) */
+    if (sf & LAGFX_A64_SAMP_FILTER_UNKNOWN) CNT(p).ext_samp_filter_unknown++;
+    if (sf & (LAGFX_A64_SAMP_ADDR_UNKNOWN | LAGFX_A64_SAMP_MIP_UNKNOWN | LAGFX_A64_SAMP_FILTER_UNKNOWN)) {   /* enum values outside the public Metal range: counted + logged once per state word (sampler_cache.c) */
         if (sf & LAGFX_A64_SAMP_ADDR_UNKNOWN) CNT(p).ext_samp_addr_unknown++;
         if (sf & LAGFX_A64_SAMP_MIP_UNKNOWN) CNT(p).ext_samp_mip_unknown++;
-        lagfx_sampler_diag_rt_count((sf & LAGFX_A64_SAMP_ADDR_UNKNOWN) != 0, (sf & LAGFX_A64_SAMP_MIP_UNKNOWN) != 0, lagfx_le32(d + 12));
+        lagfx_sampler_diag_rt_count((sf & LAGFX_A64_SAMP_ADDR_UNKNOWN) != 0, (sf & LAGFX_A64_SAMP_MIP_UNKNOWN) != 0, (sf & LAGFX_A64_SAMP_FILTER_UNKNOWN) != 0, lagfx_le32(d + 12));
     }
     if (vkCreateSampler(r->vk->device, &sm->ci, NULL, &sm->s) != VK_SUCCESS) { free(sm); p->diag2.exec.pipe.sampler_failed++; return NULL; }
     p->diag2.exec.pipe.samplers++;
@@ -688,6 +689,8 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             VkImageView v = s->bind[i].dim3 ? lagfx_a64_res_sample_view3d(r->x, t) : lagfx_a64_res_sample_view(r->x, t);
             if (!v && lagfx_a64_res_is_3d(t) != (s->bind[i].dim3 != 0)) { CNT(p).ext_tex_dim_mismatch++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             if (v && s->bind[i].dim3) CNT(p).ext_tex3d_binds++;
+            if (v && t->mips > 1u) CNT(p).ext_tex_mips_base_only++;       /* the view is level 0 only: levels >= 1 are never sampled (APPROX), counted per bound descriptor per draw */
+            if (v && t->layers > 1u) CNT(p).ext_tex_layers_base_only++;   /* the view is layer 0 only (2D, not 2D-array): layers >= 1 are never sampled (APPROX) */
             if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];

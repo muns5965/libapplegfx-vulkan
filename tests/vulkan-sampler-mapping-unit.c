@@ -222,8 +222,27 @@ if (!LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED || g_compat_mode) {
       static const uint32_t obs[4] = { 0x84000000u, 0x84000005u, 0x04000005u, 0x04000000u };
       for (int i = 0; i < 4; i++) { samp_blob(b, obs[i]); fl = lagfx_a64_sampler_decode_ex(b, 36, false, 0, false, &ci); CHECK(!(fl & (LAGFX_A64_SAMP_ADDR_UNKNOWN | LAGFX_A64_SAMP_MIP_UNKNOWN)) && ci.addressModeU == EDGE); }
       /* the counter / once-per-word log (0x84000600 and 0x87000000 are SYNTHETIC) */
-      lagfx_sampler_diag_rt_count(true, false, 0x84000600u); lagfx_sampler_diag_rt_count(true, false, 0x84000600u); lagfx_sampler_diag_rt_count(false, true, 0x87000000u);
+      lagfx_sampler_diag_rt_count(true, false, false, 0x84000600u); lagfx_sampler_diag_rt_count(true, false, false, 0x84000600u); lagfx_sampler_diag_rt_count(false, true, false, 0x87000000u);
       lagfx_sampler_diag_t d = dg(); CHECK(d.rt_sampler_objs_addr_out_of_range == 2 && d.rt_sampler_objs_mip_out_of_range == 1 && g_nwarn == 2); }
+    /* ---- runtime min / mag filter fields (2 bits each, INFER): 0 nearest, 1 linear are exact; 2 / 3 are outside MTLSamplerMinMagFilter -> LINEAR + FILTER_UNKNOWN. The old decoder read bit 0 only, so
+     * the code 2 (bit 1 set, bit 0 clear: a would-be bicubic code) silently became NEAREST. SYNTHETIC words (the captured ones only have the bit 0 / bit 2 patterns). ---- */
+    { uint8_t b[36]; VkSamplerCreateInfo ci; uint32_t fl;
+      static const struct { uint32_t mn, mg; int unknown; VkFilter emin, emag; } F[] = {
+          { 0, 0, 0, VK_FILTER_NEAREST, VK_FILTER_NEAREST }, { 1, 0, 0, VK_FILTER_LINEAR, VK_FILTER_NEAREST }, { 0, 1, 0, VK_FILTER_NEAREST, VK_FILTER_LINEAR }, { 1, 1, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR },
+          { 2, 0, 1, VK_FILTER_LINEAR, VK_FILTER_NEAREST }, { 0, 2, 1, VK_FILTER_NEAREST, VK_FILTER_LINEAR }, { 3, 3, 1, VK_FILTER_LINEAR, VK_FILTER_LINEAR }, { 2, 2, 1, VK_FILTER_LINEAR, VK_FILTER_LINEAR } };
+      for (unsigned i = 0; i < sizeof F / sizeof F[0]; i++) {
+          samp_blob(b, 0x84000000u | F[i].mn | F[i].mg << 2); fl = lagfx_a64_sampler_decode_ex(b, 36, false, 0, false, &ci);
+          CHECK(ci.minFilter == F[i].emin && ci.magFilter == F[i].emag && !!(fl & LAGFX_A64_SAMP_FILTER_UNKNOWN) == F[i].unknown);
+      }
+      /* the 4 CAPTURED words never raise it */
+      static const uint32_t cw[4] = { 0x84000000u, 0x84000005u, 0x04000005u, 0x04000000u };
+      for (int i = 0; i < 4; i++) { samp_blob(b, cw[i]); fl = lagfx_a64_sampler_decode_ex(b, 36, false, 0, false, &ci); CHECK(!(fl & LAGFX_A64_SAMP_FILTER_UNKNOWN)); }
+      /* unnormalized: the unknown min code still ends as one legal LINEAR / LINEAR pair */
+      samp_blob(b, 0x00000002u); fl = lagfx_a64_sampler_decode_ex(b, 36, false, 0, false, &ci);
+      CHECK((fl & LAGFX_A64_SAMP_UNNORM_APPLIED) && (fl & LAGFX_A64_SAMP_FILTER_UNKNOWN) && ci.minFilter == VK_FILTER_LINEAR && ci.magFilter == VK_FILTER_LINEAR);
+      lagfx_sampler_diag_reset(); g_nwarn = g_nlog = 0;
+      lagfx_sampler_diag_rt_count(false, false, true, 0x84000002u); lagfx_sampler_diag_rt_count(false, false, true, 0x84000002u);
+      lagfx_sampler_diag_t d = dg(); CHECK(d.rt_sampler_objs_filter_out_of_range == 2 && g_nwarn == 1); }
 
     /* ---- 64-word log cap: counting continues, log lines stop, suppressed builds are counted ---- */
     lagfx_sampler_diag_reset(); g_nwarn = g_nlog = 0;
