@@ -16,11 +16,29 @@
  *
  * One line "g7-gpu-readback:" per sampled swap says PASS / FAIL / SKIP and why. FAIL and SKIP are counted and NEVER count as a pass. Default OFF.
  *
- * Enable: LAGFX_WB_VERIFY=1 (same switch as wbverify) or LAGFX_GPU_READBACK=1 (this alone). Sampling per surface class (BGRA / RGhA): the first 4 candidates,
- * then every LAGFX_GPU_READBACK_EVERY-th (default 16), plus any candidate at least 30 s after the previous sample (catches the first frame after a long
- * silence), at most 60 lines. A "candidate" is one image -> staging copy recording: one per exec that renders into the surface in the immediate write-back mode
- * (LAGFX_ARM64_MAPPED_WRITEBACK=1), one per display swap in =swap mode.
- * Cost when on: one extra GPU copy + one extra host buffer of the surface size per surface (allocated at the first sample) + two guest-page reads. Off: nothing.
+ * Activation (split; the two switches are independent):
+ *   neither                        nothing: no candidate counted, no GPU copy, no buffer, no line, no wait accounting.
+ *   LAGFX_WB_VERIFY=1 only         the existing staging(B) -> guest(C) wbverify line ONLY. The independent GPU readback does NOT run (it used to be enabled by this flag; it is not any more).
+ *   LAGFX_GPU_READBACK=1 only      the independent readback, mode=AB: GPU image (A) vs the staging bytes (B) the write-back wrote. The guest pages are NOT re-read (no C), no wbverify line.
+ *   both                           mode=ABC: A vs B vs a fresh guest-page read (C), plus the wbverify line. This is the full comparison.
+ * Sampling per surface class (BGRA / RGhA): the first 4 candidates, then every LAGFX_GPU_READBACK_EVERY-th (default 16), plus any candidate at least 30 s after the
+ * previous sample (catches the first frame after a long silence), at most 60 lines. A "candidate" is one image -> staging copy recording: one per exec that renders
+ * into the surface in the immediate write-back mode (LAGFX_ARM64_MAPPED_WRITEBACK=1), one per display swap in =swap mode.
+ * Cost when on: one extra GPU copy (in the SAME command buffer, so under the SAME fence) + one extra host buffer of the surface size per surface (allocated at the
+ * first sample), + (mode ABC) two guest-page reads. Off: nothing.
+ *
+ * TIMING SIDE EFFECT (read this before comparing ON and OFF runs): the extra copy lengthens the GPU work that the exec / swap fence wait covers, so every sampled
+ * submission waits longer than it would without readback. That wait is counted (totals waits= / wait_ms_total=, only for submissions that carried a readback copy). A
+ * readback run can therefore HIDE a frame-freshness race (a late frame that appears one swap later when the GPU is slow looks fine when the wait is longer) or
+ * change the sequence of swaps. Every line carries readback_sync=on and wbv=on|off so a log shows which run it came from; compare behaviour only between runs that
+ * state the same setting.
+ *
+ * Checks done before a sample is trusted (a failed check is a SKIP with the reason, never a pass, and changes nothing else): the sample is for the SAME swap
+ * (finish swap >= record swap), mapping id, mapping generation (identity of the guest page list), write-back generation, image handle (not replaced / destroyed) and
+ * subresource (mip 0, layer 0, the only one copied); the image was in GENERAL when recorded (the library never leaves it; no transition is recorded, so the layout is
+ * the same after: layout=GENERAL->GENERAL); a signalled fence wait happened between record and finish (fence_seq); the transfer -> host barrier is recorded after the
+ * copy; non-coherent memory is invalidated before the read; the row pitch is w * bpp (tight; bufferRowLength = 0) and a buffer that does not hold (h-1) * pitch + w * bpp
+ * is an error. A surface destroyed while a sample is pending frees the slot (totals destroyed_pending=) and the finish never runs.
  *
  * Threading: called from the exec / swap paths, which already run one at a time under the protocol's execution lock. The counters are plain statics.
  * SPDX-License-Identifier: MIT
@@ -70,13 +88,27 @@ typedef struct {
     uint32_t mapping, w, h, fourcc, bpp;
     uint64_t pitch, pages_skipped;
     bool c_stable, coherent;
+    bool full;                                   /* mode ABC (LAGFX_WB_VERIFY=1 too: C is read) vs mode AB; set when the line is emitted */
     lagfx_rb_cmp_t cmp;
 } lagfx_rb_verdict_t;
-typedef struct { uint64_t candidates, sampled, pass, fail, skip, abandoned, not_sampled, invalidates, lines; } lagfx_rb_totals_t;
+typedef struct { uint64_t candidates, sampled, pass, fail, skip, abandoned, not_sampled, invalidates, lines;
+                 uint64_t waits, wait_ns, host_barriers, destroyed_pending, fence_seq; } lagfx_rb_totals_t;
 
 size_t lagfx_rb_format_line(char *buf, size_t cap, const lagfx_rb_verdict_t *v, const lagfx_rb_totals_t *t);
 
-bool lagfx_rb_enabled(void);                     /* LAGFX_WB_VERIFY == "1" or LAGFX_GPU_READBACK == "1" */
+bool lagfx_rb_enabled(void);                     /* LAGFX_GPU_READBACK == "1" ONLY (LAGFX_WB_VERIFY does not enable the independent readback) */
+bool lagfx_rb_full_mode(void);                   /* both LAGFX_GPU_READBACK == "1" and LAGFX_WB_VERIFY == "1": mode ABC */
+
+/* Identity of a sample, recorded with the copy and re-checked at the finish (pure; unit tested). */
+typedef struct { uint64_t swap, gen, ident, img, fence_seq; uint32_t mapping, w, h, bpp, mip, layer; } lagfx_rb_ident_t;
+/* NULL = the sample may be trusted; else the SKIP reason: "gen_mismatch", "mapping_mismatch", "mapping_generation_changed", "image_replaced", "desc_changed",
+ * "subresource", "swap_went_back", "fence_not_signalled". `now.fence_seq` is the signalled-wait counter at the finish. */
+const char *lagfx_rb_identity_check(const lagfx_rb_ident_t *rec, const lagfx_rb_ident_t *now);
+/* NULL = the copy may be recorded; else the SKIP reason ("no_transfer_src", "unknown_format", "bpp_format_mismatch", "bad_extent", "layout_not_general"). */
+const char *lagfx_rb_precheck(uint32_t usage_flags, int32_t vk_format, uint32_t bpp, uint32_t w, uint32_t h, int32_t layout);
+/* Wait accounting: call with the duration of a fence wait. Counted only while a readback copy is waiting for its fence (recorded, not yet signalled); ok = the wait
+ * ended with the fence signalled (advances fence_seq). No-op when the readback is off. */
+void lagfx_rb_note_wait(uint64_t ns, bool ok);
 const lagfx_rb_verdict_t *lagfx_rb_last_verdict(void);
 const lagfx_rb_totals_t *lagfx_rb_totals(void);
 
@@ -85,7 +117,8 @@ typedef struct { uint64_t seen, last_ns, taken; } lagfx_rb_gate_t;
 bool lagfx_rb_gate_admit(lagfx_rb_gate_t *g, uint64_t now_ns, uint32_t every);
 
 /* Tests only. hook: 0 none; 1 flip one bit of staging (B) before the compare; 2 flip one bit of the GPU copy (A); 3 compare B with a stride of width*bpp + 8 (a wrong
- * stride); 4 compare with C read from a corrupted copy (flip one bit of C); 5 treat the memory as non-coherent (invalidate runs even on coherent memory).
+ * stride); 4 compare with C read from a corrupted copy (flip one bit of C; mode ABC); 5 treat the memory as non-coherent (invalidate runs even on coherent memory);
+ * 6 the readback buffer allocation fails; 7 like 5 and the invalidate fails.
  * lagfx_rb_test_reset clears the totals, the last verdict and the gates. */
 extern int lagfx_rb_test_hook;
 void lagfx_rb_test_reset(void);
@@ -94,15 +127,16 @@ void lagfx_rb_test_reset(void);
 typedef struct lagfx_rb_slot lagfx_rb_slot_t;   /* per surface: the independent buffer + the pending sample */
 
 /* Record the independent copy (if enabled, the gate admits this candidate and the preconditions hold) into `cb`, right after the staging copy of the same image.
- * Precondition checked here: usage has TRANSFER_SRC, format is a known texel size equal to `bpp`, the image is host_valid (the caller only calls for those). A skipped
+ * Precondition checked here: usage has TRANSFER_SRC, format is a known texel size equal to `bpp`, the image is host_valid (the caller only calls for those) and in `layout` GENERAL. A skipped
  * candidate that was admitted logs one SKIP line with the reason. Never fails the caller. */
 void lagfx_rb_record(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot, VkCommandBuffer cb, VkImage img, VkFormat fmt, VkImageUsageFlags usage,
-                     uint32_t w, uint32_t h, uint32_t bpp, uint32_t mapping, uint64_t gen, uint64_t swap);
-/* After the fence signalled and the write-back ran: compare A (own buffer), B (`stage`, tight rows of w*bpp) and C (fresh guest read of `gs`), log the line.
- * No-op if nothing is pending for `gen`. */
+                     VkImageLayout layout, uint32_t w, uint32_t h, uint32_t bpp, uint32_t mapping, uint64_t ident, uint64_t gen, uint64_t swap);
+/* After the fence signalled and the write-back ran: identity checks, then compare A (own buffer) with B (`stage`, tight rows of w*bpp) and, in mode ABC, with C (fresh
+ * guest read of `gs`); log the line. No-op if nothing is pending for `gen`. `img` / `ident` / `mapping` are the surface's CURRENT values. */
 void lagfx_rb_finish(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot, const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *gs,
-                     const uint8_t *stage, uint64_t gen, uint64_t swap_now);
+                     const uint8_t *stage, VkImage img, uint32_t mapping, uint64_t ident, uint64_t gen, uint64_t swap_now);
 void lagfx_rb_slot_free(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot);
+bool lagfx_rb_slot_allocated(const lagfx_rb_slot_t *slot);   /* a host buffer exists (tests: must stay false while the readback is off) */
 #endif
 
 #endif

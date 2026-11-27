@@ -19,15 +19,45 @@
 int lagfx_rb_test_hook;
 static lagfx_rb_totals_t g_tot;
 static lagfx_rb_verdict_t g_last;
+static bool g_carry;                       /* a readback copy was recorded and its fence has not signalled yet */
+static bool g_announced;                   /* the one-time "readback sync ON" line was logged */
 static lagfx_rb_gate_t g_gate[2];          /* [0] 4-byte surfaces, [1] 8-byte (RGhA): the big display surface has its own budget */
 
 const lagfx_rb_verdict_t *lagfx_rb_last_verdict(void) { return &g_last; }
 const lagfx_rb_totals_t *lagfx_rb_totals(void) { return &g_tot; }
-void lagfx_rb_test_reset(void) { memset(&g_tot, 0, sizeof g_tot); memset(&g_last, 0, sizeof g_last); memset(g_gate, 0, sizeof g_gate); lagfx_rb_test_hook = 0; }
+void lagfx_rb_test_reset(void) { memset(&g_tot, 0, sizeof g_tot); memset(&g_last, 0, sizeof g_last); memset(g_gate, 0, sizeof g_gate); lagfx_rb_test_hook = 0; g_carry = false; g_announced = false; }
 
-bool lagfx_rb_enabled(void) {
-    const char *a = getenv("LAGFX_WB_VERIFY"), *b = getenv("LAGFX_GPU_READBACK");
-    return (a && a[0] == '1' && !a[1]) || (b && b[0] == '1' && !b[1]);
+static bool env_is_1(const char *n) { const char *e = getenv(n); return e && e[0] == '1' && !e[1]; }
+bool lagfx_rb_enabled(void) { return env_is_1("LAGFX_GPU_READBACK"); }                     /* LAGFX_WB_VERIFY alone does NOT enable the independent readback */
+bool lagfx_rb_full_mode(void) { return env_is_1("LAGFX_GPU_READBACK") && env_is_1("LAGFX_WB_VERIFY"); }
+
+const char *lagfx_rb_identity_check(const lagfx_rb_ident_t *rec, const lagfx_rb_ident_t *now) {
+    if (!rec || !now) return "no_inputs";
+    if (rec->gen != now->gen) return "gen_mismatch";
+    if (rec->mapping != now->mapping) return "mapping_mismatch";
+    if (rec->ident != now->ident) return "mapping_generation_changed";
+    if (rec->img != now->img) return "image_replaced";
+    if (rec->w != now->w || rec->h != now->h || rec->bpp != now->bpp) return "desc_changed";
+    if (rec->mip != 0 || rec->layer != 0 || now->mip != 0 || now->layer != 0) return "subresource";
+    if (now->swap < rec->swap) return "swap_went_back";
+    if (now->fence_seq <= rec->fence_seq) return "fence_not_signalled";
+    return NULL;
+}
+
+const char *lagfx_rb_precheck(uint32_t usage, int32_t fmt, uint32_t bpp, uint32_t w, uint32_t h, int32_t layout) {
+    uint32_t fb = lagfx_rb_format_bpp(fmt);
+    if (!(usage & 0x1u)) return "no_transfer_src";                       /* VK_IMAGE_USAGE_TRANSFER_SRC_BIT */
+    if (!fb) return "unknown_format";
+    if (fb != bpp) return "bpp_format_mismatch";
+    if (!w || !h || (uint64_t)w * h * bpp > (256ull << 20)) return "bad_extent";
+    if (layout != 1) return "layout_not_general";                        /* VK_IMAGE_LAYOUT_GENERAL */
+    return NULL;
+}
+
+void lagfx_rb_note_wait(uint64_t ns, bool ok) {
+    if (!g_carry || !lagfx_rb_enabled()) return;
+    g_tot.waits++, g_tot.wait_ns += ns;
+    if (ok) g_tot.fence_seq++, g_carry = false;
 }
 
 bool lagfx_rb_gate_admit(lagfx_rb_gate_t *g, uint64_t now_ns, uint32_t every) {
@@ -136,14 +166,18 @@ size_t lagfx_rb_format_line(char *buf, size_t cap, const lagfx_rb_verdict_t *v, 
         " A_vs_B_mismatch_px=%" PRIu64 " B_vs_C_mismatch_px=%" PRIu64 " A_vs_C_mismatch_px=%" PRIu64 " first_AB=%d,%d first_BC=%d,%d"
         " hash_A=%016" PRIx64 " hash_B=%016" PRIx64 " hash_C=%016" PRIx64 " hash_algo=%s"
         " nan_px=%" PRIu64 " inf_px=%" PRIu64 " neg_px=%" PRIu64 " gt1_px=%" PRIu64 " half_stats=%d"
-        " pages_skipped=%" PRIu64 " C_stable=%d src=vkCmdCopyImageToBuffer(no blit/shader/format change) layout=GENERAL(no transition) coherent=%d"
-        " totals[candidates=%" PRIu64 " sampled=%" PRIu64 " pass=%" PRIu64 " fail=%" PRIu64 " skip=%" PRIu64 " abandoned=%" PRIu64 " not_sampled=%" PRIu64 " invalidates=%" PRIu64 "]",
+        " readback_sync=on wbv=%s mode=%s subres=mip0/layer0 layout=GENERAL->GENERAL(no transition)"
+        " pages_skipped=%" PRIu64 " C_stable=%d src=vkCmdCopyImageToBuffer(no blit/shader/format change) coherent=%d"
+        " totals[candidates=%" PRIu64 " sampled=%" PRIu64 " pass=%" PRIu64 " fail=%" PRIu64 " skip=%" PRIu64 " abandoned=%" PRIu64 " not_sampled=%" PRIu64 " invalidates=%" PRIu64
+        " host_barriers=%" PRIu64 " destroyed_pending=%" PRIu64 " waits=%" PRIu64 " wait_ms_total=%.3f (fence wait of submissions that carried the readback copy; may hide frame-freshness races)]",
         k, v->skip ? v->skip : "-", v->swap, v->swap_fin, v->mapping, v->gen, v->w, v->h, v->fourcc, v->bpp, v->pitch, c->bytes,
         c->ab_px, c->bc_px, c->ac_px, c->ab_x, c->ab_y, c->bc_x, c->bc_y,
         c->hash_a, c->hash_b, c->hash_c, v->bpp == 8u ? "u64_fnv1a_full" : "u32_fnv1a_full",
         c->nan_px, c->inf_px, c->neg_px, c->gt1_px, c->half_stats ? 1 : 0,
+        v->full ? "on" : "off", v->full ? "ABC" : "AB",
         v->pages_skipped, v->c_stable ? 1 : 0, v->coherent ? 1 : 0,
-        t->candidates, t->sampled, t->pass, t->fail, t->skip, t->abandoned, t->not_sampled, t->invalidates);
+        t->candidates, t->sampled, t->pass, t->fail, t->skip, t->abandoned, t->not_sampled, t->invalidates,
+        t->host_barriers, t->destroyed_pending, t->waits, (double)t->wait_ns / 1e6);
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
@@ -156,11 +190,12 @@ static uint32_t every_n(void) {
 
 static void emit(lagfx_rb_verdict_t *v) {
     v->valid = true;
+    v->full = lagfx_rb_full_mode();
     g_tot.sampled++;
     if (v->kind == LAGFX_RB_PASS) g_tot.pass++; else if (v->kind == LAGFX_RB_FAIL) g_tot.fail++; else g_tot.skip++;
     g_tot.lines++;
     g_last = *v;
-    char line[1536];
+    char line[3072];
     lagfx_rb_format_line(line, sizeof line, v, &g_tot);
     LAGFX_WARN("%s", line);
 }
@@ -168,8 +203,7 @@ static void emit(lagfx_rb_verdict_t *v) {
 struct lagfx_rb_slot {
     VkBuffer buf; VkDeviceMemory mem; uint8_t *map; VkDeviceSize size; bool coherent;
     bool pending;
-    uint64_t swap, gen;
-    uint32_t mapping, w, h, bpp;
+    lagfx_rb_ident_t rec;
 };
 
 static uint32_t rb_mem_type(struct lagfx_vk_state *vk, uint32_t bits, bool *coherent) {
@@ -187,6 +221,7 @@ static uint32_t rb_mem_type(struct lagfx_vk_state *vk, uint32_t bits, bool *cohe
 }
 
 static bool slot_buf(struct lagfx_vk_state *vk, lagfx_rb_slot_t *s, VkDeviceSize size) {
+    if (lagfx_rb_test_hook == 6) return false;
     if (s->buf && s->size >= size) return true;
     if (s->buf) { vkDestroyBuffer(vk->device, s->buf, NULL); vkFreeMemory(vk->device, s->mem, NULL); s->buf = VK_NULL_HANDLE, s->mem = VK_NULL_HANDLE, s->map = NULL; }
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
@@ -210,11 +245,14 @@ bad:
 void lagfx_rb_slot_free(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot) {
     if (!slot || !*slot) return;
     lagfx_rb_slot_t *s = *slot;
+    if (s->pending) g_tot.destroyed_pending++;   /* the surface went away while a sample was pending: the finish will never run, nothing is read */
     if (vk && s->buf) vkDestroyBuffer(vk->device, s->buf, NULL);
     if (vk && s->mem) vkFreeMemory(vk->device, s->mem, NULL);   /* freeing unmaps */
     free(s);
     *slot = NULL;
 }
+
+bool lagfx_rb_slot_allocated(const lagfx_rb_slot_t *s) { return s && s->buf != VK_NULL_HANDLE; }
 
 static void emit_skip(uint32_t mapping, uint32_t w, uint32_t h, uint32_t bpp, uint64_t gen, uint64_t swap, const char *why) {
     lagfx_rb_verdict_t v; memset(&v, 0, sizeof v);
@@ -224,85 +262,98 @@ static void emit_skip(uint32_t mapping, uint32_t w, uint32_t h, uint32_t bpp, ui
 }
 
 void lagfx_rb_record(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot, VkCommandBuffer cb, VkImage img, VkFormat fmt, VkImageUsageFlags usage,
-                     uint32_t w, uint32_t h, uint32_t bpp, uint32_t mapping, uint64_t gen, uint64_t swap) {
+                     VkImageLayout layout, uint32_t w, uint32_t h, uint32_t bpp, uint32_t mapping, uint64_t ident, uint64_t gen, uint64_t swap) {
     if (!lagfx_rb_enabled() || !slot) return;
     g_tot.candidates++;
+    if (!g_announced) {
+        g_announced = true;
+        LAGFX_WARN("g7-gpu-readback: readback_sync=on wbv=%s mode=%s: one extra image->buffer copy is added to the SAME command buffer / fence of each sampled write-back, so the fence wait is longer than with the readback off (wait time is counted in totals); this may hide frame-freshness races. Compare ON and OFF behaviour only between runs that state this.",
+                   lagfx_rb_full_mode() ? "on" : "off", lagfx_rb_full_mode() ? "ABC" : "AB");
+    }
     if (*slot && (*slot)->pending) { (*slot)->pending = false; g_tot.abandoned++; }   /* recorded earlier, the finish never ran (failed exec, dropped write-back) */
     if (!vk || cb == VK_NULL_HANDLE || img == VK_NULL_HANDLE) return;
     if (g_tot.lines >= RB_LINE_CAP || !lagfx_rb_gate_admit(&g_gate[bpp == 8u], lagfx_wbv_now_ns(), every_n())) { g_tot.not_sampled++; return; }
-    uint32_t fb = lagfx_rb_format_bpp((int32_t)fmt);
-    const char *skip = NULL;
-    if (!(usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) skip = "no_transfer_src";
-    else if (!fb) skip = "unknown_format";
-    else if (fb != bpp) skip = "bpp_format_mismatch";
-    else if (!w || !h || (uint64_t)w * h * bpp > (256ull << 20)) skip = "bad_extent";
+    const char *skip = lagfx_rb_precheck((uint32_t)usage, (int32_t)fmt, bpp, w, h, (int32_t)layout);
     if (skip) { emit_skip(mapping, w, h, bpp, gen, swap, skip); return; }
     if (!*slot) *slot = calloc(1, sizeof **slot);
     lagfx_rb_slot_t *s = *slot;
     if (!s || !slot_buf(vk, s, (VkDeviceSize)w * h * bpp)) { emit_skip(mapping, w, h, bpp, gen, swap, "alloc_failed"); return; }
     memset(s->map, RB_POISON, (size_t)w * h * bpp);   /* a copy that never ran cannot match anything real */
-    /* The image is in GENERAL (the library never moves it) and the caller issued a full barrier before its own staging copy, which also covers this later read. */
+    /* The image is in GENERAL (the library never moves it) and the caller issued a full barrier before its own staging copy, which also covers this later read.
+     * No layout transition is recorded, so the layout after the copy is the layout before it. */
     VkBufferImageCopy r = { .bufferOffset = 0, .bufferRowLength = 0, .bufferImageHeight = 0,
                             .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageOffset = { 0, 0, 0 }, .imageExtent = { w, h, 1 } };
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, s->buf, 1, &r);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    s->pending = true, s->swap = swap, s->gen = gen, s->mapping = mapping, s->w = w, s->h = h, s->bpp = bpp;
+    g_tot.host_barriers++;
+    s->pending = true, g_carry = true;
+    s->rec = (lagfx_rb_ident_t){ .swap = swap, .gen = gen, .ident = ident, .img = (uint64_t)(uintptr_t)img, .fence_seq = g_tot.fence_seq,
+                                 .mapping = mapping, .w = w, .h = h, .bpp = bpp, .mip = 0, .layer = 0 };
 }
 
 static void flip_bit(uint8_t *p, size_t n) { if (n) p[n / 2u] ^= 1u; }
 
 void lagfx_rb_finish(struct lagfx_vk_state *vk, lagfx_rb_slot_t **slot, const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *gs,
-                     const uint8_t *stage, uint64_t gen, uint64_t swap_now) {
+                     const uint8_t *stage, VkImage img, uint32_t mapping, uint64_t ident, uint64_t gen, uint64_t swap_now) {
     if (!slot || !*slot) return;
     lagfx_rb_slot_t *s = *slot;
-    if (!s->pending || s->gen != gen) return;
+    if (!s->pending || s->rec.gen != gen) return;
     s->pending = false;
+    const bool full = lagfx_rb_full_mode();
     lagfx_rb_verdict_t v; memset(&v, 0, sizeof v);
-    v.swap = s->swap, v.swap_fin = swap_now, v.gen = gen, v.mapping = s->mapping, v.w = s->w, v.h = s->h, v.bpp = s->bpp, v.fourcc = gs ? gs->fourcc : 0, v.coherent = s->coherent;
-    v.pitch = (uint64_t)s->w * s->bpp;
+    v.swap = s->rec.swap, v.swap_fin = swap_now, v.gen = gen, v.mapping = s->rec.mapping, v.w = s->rec.w, v.h = s->rec.h, v.bpp = s->rec.bpp, v.fourcc = gs ? gs->fourcc : 0, v.coherent = s->coherent;
+    v.pitch = (uint64_t)s->rec.w * s->rec.bpp;
     v.cmp.ab_x = v.cmp.ab_y = v.cmp.bc_x = v.cmp.bc_y = -1;
-    size_t n = (size_t)s->w * s->h * s->bpp;
+    const uint32_t W = s->rec.w, H = s->rec.h, BPP = s->rec.bpp;
+    size_t n = (size_t)W * H * BPP;
     uint8_t *tmp_a = NULL, *tmp_b = NULL, *tmp_c = NULL, *tmp_c2 = NULL;
     if (!vk || !shell || !gs || !stage) { v.kind = LAGFX_RB_SKIP, v.skip = "no_inputs"; goto out; }
-    if (gs->width != s->w || gs->height != s->h || gs->bpp != s->bpp) { v.kind = LAGFX_RB_SKIP, v.skip = "desc_changed"; goto out; }
-    if (!s->coherent || lagfx_rb_test_hook == 5) {
+    lagfx_rb_ident_t now = { .swap = swap_now, .gen = gen, .ident = ident, .img = (uint64_t)(uintptr_t)img, .fence_seq = g_tot.fence_seq,
+                             .mapping = mapping, .w = gs->width, .h = gs->height, .bpp = gs->bpp, .mip = 0, .layer = 0 };
+    const char *why = lagfx_rb_identity_check(&s->rec, &now);
+    if (why) { v.kind = LAGFX_RB_SKIP, v.skip = why; goto out; }
+    if (!s->coherent || lagfx_rb_test_hook == 5 || lagfx_rb_test_hook == 7) {
         VkMappedMemoryRange mr = { .sType = VK_STRUCTURE_TYPE_MAPPED_MEMORY_RANGE, .memory = s->mem, .offset = 0, .size = VK_WHOLE_SIZE };
         g_tot.invalidates++;
-        if (vkInvalidateMappedMemoryRanges(vk->device, 1, &mr) != VK_SUCCESS) { v.kind = LAGFX_RB_SKIP, v.skip = "invalidate_failed"; goto out; }
+        if (lagfx_rb_test_hook == 7 || vkInvalidateMappedMemoryRanges(vk->device, 1, &mr) != VK_SUCCESS) { v.kind = LAGFX_RB_SKIP, v.skip = "invalidate_failed"; goto out; }
+        if (lagfx_rb_test_hook == 5) vkInvalidateMappedMemoryRanges(vk->device, 1, &mr);   /* the call really runs on coherent memory too (allowed) */
     }
-    tmp_c = malloc(n);
-    if (!tmp_c) { v.kind = LAGFX_RB_SKIP, v.skip = "oom"; goto out; }
-    lagfx_guest_surface_xfer_stats_t xs; memset(&xs, 0, sizeof xs);
-    if (lagfx_guest_surface_xfer(shell, gs, tmp_c, s->w, s->h, (size_t)s->w * s->bpp, false, &xs) != LAGFX_OK) { v.kind = LAGFX_RB_SKIP, v.skip = "guest_read_failed"; goto out; }
-    v.pages_skipped = xs.pages_skipped;
-    lagfx_rb_img_t a = { s->map, (size_t)s->w * s->bpp, n }, b = { stage, (size_t)s->w * s->bpp, n }, c = { tmp_c, (size_t)s->w * s->bpp, n };
+    lagfx_rb_img_t a = { s->map, (size_t)W * BPP, n }, b = { stage, (size_t)W * BPP, n }, c = { NULL, (size_t)W * BPP, n };
+    if (full) {
+        tmp_c = malloc(n);
+        if (!tmp_c) { v.kind = LAGFX_RB_SKIP, v.skip = "oom"; goto out; }
+        lagfx_guest_surface_xfer_stats_t xs; memset(&xs, 0, sizeof xs);
+        if (lagfx_guest_surface_xfer(shell, gs, tmp_c, W, H, (size_t)W * BPP, false, &xs) != LAGFX_OK) { v.kind = LAGFX_RB_SKIP, v.skip = "guest_read_failed"; goto out; }
+        v.pages_skipped = xs.pages_skipped;
+        c.p = tmp_c;
+    }
     if (lagfx_rb_test_hook == 1 || lagfx_rb_test_hook == 2 || lagfx_rb_test_hook == 4) {   /* negative controls act on copies, never on the real staging / guest bytes */
         tmp_a = malloc(n), tmp_b = malloc(n);
         if (!tmp_a || !tmp_b) { v.kind = LAGFX_RB_SKIP, v.skip = "oom"; goto out; }
         memcpy(tmp_a, s->map, n), memcpy(tmp_b, stage, n);
         if (lagfx_rb_test_hook == 1) flip_bit(tmp_b, n);
         if (lagfx_rb_test_hook == 2) flip_bit(tmp_a, n);
-        if (lagfx_rb_test_hook == 4) flip_bit(tmp_c, n);
+        if (lagfx_rb_test_hook == 4 && tmp_c) flip_bit(tmp_c, n);
         a.p = tmp_a, b.p = tmp_b;
     }
-    if (lagfx_rb_test_hook == 3) b.stride = (size_t)s->w * s->bpp + 8u;   /* a wrong stride for B: must be detected, not read past the buffer */
-    lagfx_rb_err_t e = lagfx_rb_compare(&a, &b, &c, s->w, s->h, s->bpp, &v.cmp);
+    if (lagfx_rb_test_hook == 3) b.stride = (size_t)W * BPP + 8u;   /* a wrong stride for B: must be detected, not read past the buffer */
+    lagfx_rb_err_t e = lagfx_rb_compare(&a, &b, full ? &c : NULL, W, H, BPP, &v.cmp);
     if (e != LAGFX_RB_OK) { v.kind = LAGFX_RB_FAIL, v.skip = e == LAGFX_RB_ERR_STRIDE ? "stride" : "bad_args"; goto out; }
-    v.c_stable = true;
-    if (v.cmp.bc_px) {   /* B != C: was the guest writing meanwhile? read C once more */
+    v.c_stable = full;
+    if (full && v.cmp.bc_px) {   /* B != C: was the guest writing meanwhile? read C once more */
         tmp_c2 = malloc(n);
         lagfx_guest_surface_xfer_stats_t xs2; memset(&xs2, 0, sizeof xs2);
-        if (tmp_c2 && lagfx_guest_surface_xfer(shell, gs, tmp_c2, s->w, s->h, (size_t)s->w * s->bpp, false, &xs2) == LAGFX_OK) {
-            lagfx_rb_img_t c2 = { tmp_c2, (size_t)s->w * s->bpp, n };
+        if (tmp_c2 && lagfx_guest_surface_xfer(shell, gs, tmp_c2, W, H, (size_t)W * BPP, false, &xs2) == LAGFX_OK) {
+            lagfx_rb_img_t c2 = { tmp_c2, (size_t)W * BPP, n };
             uint64_t hh = 1469598103934665603ull;
-            for (size_t i = 0; i + (s->bpp) <= n; i += s->bpp) { uint64_t px = 0; memcpy(&px, c2.p + i, s->bpp); hh = (hh ^ px) * 1099511628211ull; }
+            for (size_t i = 0; i + BPP <= n; i += BPP) { uint64_t px = 0; memcpy(&px, c2.p + i, BPP); hh = (hh ^ px) * 1099511628211ull; }
             v.c_stable = hh == v.cmp.hash_c;
-        }
+        } else v.c_stable = false;
     }
     if (v.cmp.ab_px) v.kind = LAGFX_RB_FAIL, v.skip = "A!=B";
-    else if (v.pages_skipped) v.kind = LAGFX_RB_SKIP, v.skip = "guest_pages_skipped";
-    else if (v.cmp.bc_px) v.kind = LAGFX_RB_FAIL, v.skip = "B!=C";
+    else if (full && v.pages_skipped) v.kind = LAGFX_RB_SKIP, v.skip = "guest_pages_skipped";
+    else if (full && v.cmp.bc_px) v.kind = LAGFX_RB_FAIL, v.skip = "B!=C";
     else v.kind = LAGFX_RB_PASS;
 out:
     free(tmp_a), free(tmp_b), free(tmp_c), free(tmp_c2);

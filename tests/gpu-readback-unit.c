@@ -2,6 +2,9 @@
  * test that renders a known binary16 pattern into an RGBA16Float mapped surface, takes the independent vkCmdCopyImageToBuffer copy (A), and compares it with the
  * write-back path (staging B, fresh guest-page read C) for the same swap / mapping / generation. Negative controls: a corrupted staging byte, a corrupted GPU copy,
  * a corrupted guest read and a wrong stride must all be detected (FAIL) and never counted as a pass. Off by default: with no env var nothing is recorded.
+ * Activation matrix (split flags): neither -> nothing; LAGFX_WB_VERIFY=1 only -> NO independent readback (no candidate, no GPU copy, no buffer, no wait accounting);
+ * LAGFX_GPU_READBACK=1 only -> mode AB (A vs B, guest pages not re-read); both -> mode ABC. Also: identity checks (swap / mapping / generation / image / subresource /
+ * fence), layout precondition, host-read barrier count, non-coherent invalidate, row pitch, a slot freed while pending, failure injection leaves the write-back unchanged.
  * lavapipe only; NOT verified on a hardware GPU.
  * SPDX-License-Identifier: MIT */
 #include "dispatchers/channel_compute_dispatcher.h"
@@ -47,7 +50,8 @@ static uint8_t *g_mem;
 static int g_irq;
 static uint32_t g_stamps[256]; static int g_nstamps; static atomic_uint g_last_stamp;   /* every value written to the stamp cell of slot 1, in order */
 static uint64_t g_rd_fail_lo, g_rd_fail_hi;   /* fault injection: reads overlapping [lo, hi) fail */
-static bool rd(void *o, uint64_t gpa, uint64_t len, void *dst) { (void)o; if (gpa + len > MEM_SIZE) return false; if (g_rd_fail_hi && gpa < g_rd_fail_hi && gpa + len > g_rd_fail_lo) return false; memcpy(dst, g_mem + gpa, len); return true; }
+static uint64_t g_rd_calls;   /* every guest-memory read (the matrix test compares mode AB with mode ABC) */
+static bool rd(void *o, uint64_t gpa, uint64_t len, void *dst) { (void)o; g_rd_calls++; if (gpa + len > MEM_SIZE) return false; if (g_rd_fail_hi && gpa < g_rd_fail_hi && gpa + len > g_rd_fail_lo) return false; memcpy(dst, g_mem + gpa, len); return true; }
 static bool wr(void *o, uint64_t gpa, uint64_t len, const void *src) { (void)o; if (gpa + len > MEM_SIZE) return false;
     if (len == 4 && gpa == ((uint64_t)STAMP_PFN << 14) + 4 && g_nstamps < 256) { memcpy(&g_stamps[g_nstamps++], src, 4); atomic_store(&g_last_stamp, g_stamps[g_nstamps - 1]); } memcpy(g_mem + gpa, src, len); return true; }
 static void irq(void *o, uint32_t v) { (void)o; (void)v; g_irq++; }
@@ -337,23 +341,70 @@ static void pure_tests(void) {
     { lagfx_rb_verdict_t v; memset(&v, 0, sizeof v); lagfx_rb_totals_t t; memset(&t, 0, sizeof t);
       v.kind = LAGFX_RB_FAIL; v.skip = "A!=B"; v.swap = 151; v.swap_fin = 151; v.mapping = 2; v.gen = 9; v.w = 1920; v.h = 1080; v.fourcc = 0x52476841u; v.bpp = 8; v.pitch = 15360;
       v.cmp.bytes = 16588800ull; v.cmp.ab_px = 3; v.cmp.ab_x = 5; v.cmp.ab_y = 6; v.cmp.bc_x = v.cmp.bc_y = -1; v.cmp.half_stats = true; v.cmp.nan_px = 7; t.fail = 1; t.sampled = 1;
-      char line[1536]; size_t n = lagfx_rb_format_line(line, sizeof line, &v, &t);
+      char line[3072]; size_t n = lagfx_rb_format_line(line, sizeof line, &v, &t);
       assert(n > 100 && strstr(line, "g7-gpu-readback: verdict=FAIL reason=A!=B swap=151 swap_fin=151 ms=2 gen=9 1920x1080 fourcc=52476841 bpp=8 pitch=15360 bytes=16588800 A_vs_B_mismatch_px=3"));
       assert(strstr(line, "nan_px=7") && strstr(line, "first_AB=5,6") && strstr(line, "hash_A=") && strstr(line, "totals[candidates=0 sampled=1 pass=0 fail=1"));
       char tiny[40]; assert(lagfx_rb_format_line(tiny, sizeof tiny, &v, &t) == sizeof tiny - 1 && tiny[sizeof tiny - 1] == 0); }
     printf("PASS: g7-gpu-readback line format (swap, mapping, generation, size, fourcc, bytes, mismatches, hashes, nan/inf/neg/>1, totals)\n");
-    /* default off: no env var -> not enabled; each switch alone enables */
+    /* activation: LAGFX_WB_VERIFY alone does NOT enable the independent readback any more; LAGFX_GPU_READBACK alone does; both = full mode */
     unsetenv("LAGFX_WB_VERIFY"); unsetenv("LAGFX_GPU_READBACK");
-    assert(!lagfx_rb_enabled());
-    setenv("LAGFX_GPU_READBACK", "1", 1); assert(lagfx_rb_enabled()); unsetenv("LAGFX_GPU_READBACK");
-    setenv("LAGFX_WB_VERIFY", "1", 1); assert(lagfx_rb_enabled()); setenv("LAGFX_WB_VERIFY", "0", 1); assert(!lagfx_rb_enabled()); setenv("LAGFX_WB_VERIFY", "11", 1); assert(!lagfx_rb_enabled()); unsetenv("LAGFX_WB_VERIFY");
-    printf("PASS: default OFF; LAGFX_WB_VERIFY=1 or LAGFX_GPU_READBACK=1 enable it\n");
+    assert(!lagfx_rb_enabled() && !lagfx_rb_full_mode());
+    setenv("LAGFX_WB_VERIFY", "1", 1); assert(!lagfx_rb_enabled() && !lagfx_rb_full_mode());
+    unsetenv("LAGFX_WB_VERIFY");
+    setenv("LAGFX_GPU_READBACK", "1", 1); assert(lagfx_rb_enabled() && !lagfx_rb_full_mode());
+    setenv("LAGFX_WB_VERIFY", "1", 1); assert(lagfx_rb_enabled() && lagfx_rb_full_mode());
+    setenv("LAGFX_WB_VERIFY", "0", 1); assert(lagfx_rb_enabled() && !lagfx_rb_full_mode()); setenv("LAGFX_WB_VERIFY", "11", 1); assert(!lagfx_rb_full_mode());
+    setenv("LAGFX_GPU_READBACK", "0", 1); assert(!lagfx_rb_enabled()); setenv("LAGFX_GPU_READBACK", "11", 1); assert(!lagfx_rb_enabled());
+    unsetenv("LAGFX_WB_VERIFY"); unsetenv("LAGFX_GPU_READBACK");
+    printf("PASS: flag matrix (pure): neither off; WB_VERIFY alone does NOT enable the readback; GPU_READBACK alone does (AB); both = full (ABC); '0' / '11' off\n");
+    /* identity checks */
+    { lagfx_rb_ident_t rec = { .swap = 10, .gen = 5, .ident = 0x1234, .img = 0xabc, .fence_seq = 3, .mapping = 2, .w = 1920, .h = 1080, .bpp = 8 }, now = rec;
+      now.fence_seq = 4; now.swap = 11;
+      assert(lagfx_rb_identity_check(&rec, &now) == NULL);
+      now.swap = 10; assert(lagfx_rb_identity_check(&rec, &now) == NULL);   /* same swap */
+      lagfx_rb_ident_t t;
+      t = now; t.swap = 9; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "swap_went_back"));
+      t = now; t.gen = 6; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "gen_mismatch"));
+      t = now; t.mapping = 3; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "mapping_mismatch"));
+      t = now; t.ident = 0x1235; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "mapping_generation_changed"));
+      t = now; t.img = 0xabd; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "image_replaced"));
+      t = now; t.w = 1280; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "desc_changed"));
+      t = now; t.bpp = 4; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "desc_changed"));
+      t = now; t.mip = 1; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "subresource"));
+      t = now; t.layer = 1; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "subresource"));
+      { lagfx_rb_ident_t r2 = rec; r2.mip = 1; assert(!strcmp(lagfx_rb_identity_check(&r2, &now), "subresource")); }
+      t = now; t.fence_seq = 3; assert(!strcmp(lagfx_rb_identity_check(&rec, &t), "fence_not_signalled"));
+      assert(!strcmp(lagfx_rb_identity_check(NULL, &now), "no_inputs")); }
+    printf("PASS: identity check: same swap (never backwards) / mapping id / mapping generation / write-back generation / image handle / size / subresource mip0 layer0 / fence signalled\n");
+    /* preconditions */
+    assert(!lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 97, 8, 1920, 1080, 1));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 97, 8, 64, 64, 1), "no_transfer_src"));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 109, 8, 64, 64, 1), "unknown_format"));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 44, 8, 64, 64, 1), "bpp_format_mismatch"));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 97, 8, 0, 64, 1), "bad_extent"));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 97, 8, 64, 64, VK_IMAGE_LAYOUT_UNDEFINED), "layout_not_general"));
+    assert(!strcmp(lagfx_rb_precheck(VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 97, 8, 64, 64, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL), "layout_not_general"));
+    printf("PASS: preconditions: TRANSFER_SRC, known format, bpp, extent, layout GENERAL (image layout is restored by construction: no transition recorded)\n");
+    /* wait accounting: counted only while a recorded copy waits for its fence; off = no-op */
+    lagfx_rb_test_reset(); unsetenv("LAGFX_GPU_READBACK");
+    lagfx_rb_note_wait(5000000, true); assert(lagfx_rb_totals()->waits == 0 && lagfx_rb_totals()->wait_ns == 0 && lagfx_rb_totals()->fence_seq == 0);
+    setenv("LAGFX_GPU_READBACK", "1", 1);
+    lagfx_rb_note_wait(5000000, true); assert(lagfx_rb_totals()->waits == 0);   /* nothing recorded: not a readback wait */
+    unsetenv("LAGFX_GPU_READBACK");
+    printf("PASS: wait accounting is a no-op while the readback is off or nothing was recorded\n");
+    /* line format carries the sync state and the wait total */
+    { lagfx_rb_verdict_t v; memset(&v, 0, sizeof v); lagfx_rb_totals_t t; memset(&t, 0, sizeof t); char line[2048];
+      v.kind = LAGFX_RB_PASS; v.w = 4; v.h = 4; v.bpp = 8; v.pitch = 32; v.cmp.ab_x = v.cmp.ab_y = v.cmp.bc_x = v.cmp.bc_y = -1; t.waits = 3; t.wait_ns = 12345000; t.host_barriers = 3;
+      lagfx_rb_format_line(line, sizeof line, &v, &t);
+      assert(strstr(line, "readback_sync=on wbv=off mode=AB subres=mip0/layer0 layout=GENERAL->GENERAL") && strstr(line, "waits=3 wait_ms_total=12.345") && strstr(line, "host_barriers=3") && strstr(line, "may hide frame-freshness races"));
+      v.full = true; lagfx_rb_format_line(line, sizeof line, &v, &t); assert(strstr(line, "wbv=on mode=ABC")); }
+    printf("PASS: line records readback_sync=on, wbv=on|off, mode=AB|ABC, subresource, layout, host barriers and total fence wait ms\n");
 }
 
 /* ================= integration (lavapipe + validation) ================= */
 static const lagfx_rb_verdict_t *V(void) { return lagfx_rb_last_verdict(); }
 static void show(const char *tag) {   /* the same line the library logs, so the test output documents what the phone log will look like */
-    char line[1536]; lagfx_rb_format_line(line, sizeof line, V(), lagfx_rb_totals());
+    char line[3072]; lagfx_rb_format_line(line, sizeof line, V(), lagfx_rb_totals());
     printf("LINE[%s] %s\n", tag, line);
 }
 
@@ -383,21 +434,58 @@ int main(void) {
     uint64_t off_hash = guest_hash8(), off_down = CNT(p).mapped_bytes_down;
     uint8_t off_pages[4u << 14]; memcpy(off_pages, surf_page(0), sizeof off_pages);
     assert(lagfx_a64_res_lookup(p, 1, REF_M9)->ms != NULL);
-    printf("PASS: readback OFF by default: write-back identical, no candidate / sample / line (guest hash %016llx)\n", (unsigned long long)off_hash);
+    assert(lagfx_a64_test_ms_rb_allocated(p, MAP_HALF) == 0 && lagfx_rb_totals()->waits == 0 && lagfx_rb_totals()->host_barriers == 0 && lagfx_rb_totals()->fence_seq == 0);
+    printf("PASS: readback OFF by default: write-back identical, no candidate / sample / line / buffer / wait accounting (guest hash %016llx)\n", (unsigned long long)off_hash);
+
+    /* (0b) flag matrix row "WB only": LAGFX_WB_VERIFY=1 runs the existing staging -> guest verify and must NOT run the independent readback */
+    setenv("LAGFX_WB_VERIFY", "1", 1); unsetenv("LAGFX_GPU_READBACK"); lagfx_rb_test_reset();
+    memset(surf_page(0), SENT, 4u << 14);
+    { uint64_t wbx = CNT(p).mapped_written_back;
+      run_exec(p, 2, REF_M9, 2, pat, true, res, 1, true);
+      assert(CNT(p).mapped_written_back == wbx + 1 && !memcmp(off_pages, surf_page(0), sizeof off_pages));
+      assert(!V()->valid && lagfx_rb_totals()->candidates == 0 && lagfx_rb_totals()->sampled == 0 && lagfx_rb_totals()->host_barriers == 0 && lagfx_rb_totals()->waits == 0 && lagfx_rb_totals()->wait_ns == 0);
+      assert(lagfx_a64_test_ms_rb_allocated(p, MAP_HALF) == 0);   /* no GPU readback buffer allocated, no GPU copy recorded */
+      /* even many more execs: still nothing */
+      for (unsigned i = 0; i < 6; i++) run_exec(p, 3 + i, REF_M9, 2, pat, true, res, 1, true);
+      assert(lagfx_rb_totals()->candidates == 0 && lagfx_a64_test_ms_rb_allocated(p, MAP_HALF) == 0 && !V()->valid); }
+    printf("PASS: flag matrix row WB only: write-back identical, NO readback candidate / GPU copy / buffer / barrier / wait accounting\n");
+    unsetenv("LAGFX_WB_VERIFY");
+
+    /* (0c) row "READBACK only": mode AB (A vs B), guest pages are not re-read (no C), the write-back itself is bit-identical */
+    setenv("LAGFX_GPU_READBACK", "1", 1); lagfx_rb_test_reset();
+    memset(surf_page(0), SENT, 4u << 14);
+    p->diag2.disp.op_swap = 150;
+    { uint64_t r0 = g_rd_calls;
+      run_exec(p, 20, REF_M9, 2, pat, true, res, 1, true);
+      uint64_t rd_ab = g_rd_calls - r0;
+      assert(!memcmp(off_pages, surf_page(0), sizeof off_pages));
+      const lagfx_rb_verdict_t *v = V();
+      assert(v->valid && v->kind == LAGFX_RB_PASS && !v->full && v->cmp.ab_px == 0 && v->cmp.bc_px == 0 && v->cmp.hash_c == 0 && v->pages_skipped == 0 && v->cmp.hash_a == v->cmp.hash_b && v->cmp.hash_a == off_hash);
+      assert(lagfx_a64_test_ms_rb_allocated(p, MAP_HALF) == 1 && lagfx_rb_totals()->host_barriers == 1 && lagfx_rb_totals()->waits >= 1 && lagfx_rb_totals()->wait_ns > 0 && lagfx_rb_totals()->fence_seq >= 1);
+      char line[3072]; lagfx_rb_format_line(line, sizeof line, v, lagfx_rb_totals());
+      assert(strstr(line, "readback_sync=on wbv=off mode=AB") && strstr(line, "verdict=PASS"));
+      show("AB");
+      /* the same exec in mode ABC reads the guest pages once more (C): strictly more guest reads than AB */
+      setenv("LAGFX_WB_VERIFY", "1", 1); lagfx_rb_test_reset(); r0 = g_rd_calls;
+      run_exec(p, 21, REF_M9, 2, pat, true, res, 1, true);
+      uint64_t rd_abc = g_rd_calls - r0;
+      assert(V()->kind == LAGFX_RB_PASS && V()->full && V()->cmp.hash_c == off_hash && rd_abc > rd_ab);
+      unsetenv("LAGFX_WB_VERIFY"); }
+    printf("PASS: flag matrix row READBACK only: mode=AB (A vs B, no guest re-read, hash %016llx), both flags: mode=ABC with C\n", (unsigned long long)off_hash);
 
     /* (1) ON: the same exec -> a PASS verdict for the same swap / mapping; bit-identical write-back to the OFF run */
-    setenv("LAGFX_GPU_READBACK", "1", 1); lagfx_rb_test_reset();
+    setenv("LAGFX_GPU_READBACK", "1", 1); setenv("LAGFX_WB_VERIFY", "1", 1); lagfx_rb_test_reset();   /* both flags: the full A/B/C comparison */
     memset(surf_page(0), SENT, 4u << 14);
     p->diag2.disp.op_swap = 151;   /* the swap number the verdict must name (the display counter before the exec's own swap) */
     run_exec(p, 2, REF_M9, 2, pat, true, res, 1, true);
-    assert(cell(1) == 2 && CNT(p).mapped_written_back == 2 && CNT(p).mapped_bytes_down - off_down == off_down);
+    assert(!memcmp(off_pages, surf_page(0), sizeof off_pages) && CNT(p).mapped_bytes_down >= 2 * off_down);
     assert(!memcmp(off_pages, surf_page(0), sizeof off_pages));   /* readback on: guest pages byte-identical to readback off, padding / sentinel included */
     assert(lagfx_rb_totals()->candidates == 1 && lagfx_rb_totals()->sampled == 1 && lagfx_rb_totals()->pass == 1 && lagfx_rb_totals()->fail == 0 && lagfx_rb_totals()->skip == 0);
     { const lagfx_rb_verdict_t *v = V(); const lagfx_rb_cmp_t *c = &v->cmp;
       assert(v->valid && v->kind == LAGFX_RB_PASS && !v->skip && v->mapping == MAP_HALF && v->w == SW && v->h == SH && v->bpp == 8 && v->fourcc == 0x52476841u && v->pitch == SW * 8u);
       assert(v->swap == 151 && v->swap == v->swap_fin && v->gen != 0 && v->pages_skipped == 0 && v->c_stable);
       assert(c->bytes == SW * SH * 8u && c->ab_px == 0 && c->bc_px == 0 && c->ac_px == 0 && c->ab_x == -1 && c->bc_x == -1);
-      assert(c->hash_a == c->hash_b && c->hash_b == c->hash_c && c->hash_a == guest_hash8() && c->hash_a == off_hash);   /* A (GPU image copy) == what the guest pages hold == the OFF run */
+      assert(v->full && c->hash_a == c->hash_b && c->hash_b == c->hash_c && c->hash_a == guest_hash8() && c->hash_a == off_hash);   /* A (GPU image copy) == what the guest pages hold == the OFF run */
       assert(c->half_stats && c->nan_px == 0 && c->inf_px == 0 && c->neg_px == 0 && c->gt1_px == 0); }
     printf("PASS: readback ON: independent copy A == staging B == fresh guest read C for the same swap/mapping/gen (hash %016llx, %u bytes), exact halves 0/1/0.5/2^-7, no NaN/Inf/neg/>1\n", (unsigned long long)V()->cmp.hash_a, SW * SH * 8u);
     show("on-pass");
@@ -465,12 +553,14 @@ int main(void) {
     /* (5) skipped candidates are reported, never silently passed */
     lagfx_rb_test_reset();
     { lagfx_rb_slot_t *sl = NULL; VkCommandBuffer fake = (VkCommandBuffer)(uintptr_t)8;
-      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 64, 80, 8, 5, 1, 1);
+      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_LAYOUT_GENERAL, 64, 80, 8, 5, 0, 1, 1);
       assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "no_transfer_src"));
-      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, (VkFormat)109, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 64, 80, 8, 5, 1, 1);
+      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, (VkFormat)109, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 64, 80, 8, 5, 0, 1, 1);
       assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "unknown_format"));
-      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 64, 80, 8, 5, 1, 1);
-      assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "bpp_format_mismatch") && lagfx_rb_totals()->skip == 3 && lagfx_rb_totals()->pass == 0 && sl == NULL); }
+      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 64, 80, 8, 5, 0, 1, 1);
+      assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "bpp_format_mismatch") && lagfx_rb_totals()->skip == 3 && lagfx_rb_totals()->pass == 0 && sl == NULL);
+      lagfx_rb_record(g_dev->vk, &sl, fake, (VkImage)(uintptr_t)8, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_UNDEFINED, 64, 80, 8, 5, 0, 1, 1);
+      assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "layout_not_general") && lagfx_rb_totals()->skip == 4 && sl == NULL && lagfx_rb_totals()->host_barriers == 0); }
     printf("PASS: unusable candidates (no TRANSFER_SRC / unknown format / bpp mismatch) are logged as SKIP and counted\n");
 
     /* (6) rate limit: many candidates, few samples */
@@ -479,6 +569,87 @@ int main(void) {
     assert(lagfx_rb_totals()->candidates == 20 && lagfx_rb_totals()->sampled == 4 + 2 && lagfx_rb_totals()->not_sampled == 14 && lagfx_rb_totals()->pass == 6 && lagfx_rb_totals()->fail == 0);   /* 1..4, 8->no (seen 8 is a multiple: taken), 16 */
     unsetenv("LAGFX_GPU_READBACK_EVERY");
     printf("PASS: rate limit: 20 candidates -> %llu samples (first 4, then every 8th), %llu not sampled\n", (unsigned long long)lagfx_rb_totals()->sampled, (unsigned long long)lagfx_rb_totals()->not_sampled);
+
+    /* (7) failure injection leaves state unchanged: the write-back (guest bytes, counters, pending flag) is identical to a run without the readback */
+    for (int hook = 6; hook <= 7; hook++) {
+        unsetenv("LAGFX_GPU_READBACK"); unsetenv("LAGFX_WB_VERIFY");
+        static const double pat3[4] = { 0.125, 0.25, 0.5, 1 };
+        memset(surf_page(0), SENT, 4u << 14);
+        uint64_t wb0 = CNT(p).mapped_written_back;
+        run_exec(p, 70, REF_M9, 2, pat3, true, res, 1, true);
+        uint8_t base[4u << 14]; memcpy(base, surf_page(0), sizeof base);
+        uint64_t wb_base = CNT(p).mapped_written_back - wb0;
+        setenv("LAGFX_GPU_READBACK", "1", 1); lagfx_rb_test_reset(); lagfx_rb_test_hook = hook;
+        memset(surf_page(0), SENT, 4u << 14);
+        wb0 = CNT(p).mapped_written_back;
+        run_exec(p, 71, REF_M9, 2, pat3, true, res, 1, true);
+        lagfx_rb_test_hook = 0;
+        assert(V()->valid && V()->kind == LAGFX_RB_SKIP && V()->skip && !strcmp(V()->skip, hook == 6 ? "alloc_failed" : "invalidate_failed") && lagfx_rb_totals()->pass == 0 && lagfx_rb_totals()->skip == 1);
+        assert(!memcmp(base, surf_page(0), sizeof base) && CNT(p).mapped_written_back - wb0 == wb_base && lagfx_a64_test_ms_down_pending(p, MAP_HALF) == 0);
+        show(hook == 6 ? "alloc-failed" : "invalidate-failed");
+        unsetenv("LAGFX_GPU_READBACK");
+    }
+    printf("PASS: failure (buffer allocation / invalidate) -> SKIP with reason, write-back bytes + counters identical to the readback-off run, nothing pending afterwards\n");
+
+    /* (8) lifetime and fence, driven directly with a real image: a slot freed while its sample is pending; a finish before any signalled wait; a copy that never ran */
+    {   struct lagfx_vk_state *vk = g_dev->vk;
+        VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R16G16B16A16_SFLOAT, .extent = { 8, 8, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                                  .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+        VkImage img = VK_NULL_HANDLE; VkDeviceMemory imem = VK_NULL_HANDLE;
+        assert(vkCreateImage(vk->device, &ici, NULL, &img) == VK_SUCCESS);
+        VkMemoryRequirements rq; vkGetImageMemoryRequirements(vk->device, img, &rq);
+        VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &mp);
+        uint32_t mt = UINT32_MAX; for (uint32_t i = 0; i < mp.memoryTypeCount; i++) if ((rq.memoryTypeBits & (1u << i))) { mt = i; break; }
+        VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = mt };
+        assert(mt != UINT32_MAX && vkAllocateMemory(vk->device, &mai, NULL, &imem) == VK_SUCCESS && vkBindImageMemory(vk->device, img, imem, 0) == VK_SUCCESS);
+        setenv("LAGFX_GPU_READBACK", "1", 1); unsetenv("LAGFX_WB_VERIFY"); lagfx_rb_test_reset();
+        VkCommandBuffer cbs[8]; unsigned ncb = 0;   /* a fresh, never submitted recording per sample: one buffer per cb (a slot freed while recorded invalidates only that cb) */
+#define NEWCB() ({ VkCommandBuffer c_ = VK_NULL_HANDLE; assert(lagfx_vk_cmdbuf_alloc(vk, &c_) == LAGFX_OK); \
+                   VkCommandBufferBeginInfo bi_ = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT }; \
+                   assert(vkBeginCommandBuffer(c_, &bi_) == VK_SUCCESS); assert(ncb < 8); cbs[ncb++] = c_; c_; })
+        lagfx_rb_slot_t *sl = NULL;
+        /* (8a) surface destroyed while the sample is pending: slot freed, counted, finish can never run on it, no crash / validation message */
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 9, 100);
+        assert(sl && lagfx_rb_slot_allocated(sl) && lagfx_rb_totals()->host_barriers == 1 && lagfx_rb_totals()->candidates == 1);
+        lagfx_rb_slot_free(vk, &sl);
+        assert(sl == NULL && lagfx_rb_totals()->destroyed_pending == 1);
+        lagfx_rb_finish(vk, &sl, NULL, NULL, NULL, img, 4, 77, 9, 100);   /* a finish on a freed slot is a no-op */
+        assert(lagfx_rb_totals()->sampled == 0);
+        printf("PASS: surface destroyed while a sample is pending: slot freed (destroyed_pending=1), finish is a no-op, no verdict\n");
+        /* (8b) a finish before any signalled fence wait is refused; the host never reads what no fence made visible */
+        lagfx_rb_test_reset();
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 9, 100);
+        uint8_t stage[8 * 8 * 8]; memset(stage, 0, sizeof stage);
+        lagfx_guest_surface_t gs; memset(&gs, 0, sizeof gs); gs.width = 8, gs.height = 8, gs.bpp = 8, gs.fourcc = 0x52476841u;
+        lagfx_shell_callbacks_t sh; memset(&sh, 0, sizeof sh);
+        lagfx_rb_finish(vk, &sl, &sh, &gs, stage, img, 4, 77, 9, 100);
+        assert(V()->valid && V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "fence_not_signalled") && lagfx_rb_totals()->pass == 0);
+        /* (8c) identity changes between record and finish are SKIPs */
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 10, 100);
+        lagfx_rb_note_wait(1000, true);
+        lagfx_rb_finish(vk, &sl, &sh, &gs, stage, img, 4, 78, 10, 100);
+        assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "mapping_generation_changed"));
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 11, 100);
+        lagfx_rb_note_wait(1000, true);
+        lagfx_rb_finish(vk, &sl, &sh, &gs, stage, (VkImage)(uintptr_t)0x1234, 4, 77, 11, 100);
+        assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "image_replaced"));
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 12, 100);
+        lagfx_rb_note_wait(1000, true);
+        lagfx_rb_finish(vk, &sl, &sh, &gs, stage, img, 5, 77, 12, 100);
+        assert(V()->kind == LAGFX_RB_SKIP && !strcmp(V()->skip, "mapping_mismatch") && lagfx_rb_totals()->pass == 0 && lagfx_rb_totals()->fail == 0);
+        printf("PASS: finish refuses (SKIP, never pass): no signalled fence / mapping generation changed / image replaced / mapping id changed\n");
+        lagfx_rb_test_reset();   /* fresh sampling gate */
+        /* (8d) a copy that never executed (poison still in the buffer) can never match real staging bytes -> FAIL A!=B */
+        lagfx_rb_record(vk, &sl, NEWCB(), img, VK_FORMAT_R16G16B16A16_SFLOAT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_LAYOUT_GENERAL, 8, 8, 8, 4, 77, 13, 100);
+        lagfx_rb_note_wait(1000, true);
+        lagfx_rb_finish(vk, &sl, &sh, &gs, stage, img, 4, 77, 13, 100);
+        assert(V()->kind == LAGFX_RB_FAIL && !strcmp(V()->skip, "A!=B") && V()->cmp.ab_px == 64 && lagfx_rb_totals()->pass == 0);
+        printf("PASS: a copy that never ran (poison) is a FAIL, not a pass\n");
+        lagfx_rb_slot_free(vk, &sl);
+        for (unsigned i = 0; i < ncb; i++) lagfx_vk_cmdbuf_free(vk, cbs[i]);   /* never submitted: only the recording is exercised here */
+        vkDestroyImage(vk->device, img, NULL); vkFreeMemory(vk->device, imem, NULL);
+        unsetenv("LAGFX_GPU_READBACK"); lagfx_rb_test_reset();
+    }
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
