@@ -44,9 +44,10 @@ static uint64_t s_op08_ch4, s_op0a_ident, s_op0a_nonident;
 static uint64_t s_swaps, s_swap_unresolved, s_swap_gpu, s_swap_lines, s_swap_unres_lines;
 static uint32_t s_last_mtl, s_last_w, s_last_h; static int32_t s_last_vk; static uint64_t s_last_mapping;
 static struct { uint64_t mapping; uint32_t w, h, mtl; } s_seen[16];
-static uint64_t s_cursor_show, s_cursor_glyph, s_cursor_lines;
+static uint64_t s_cursor_show, s_cursor_glyph, s_cursor_lines, s_cursor_poschg, s_cursor_vischg, s_cursor_glyph_chg;   /* ops seen / position changes / visibility changes / glyph size changes, separately */
+static int s_cursor_have_pos, s_cursor_have_glyph;
 static int s_cx, s_cy; static uint32_t s_cvis, s_cgw, s_cgh;
-static uint64_t s_vbl_ticks, s_vbl_raises, s_vbl_noread, s_vbl_readbacks, s_vbl_pending_set, s_vbl_lines;
+static uint64_t s_vbl_ticks, s_vbl_raises, s_vbl_noread, s_vbl_readbacks, s_vbl_pending_set, s_vbl_readback_zero, s_vbl_readback_fail, s_vbl_lines;
 static uint64_t s_gamma_raw_lines, s_gamma_attempts, s_gamma_done, s_stat_lines;
 
 static void op_seen(opseen_t *o, uint32_t op, uint32_t chan) {
@@ -145,10 +146,15 @@ static void cursor_line(const char *what) {
                   (unsigned long long)GET(s_cursor_show), (unsigned long long)GET(s_cursor_glyph), s_cx, s_cy, s_cvis, s_cgw, s_cgh, (unsigned long long)dd_ms());
 }
 void lagfx_dd_note_cursor_show(uint32_t display_id, int x, int y, uint32_t visible) {
-    (void)display_id; INC(s_cursor_show); s_cx = x; s_cy = y; s_cvis = visible; cursor_line("show");
+    (void)display_id; INC(s_cursor_show);
+    if (!s_cursor_have_pos || x != s_cx || y != s_cy) INC(s_cursor_poschg);
+    if (!s_cursor_have_pos || visible != s_cvis) INC(s_cursor_vischg);
+    s_cursor_have_pos = 1; s_cx = x; s_cy = y; s_cvis = visible; cursor_line("show");
 }
 void lagfx_dd_note_cursor_glyph(uint32_t display_id, uint32_t w, uint32_t h) {
-    (void)display_id; INC(s_cursor_glyph); s_cgw = w; s_cgh = h; cursor_line("glyph");
+    (void)display_id; INC(s_cursor_glyph);
+    if (!s_cursor_have_glyph || w != s_cgw || h != s_cgh) INC(s_cursor_glyph_chg);
+    s_cursor_have_glyph = 1; s_cgw = w; s_cgh = h; cursor_line("glyph");
 }
 
 void lagfx_dd_note_vbl_tick(unsigned display, uint32_t enabled_mask, bool raised, bool read_ok) {
@@ -159,7 +165,7 @@ void lagfx_dd_note_vbl_tick(unsigned display, uint32_t enabled_mask, bool raised
 }
 void lagfx_dd_note_vbl_readback(unsigned display, int64_t pending_word) {
     INC(s_vbl_readbacks);
-    if (pending_word > 0) INC(s_vbl_pending_set);
+    if (pending_word > 0) INC(s_vbl_pending_set); else if (pending_word == 0) INC(s_vbl_readback_zero); else INC(s_vbl_readback_fail);
     if (__atomic_fetch_add(&s_vbl_lines, 1u, __ATOMIC_RELAXED) < 16u)
         dd_say("g7-pvg-vbl: display[%u] readback of ss[+0x100] after the raise = %lld (nonzero = not yet cleared by the guest; INFER: the guest clears it when it consumed the event) t=+%llums",
                   display, (long long)pending_word, (unsigned long long)dd_ms());
@@ -168,16 +174,16 @@ void lagfx_dd_note_vbl_readback(unsigned display, int64_t pending_word) {
 size_t lagfx_dd_stats_line(char *out, size_t cap) {
     int n = snprintf(out, cap,
         "g7-pvg-ops: t=+%llus op37=%llu(first +%llums ch%u) op22=%llu(first +%llums ch%u) op08=%llu(ch4=%llu first +%llums ch%u) op0a=%llu(identity=%llu other=%llu first +%llums ch%u) "
-        "swaps=%llu(unresolved=%llu gpu=%llu last mapping=%llu %ux%u mtl=%u(%s) vk=%d(%s)) cursor[show=%llu glyph=%llu last=(%d,%d) vis=%u glyph=%ux%u] "
-        "vbl[ticks=%llu raises=%llu noread=%llu readbacks=%llu pending_nonzero=%llu] gamma[raw_lines=%llu read_attempts=%llu read_done=%llu]",
+        "swaps=%llu(unresolved=%llu gpu=%llu last mapping=%llu %ux%u mtl=%u(%s) vk=%d(%s)) cursor[ops_show=%llu ops_glyph=%llu pos_changes=%llu vis_changes=%llu glyph_updates=%llu(size_changes) last=(%d,%d) vis=%u glyph=%ux%u] "
+        "vbl[ticks=%llu raise_attempts=%llu tick_noread=%llu readbacks=%llu readback_zero(consumed INFER)=%llu readback_nonzero=%llu readback_failed=%llu] gamma[raw_lines=%llu read_attempts=%llu read_done=%llu]",
         (unsigned long long)(dd_ms() / 1000ull),
         (unsigned long long)GET(s_op37.n), (unsigned long long)s_op37.first_ms, s_op37.first_chan, (unsigned long long)GET(s_op22.n), (unsigned long long)s_op22.first_ms, s_op22.first_chan,
         (unsigned long long)GET(s_op08.n), (unsigned long long)GET(s_op08_ch4), (unsigned long long)s_op08.first_ms, s_op08.first_chan,
         (unsigned long long)GET(s_op0a.n), (unsigned long long)GET(s_op0a_ident), (unsigned long long)GET(s_op0a_nonident), (unsigned long long)s_op0a.first_ms, s_op0a.first_chan,
         (unsigned long long)GET(s_swaps), (unsigned long long)GET(s_swap_unresolved), (unsigned long long)GET(s_swap_gpu), (unsigned long long)s_last_mapping, s_last_w, s_last_h,
         s_last_mtl, lagfx_dd_mtl_name(s_last_mtl), (int)s_last_vk, lagfx_dd_vk_name(s_last_vk),
-        (unsigned long long)GET(s_cursor_show), (unsigned long long)GET(s_cursor_glyph), s_cx, s_cy, s_cvis, s_cgw, s_cgh,
-        (unsigned long long)GET(s_vbl_ticks), (unsigned long long)GET(s_vbl_raises), (unsigned long long)GET(s_vbl_noread), (unsigned long long)GET(s_vbl_readbacks), (unsigned long long)GET(s_vbl_pending_set),
+        (unsigned long long)GET(s_cursor_show), (unsigned long long)GET(s_cursor_glyph), (unsigned long long)GET(s_cursor_poschg), (unsigned long long)GET(s_cursor_vischg), (unsigned long long)GET(s_cursor_glyph_chg), s_cx, s_cy, s_cvis, s_cgw, s_cgh,
+        (unsigned long long)GET(s_vbl_ticks), (unsigned long long)GET(s_vbl_raises), (unsigned long long)GET(s_vbl_noread), (unsigned long long)GET(s_vbl_readbacks), (unsigned long long)GET(s_vbl_readback_zero), (unsigned long long)GET(s_vbl_pending_set), (unsigned long long)GET(s_vbl_readback_fail),
         (unsigned long long)GET(s_gamma_raw_lines), (unsigned long long)GET(s_gamma_attempts), (unsigned long long)GET(s_gamma_done));
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
 }
