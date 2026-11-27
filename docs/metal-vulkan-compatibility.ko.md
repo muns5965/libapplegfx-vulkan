@@ -58,6 +58,7 @@
 | 변환기에 대한 포크 변경 | 포크 수정 | Vulkan | 구현 완료·미검증 | `LAGFX_NO_PROCESS` 옵션이 `system()`/`popen()` 디버그 및 `llc` 탐색 호출을 제거(Android 실행기는 프로세스 생성 금지). `shader_translate.c`의 4줄 변경. |
 | 변환된 셰이더의 GPU 실행 | 원본 구현 | Vulkan | 부분 구현 | Android 기기: `ColorFill`, `TextureCopy` 프래그먼트가 정상 출력(각 4,096/4,096 픽셀). `UberComposite`, `Vfx`, `Xgc` 및 로그인 정점 셰이더는 변환만 확인, GPU 실행 **미시험**. |
 | 기본 셰이더 카탈로그(클리어·블릿 보조) | 원본 구현 | Vulkan | 구현 완료·미검증 | 카탈로그 시험은 Vulkan 없이 실행되어 Vulkan 의존 부분은 건너뜀. SPIR-V 파일은 저장소에 포함. |
+| 원자 연산(`air.atomic.*` → `OpAtomic*`) | 포크 | Vulkan | 구현 및 검증 완료(변환기 + lavapipe, 직접 작성한 AIR), 철자 일부는 미검증 | 장치(StorageBuffer)·스레드그룹(Workgroup) 메모리의 32비트 정수 load / store / exchange / compare-exchange / add sub and or xor min max(부호 있음·없음). 64비트 정수 min/max(`LAGFX_VK_CAP_ATOMIC64`)와 32비트 float add(`LAGFX_VK_CAP_ATOMIC_F32_ADD`, `lagfx_vk_init`이 켜지 않으므로 거부하고 셈). 그 밖의 연산과 relaxed가 아닌 메모리 순서는 변환을 **실패**시키며(셈, 버리거나 흉내 내지 않음) 시험 `air2spv atomics on lavapipe`(CPU 기준값, 음성 대조)와 `air2spv discard robustness on lavapipe`(discard 뒤 원자 연산)로 확인. 철자: Apple이 컴파일한 모듈에서는 `air.atomic.global.{load,store,xchg}.i32`와 `{add,and,or}.u.i32`만 확인했고, `local`, `sub`/`xor`/`min`/`max`, `cmpxchg.weak`, `.i64`, `.f32`는 이 문법에서 유추한 것으로 **미검증**. 캡처·고정 입력 고유 모듈 190개 중 원자 연산 사용은 0개. `docs/spec-audit.md`의 "Atomics" 참조. |
 | Compute 셰이더(MSL 커널 → SPIR-V compute) | — | Vulkan | 미구현 | 소스 전체에 `vkCreateComputePipelines`, `vkCmdDispatch` 없음. |
 | Tessellation, Mesh, Ray Tracing | — | Vulkan | 미구현 | Patch Draw opcode는 로그만 남김(2.6 참조). |
 

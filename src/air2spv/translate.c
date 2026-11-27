@@ -182,6 +182,28 @@ bool lagfx_air_arg_is_written_texture(const lagfx_air_module_t *m, uint32_t arg_
     return tex && wr;
 }
 
+/* True when entry-point argument `arg_idx` carries the per-arg metadata key "air.buffer" ([[buffer(n)]]). The authoritative route for a module whose pointers are OPAQUE (LLVM >= 15
+ * bitcode, e.g. llvm-as output): there the pointee type does not say buffer vs texture, the metadata does. Apple's own (typed) modules agree with it. */
+bool lagfx_air_arg_is_buffer(const lagfx_air_module_t *m, uint32_t arg_idx) {
+    if (!m) return false;
+    const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.kernel");
+    if (!named || named->num_operands < 1u) return false;
+    const lagfx_air_metadata_t *ep = md_record(m, named->operands[0]);
+    if (!ep || ep->kind != LAGFX_AIR_MD_NODE || ep->num_operands < 3u || ep->operands[2] == 0u) return false;
+    const lagfx_air_metadata_t *args = md_record(m, ep->operands[2] - 1u);
+    if (!args || args->kind != LAGFX_AIR_MD_NODE || arg_idx >= args->num_operands || args->operands[arg_idx] == 0u) return false;
+    const lagfx_air_metadata_t *arg = md_record(m, args->operands[arg_idx] - 1u);
+    if (!arg || arg->kind != LAGFX_AIR_MD_NODE) return false;
+    for (uint32_t j = 0; j < arg->num_operands; j++) {
+        if (arg->operands[j] == 0u) continue;
+        const char *str = md_string(m, arg->operands[j] - 1u);
+        if (str && strcmp(str, "air.buffer") == 0) return true;
+    }
+    return false;
+}
+
 /* True when entry-point argument `arg_idx` is a `texture3d<...>` (its air.arg_type_name string starts with "texture3d"). Under opaque pointers the LLVM pointee type does not
  * tell texture2d from texture3d, the argument metadata does. */
 bool lagfx_air_arg_is_texture3d(const lagfx_air_module_t *m, uint32_t arg_idx) {

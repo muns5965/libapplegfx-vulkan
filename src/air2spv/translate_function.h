@@ -156,6 +156,15 @@ typedef struct { uint64_t modules, calls, kernels_rejected; } lagfx_simd_unsuppo
 uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap);
 void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out);
 
+/* Atomics (air.atomic.*): 32-bit integer load / store / exchange / compare-exchange / add sub and or xor min max on device (StorageBuffer) and threadgroup (Workgroup) memory,
+ * 64-bit integer (needs LAGFX_VK_CAP_ATOMIC64) and 32-bit float add (needs LAGFX_VK_CAP_ATOMIC_F32_ADD). An air.atomic.* call whose name, operand shape or type the translator does
+ * not implement is NEVER dropped or emulated: the translation FAILS (LAGFX_ERR_PROTOCOL, any stage) and is counted.
+ *   lagfx_air2spv_last_unsupported_atomic  the calling thread's last translation: number of refused atomic calls (0 = none) and the first one's name (first_name may be NULL)
+ *   lagfx_air2spv_atomic_totals            process-wide: translations that contained atomics, atomic calls translated, calls refused, modules rejected */
+typedef struct { uint64_t modules, translated, refused, modules_rejected; } lagfx_atomic_totals_t;
+uint32_t lagfx_air2spv_last_unsupported_atomic(char *first_name, size_t cap);
+void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out);
+
 /* Internal (tests): look up an AIR math-intrinsic callee name in the GLSL.std.450 dispatch table. On a hit returns true and fills the GLSL.std.450 instruction
  * number, the operand count and whether it is a chained three-operand form (fmax3/fmin3); any out pointer may be NULL. */
 bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way);

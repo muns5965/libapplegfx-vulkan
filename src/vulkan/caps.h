@@ -30,6 +30,10 @@ enum {
     LAGFX_VK_CAP_SUBGROUP_SHUFFLE, /* GroupNonUniformShuffle (simd_shuffle*)                              <- subgroupSupportedOperations SHUFFLE + COMPUTE stage */
     LAGFX_VK_CAP_SUBGROUP_SHUFFLE_RELATIVE, /* GroupNonUniformShuffleRelative (shuffle_up/down)                  <- subgroupSupportedOperations SHUFFLE_RELATIVE + COMPUTE stage (a separate Vulkan feature bit) */
     LAGFX_VK_CAP_DEMOTE,         /* DemoteToHelperInvocation (OpDemoteToHelperInvocation: air.discard_fragment)    <- VkPhysicalDeviceVulkan13Features::shaderDemoteToHelperInvocation (VK_EXT_shader_demote_to_helper_invocation) */
+    LAGFX_VK_CAP_ATOMIC64,       /* Int64Atomics (64-bit integer atomics on StorageBuffer / Workgroup memory: air.atomic.*.i64)  <- VkPhysicalDeviceVulkan12Features::shaderBufferInt64Atomics AND shaderSharedInt64Atomics */
+    LAGFX_VK_CAP_ATOMIC_F32_ADD, /* AtomicFloat32AddEXT (+ SPV_EXT_shader_atomic_float_add: air.atomic.*.add.f32)  <- VK_EXT_shader_atomic_float shaderBufferFloat32AtomicAdd AND shaderSharedFloat32AtomicAdd.
+                                  * NOT enabled by lagfx_vk_init (the extension and its feature struct are not wired into device creation): a shader with a float atomic add is counted
+                                  * (stub_missing_cap_atomic_f32_add) and its draw skipped; it is never emulated. */
     LAGFX_VK_CAP_COUNT
 };
 #define LAGFX_VK_CAP_BIT(c) (1u << (c))

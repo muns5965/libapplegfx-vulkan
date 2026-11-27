@@ -10,10 +10,10 @@
  *   [V: Vulkan spec, same chapter] an OpKill may be implemented as OpTerminateInvocation OR as OpDemoteToHelperInvocation; OpTerminateInvocation terminates the invocation: nothing after it executes.
  *   => for the memory contents the three flavours agree (nothing after the discard reaches memory); they differ in derivatives of the neighbouring lanes (test_discard_derivatives in
  *   arm64-render-compat-unit.c) and in whether code after the discard still runs (invisible when its stores are suppressed).
- * No translator fixture stores to a device buffer: llvm-as (LLVM 18) writes only opaque pointers and frag_resource_kind classifies a buffer argument by its typed pointee (Apple's AIR is typed), so
- * a hand-written `ptr addrspace(1)` buffer argument is taken for a texture; the buffer stores run from the GLSL below.
- * The translator has NO atomic instruction (no air.atomic.* / atomicrmw), so the atomic case runs hand-written GLSL compiled to the three discard flavours
- * (tests/fixtures/discard_atomic.frag, gen-discard-atomic-spv.sh): that checks the DEVICE, not the translator.
+ * Device buffers in hand-written fixtures: llvm-as (LLVM 18) writes only opaque pointers; the translator classifies such an argument by its "air.buffer" arg metadata (frag_resource_kind).
+ * The translator now has atomics (air.atomic.*, docs/spec-audit.md "Atomics"): tests/fixtures/atomic_frag_discard.air.bc is TRANSLATED in kill and demote mode (an atomic add and a
+ * device store after the discard). The hand-written GLSL compiled to the three discard flavours (tests/fixtures/discard_atomic.frag, gen-discard-atomic-spv.sh) is kept: it checks the
+ * DEVICE (OpTerminateInvocation has no translator mode).
  * Fixtures: tests/fixtures/gen-discard-robust-fixtures.sh (HAND-WRITTEN IR, spelling air.discard_fragment is [I]). Exit 77 (skip) without a Vulkan 1.3 device.
  * SPDX-License-Identifier: MIT */
 #include "air2spv/translate.h"
@@ -189,10 +189,13 @@ static void col_nested(int x, int y, float *p) {   /* discards: outer i == 2 && 
 static void col_diamond(int x, int y, float *p) { if (x < 4 && y < 4) ref_clear(p); else put(p, x < 4 ? 0.25f : 0.5f, 0, 0, 1); }
 static void col_x4(int x, int y, float *p) { (void)y; if (x < 4) ref_clear(p); else put(p, 1, 0, 0, 1); }
 static void mem_img(int x, int y, uint32_t *buf, float *img) { (void)buf; if (x >= 4) put(img + (y * 8 + x) * 4, 1, 0.5f, 0.25f, 1); }
+/* atomic_frag_discard (TRANSLATED air.atomic.global.add.u.i32 + a device store after the discard): every surviving pixel adds 1 to buf[0] and stores 7 at buf[1 + y*8 + x] */
+static void mem_atomic(int x, int y, uint32_t *buf, float *img) { (void)img; if (x >= 4) { buf[0] += 1u; buf[1 + y * 8 + x] = 7u; } }
 static const case_t cases[] = {
     { "spec_discard_r_nested.air.bc",   RES_NONE,  col_nested,  NULL },
     { "spec_discard_r_diamond.air.bc",  RES_NONE,  col_diamond, NULL },
     { "spec_discard_r_imgstore.air.bc", RES_IMAGE, col_x4,      mem_img },
+    { "atomic_frag_discard.air.bc",     RES_SSBO,  col_x4,      mem_atomic },   /* S06 x atomics: the atomic is TRANSLATED here (the GLSL cases below test the device) */
 };
 
 static int compare(const char *label, const case_t *cs, const result_t *r) {
@@ -204,7 +207,7 @@ static int compare(const char *label, const case_t *cs, const result_t *r) {
     }
     uint32_t wbuf[65]; float wimg[8 * 8 * 4]; memset(wbuf, 0, sizeof wbuf); memset(wimg, 0, sizeof wimg);
     if (cs->mem) for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) cs->mem(x, y, wbuf, wimg);
-    for (int i = 0; i < 64; i++) if (r->buf[i] != wbuf[i]) { if (!bad) printf("%s: first bad buffer word %d: got %08x want %08x (a store after the discard reached memory, or a survivor's store is missing)\n", label, i, r->buf[i], wbuf[i]); bad++; break; }
+    for (int i = 0; i < 65; i++) if (r->buf[i] != wbuf[i]) { if (!bad) printf("%s: first bad buffer word %d: got %08x want %08x (a store after the discard reached memory, or a survivor's store is missing)\n", label, i, r->buf[i], wbuf[i]); bad++; break; }
     for (int i = 0; i < 8 * 8 * 4; i++) if (fabsf(r->img[i] - wimg[i]) > 1.0f / 1024.0f) { if (!bad) printf("%s: first bad image float %d: got %g want %g\n", label, i, r->img[i], wimg[i]); bad++; break; }
     return bad;
 }
