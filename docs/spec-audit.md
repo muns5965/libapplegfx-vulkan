@@ -198,3 +198,63 @@ Tags as above. Three verification levels are kept apart for every operation: **(
 - Build-verified: full `meson test` 166 OK / 0 fail / 1 skip (baseline 162 / 1; four new tests); A2Xghfc pair byte-identical (fs sha256 `aa5ef4ce7adf1338...`, vs `d625b8ccc7d56c49...`); spirv-val vulkan1.2 / 1.3 on 11 atomic modules and 3 of the 4 real Apple modules (all 4 with the undef-control override).
 - Device-verified: lavapipe only (CPU Vulkan); NO run on Adreno or any real GPU, NO run of real Apple atomic modules, level C (equivalence with real Metal) NO for every operation.
 - Remaining: spelling of local / sub / xor / min / max / add.s / cmpxchg / i64 / f32 / fence; meaning of scope `2`, the rmw extra `0` and the i1; acquire / release encoding; helper atomics through a pointer parameter; threadgroup arguments `[[threadgroup(n)]]`; float load / store / exchange; texture atomics; Adreno behaviour.
+
+
+## Unlowered calls (integ7b)
+
+**Finding.** A CALL that no lowering handles does not fail the translation: a non-void call is bound to a typed `OpUndef` (so value numbering stays in sync) and a void call is dropped. In the AIR of the video-encode kernel `shaders` the call `%58 = call i32 @llvm.umax.i32(i32 %54, i32 1)` had no lowering; the undef reached 1 switch and 1 select condition of the block dispatch and the fail-closed undef-control guard rejected the module (it translated only with `LAGFX_ALLOW_UNDEF_CONTROL=1`).
+
+**(a) Where.** `emit_inst_call` in `src/air2spv/translate_function.c`. Lowered: `air.atomic.*`; every row of the GLSL.std.450 table (`air.*` / `air.fast_*` / `air.precise_*` math, `air.min/max/clamp/abs.{s,u}`, `llvm.fma` / `llvm.fmuladd` since integ7b); `air.convert.*`, `air.dot`, `air.all/any`, `air.dfdx/dfdy/fwidth`, `air.saturate`, `air.round`, `air.unpack.unorm4x8`; integer `air.{clz,ctz,popcount,reverse_bits,mul_hi,add_sat,sub_sat,extract_bits,insert_bits,abs.u}`; texture sample / read / write 2d, 3d, 2d_array; imageblock load / store; SIMD-group ops and barriers; `air.discard_fragment`; calls to functions of the same module (`OpFunctionCall`). Since integ7b also `llvm.umax / umin / smax / smin` (i8..i64 and vectors), and in a separate commit `llvm.abs / ctlz / cttz / ctpop / bitreverse / bswap / fshl / fshr`. Everything else reaches the single fallback at the end of the call handler (typed undef for a non-void call, drop for a void one). Void `llvm.lifetime.*` / debug calls are dropped by design.
+
+**New (all default behaviour unchanged except the refusal below).**
+- Ledger, always on: every call reaching the fallback is counted by callee name (`lagfx_air2spv_unlowered_calls`, call sites and translations that contained it); `LAGFX_LOG_UNLOWERED=1` prints one `g7-xlate-unlowered:` line per site (`dump-translate` adds `g7-xlate-module:` markers).
+- Named refusal (DEFAULT, narrow): a non-void unlowered `llvm.*` call fails the translation naming the callee (warning `module not translated: N call(s) have no lowering ... (first: <name>)`), and the vertex / fragment path does NOT fall back to the reference stub (counter `lagfx_air2spv_unlowered_refused`). `LAGFX_ALLOW_UNLOWERED_LLVM=1` restores the typed undef. Safe for the captured modules: none of the 46 distinct device-dump modules calls a non-void `llvm.*` function (table below). Risk: a future shader with an unlowered non-void `llvm.*` call whose result is unused used to translate and is now refused.
+- `LAGFX_STRICT_INTRINSICS=1` (opt-in, default OFF): also refuse non-void unlowered `air.*` calls. Not default: translated repo / third-party fixtures (e.g. `air.get_read_sampler`, 15 modules) rely on them degrading.
+
+**(b) Scan.** 405 distinct AIR modules (disassembled, deduplicated; 46 device-dump, 190 repo / other fixtures, 180 third-party corpus), every called `llvm.*` / `air.*` name tabulated with module and call-site counts (script not committed; corpora not committed). The translator itself (ledger) decided lowered vs undef. Rows below are the names that fall to the fallback in at least one translated module:
+
+| call | modules | call sites | module categories (dev = captured device dumps, rep = repo / other fixtures, thi = third-party corpus) | before integ7b | after |
+|---|---|---|---|---|---|
+| `llvm.lifetime.end.p0` | 15 | 17 | dev=2,rep=1,thi=12 | void, dropped by design | dropped (void) |
+| `llvm.lifetime.start.p0` | 15 | 17 | dev=2,rep=1,thi=12 | void, dropped by design | dropped (void) |
+| `llvm.fmuladd.f32` | 1 | 5 | thi=1 | typed undef (non-void) | lowered |
+| `llvm.umax.i32` | 1 | 1 | rep=1,thi=1 | typed undef (non-void) | lowered |
+| `air.get_read_sampler` | 18 | 19 | rep=2,thi=16 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.read_texture_2d.v4f32` | 12 | 22 | rep=2,thi=10 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_width_texture_2d` | 8 | 8 | thi=8 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.write_texture_2d.v4f32` | 8 | 11 | rep=1,thi=7 | void, dropped by design | dropped (void) |
+| `air.get_height_texture_2d` | 7 | 7 | thi=7 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.draw_primitives_render_command` | 3 | 3 | thi=3 | void, dropped by design | dropped (void) |
+| `air.imageblock_data` | 3 | 3 | thi=3 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.pack.unorm4x8.v4f32` | 3 | 3 | thi=3 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.read_texture_2d.u.v4i32` | 3 | 4 | thi=3 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.set_cull_mode_render_command` | 3 | 3 | thi=3 | void, dropped by design | dropped (void) |
+| `air.draw_indexed_primitives_render_command.p1` | 2 | 2 | thi=2 | void, dropped by design | dropped (void) |
+| `air.gather_texture_2d.v4f32` | 2 | 4 | thi=2 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_function_pointer_visible_function_table` | 2 | 2 | thi=2 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_height_texture_2d_array` | 2 | 2 | thi=2 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_width_texture_2d_array` | 2 | 2 | thi=2 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.sample_texture_1d_array.v4f32` | 2 | 12 | rep=1,thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.set_fragment_buffer_render_command.p2` | 2 | 2 | thi=2 | void, dropped by design | dropped (void) |
+| `air.set_vertex_buffer_render_command.p1` | 2 | 30 | thi=2 | void, dropped by design | dropped (void) |
+| `air.write_imageblock_slice_to_texture_2d.i16.v4f16` | 2 | 2 | thi=2 | void, dropped by design | dropped (void) |
+| `air.concurrent_dispatch_threadgroups_compute_command` | 1 | 1 | thi=1 | void, dropped by design | dropped (void) |
+| `air.fast_rint.v3f32` | 1 | 1 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.gather_texture_2d.v4f16` | 1 | 2 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.gather_texture_2d_array.v4f32` | 1 | 2 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_imageblock_height` | 1 | 1 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.get_imageblock_width` | 1 | 1 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.no_such_intrinsic.f32` | 1 | 1 | rep=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.read_texture_2d_array.v4f32` | 1 | 1 | thi=1 | typed undef (non-void) | unchanged: typed undef (air.*, not refused by default) |
+| `air.reset_compute_command` | 1 | 1 | thi=1 | void, dropped by design | dropped (void) |
+| `air.set_depth_stencil_state_render_command` | 1 | 1 | thi=1 | void, dropped by design | dropped (void) |
+| `air.set_pipeline_state_compute_command` | 1 | 1 | thi=1 | void, dropped by design | dropped (void) |
+| `air.set_pipeline_state_render_command` | 1 | 1 | thi=1 | void, dropped by design | dropped (void) |
+
+Names marked "unchanged" are `air.*` texture-query / gather / 1d-array / render-command / imageblock-query / pack calls found only in repo fixtures and the third-party corpus (the translator has no lowering; recorded, not changed). No `air.*` call fell to undef in any device-dump module; the only calls dropped there are the void `llvm.lifetime.start/end` pairs.
+
+**A2Xghfc** (library 35024e60e414abf4, fs SPIR-V hash c65cc4d1ec02658b, the Adreno -13 shader) and every pipeline pairing it (VS 22942f5e92793dde in the run3 dump): ledger = 2 `llvm.lifetime.start` + 2 `llvm.lifetime.end` (void, dropped, benign) and nothing else, i.e. NO silent call-level undef; all helper calls (`_ZN10UberShaderIDhfE...`) were wired as `OpFunctionCall`. (Operand-level `resolve_or_undef` fallbacks are a different path and are measured by the existing undef report.) The 28 skipped draws are pipelines of this fragment shader (-13) plus texture / descriptor skips; no other shader is involved, so the same ledger applies.
+
+**(c) Lowerings** (lavapipe, CPU reference per pixel, negative control, `tests/air2spv-int-intrinsics-lavapipe.c`, fixtures `rt_llvm_*`, generator `gen-llvm-int-fixtures.sh`; HAND-WRITTEN AIR): `llvm.umax/umin/smax/smin` -> UMax / UMin / SMax / SMin; `llvm.fma` / `llvm.fmuladd` -> `Fma` (fmuladd may be fused or not; the test values are exact either way, so fused single rounding is NOT verified); separate commit: `abs` (select, `abs(MIN) = MIN`), `ctlz` / `cttz` (zero input gives the width; the i1 flag is never read because the flagged case is poison), `ctpop`, `bitreverse`, `bswap`, `fshl` / `fshr` (shift taken modulo the width via a double shift). Same commit: `air.popcount` / `air.reverse_bits` of 8 / 16 / 64-bit operands now go through 32-bit words (spirv-val `--target-env vulkan1.x` rejects `OpBitCount` / `OpBitReverse` on a non-32-bit Base, VUID-StandaloneSpirv-Base-04781). **Open finding, not changed:** `air.extract_bits` / `air.insert_bits` on 8 / 16 / 64-bit operands emit `OpBitField*` on a non-32-bit Base and fail the same Vulkan validation. Fail-before: with the lowerings disabled the fixtures give all-zero pixels with `LAGFX_ALLOW_UNLOWERED_LLVM=1` (typed undef) and a refused translation by default; `shaders` then needs `LAGFX_ALLOW_UNDEF_CONTROL=1`. After: `shaders` translates without it and passes `spirv-val` (vulkan1.2); not executed.
+
+**(d)** A2Xghfc pair is byte-identical (fs `aa5ef4ce7adf1338...`, vs `d625b8ccc7d56c49...`); dump checks 39 / 40 / 40 OK. Whether atomic refusals of a fragment / vertex shader fall back to a stub is outside this change (observed: only the new unlowered refusal suppresses the stub).

@@ -87,3 +87,17 @@ No other env flag is added. Behaviour that is ON without a flag:
 - The meson source lists pick the new files up under the Android cross file.
 - No warning-as-error from `uint64_t` printf formats in the new log lines on 32-bit targets (cannot be checked here).
 - A first device run is needed for everything in the table above.
+
+## integ7b appendix
+
+Branch `research/g7-integ7b`, base integ7 (a21e9be, not modified). Step 1: `--no-ff` merge of `origin/research/g7-atomic2` (acba1cd, based on 98d5c3a which integ7 already contains): no conflicts, no manual decisions. Full meson suite (release, clean build dir) after the merge: 170 OK / 0 fail / 1 skip (171 tests; integ7 baseline 166 / 1, +4 from atomic2). A2Xghfc pair unchanged: fs sha256 `aa5ef4ce7adf1338...`, vs `d625b8ccc7d56c49...`.
+
+Step 2 (see `docs/spec-audit.md`, "Unlowered calls (integ7b)"):
+- commit 1: unlowered-call ledger, default named refusal of non-void unlowered `llvm.*` calls (no reference-stub fallback), `llvm.umax/umin/smax/smin`, `llvm.fma/fmuladd`; new unit test `air2spv unlowered calls (unit)`, 5 + 2 fixtures; the lavapipe integer test gains the min/max/fma cases with negative controls.
+- commit 2 (separately revertable): `llvm.abs/ctlz/cttz/ctpop/bitreverse/bswap/fshl/fshr` (none occurs in any scanned module) and 32-bit-only `OpBitCount` / `OpBitReverse` (also for the existing `air.popcount` / `air.reverse_bits`; `air2spv-int-intrinsics-unit` expectation 4 -> 5 for the 64-bit halves).
+- `shaders` (video-encode kernel) translates without `LAGFX_ALLOW_UNDEF_CONTROL=1`, spirv-val vulkan1.2 OK, not executed.
+- A2Xghfc output byte-identical after both commits (same sha256 as above); dump checks run3/z 39, x231501 40, vm2 40 OK.
+
+New flags (all read at every translation): `LAGFX_LOG_UNLOWERED=1` (log each unlowered call site, default off), `LAGFX_ALLOW_UNLOWERED_LLVM=1` (restore typed undef for unlowered non-void `llvm.*`; default off = refuse by name), `LAGFX_STRICT_INTRINSICS=1` (also refuse non-void `air.*`; default off). New counters / API: `lagfx_air2spv_unlowered_calls`, `_unlowered_reset`, `_last_unlowered`, `_last_unlowered_refused`, `_unlowered_refused`. Default-behaviour change: only the refusal of non-void unlowered `llvm.*` calls.
+
+Not verifiable here: Android NDK build (no NDK), any run on a device or Adreno; fused single rounding of `Fma`; the semantics of the scanned third-party modules.
