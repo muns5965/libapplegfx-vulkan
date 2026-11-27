@@ -60,11 +60,19 @@ int main(void) {
         CHECK(ids == 1, "id line must be logged exactly once per process, got %d", ids);
         CHECK(fmts == 2, "two fmt lines expected, got %d", fmts);
         CHECK(longest <= (int)LAGFX_VKDEV_LINE_MAX + 1, "logged line longer than the cap: %d", longest);
+        {   /* the production call passes the enabled set: numeric enabled= values, not n/a */
+            f = fopen(logpath, "r");
+            CHECK(f, "log file 2");
+            int en_num = 0, en_na = 0;
+            while (fgets(buf, sizeof buf, f)) if (strstr(buf, "g7-vkdev: feat part=")) { if (strstr(buf, "enabled=n/a")) en_na++; if (strstr(buf, "dynamicRendering supported=") && (strstr(buf, " enabled=0") || strstr(buf, " enabled=1"))) en_num++; }
+            fclose(f);
+            CHECK(en_na == 0 && en_num == 1, "feat lines of the production log: n/a=%d numeric=%d", en_na, en_num);
+        }
         CHECK(lagfx_vk_devinfo_log_once(pd) == 0, "second log_once must be a no-op");
     }
 
     size_t n = lagfx_vk_devinfo_collect(pd, grab, NULL);
-    CHECK(n == g_n && n >= 8 && n <= LAGFX_VKDEV_MAX_LINES + 1, "line count %zu out of range", n);
+    CHECK(n == g_n && n >= 16 && n <= LAGFX_VKDEV_MAX_LINES + 1, "line count %zu out of range", n);
     for (size_t i = 0; i < n; i++) {
         CHECK(!strncmp(g_lines[i], "g7-vkdev: ", 10), "line %zu lacks the tag", i);
         CHECK(strlen(g_lines[i]) < LAGFX_VKDEV_LINE_MAX, "line %zu is %zu chars (cap %u)", i, strlen(g_lines[i]), LAGFX_VKDEV_LINE_MAX);
@@ -122,6 +130,19 @@ int main(void) {
     const char *f80 = find_line("fmt mtl=80 vk=44 "), *f115 = find_line("fmt mtl=115 vk=97 ");
     CHECK(f80 && f115, "format lines");
     CHECK(strstr(f80, "SAMPLED_IMAGE_FILTER_CUBIC=") && strstr(f80, "TRANSFER_DST=") && strstr(f115, "COLOR_ATTACHMENT_BLEND="), "format flag names");
+    {   /* descriptor limits / layout comparison / MSAA / memory / features (structure only) */
+        const char *l = find_line("desc_limits maxBoundDescriptorSets=");
+        CHECK(l && strstr(l, "perStage[StorageBuffers=") && strstr(l, "maxColorAttachments="), "desc_limits line");
+        CHECK(find_line("desc_limits_uab "), "desc_limits_uab line");
+        l = find_line("layout_vs_limits layout=1set/30bindings");
+        CHECK(l && strstr(l, "StorageBuffers 13<=") && strstr(l, "SampledImages 12<=") && strstr(l, "Samplers 3<=") && strstr(l, "InputAttachments 2<=") && strstr(l, "Resources 30<="), "layout_vs_limits line: %s", l ? l : "(none)");
+        CHECK(find_line("msaa limits framebufferColorSampleCounts="), "msaa limits");
+        CHECK(find_line("msaa fmt mtl=80 vk=44 ") && find_line("msaa fmt mtl=115 vk=97 "), "msaa fmt lines");
+        CHECK(find_line("mem types n=") && find_line("mem heaps n="), "mem lines");
+        l = find_line("feat part=1 ");
+        CHECK(l && strstr(l, "dynamicRendering supported=") && strstr(l, "enabled=n/a"), "feat line (collect() passes no enabled set -> n/a)");
+        CHECK(find_line("feat enabled_exts=n/a"), "feat enabled_exts");
+    }
     for (size_t i = 0; i < n; i++) printf("%s\n", g_lines[i]);
     unlink(logpath);
     lagfx_vk_shutdown(vk);

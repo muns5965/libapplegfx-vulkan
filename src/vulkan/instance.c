@@ -691,7 +691,6 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
 
     s->caps_enabled = caps_en, s->caps_missing = LAGFX_VK_CAP_ALL & ~caps_en;
-    lagfx_vk_devinfo_log_once(s->phys_device);   /* read-only g7-vkdev: identity / extension list / feature summary, WARN, once per process */
     lagfx_pipeline_matrix_set_device(s->have_local_read, s->have_raster_order, s->phys_props.limits.maxColorAttachments, s->phys_props.limits.maxPerStageDescriptorInputAttachments);   /* only read by the opt-in LAGFX_PIPELINE_MATRIX diagnostics */
     {   /* record what the device was created with (read back by the pipeline failure bundle) */
         size_t eo = 0;
@@ -714,6 +713,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         snprintf(s->driver_name, sizeof s->driver_name, "%s", drv.driverName), snprintf(s->driver_info, sizeof s->driver_info, "%s", drv.driverInfo);
     }
     if (feat13.subgroupSizeControl != VK_TRUE) s->sg_control = false;
+    lagfx_vk_devinfo_log_once_ex(s->phys_device, s->dev_exts, s->dev_features);   /* read-only g7-vkdev diagnostic (devinfo.h), WARN, once per process; the strings are what vkCreateDevice was given */
     {   /* printed once per process: Metal's simdgroup is 32 lanes; a kernel that maps lanes to pixels needs a 32-wide subgroup (pinned when the device allows it) */
         static bool sg_printed;
         if (!sg_printed) {
