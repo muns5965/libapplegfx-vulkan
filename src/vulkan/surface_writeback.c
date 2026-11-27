@@ -9,6 +9,7 @@
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 static lagfx_status_t decode_impl(const uint8_t *desc, size_t len, lagfx_guest_surface_t *out, bool allow_rgha) {
     if (!desc || !out || len < LAGFX_SURF_DESC_BYTES) return LAGFX_ERR_INVALID_ARG;
@@ -97,6 +98,47 @@ lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, co
 out:
     free(pages); free(bad);
     return res;
+}
+
+static uint64_t wbv_hash(const uint8_t *b, uint64_t px) {
+    uint64_t h = 1469598103934665603ull;
+    for (uint64_t i = 0; i < px; i++) { uint32_t v = lagfx_le32(b + i * 4u); h = (h ^ v) * 1099511628211ull; }
+    return h;
+}
+lagfx_status_t lagfx_guest_surface_verify(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, const uint8_t *buf, uint32_t w, uint32_t h, size_t stride, lagfx_wbv_result_t *r) {
+    if (!shell || !s || !buf || !r || !w || !h || s->bpp != 4u || stride < (size_t)w * 4u) return LAGFX_ERR_INVALID_ARG;
+    if (w > s->width) w = s->width;
+    if (h > s->height) h = s->height;
+    memset(r, 0, sizeof *r);
+    r->w = w, r->h = h, r->bpp = 4u, r->first_x = r->first_y = -1, r->pixels = (uint64_t)w * h;
+    uint8_t *g = malloc((size_t)w * h * 4u), *tight = malloc((size_t)w * h * 4u);
+    if (!g || !tight) { free(g); free(tight); return LAGFX_ERR_OUT_OF_MEMORY; }
+    lagfx_guest_surface_xfer_stats_t st = { 0, 0, 0 }, st2 = { 0, 0, 0 };
+    lagfx_status_t res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * 4u, false, &st);
+    if (res != LAGFX_OK) goto out;
+    for (uint32_t y = 0; y < h; y++) memcpy(tight + (size_t)y * w * 4u, buf + (size_t)y * stride, (size_t)w * 4u);   /* valid pixels only: no row padding */
+    r->hash_buf = wbv_hash(tight, r->pixels), r->hash_guest = wbv_hash(g, r->pixels), r->pages_skipped = st.pages_skipped;
+    for (uint64_t i = 0; i < r->pixels; i++) {
+        const uint8_t *a = tight + i * 4u, *b = g + i * 4u;
+        bool rgb = a[0] != b[0] || a[1] != b[1] || a[2] != b[2];
+        if (!rgb && a[3] == b[3]) continue;
+        if (rgb) r->rgb_mismatch++; else r->alpha_only_mismatch++;
+        if (r->first_x < 0) r->first_x = (int32_t)(i % w), r->first_y = (int32_t)(i / w);
+    }
+    res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * 4u, false, &st2);   /* second read into the same buffer: is the guest side stable? */
+    if (res != LAGFX_OK) goto out;
+    r->hash_guest2 = wbv_hash(g, r->pixels), r->stable = r->hash_guest2 == r->hash_guest;
+out:
+    free(g); free(tight);
+    return res;
+}
+bool lagfx_wbv_enabled(void) { const char *e = getenv("LAGFX_WB_VERIFY"); return e && e[0] == '1' && !e[1]; }
+uint64_t lagfx_wbv_now_ns(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec; }
+bool lagfx_wbv_admit(lagfx_wbv_gate_t *g, uint64_t now_ns) {
+    if (!g || g->done >= LAGFX_WBV_MAX_COMPARES) return false;
+    if (g->done && now_ns - g->last_ns < LAGFX_WBV_MIN_GAP_NS) return false;
+    g->done++, g->last_ns = now_ns;
+    return true;
 }
 
 #ifdef LAGFX_HAVE_VULKAN

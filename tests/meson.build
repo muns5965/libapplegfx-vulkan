@@ -1513,6 +1513,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-surface-writeback-unit.c')
   test('arm64 completion fence + guest surface writeback (lavapipe)', sw_test)
 endif
 
+# LAGFX_WB_VERIFY read-only writeback comparison (no Vulkan: fake guest memory).
+if fs.is_file(meson.current_source_dir() / 'arm64-wb-verify-unit.c')
+  wbv_test = executable('arm64-wb-verify-unit',
+    'arm64-wb-verify-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 writeback verify diagnostic (unit)', wbv_test)
+endif
+
 # ARM64 render-segment execution (LAGFX_ARM64_EXEC=1): (task, ref) object table lifetime + real Vulkan recording read back on lavapipe.
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   er_deps = [libapplegfx_vulkan_dep]

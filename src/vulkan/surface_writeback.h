@@ -56,6 +56,29 @@ typedef struct { uint64_t bytes, pages_skipped, chunks_skipped; } lagfx_guest_su
 lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, uint8_t *buf, uint32_t w, uint32_t h, size_t stride,
                                         bool to_guest, lagfx_guest_surface_xfer_stats_t *st);
 
+/* READ-ONLY writeback verification (diagnostic, opt-in by LAGFX_WB_VERIFY=1; see lagfx_wbv_*). Reads the guest pages back (xfer, to_guest=false, into a temporary tight
+ * buffer) and compares the valid pixels (w * bpp bytes a row, row padding excluded) with `buf` (stride bytes a row). BGRA only (bpp 4); anything else is refused.
+ * Pixel bytes are taken as b, g, r, a at +0..+3 (INFER: from the fourcc 'BGRA' little-endian word, alpha in the high byte). A pixel whose b/g/r differ counts in rgb_mismatch
+ * (whatever its alpha); one whose b/g/r are equal but alpha differs counts in alpha_only_mismatch. hash_* = Henge pvgpix' hash: FNV-1a basis 1469598103934665603, prime
+ * 1099511628211, one step per whole little-endian 32-bit pixel ((h ^ px) * prime), every pixel of w x h, alpha included, not sampled. The guest is read twice;
+ * stable = both reads hashed equal (a mismatch with stable=0 means the guest wrote meanwhile; with stable=1 a copy error or a guest write BEFORE the first read). */
+typedef struct {
+    uint32_t w, h, bpp;
+    uint64_t pixels, rgb_mismatch, alpha_only_mismatch, pages_skipped;
+    int32_t first_x, first_y;                  /* first differing pixel (row-major), -1 if none */
+    uint64_t hash_buf, hash_guest, hash_guest2;
+    bool stable;
+} lagfx_wbv_result_t;
+lagfx_status_t lagfx_guest_surface_verify(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, const uint8_t *buf, uint32_t w, uint32_t h, size_t stride, lagfx_wbv_result_t *r);
+
+/* Gate: opt-in env var, at most LAGFX_WBV_MAX_COMPARES per state, LAGFX_WBV_MIN_GAP_NS between two (the first is immediate). now_ns = a monotonic clock. */
+#define LAGFX_WBV_MAX_COMPARES 8u
+#define LAGFX_WBV_MIN_GAP_NS   10000000000ull
+typedef struct { uint32_t done; uint64_t last_ns; bool capped_logged; } lagfx_wbv_gate_t;
+bool lagfx_wbv_enabled(void);                                   /* getenv("LAGFX_WB_VERIFY") == "1" */
+bool lagfx_wbv_admit(lagfx_wbv_gate_t *g, uint64_t now_ns);     /* true: do one compare now (counts it) */
+uint64_t lagfx_wbv_now_ns(void);
+
 #ifdef LAGFX_HAVE_VULKAN
 /* Read `rt` (B8G8R8A8 or R8G8B8A8, converted to BGRA) back from the GPU and write it into the guest surface described by desc. */
 lagfx_status_t lagfx_vk_render_target_to_guest_surface(struct lagfx_vk_state *vk, lagfx_vk_render_target_t *rt,

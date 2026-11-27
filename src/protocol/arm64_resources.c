@@ -486,6 +486,26 @@ static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms) {
     return true;
 }
 
+/* LAGFX_WB_VERIFY=1 only: read-only check that the guest pages hold what was just written (see lagfx_guest_surface_verify). Never changes ms or the guest. */
+static void ms_wb_verify(lagfx_protocol_t *p, msurf_t *ms, const lagfx_guest_surface_t *gs) {
+    static lagfx_wbv_gate_t gate;
+    static uint32_t lines;
+    if (gs->bpp != 4u) return;
+    if (!lagfx_wbv_admit(&gate, lagfx_wbv_now_ns())) {
+        if (gate.done >= LAGFX_WBV_MAX_COMPARES && !gate.capped_logged && lines < 40u) gate.capped_logged = true, lines++, LAGFX_WARN("wbverify cap reached (%u compares)", LAGFX_WBV_MAX_COMPARES);
+        return;
+    }
+    lagfx_wbv_result_t r;
+    lagfx_status_t st = lagfx_guest_surface_verify(ms_shell(p), gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, &r);
+    if (lines >= 40u) return;
+    lines++;
+    unsigned long long swap = (unsigned long long)p->diag2.disp.op_swap;
+    if (st != LAGFX_OK) { LAGFX_WARN("wbverify swap=%llu ms=%u %ux%u row=%llu first=%u npages=%u fourcc=%08x: read-back failed (status %d)", swap, ms->mapping, ms->w, ms->h, (unsigned long long)gs->row_bytes, gs->first_offset, gs->npages, gs->fourcc, (int)st); return; }
+    LAGFX_WARN("wbverify swap=%llu ms=%u %ux%u row=%llu first=%u npages=%u fourcc=%08x rgb_mismatch=%llu alpha_only_mismatch=%llu of %llu first_diff=%d,%d pages_skipped=%llu hash_algo=pvgpix_u32_fnv1a_full hash_written=%016llx hash_guest=%016llx hash_guest2=%016llx stable=%d",
+               swap, ms->mapping, r.w, r.h, (unsigned long long)gs->row_bytes, gs->first_offset, gs->npages, gs->fourcc, (unsigned long long)r.rgb_mismatch, (unsigned long long)r.alpha_only_mismatch, (unsigned long long)r.pixels,
+               r.first_x, r.first_y, (unsigned long long)r.pages_skipped, (unsigned long long)r.hash_buf, (unsigned long long)r.hash_guest, (unsigned long long)r.hash_guest2, r.stable ? 1 : 0);
+}
+
 /* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted).
  * Returns 1 written, 0 not written (descriptor unreadable / transfer failed: retryable), -1 the guest re-mapped the surface since the pixels were taken (dropped). */
 static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
@@ -500,6 +520,7 @@ static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms) {
     memset(&st, 0, sizeof st);
     if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return 0; }
     MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
+    if (lagfx_wbv_enabled()) ms_wb_verify(p, ms, &gs);
     ms->guest_stale = false;
     ms->owed = false;   /* whoever paid it (flag 4, synchronize, swap): the guest is current */
     return 1;
