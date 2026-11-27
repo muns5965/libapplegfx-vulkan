@@ -81,6 +81,9 @@ else
   warning('Vulkan not found — building with no-op Vulkan init stubs.')
   lagfx_deps = []
 endif
+# libm: ce_cast.c (trunc, ldexp) and others; on Android/bionic the math functions live in libm, which is not implied for a static library
+lagfx_deps += meson.get_compiler('c').find_library('m', required : false)
+
 
 # --- Library --------------------------------------------------------------
 libapplegfx_vulkan = both_libraries('applegfx-vulkan',
