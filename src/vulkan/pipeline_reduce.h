@@ -6,7 +6,7 @@
  *
  * Enable: LAGFX_PIPELINE_REDUCE=1 (app failure path: the first distinct failing fragment module of the process; =N up to 4), or pipeline-repro --reduce /
  * lagfx_pipeline_repro_run(flags | LAGFX_PIPELINE_REPRO_REDUCE). LAGFX_PIPELINE_MATRIX_DIR=<dir> (else the bundle dir) supplies the offline files, one directory layout:
- *     <dir>/<fs hash, 16 hex>.red.<name>.fs.spv      rows F:<name>  (spirv-opt outputs, plus u2/u3/u5 = the U1 module optimised)
+ *     <dir>/<fs hash, 16 hex>.red.<name>.fs.spv      rows F:<name>  (spirv-opt outputs run with --preserve-bindings --preserve-interface --target-env=vulkan1.2, plus u2/u3/u5 = the U1 module optimised; a pass whose output equals the input has no file: its row is n/a)
  *     <dir>/<fs hash, 16 hex>.m8.fs.spv / .m8c.fs.spv rows M8 / M8c of the -13 matrix (pipeline_matrix.h)
  * Other switches: LAGFX_PIPELINE_REDUCE_GROUPS=<letters> (h helpers, s sampling/fetch, c control flow, u undef, i stage interface, o offline files, k cumulative chains; default: every group = hscuiokx; x = the second-round rows XN.. XG.. XU.. PB.. IW.. CXF.., see pipeline_reduce.c),
  * LAGFX_PIPELINE_REDUCE_MAX=<rows> (default 400), LAGFX_PIPELINE_REDUCE_ONLY=<id,id,..>, LAGFX_PIPELINE_REDUCE_FROM=<id> (resume), LAGFX_PIPELINE_REDUCE_LOG=<path> (every row line is also

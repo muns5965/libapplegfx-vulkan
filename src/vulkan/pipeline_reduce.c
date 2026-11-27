@@ -448,11 +448,12 @@ static void audit(L_t *l, const lagfx_reduce_cfg_t *cfg) {
     free(f), free(v), free(s);
 }
 
-static const char *FILE_NAMES[] = { "ssa", "local-single-block", "local-single-store", "local-multi-store", "scalar", "inline", "deadfn", "dce", "merge", "deadbr", "unify", "strip", "O", "Os", "locals", "reenc", "asm", "hlsl", "u2", "u3", "u5" };
+static const char *FILE_NAMES[] = { "ssa", "local-single-block", "local-single-store", "local-multi-store", "scalar", "inline", "deadfn", "dce", "merge", "deadbr", "unify", "strip", "O", "Os", "locals", "reenc", "asm", "hlsl", "ccp", "simplify", "redundancy", "local-redundancy", "u2", "u3", "u5" };
+#define FILE_FIRST_U 22   /* index of "u2": the U-chain files are diagnostic (switch rewritten), the ones before are spirv-opt passes of the original */
 static const char *FILE_WHAT[] = { "spirv-opt --ssa-rewrite (Function variables -> SSA, adds OpPhi)", "spirv-opt --eliminate-local-single-block", "spirv-opt --eliminate-local-single-store", "spirv-opt --eliminate-local-multi-store",
     "spirv-opt --scalar-replacement=100", "spirv-opt --inline-entry-points-exhaustive", "spirv-opt --eliminate-dead-functions", "spirv-opt --eliminate-dead-code-aggressive", "spirv-opt --merge-blocks", "spirv-opt --eliminate-dead-branches",
     "spirv-opt --unify-const (U4: fewer unique constants)", "spirv-opt --strip-debug", "spirv-opt -O", "spirv-opt -Os", "spirv-opt --scalar-replacement=100 --ssa-rewrite --eliminate-dead-code-aggressive (fewer locals)",
-    "spirv-opt with no pass (producer re-encode)", "spirv-dis -> spirv-as round trip", "spirv-opt --legalize-hlsl", "U2: U1 (switch -> most frequent case) then --eliminate-dead-branches --eliminate-dead-code-aggressive",
+    "spirv-opt with no pass (producer re-encode)", "spirv-dis -> spirv-as round trip", "spirv-opt --legalize-hlsl", "spirv-opt --ccp (constant propagation)", "spirv-opt --simplify-instructions", "spirv-opt --redundancy-elimination", "spirv-opt --local-redundancy-elimination", "U2: U1 (switch -> most frequent case) then --eliminate-dead-branches --eliminate-dead-code-aggressive",
     "U3: U2 then --eliminate-dead-functions", "U5: U1 then --unify-const" };
 
 static uint32_t *slurp(const char *path, size_t *bytes) {
@@ -725,10 +726,10 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
                 if (strlen(missing) < 330) { strcat(missing, FILE_NAMES[i]); strcat(missing, " "); }
                 char why2[200];
                 snprintf(why2, sizeof why2, "offline file %016llx.red.%s.fs.spv not found (no-op pass or not shipped): the row was NOT run", (unsigned long long)l->fh, FILE_NAMES[i]);
-                do_row(l, id, FILE_WHAT[i], (i >= 18) ? MEAN_D : MEAN_O, NULL, 0, 0, NULL, 0, why2, 0);
+                do_row(l, id, FILE_WHAT[i], (i >= FILE_FIRST_U) ? MEAN_D : MEAN_O, NULL, 0, 0, NULL, 0, why2, 0);
                 continue;
             }
-            do_row(l, id, FILE_WHAT[i], (i >= 18) ? MEAN_D : MEAN_O, NULL, 0, 0, fw, fb, NULL, 0);
+            do_row(l, id, FILE_WHAT[i], (i >= FILE_FIRST_U) ? MEAN_D : MEAN_O, NULL, 0, 0, fw, fb, NULL, 0);
             free(fw);
         }
         if (nmiss && !cfg->list_only) emit_line(l, "pipeline-reduce: %u offline file row(s) absent (no %016llx.red.<name>.fs.spv in LAGFX_PIPELINE_MATRIX_DIR / bundle dir): %s(a pass whose output equals the input has no file by design: it is a no-op)", nmiss, (unsigned long long)l->fh, missing);
