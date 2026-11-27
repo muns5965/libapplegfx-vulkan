@@ -6,7 +6,24 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel", "demote", "atomic64", "atomic_f32_add" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel", "demote", "atomic64_buf", "atomic64_shared", "atomic_f32_buf", "atomic_f32_buf_add", "atomic_f32_shared", "atomic_f32_shared_add", "atomic_f32_image" };
+
+const lagfx_vk_atomic_feat_t *lagfx_vk_atomic_feat_inject = NULL;
+
+uint32_t lagfx_vk_atomic_caps(const lagfx_vk_atomic_feat_t *f) {
+    uint32_t m = 0;
+    if (!f) return 0;
+    if (f->shader_int64 && f->buffer_int64_atomics) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF);       /* device memory 64-bit atomics do not need the shared feature */
+    if (f->shader_int64 && f->shared_int64_atomics) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED);    /* threadgroup memory 64-bit atomics do not need the buffer feature */
+    if (f->af_ext) {
+        if (f->buffer_f32) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF);
+        if (f->buffer_f32_add) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD);
+        if (f->shared_f32) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED);
+        if (f->shared_f32_add) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD);
+        if (f->image_f32) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE);
+    }
+    return m;
+}
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -55,7 +72,7 @@ static bool spv_reaches_narrow(const spv_ty_t *t, const uint32_t *w, const size_
 /* false = the module could not be analysed (allocation failure, id bound too large, ids outside the bound, truncated stream, types nested deeper than the
  * limit): the caller must treat that as "needs everything", never as "needs nothing". */
 #define SPV_BOUND_LIMIT (1u << 22)
-static bool spv_used_caps(const uint32_t *w, size_t n, uint32_t *out) {
+static bool spv_used_caps(const uint32_t *w, size_t n, bool decl_i64atomics, bool decl_f32add, uint32_t *out) {
     uint32_t m = 0;
     *out = 0;
     if (n < 5u) return false;
@@ -63,7 +80,8 @@ static bool spv_used_caps(const uint32_t *w, size_t n, uint32_t *out) {
     if (!bound || bound > SPV_BOUND_LIMIT) return false;
     spv_ty_t *t = calloc(bound, sizeof *t);
     size_t *at = calloc(bound, sizeof *at);
-    if (!t || !at) { free(t); free(at); return false; }
+    uint32_t *pty = calloc(bound, sizeof *pty);   /* result id -> result type id, for the ids that can be an atomic's pointer (OpVariable, access chains, function parameters, phi / select / copy of pointers) */
+    if (!t || !at || !pty) { free(t); free(at); free(pty); return false; }
     bool fail = false;
     for (size_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
@@ -85,6 +103,9 @@ static bool spv_used_caps(const uint32_t *w, size_t n, uint32_t *out) {
         case 28: case 29: if (len >= 3) t[w[i + 1]] = (spv_ty_t){ 4, 0, w[i + 2], 0 }; else fail = true; break;   /* array / runtime array */
         case 30: t[w[i + 1]] = (spv_ty_t){ 3, 0, 0, 0 }; at[w[i + 1]] = i; break;   /* struct */
         case 32: if (len >= 4) t[w[i + 1]] = (spv_ty_t){ 5, 0, w[i + 3], w[i + 2] }; else fail = true; break;   /* pointer */
+        case 59: case 65: case 66: case 67: case 70: case 57: case 245: case 169: case 83: case 60: case 61:   /* OpVariable, [InBounds][Ptr]AccessChain, FunctionParameter, Phi, Select, CopyObject, ImageTexelPointer, Load: <type> <id> ... */
+            if (len >= 3u && w[i + 1] < bound && w[i + 2] < bound) pty[w[i + 2]] = w[i + 1];
+            break;
         default: break;
         }
         if (fail) break;
@@ -102,7 +123,41 @@ static bool spv_used_caps(const uint32_t *w, size_t n, uint32_t *out) {
             else if (w16) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
         }
     }
-    free(t); free(at);
+    /* Atomic uses, attributed to the storage class of the atomic's pointer (the pointee type says 64-bit integer / 32-bit float). A pointer whose class cannot be determined is charged to every class. */
+    if (!fail) {
+        bool unk_ptr = false, attributed64 = false, attributed_f = false;
+        const uint32_t B64 = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF), S64 = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED);
+        for (size_t i = 5; i < n;) {
+            uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
+            if (!len || i + len > n) break;
+            if ((op >= 227u && op <= 242u) || op == 6035u) {
+                const bool store = op == 228u;
+                uint32_t pid = store ? (len >= 2u ? w[i + 1] : 0u) : (len >= 4u ? w[i + 3] : 0u);
+                uint32_t rty = (!store && len >= 3u && w[i + 1] < bound) ? w[i + 1] : 0u;    /* result type: the value type of every atomic but the store */
+                uint32_t sc = ~0u, pointee = 0u;
+                if (pid && pid < bound && pty[pid] && pty[pid] < bound && t[pty[pid]].kind == 5) { sc = t[pty[pid]].b; pointee = t[pty[pid]].a; }
+                const spv_ty_t *vt = (pointee && pointee < bound) ? &t[pointee] : (rty ? &t[rty] : NULL);
+                if (sc == ~0u) unk_ptr = true;
+                if (vt && vt->kind == 1 && vt->width == 64) {
+                    attributed64 = true;
+                    if (sc == 12u) m |= B64; else if (sc == 4u) m |= S64; else m |= B64 | S64;
+                } else if (vt && vt->kind == 2 && vt->width == 32) {
+                    const bool add = op == 6035u;
+                    attributed_f = true;
+                    if (sc == 12u) m |= LAGFX_VK_CAP_BIT(add ? LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD : LAGFX_VK_CAP_ATOMIC_F32_BUF);
+                    else if (sc == 4u) m |= LAGFX_VK_CAP_BIT(add ? LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD : LAGFX_VK_CAP_ATOMIC_F32_SHARED);
+                    else if (sc == 11u) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE);
+                    else m |= add ? (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE))
+                                  : (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE));
+                }
+            }
+            i += len;
+        }
+        /* a declared atomic capability that no use explains (a store through an unanalysable pointer, a hand-patched module): every class of it is required */
+        if (decl_i64atomics && (!attributed64 || unk_ptr)) m |= B64 | S64;
+        if (decl_f32add && (!attributed_f || unk_ptr)) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_IMAGE);
+    }
+    free(t); free(at); free(pty);
     if (fail) return false;
     *out = m;
     return true;
@@ -115,6 +170,7 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
     size_t n = bytes / 4u;
     if (w[0] != 0x07230203u) return false;
     uint32_t m = 0;
+    bool decl_i64atomics = false, decl_f32add = false;
     if (w[1] > 0x00010300u) m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
     for (size_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
@@ -133,8 +189,8 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
             case 4435: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); break;
             case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16); break;
             case 5379: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE); break;   /* DemoteToHelperInvocation <- shaderDemoteToHelperInvocation */
-            case 12: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64); break;                                         /* Int64Atomics */
-            case 6033: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_ADD); break;                                /* AtomicFloat32AddEXT */
+            case 12: decl_i64atomics = true; break;                                                              /* Int64Atomics: the class (buffer / shared) comes from the uses, see spv_used_caps */
+            case 6033: decl_f32add = true; break;                                                                /* AtomicFloat32AddEXT: likewise */
             case 4441: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB); break;
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
             case 61: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP); break;                                        /* GroupNonUniform */
@@ -148,7 +204,7 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
         i += len;
     }
     uint32_t used;
-    if (!spv_used_caps(w, n, &used)) return false;
+    if (!spv_used_caps(w, n, decl_i64atomics, decl_f32add, &used)) return false;
     *mask = m | used;
     return true;
 }
@@ -186,7 +242,7 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
         { LAGFX_VK_CAP_SB8, 4448, true }, { LAGFX_VK_CAP_UB8, 4449, true }, { LAGFX_VK_CAP_PC8, 4450, true },
     };
     uint32_t used;
-    if (!spv_used_caps(w, n, &used)) return false;   /* unanalysable: do not pretend the module needs nothing */
+    if (!spv_used_caps(w, n, false, false, &used)) return false;   /* unanalysable: do not pretend the module needs nothing */
     /* what is ALREADY declared: scan OpCapability words directly */
     uint32_t declared_ids[64]; unsigned nd = 0;
     size_t after_caps = 5; bool has_ext8 = false, has_ext16 = false, has_extd = false;

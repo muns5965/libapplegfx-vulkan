@@ -1912,6 +1912,36 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-lavapipe.c') and vulk
     workdir : meson.current_source_dir() / '..')
 endif
 
+# AIR atomics: the STRICT operand grammar (only the combinations seen in real Apple modules), the named refusal reasons and counters, LAGFX_ATOMIC_LENIENT. No device. The second entry runs the
+# environment switch (LAGFX_ATOMIC_LENIENT=1) in its own process.
+if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-strict-unit.c')
+  air2spv_atomic_strict_test = executable('air2spv-atomic-strict-unit',
+    'air2spv-atomic-strict-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv atomics strict operand grammar (unit)', air2spv_atomic_strict_test,
+    workdir : meson.current_source_dir() / '..')
+  test('air2spv atomics LAGFX_ATOMIC_LENIENT=1 (unit)', air2spv_atomic_strict_test, args : ['env-lenient'],
+    env : {'LAGFX_ATOMIC_LENIENT' : '1'},
+    workdir : meson.current_source_dir() / '..')
+endif
+
+# AIR atomics -> SPIR-V: storage class vs scope, memory model (GLSL450, no Vulkan-memory-model capability), spirv-val on vulkan1.2 / 1.3 and on the VulkanKHR variants. Skips (77) without spirv-val.
+if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-spv-unit.c')
+  air2spv_atomic_spv_test = executable('air2spv-atomic-spv-unit',
+    'air2spv-atomic-spv-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv atomics SPIR-V consistency + spirv-val (unit)', air2spv_atomic_spv_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # The same sampling options executed on a Vulkan 1.3 device (lavapipe): mip-mapped texture, explicit level / bias / constant offset compared with the expected texel. Skips (77) without a device.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-lavapipe.c') and vulkan_dep.found()
   air2spv_tso_vk_test = executable('air2spv-texture-sample-lavapipe',
@@ -2083,6 +2113,17 @@ pipeline_reduce_test = executable('pipeline-reduce-unit',
   build_by_default : true,
 )
 test('pipeline reduction ladder (unit, lavapipe)', pipeline_reduce_test, timeout : 300)
+
+# Atomic device capabilities: separate buffer / shared 64-bit caps, per-feature float caps (VK_EXT_shader_atomic_float), the SPIR-V scan attribution, the gate on fake devices (injectable feature struct),
+# and lagfx_vk_init with injected features on the available ICD (skips with 77 after the pure parts when there is none).
+atomic_caps_test = executable('vulkan-atomic-caps-unit',
+  'vulkan-atomic-caps-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('atomic device capabilities (unit, injected features, lavapipe)', atomic_caps_test, workdir : meson.current_source_dir() / '..')
 
 # Read-only device diagnostic g7-vkdev (identity, full extension list, feature summary): structure checks on the available ICD, skip (77) without one.
 vkdev_info_test = executable('vkdev-info-unit',

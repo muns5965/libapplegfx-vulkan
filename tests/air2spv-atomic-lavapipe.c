@@ -12,8 +12,11 @@
  *   cas_wb   single invocation: a FAILING compare_exchange returns false and writes the observed value into *expected; a succeeding one returns true, stores desired, leaves *expected.
  *   neg      negative controls: the sub variant of the add kernel and the no-increment CAS variant must NOT reproduce the expected counters (the test has teeth).
  *   refuse   an unknown atomic spelling / unsupported operand / non-relaxed memory order fails the translation (never an undefined value, never a weakened order) and is counted.
- *   caps     32-bit kernels need no atomic capability bit; the 64-bit kernel needs LAGFX_VK_CAP_ATOMIC64 and runs when the device has it (shaderBuffer/SharedInt64Atomics); the float-add kernel needs
- *            LAGFX_VK_CAP_ATOMIC_F32_ADD (never enabled by lagfx_vk_init: the gate refuses it), and runs here only when the device offers VK_EXT_shader_atomic_float.
+ *   caps     32-bit kernels need no atomic capability bit; the device-memory 64-bit kernel needs LAGFX_VK_CAP_ATOMIC64_BUF only and the threadgroup one LAGFX_VK_CAP_ATOMIC64_SHARED only (separate
+ *            Vulkan features); the float-add kernels need LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD / _SHARED_ADD (lagfx_vk_init enables them when VK_EXT_shader_atomic_float reports them) and are
+ *            translated only in lenient mode (the float spelling was never observed: strict mode refuses it). They run here only when the device offers the feature.
+ *   helper   atomics inside non-entry helper functions: a threadgroup static used by tg_add() called from two call sites and by tg_twice() (nested call) -> exact per-group sums; a helper taking
+ *            a device pointer parameter is refused (LAGFX_ATOMIC_R_HELPER) instead of silently dropping the atomic.
  * Exit 77 (skip) when there is no Vulkan device or it lacks shaderInt64.
  */
 #include "air2spv/translate.h"
@@ -31,7 +34,7 @@
 #define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); return 1; } } while (0)
 #define VK(call) do { VkResult r_ = (call); if (r_ != VK_SUCCESS) { printf("FAIL %s:%d: %s = %d\n", __FILE__, __LINE__, #call, (int)r_); return 1; } } while (0)
 
-static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf; static uint32_t g_have_caps; static int g_run_f32;
+static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf; static uint32_t g_have_caps; static int g_run_f32, g_run_f32_shared;
 
 static uint8_t *slurp(const char *name, size_t *n) {
     char path[512];
@@ -67,14 +70,17 @@ static int mkbuf(buf_t *o, VkDeviceSize n) {
 }
 
 /* Translate fixture `name`; the SPIR-V is validated by the caller's tools (tests/ spirv-val runs in CI), here the device compiles it. */
-static int translate(const char *name, uint8_t **spv, size_t *n, lagfx_air_module_t **m) {
+static int translate_mode(const char *name, uint8_t **spv, size_t *n, lagfx_air_module_t **m, int lenient) {
     size_t an = 0; uint8_t *air = slurp(name, &an);
     CHECK(air, "fixture %s not found", name);
     CHECK(lagfx_air_module_open(air, an, m) == LAGFX_OK && *m, "%s: module_open", name);
+    lagfx_air2spv_set_atomic_lenient(lenient);
     lagfx_status_t st = lagfx_air2spv_translate_module(*m, spv, n);
+    lagfx_air2spv_set_atomic_lenient(-1);
     CHECK(st == LAGFX_OK && *spv, "%s: translate = %d", name, (int)st);
     return 0;
 }
+static int translate(const char *name, uint8_t **spv, size_t *n, lagfx_air_module_t **m) { return translate_mode(name, spv, n, m, -1); }   /* strict (the default) */
 
 /* Run a compute kernel `spv` with `nb` storage buffers (bufs[i] bound to the i-th reflected STORAGE_BUFFER binding, i.e. the AIR argument order), `groups` workgroups of `local`. */
 static int run_kernel(const uint8_t *spv, size_t spv_n, buf_t *bufs, uint32_t nb, uint32_t groups, uint32_t local) {
@@ -250,14 +256,17 @@ int main(void) {
     VkPhysicalDeviceFeatures2 q2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q12 };
     vkGetPhysicalDeviceFeatures2(g_pd, &q2);
     if (!q2.features.shaderInt64) SKIP("device lacks shaderInt64");
-    /* the capability bits this device offers for the atomics (the same rule lagfx_vk_init applies; ATOMIC_F32_ADD is never enabled there) */
-    uint32_t have_caps = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
-    if (q12.shaderBufferInt64Atomics && q12.shaderSharedInt64Atomics) have_caps |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64);
+    /* the capability bits this device offers for the atomics: the same rule lagfx_vk_init applies (lagfx_vk_atomic_caps) */
+    lagfx_vk_atomic_feat_t af_in = { .shader_int64 = q2.features.shaderInt64 == VK_TRUE, .buffer_int64_atomics = q12.shaderBufferInt64Atomics == VK_TRUE, .shared_int64_atomics = q12.shaderSharedInt64Atomics == VK_TRUE,
+        .af_ext = have_af_ext, .buffer_f32 = have_af_ext && qaf.shaderBufferFloat32Atomics, .buffer_f32_add = have_af_ext && qaf.shaderBufferFloat32AtomicAdd,
+        .shared_f32 = have_af_ext && qaf.shaderSharedFloat32Atomics, .shared_f32_add = have_af_ext && qaf.shaderSharedFloat32AtomicAdd, .image_f32 = have_af_ext && qaf.shaderImageFloat32Atomics };
+    uint32_t have_caps = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14) | lagfx_vk_atomic_caps(&af_in);
     g_have_caps = have_caps;
     int run_f32 = have_af_ext && qaf.shaderBufferFloat32AtomicAdd; g_run_f32 = run_f32;
-    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT eaf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT, .shaderBufferFloat32AtomicAdd = (VkBool32)run_f32 };
+    int run_f32s = have_af_ext && qaf.shaderSharedFloat32AtomicAdd; g_run_f32_shared = run_f32s;
+    VkPhysicalDeviceShaderAtomicFloatFeaturesEXT eaf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT, .shaderBufferFloat32AtomicAdd = (VkBool32)run_f32, .shaderSharedFloat32AtomicAdd = (VkBool32)run_f32s };
     VkPhysicalDeviceVulkan12Features e12 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .shaderBufferInt64Atomics = q12.shaderBufferInt64Atomics, .shaderSharedInt64Atomics = q12.shaderSharedInt64Atomics,
-                                             .pNext = run_f32 ? (void *)&eaf : NULL };
+                                             .pNext = (run_f32 || run_f32s) ? (void *)&eaf : NULL };
     VkPhysicalDeviceFeatures2 e2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &e12, .features = { .shaderInt64 = VK_TRUE } };
     const char *dev_exts[1] = { "VK_EXT_shader_atomic_float" };
     float prio = 1.0f;
@@ -268,7 +277,7 @@ int main(void) {
     CHECK(g_qf != ~0u, "no compute queue");
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = &e2, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
-                               .enabledExtensionCount = run_f32 ? 1u : 0u, .ppEnabledExtensionNames = run_f32 ? dev_exts : NULL };
+                               .enabledExtensionCount = (run_f32 || run_f32s) ? 1u : 0u, .ppEnabledExtensionNames = (run_f32 || run_f32s) ? dev_exts : NULL };
     VK(vkCreateDevice(g_pd, &dci, NULL, &g_dev));
     vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
 
@@ -324,16 +333,16 @@ int main(void) {
     /* ---- capability bits ---- */
     {
         uint8_t *spv = NULL; size_t sn = 0; lagfx_air_module_t *m = NULL; uint32_t need = 0;
+        const uint32_t B64 = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF), S64 = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED);
         CHECK(!translate("atomic_rmw.air.bc", &spv, &sn, &m) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan rmw");
-        CHECK(!(need & (LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_ADD))), "32-bit integer atomics must need no atomic capability bit (need 0x%x)", need);
+        CHECK(!(need & LAGFX_VK_CAPS_ATOMIC_ALL), "32-bit integer atomics must need no atomic capability bit (need 0x%x)", need);
         free(spv); lagfx_air_module_free(m); spv = NULL;
         CHECK(!translate("atomic_i64.air.bc", &spv, &sn, &m) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan i64");
-        CHECK(need & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64), "64-bit atomics must require LAGFX_VK_CAP_ATOMIC64 (need 0x%x)", need);
-        CHECK(!(need & ~(g_have_caps | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64))), "unexpected extra capability bits 0x%x", need);
-        const uint32_t lacking = need & ~(g_have_caps & ~LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64));   /* a device without Int64 atomics: the gate (need & ~enabled) must fire */
-        CHECK(lacking & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64), "the capability gate would not refuse the 64-bit atomics on a device without them");
-        printf("PASS: caps: 32-bit atomics need no atomic cap bit; the 64-bit kernel requires atomic64 (the gate refuses it on a device without Int64 atomics)\n");
-        if (g_have_caps & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64)) {
+        CHECK((need & LAGFX_VK_CAPS_ATOMIC_ALL) == B64, "device-memory 64-bit atomics must require exactly atomic64_buf (need 0x%x)", need);
+        CHECK(!(need & ~(g_have_caps | B64)), "unexpected extra capability bits 0x%x", need);
+        CHECK((need & ~(g_have_caps & ~B64)) & B64, "the capability gate would not refuse the 64-bit atomics on a device without the buffer feature");
+        printf("PASS: caps: 32-bit atomics need no atomic cap bit; the device-memory 64-bit kernel requires atomic64_buf only (the gate refuses it on a device without shaderBufferInt64Atomics)\n");
+        if (g_have_caps & B64) {
             buf_t c; CHECK(!mkbuf(&c, 64), "buf");
             uint64_t *c64 = (uint64_t *)c.p;
             buf_t bufs[1] = { c };
@@ -342,20 +351,71 @@ int main(void) {
             uint64_t e0 = 0, e1 = ~0ull;
             for (uint64_t t = 0; t < N; t++) { if (t * 4294967297ull > e0) e0 = t * 4294967297ull; uint64_t v = (t + 5u) * 4294967297ull + 7u; if (v < e1) e1 = v; }
             CHECK(c64[0] == e0 && c64[1] == e1, "i64 atomics: umax %llx (want %llx), umin %llx (want %llx)", (unsigned long long)c64[0], (unsigned long long)e0, (unsigned long long)c64[1], (unsigned long long)e1);
-            printf("PASS: atomic_i64: 64-bit umax / umin over 256 invocations match the CPU model (Int64Atomics)\n");
-        } else printf("note: device has no Int64 atomics: the 64-bit kernel was not run\n");
+            printf("PASS: atomic_i64: 64-bit umax / umin over 256 invocations match the CPU model (Int64Atomics on StorageBuffer)\n");
+        } else printf("note: device has no shaderBufferInt64Atomics: the 64-bit kernel was not run\n");
         free(spv); lagfx_air_module_free(m); spv = NULL;
-        CHECK(!translate("atomic_f32.air.bc", &spv, &sn, &m) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan f32");
-        CHECK(need & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_ADD), "float atomic add must require LAGFX_VK_CAP_ATOMIC_F32_ADD (need 0x%x)", need);
-        printf("PASS: caps: the float atomic add requires atomic_f32_add (not enabled by lagfx_vk_init, so the gate refuses it; never emulated)\n");
+        /* threadgroup 64-bit: its own cap */
+        CHECK(!translate("atomic_i64_tg.air.bc", &spv, &sn, &m) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan i64_tg");
+        CHECK((need & LAGFX_VK_CAPS_ATOMIC_ALL) == S64, "threadgroup 64-bit atomics must require exactly atomic64_shared (need 0x%x)", need);
+        if (g_have_caps & S64) {
+            buf_t c; CHECK(!mkbuf(&c, 64), "buf");
+            uint64_t *c64 = (uint64_t *)c.p; buf_t bufs[1] = { c };
+            CHECK(!run_kernel(spv, sn, bufs, 1, 1, 64u), "i64_tg run");
+            CHECK(c64[0] == 63ull * 4294967297ull, "threadgroup 64-bit umax: %llx, want %llx", (unsigned long long)c64[0], (unsigned long long)(63ull * 4294967297ull));
+            printf("PASS: atomic_i64_tg: 64-bit threadgroup umax over 64 invocations = 63 * 0x100000001 (Int64Atomics on Workgroup)\n");
+        } else printf("note: device has no shaderSharedInt64Atomics: the threadgroup 64-bit kernel was not run\n");
+        free(spv); lagfx_air_module_free(m); spv = NULL;
+        /* float add: strict mode refuses the (unobserved) spelling; lenient mode translates it and the gate sees the per-class cap */
+        {
+            lagfx_atomic_totals_t f0, f1; lagfx_air2spv_atomic_totals(&f0);
+            size_t an = 0; uint8_t *air = slurp("atomic_f32.air.bc", &an); CHECK(air, "atomic_f32 fixture");
+            lagfx_air_module_t *fm = NULL; CHECK(lagfx_air_module_open(air, an, &fm) == LAGFX_OK, "open f32");
+            uint8_t *fs = NULL; size_t fsn = 0;
+            lagfx_status_t fst = lagfx_air2spv_translate_module(fm, &fs, &fsn);
+            lagfx_air2spv_atomic_totals(&f1);
+            CHECK(fst != LAGFX_OK && !fs && lagfx_air2spv_last_atomic_reason() == LAGFX_ATOMIC_R_FLOAT && f1.reason[LAGFX_ATOMIC_R_FLOAT] > f0.reason[LAGFX_ATOMIC_R_FLOAT], "strict mode must refuse the float atomic (reason float)");
+            lagfx_air_module_free(fm); free(air);
+            printf("PASS: float atomic add is refused by default (reason float, counted); LAGFX_ATOMIC_LENIENT=1 is needed to translate it\n");
+        }
+        CHECK(!translate_mode("atomic_f32.air.bc", &spv, &sn, &m, 1) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan f32 (lenient)");
+        CHECK((need & LAGFX_VK_CAPS_ATOMIC_ALL) == LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_BUF_ADD), "device float add must require exactly atomic_f32_buf_add (need 0x%x)", need);
         if (g_run_f32) {
             buf_t c; CHECK(!mkbuf(&c, 64), "buf");
             float *cf = (float *)c.p; buf_t bufs[1] = { c };
             CHECK(!run_kernel(spv, sn, bufs, 1, N / 64u, 64u), "f32 run");
             CHECK(cf[0] == (float)N, "float atomic add: %g, want %u", cf[0], N);
-            printf("PASS: atomic_f32: 256 float atomic adds of 1.0 = 256.0 (VK_EXT_shader_atomic_float)\n");
-        } else printf("note: device has no VK_EXT_shader_atomic_float: the float kernel was not run\n");
+            printf("PASS: atomic_f32 (lenient): 256 float atomic adds of 1.0 = 256.0 (VK_EXT_shader_atomic_float, shaderBufferFloat32AtomicAdd)\n");
+        } else printf("note: device has no shaderBufferFloat32AtomicAdd: the float kernel was not run\n");
+        free(spv); lagfx_air_module_free(m); spv = NULL;
+        CHECK(!translate_mode("atomic_f32_tg.air.bc", &spv, &sn, &m, 1) && lagfx_spv_required_caps_ex(spv, sn, &need), "caps scan f32_tg (lenient)");
+        CHECK((need & LAGFX_VK_CAPS_ATOMIC_ALL) == LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_SHARED_ADD), "threadgroup float add must require exactly atomic_f32_shared_add (need 0x%x)", need);
+        if (g_run_f32_shared) {
+            buf_t c; CHECK(!mkbuf(&c, 64), "buf");
+            float *cf = (float *)c.p; buf_t bufs[1] = { c };
+            CHECK(!run_kernel(spv, sn, bufs, 1, 1, 64u), "f32_tg run");
+            CHECK(cf[0] == 64.0f, "threadgroup float atomic add: %g, want 64", cf[0]);
+            printf("PASS: atomic_f32_tg (lenient): 64 threadgroup float atomic adds = 64.0 (shaderSharedFloat32AtomicAdd)\n");
+        } else printf("note: device has no shaderSharedFloat32AtomicAdd: the threadgroup float kernel was not run\n");
         free(spv); lagfx_air_module_free(m);
+    }
+    /* ---- helper functions holding atomics ---- */
+    {
+        uint8_t *spv = NULL; size_t sn = 0; lagfx_air_module_t *m = NULL;
+        CHECK(!translate("atomic_helper_tg.air.bc", &spv, &sn, &m), "helper_tg translate");
+        buf_t o; CHECK(!mkbuf(&o, 16 * 4), "buf");
+        buf_t bufs[1] = { o };
+        CHECK(!run_kernel(spv, sn, bufs, 1, 4, 64), "helper_tg run");
+        for (uint32_t g = 0; g < 4; g++) CHECK(o.p[g] == 2400u, "helper_tg: group %u = %u, expected 2400 (64 x 1 + 64*65/2 + 64 x 4)", g, o.p[g]);
+        printf("PASS: atomic_helper_tg: threadgroup atomics inside helper functions (two call sites + a nested call) = 2400 per group\n");
+        free(spv); lagfx_air_module_free(m);
+        /* a helper with a device pointer parameter cannot be wired (opaque / wrapper pointee): refused, never dropped */
+        size_t an = 0; uint8_t *air = slurp("atomic_helper.air.bc", &an); CHECK(air, "atomic_helper fixture");
+        lagfx_air_module_t *hm = NULL; CHECK(lagfx_air_module_open(air, an, &hm) == LAGFX_OK, "open helper");
+        uint8_t *hs = NULL; size_t hn = 0; char first[96] = "";
+        lagfx_status_t hst = lagfx_air2spv_translate_module(hm, &hs, &hn);
+        CHECK(hst != LAGFX_OK && !hs && lagfx_air2spv_last_atomic_reason() == LAGFX_ATOMIC_R_HELPER && lagfx_air2spv_last_unsupported_atomic(first, sizeof first) == 4u, "an atomic in a helper that cannot be wired must be refused (reason helper, 4 call sites)");
+        printf("PASS: atomic_helper: atomics in a helper taking a device pointer are refused ('%s' x4, reason helper) instead of being dropped\n", first);
+        lagfx_air_module_free(hm); free(air);
     }
     /* ---- refusal ---- */
     {

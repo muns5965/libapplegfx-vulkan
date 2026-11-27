@@ -138,6 +138,9 @@ typedef struct {
      * duplicate identical decorations are legal but noisy). */
     uint32_t stride_decorated[16];
     uint32_t n_stride_decorated;
+    /* Workgroup (threadgroup) module globals, by module global index (the first 64): the OpVariable id is allocated BEFORE the helpers are translated (their atomics / loads
+     * name it) and used by emit_workgroup_globals later. 0 = none. */
+    uint32_t wg_var[64];
 } xlate_helpers_t;
 
 /* ===================================================================
@@ -2913,6 +2916,19 @@ static void emit_alloca_vars(xlate_ctx_t *c) {
 /* `threadgroup T x;` / `threadgroup T x[N];` statics (module GLOBALVARs in address space 3) -> OpVariable Workgroup, bound to the global's value id. Supported value types: a 32/64-bit
  * integer, a 32-bit float, Metal's atomic_T wrapper of those, or an array of any of them. Anything else is left unbound (a use of it resolves to an undefined value, which the atomic
  * handler refuses). `threadgroup T *p [[threadgroup(n)]]` ARGUMENTS (a dispatch-sized allocation) are NOT modelled. */
+/* Module global `g` is a threadgroup static the translator models (emit_workgroup_globals): address space 3, a 32 / 64-bit integer, float, atomic wrapper, or an array of those. */
+static bool workgroup_global_ok(const xlate_ctx_t *c, uint32_t g) {
+    uint32_t nt = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    lagfx_air_globalvar_t gv;
+    if (!lagfx_air_module_globalvar(c->m, g, &gv) || (gv.flags >> 2) != 3u || gv.type_index >= nt) return false;
+    uint32_t el = gv.type_index;
+    if (ts[el].kind == LAGFX_AIR_TYPE_ARRAY && ts[el].num_op >= 2u) el = ts[el].op[1];
+    { uint32_t wf = air_atomic_wrapper_field(c, el); if (wf) el = wf; }
+    if (el >= nt) return false;
+    return (ts[el].kind == LAGFX_AIR_TYPE_INTEGER && ts[el].num_op >= 1u && (ts[el].op[0] == 32u || ts[el].op[0] == 64u)) || ts[el].kind == LAGFX_AIR_TYPE_FLOAT;
+}
+
 static void emit_workgroup_globals(xlate_ctx_t *c) {
     uint32_t ng = lagfx_air_module_num_globalvars(c->m);
     uint32_t nt = 0;
@@ -2928,7 +2944,7 @@ static void emit_workgroup_globals(xlate_ctx_t *c) {
         if (!ok) continue;
         uint32_t ty_spv = emit_air_type(c, gv.type_index);
         uint32_t ptr = emit_type_pointer(c, gv.type_index, ty_spv, 4u /* Workgroup */);
-        uint32_t var = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t var = (c->helpers && g < 64u && c->helpers->wg_var[g]) ? c->helpers->wg_var[g] : lagfx_spv_builder_alloc_id(c->b);
         uint32_t vo[] = { ptr, var, 4u /* Workgroup */ };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
         cs_iface_add(c, var);   /* SPIR-V 1.4: every global variable the entry point uses is in its interface */
@@ -4704,6 +4720,9 @@ void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out) {
  * Memory order: only the literal 0 (memory_order_relaxed) is translated, to Semantics None; any other order operand is REFUSED (MSL 4.1 added acquire / release / acq_rel / seq_cst
  * [V: MSL spec 1.3, 6.16.1]; their AIR encoding is unknown [N]). The scope operand (2 in every verified instance, meaning unknown [N]) is not interpreted: the SPIR-V scope follows the
  * address space (global -> Device, local -> Workgroup), a superset of any narrower MSL thread_scope.
+ * STRICT operand grammar (default): the scope operand must be the literal 2, the rmw extra operand the literal 0, the final i1 the constant true, and the operand count exactly that of the
+ * observed form; anything else is refused with a named reason (LAGFX_ATOMIC_R_*) and counted. LAGFX_ATOMIC_LENIENT=1 restores the earlier permissive grammar (no check of those three
+ * operands, float add and a non-void 64-bit return accepted) for experiments; see translate_function.h.
  * =================================================================== */
 enum { AT_LOAD, AT_STORE, AT_XCHG, AT_ADD, AT_SUB, AT_AND, AT_OR, AT_XOR, AT_MIN, AT_MAX, AT_CAS };
 typedef struct { bool ok, global, is_float; int op; char sign; uint32_t bits; } atomic_name_t;   /* sign: 's', 'u' or 0 */
@@ -4763,11 +4782,25 @@ static uint32_t find_air_scalar_type(const xlate_ctx_t *c, bool is_float, uint32
 }
 
 /* Atomic operations the translator refused (unknown spelling / operand shape / type), per translation (thread-local) and process-wide (diagnostic counters). */
-static _Thread_local struct { uint32_t n; char first[80]; } t_unsup_atomic;
+static _Thread_local struct { uint32_t n; char first[80]; unsigned first_reason; } t_unsup_atomic;
 static lagfx_atomic_totals_t g_atomic_tot;
-static void note_unsupported_atomic(const char *fn_name) {
-    if (!t_unsup_atomic.n) snprintf(t_unsup_atomic.first, sizeof t_unsup_atomic.first, "%s", fn_name);
+static _Atomic int g_atomic_lenient_override = -1;   /* -1: environment; 0 / 1: forced (tests) */
+static _Atomic int g_atomic_lenient_env = -1;
+void lagfx_air2spv_set_atomic_lenient(int mode) { atomic_store(&g_atomic_lenient_override, mode < 0 ? -1 : mode ? 1 : 0); }
+static bool atomic_lenient(void) {
+    int o = atomic_load(&g_atomic_lenient_override);
+    if (o >= 0) return o != 0;
+    int e = atomic_load(&g_atomic_lenient_env);
+    if (e < 0) { const char *v = getenv("LAGFX_ATOMIC_LENIENT"); e = v && v[0] == '1' && v[1] == '\0'; atomic_store(&g_atomic_lenient_env, e); }
+    return e != 0;
+}
+static const char *const k_atomic_reason_names[LAGFX_ATOMIC_R_COUNT] = {
+    "none", "spelling", "operand_count", "order", "scope", "rmw_extra", "flag", "float", "i64_return", "cas_form", "pointer", "type", "helper" };
+const char *lagfx_air2spv_atomic_reason_name(unsigned r) { return r < LAGFX_ATOMIC_R_COUNT ? k_atomic_reason_names[r] : "?"; }
+static void note_unsupported_atomic(const char *fn_name, unsigned reason) {
+    if (!t_unsup_atomic.n) { snprintf(t_unsup_atomic.first, sizeof t_unsup_atomic.first, "%s", fn_name); t_unsup_atomic.first_reason = reason; }
     t_unsup_atomic.n++;
+    if (reason < LAGFX_ATOMIC_R_COUNT) __atomic_add_fetch(&g_atomic_tot.reason[reason], 1u, __ATOMIC_RELAXED);
 }
 void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out) {
     if (!out) return;
@@ -4775,44 +4808,129 @@ void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out) {
     out->translated = __atomic_load_n(&g_atomic_tot.translated, __ATOMIC_RELAXED);
     out->refused = __atomic_load_n(&g_atomic_tot.refused, __ATOMIC_RELAXED);
     out->modules_rejected = __atomic_load_n(&g_atomic_tot.modules_rejected, __ATOMIC_RELAXED);
+    for (unsigned i = 0; i < LAGFX_ATOMIC_R_COUNT; i++) out->reason[i] = __atomic_load_n(&g_atomic_tot.reason[i], __ATOMIC_RELAXED);
+    out->lenient_accepted = __atomic_load_n(&g_atomic_tot.lenient_accepted, __ATOMIC_RELAXED);
+    out->cas_synthetic = __atomic_load_n(&g_atomic_tot.cas_synthetic, __ATOMIC_RELAXED);
 }
 uint32_t lagfx_air2spv_last_unsupported_atomic(char *first_name, size_t cap) {
     if (first_name && cap) snprintf(first_name, cap, "%s", t_unsup_atomic.n ? t_unsup_atomic.first : "");
     return t_unsup_atomic.n;
 }
+unsigned lagfx_air2spv_last_atomic_reason(void) { return t_unsup_atomic.n ? t_unsup_atomic.first_reason : (unsigned)LAGFX_ATOMIC_R_NONE; }
 
 static uint32_t gep_base_storage_class(const xlate_ctx_t *c, uint32_t ptr_value_id);
 static uint32_t buffer_arg_runtimearray_elem(xlate_ctx_t *c, uint32_t ptr_value_id);
 
-/* One air.atomic.* call. Returns false when it cannot be translated faithfully (the caller counts it and the translation fails; nothing is emitted for it). */
-static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char *fn_name, const lagfx_air_inst_t *inst, uint32_t callee_slot_idx,
+/* Value of the i1 constant operand `vid` (module-level or function-local constant): true / false in *val; false when the operand is not an i1 integer constant. */
+static bool atomic_const_i1(const xlate_ctx_t *c, uint32_t vid, bool *val) {
+    uint32_t nt = 0, nk = 0, nf = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    const lagfx_air_constant_t *k = NULL;
+    const lagfx_air_constant_t *mc = lagfx_air_module_constants(c->m, &nk);
+    (void)lagfx_air_module_functions(c->m, &nf);
+    const uint32_t mod_val_base = lagfx_air_module_num_globalvars(c->m) + nf;
+    if (vid >= mod_val_base && vid - mod_val_base < nk) k = &mc[vid - mod_val_base];
+    else {
+        uint32_t nl = 0;
+        const lagfx_air_constant_t *lc = lagfx_air_function_body_local_constants(c->body, &nl);
+        const uint32_t lc_base = c->arg_id_base + c->num_args;
+        if (lc && vid >= lc_base && vid - lc_base < nl) k = &lc[vid - lc_base];
+    }
+    if (!k || k->kind != LAGFX_AIR_CONST_INTEGER || k->type_index >= nt) return false;
+    const lagfx_air_type_t *t = &ts[k->type_index];
+    if (t->kind != LAGFX_AIR_TYPE_INTEGER || t->num_op < 1u || t->op[0] != 1u) return false;
+    *val = k->payload.i64 != 0;
+    return true;
+}
+
+/* Operand positions (indices into the call's argument list) of the observed AIR forms. [V] = seen in real Apple modules (load, store, rmw); the CAS layout is [N] (hand-written). */
+typedef struct { uint32_t n, ord0, nord, scope, extra, flag; } atomic_layout_t;   /* extra / flag: ~0u = none */
+static atomic_layout_t atomic_layout(int op) {
+    switch (op) {
+    case AT_LOAD:  return (atomic_layout_t){ 4u, 1u, 1u, 2u, ~0u, 3u };
+    case AT_STORE: return (atomic_layout_t){ 5u, 2u, 1u, 3u, ~0u, 4u };
+    case AT_CAS:   return (atomic_layout_t){ 7u, 3u, 2u, 5u, ~0u, 6u };
+    default:       return (atomic_layout_t){ 6u, 2u, 1u, 3u, 4u, 5u };
+    }
+}
+
+/* One air.atomic.* call. Returns 0 on success, else the LAGFX_ATOMIC_R_* reason it cannot be translated faithfully (the caller counts it and the translation fails; nothing is emitted
+ * for it before the reason is known: every check precedes the first emitted instruction). */
+static unsigned emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char *fn_name, const lagfx_air_inst_t *inst, uint32_t callee_slot_idx,
                              uint32_t result_value_id, uint32_t result_ty_air, uint32_t next_val_id) {
     (void)fn_name;
-    if (!an->ok) return false;
+    if (!an->ok) return LAGFX_ATOMIC_R_SPELLING;
+    const bool lenient = atomic_lenient();
+    unsigned strict_reason = LAGFX_ATOMIC_R_NONE;   /* first reason strict mode would refuse for; lenient mode proceeds (and counts) */
     const uint32_t nargs = inst->num_ops > callee_slot_idx + 1u ? inst->num_ops - callee_slot_idx - 1u : 0u;
+    const atomic_layout_t L = atomic_layout(an->op);
     const uint32_t need = an->op == AT_LOAD ? 1u : an->op == AT_CAS ? 3u : 2u;
-    if (nargs < need) return false;
-    if (an->is_float && an->op != AT_ADD) return false;                       /* float load/store/exchange/min/max: not implemented (never emulated) */
-    if (an->op == AT_SUB && an->is_float) return false;
-    if ((an->op == AT_MIN || an->op == AT_MAX || an->op == AT_ADD || an->op == AT_SUB) && !an->is_float && !an->sign) return false;   /* signedness is part of the spelling for these */
+    if (nargs < need) return LAGFX_ATOMIC_R_OPERAND_COUNT;
+    if (nargs != L.n) {
+        if (!lenient || nargs < L.n) return LAGFX_ATOMIC_R_OPERAND_COUNT;   /* lenient: extra trailing operands were tolerated, missing ones never */
+        strict_reason = LAGFX_ATOMIC_R_OPERAND_COUNT;
+    }
+    if (an->is_float && an->op != AT_ADD) return LAGFX_ATOMIC_R_SPELLING;      /* float load/store/exchange/min/max: not implemented (never emulated) */
+    if (an->op == AT_SUB && an->is_float) return LAGFX_ATOMIC_R_SPELLING;
+    if ((an->op == AT_MIN || an->op == AT_MAX || an->op == AT_ADD || an->op == AT_SUB) && !an->is_float && !an->sign) return LAGFX_ATOMIC_R_SPELLING;   /* signedness is part of the spelling for these */
+    if (an->is_float && !strict_reason) strict_reason = LAGFX_ATOMIC_R_FLOAT;  /* the spelling air.atomic.*.add.f32 was never observed in a real module [N] */
     const uint32_t aty = find_air_scalar_type(c, an->is_float, an->bits);
-    if (aty == LAGFX_AIR_TYPE_NONE) return false;
+    if (aty == LAGFX_AIR_TYPE_NONE) return LAGFX_ATOMIC_R_TYPE;
 #define AT_ARG(k) resolve_relative((uint32_t)inst->ops[callee_slot_idx + 1u + (k)], next_val_id)
     {   /* memory order operand(s): only the literal 0 (memory_order_relaxed, the only value in every verified instance) is translated. Metal 4.1 adds acquire / release / acq_rel / seq_cst
-         * [V: MSL spec section 1.3 and 6.16.1]; their AIR encoding is unknown [N], so such a call is REFUSED instead of silently weakened to Semantics None. */
-        const uint32_t first_ord = an->op == AT_LOAD ? 1u : an->op == AT_STORE ? 2u : an->op == AT_CAS ? 3u : 2u;
-        const uint32_t n_ord     = an->op == AT_CAS ? 2u : 1u;
-        for (uint32_t k = first_ord; k < first_ord + n_ord && k < nargs; k++) {
+         * [V: MSL spec section 1.3 and 6.16.1]; their AIR encoding is unknown [N], so such a call is REFUSED (also in lenient mode) instead of silently weakened to Semantics None. */
+        for (uint32_t k = L.ord0; k < L.ord0 + L.nord && k < nargs; k++) {
             int32_t ov = -1;
-            if (!resolve_value_lit_i32(c, AT_ARG(k), &ov) || ov != 0) return false;
+            if (!resolve_value_lit_i32(c, AT_ARG(k), &ov) || ov != 0) return LAGFX_ATOMIC_R_ORDER;
         }
+    }
+    /* scope operand (observed: 2), rmw extra operand (observed: 0), final i1 (observed: true): exactly the observed combinations in strict mode */
+    if (L.scope < nargs) {
+        int32_t v = -1;
+        if ((!resolve_value_lit_i32(c, AT_ARG(L.scope), &v) || v != 2) && !strict_reason) strict_reason = LAGFX_ATOMIC_R_SCOPE;
+    }
+    if (L.extra != ~0u && L.extra < nargs) {
+        int32_t v = -1;
+        if ((!resolve_value_lit_i32(c, AT_ARG(L.extra), &v) || v != 0) && !strict_reason) strict_reason = LAGFX_ATOMIC_R_RMW_EXTRA;
+    }
+    if (L.flag < nargs) {
+        bool b = false;
+        if ((!atomic_const_i1(c, AT_ARG(L.flag), &b) || !b) && !strict_reason) strict_reason = LAGFX_ATOMIC_R_FLAG;
+    }
+    /* 64-bit atomics: MSL has atomic_ulong min / max only, device memory only, returning void [V: MSL 6.16.4.6]; the real AIR return type was never observed [N]. Only a void-declared
+     * call is accepted in strict mode (a non-void declaration may be used, and its value would be a guess); a 64-bit load always has a result and is therefore refused. */
+    if (an->bits == 64u && !an->is_float && (result_value_id != 0u || an->op == AT_LOAD) && an->op != AT_CAS && !strict_reason) strict_reason = LAGFX_ATOMIC_R_I64_RETURN;
+    if (strict_reason) {
+        if (!lenient) return strict_reason;
+        __atomic_add_fetch(&g_atomic_tot.lenient_accepted, 1u, __ATOMIC_RELAXED);
     }
 
     const uint32_t ptr_id = AT_ARG(0);
     uint32_t ptr_spv = resolve_value_spv(c, ptr_id);
-    if (!ptr_spv) return false;
+    if (!ptr_spv) return LAGFX_ATOMIC_R_POINTER;
     const uint32_t want_sc = an->global ? LAGFX_SPV_STORAGE_STORAGE_BUFFER : 4u /* Workgroup */;
-    if (gep_base_storage_class(c, ptr_id) != want_sc) return false;          /* a Function-storage / unknown pointer is not atomic memory */
+    if (gep_base_storage_class(c, ptr_id) != want_sc) return LAGFX_ATOMIC_R_POINTER;   /* a Function-storage / unknown pointer is not atomic memory; the scope below follows this checked class */
+    uint32_t exp_ptr = 0;
+    if (an->op == AT_CAS) {
+        /* The ONE implemented compare-exchange form (synthetic, hand-written fixtures; no real AIR compare-exchange has been seen [N]): `i1 cmpxchg(ptr dev, ptr expected, T desired, ...)` where `expected`
+         * is a pointer to FUNCTION memory (Metal's `T *expected`) and the call returns i1. Only in that form does the intrinsic itself have to write the observed value back into *expected
+         * (nothing else could: the i1 result carries no value), so the translator's write-back below is the only write and cannot double up. A form that returns the observed value, or takes
+         * `expected` by value, or points it at device memory, has an unknown write-back contract and is refused (LAGFX_ATOMIC_R_CAS_FORM), never guessed. */
+        uint32_t nt = 0;
+        const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+        const bool res_i1 = result_value_id != 0u && result_ty_air < nt && ts[result_ty_air].kind == LAGFX_AIR_TYPE_INTEGER && ts[result_ty_air].num_op >= 1u && ts[result_ty_air].op[0] == 1u;
+        const uint32_t exp_id = AT_ARG(1);
+        exp_ptr = resolve_value_spv(c, exp_id);
+        bool exp_is_ptr = false;   /* the DECLARED parameter type of `expected`: a pointer (Metal's `T *expected`); by value is a different (unobserved) form */
+        if (inst->num_ops > 2u && ((uint32_t)inst->ops[1] & 0x8000u)) {
+            const uint32_t fnty = (uint32_t)inst->ops[2u + (((uint32_t)inst->ops[1] & (1u << 17)) ? 1u : 0u)];
+            if (fnty < nt && ts[fnty].kind == LAGFX_AIR_TYPE_FUNCTION && ts[fnty].num_op > 3u) {
+                const uint32_t pt = (uint32_t)ts[fnty].op[3];   /* op[0] varargs, op[1] return type, op[2] = parameter 0 (the device pointer), op[3] = parameter 1 (expected) */
+                exp_is_ptr = pt < nt && ts[pt].kind == LAGFX_AIR_TYPE_POINTER && ts[pt].num_op >= 2u && ts[pt].op[1] == 0u;
+            }
+        }
+        if (!res_i1 || !exp_ptr || !exp_is_ptr || gep_base_storage_class(c, exp_id) != LAGFX_SPV_STORAGE_FUNCTION) return LAGFX_ATOMIC_R_CAS_FORM;
+    }
     const uint32_t elem_spv = emit_air_type(c, aty);
     if (an->global) {   /* the Block variable itself (a bare `device T*` arg): the element 0 of its runtime array */
         uint32_t rt = buffer_arg_runtimearray_elem(c, ptr_id);
@@ -4837,7 +4955,9 @@ static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char
         uint32_t ext[8]; memset(ext, 0, sizeof ext); memcpy(ext, "SPV_EXT_shader_atomic_float_add", 31u);
         lagfx_spv_builder_emit_op(c->b, 10u /* OpExtension */, ext, 8);
     }
-    const uint32_t scope = emit_const_uint32(c, an->global ? 1u /* Device */ : 2u /* Workgroup */);
+    /* Scope follows the CHECKED storage class of the pointer (StorageBuffer -> Device, Workgroup -> Workgroup), never the scope operand. The module declares OpMemoryModel Logical GLSL450
+     * (no Vulkan memory model): Device scope on StorageBuffer atomics is valid there without any VulkanMemoryModel* capability (docs/spec-audit.md "Atomics", test air2spv-atomic-spv-unit). */
+    const uint32_t scope = emit_const_uint32(c, want_sc == 4u ? 2u /* Workgroup */ : 1u /* Device */);
     const uint32_t sem   = emit_const_uint32(c, 0u);                          /* Semantics None = memory_order_relaxed (other orders were refused above) */
     uint32_t res = lagfx_spv_builder_alloc_id(c->b);
 
@@ -4846,16 +4966,15 @@ static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char
         uint32_t o[] = { ptr_spv, scope, sem, v };
         lagfx_spv_builder_emit_op(c->b, 228u /* OpAtomicStore */, o, 4);
         __atomic_add_fetch(&g_atomic_tot.translated, 1u, __ATOMIC_RELAXED);
-        return true;
+        return LAGFX_ATOMIC_R_NONE;
     }
     if (an->op == AT_LOAD) {
         uint32_t o[] = { elem_spv, res, ptr_spv, scope, sem };
         lagfx_spv_builder_emit_op(c->b, 227u /* OpAtomicLoad */, o, 5);
     } else if (an->op == AT_CAS) {
         /* Metal: bool atomic_compare_exchange_weak_explicit(obj, T *expected, T desired, ...): on failure *expected receives the observed value. SPIR-V returns the
-         * observed value of the (strong) exchange; the result is observed == expected, and the observed value is stored back unconditionally (on success it equals *expected). */
-        uint32_t exp_ptr = resolve_value_spv(c, AT_ARG(1));
-        if (!exp_ptr) return false;
+         * observed value of the (strong) exchange; the result is observed == expected, and the observed value is stored back unconditionally (on success it equals *expected).
+         * This write-back exists only for the synthetic pointer + i1 form checked above (see there for why it cannot be a second write). */
         uint32_t exp_val = lagfx_spv_builder_alloc_id(c->b);
         uint32_t lo[] = { elem_spv, exp_val, exp_ptr };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, lo, 3);
@@ -4871,7 +4990,8 @@ static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char
         bind_value_spv(c, result_value_id, res);
         set_result_air_type(c, result_value_id, result_ty_air);
         __atomic_add_fetch(&g_atomic_tot.translated, 1u, __ATOMIC_RELAXED);
-        return true;
+        __atomic_add_fetch(&g_atomic_tot.cas_synthetic, 1u, __ATOMIC_RELAXED);
+        return LAGFX_ATOMIC_R_NONE;
     } else {
         static const uint16_t opc_i[] = { 0, 0, 229 /* Exchange */, 234 /* IAdd */, 235 /* ISub */, 240 /* And */, 241 /* Or */, 242 /* Xor */, 0, 0 };
         uint32_t opc = 0;
@@ -4879,7 +4999,7 @@ static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char
         else if (an->op == AT_MIN) opc = an->sign == 's' ? 236u /* SMin */ : 237u /* UMin */;
         else if (an->op == AT_MAX) opc = an->sign == 's' ? 238u /* SMax */ : 239u /* UMax */;
         else opc = opc_i[an->op];
-        if (!opc) return false;
+        if (!opc) return LAGFX_ATOMIC_R_SPELLING;
         uint32_t v = resolve_or_undef(c, AT_ARG(1), elem_spv);
         uint32_t o[] = { elem_spv, res, ptr_spv, scope, sem, v };
         lagfx_spv_builder_emit_op(c->b, opc, o, 6);
@@ -4890,8 +5010,10 @@ static bool emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const char
     }
     __atomic_add_fetch(&g_atomic_tot.translated, 1u, __ATOMIC_RELAXED);
 #undef AT_ARG
-    return true;
+    return LAGFX_ATOMIC_R_NONE;
 }
+
+static bool fn_reaches_atomic(const xlate_ctx_t *c, uint32_t fn_idx, int depth);
 
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
@@ -4978,7 +5100,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     {
         atomic_name_t an;
         if (parse_atomic_name(fn_name, &an)) {
-            if (!emit_atomic_call(c, &an, fn_name, inst, callee_slot_idx, result_value_id, result_ty_air, next_val_id)) note_unsupported_atomic(fn_name);
+            unsigned why = emit_atomic_call(c, &an, fn_name, inst, callee_slot_idx, result_value_id, result_ty_air, next_val_id);
+            if (why) note_unsupported_atomic(fn_name, why);
             return;
         }
     }
@@ -5981,6 +6104,10 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                            result_value_id, next_val_id, fn_name)) {
         return;
     }
+    /* A call to a user function that could NOT be wired (unregistered signature, failed body, argument type mismatch) degrades to a typed undef below. If that function (or one it
+     * calls) holds an atomic, the atomic would silently never run and its result would be an undefined value: refuse the module instead (LAGFX_ATOMIC_R_HELPER). */
+    if (!glsl_inst && strncmp(fn_name, "air.", 4u) != 0 && strncmp(fn_name, "llvm.", 5u) != 0 && fn_idx != UINT32_MAX && fn_reaches_atomic(c, fn_idx, 0))
+        note_unsupported_atomic(fn_name, LAGFX_ATOMIC_R_HELPER);
 
     /* === air.discard_fragment (MSL discard_fragment()) [I: spelling not in the corpus] === */
     if (!glsl_inst && result_value_id == 0u && c->stage == LAGFX_XLATE_STAGE_FRAGMENT && strcmp(fn_name, "air.discard_fragment") == 0) {
@@ -10125,6 +10252,41 @@ static uint32_t call_callee_fn_index(const xlate_ctx_t *c,
     return callee_id - n_globalvars;
 }
 
+/* True when function `fn_idx` (a non-prototype module function) contains an air.atomic.* call, directly or through the user functions it calls (depth-limited). Reads the body
+ * afresh: only used on the rare path where a helper call could not be wired. */
+static bool fn_reaches_atomic(const xlate_ctx_t *c, uint32_t fn_idx, int depth) {
+    uint32_t n_fns = 0;
+    const lagfx_air_function_t *fns = lagfx_air_module_functions(c->m, &n_fns);
+    if (depth > 6 || fn_idx >= n_fns || fns[fn_idx].is_proto || fns[fn_idx].body_offset == 0u) return false;
+    lagfx_air_function_body_t *body = NULL;
+    if (lagfx_air_function_body_open(c->m, fn_idx, &body) != LAGFX_OK || !body) return false;
+    uint32_t n_insts = 0;
+    const lagfx_air_inst_t *insts = lagfx_air_function_body_instructions(body, &n_insts);
+    uint32_t n_types = 0;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
+    const uint32_t fn_ty = fns[fn_idx].type_index;
+    const uint32_t num_args = (fn_ty < n_types && ts[fn_ty].kind == LAGFX_AIR_TYPE_FUNCTION && ts[fn_ty].num_op > 2u) ? ts[fn_ty].num_op - 2u : 0u;
+    uint32_t n_local = 0;
+    (void)lagfx_air_function_body_local_constants(body, &n_local);
+    uint32_t next_val = c->module_val_count + num_args + n_local;
+    bool found = false;
+    for (uint32_t i = 0; i < n_insts && !found; i++) {
+        const lagfx_air_inst_t *inst = &insts[i];
+        if (inst->code == LAGFX_AIR_INST_CALL) {
+            uint32_t slot = 0;
+            const char *nm = call_callee_name_slot(c, inst, next_val, &slot);
+            if (nm && strncmp(nm, "air.atomic.", 11u) == 0) found = true;
+            else if (nm && strncmp(nm, "air.", 4u) != 0 && strncmp(nm, "llvm.", 5u) != 0) {
+                uint32_t callee = call_callee_fn_index(c, inst, next_val);
+                if (callee != UINT32_MAX && callee != fn_idx) found = fn_reaches_atomic(c, callee, depth + 1);
+            }
+        }
+        if (inst_produces_value(c, inst)) next_val++;
+    }
+    lagfx_air_function_body_free(body);
+    return found;
+}
+
 static void helpers_plan_fn(xlate_ctx_t *ec, uint32_t fn_idx, int depth);
 
 /* Scan one decoded instruction stream for CALLs to non-proto module
@@ -10227,6 +10389,9 @@ static void translate_one_helper(xlate_ctx_t *ec, uint32_t slot) {
 
     bind_module_constants(&hc);
     bind_local_constants(&hc);
+    for (uint32_t g = 0; g < 64u && g < hc.value_id_capacity; g++) {   /* threadgroup statics: the same OpVariable as the entry function's */
+        if (h->wg_var[g]) { bind_value_spv(&hc, g, h->wg_var[g]); set_value_storage(&hc, g, 4u); }
+    }
 
     /* Function header: OpFunction + OpFunctionParameter* + OpLabel,
      * then the ALLOCA OpVariables and the locals-splice mark. */
@@ -10327,7 +10492,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
 
     xlate_ctx_t c = {0};
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
-    t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0;
+    t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;
     c.b = lagfx_spv_builder_create(256u);
     if (!c.b) return LAGFX_ERR_OUT_OF_MEMORY;
     c.m = m;
@@ -10372,6 +10537,10 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
      * (post-order → callee-first, no forward references). Helper function
      * bodies land in the functions section BEFORE the entry's OpFunction. */
     helpers_plan_scan(&c, c.insts, c.num_insts, c.inst_id_base, 0);
+    if (c.stage == LAGFX_XLATE_STAGE_COMPUTE && c.helpers->n_fns) {   /* ids of the threadgroup statics, before any helper body names them */
+        const uint32_t ngv = lagfx_air_module_num_globalvars(c.m);
+        for (uint32_t g = 0; g < ngv && g < 64u; g++) if (workgroup_global_ok(&c, g)) c.helpers->wg_var[g] = lagfx_spv_builder_alloc_id(c.b);
+    }
     for (uint32_t i = 0; i < c.helpers->n_fns; i++) {
         if (c.helpers->fns[i].func_id && !c.helpers->fns[i].emitted)
             translate_one_helper(&c, i);
@@ -10416,7 +10585,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
         __atomic_add_fetch(&g_atomic_tot.modules, 1u, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_atomic_tot.refused, t_unsup_atomic.n, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_atomic_tot.modules_rejected, 1u, __ATOMIC_RELAXED);
-        LAGFX_WARN("air2spv: module not translated: %u atomic operation(s) not implemented (first: %s)", t_unsup_atomic.n, t_unsup_atomic.first);
+        LAGFX_WARN("air2spv: module not translated: %u atomic operation(s) not implemented (first: %s, reason: %s)", t_unsup_atomic.n, t_unsup_atomic.first, lagfx_air2spv_atomic_reason_name(t_unsup_atomic.first_reason));
         st = LAGFX_ERR_PROTOCOL;
         goto fail;
     }
