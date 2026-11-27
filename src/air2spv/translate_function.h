@@ -116,12 +116,19 @@ void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out);
 /* air.discard_fragment (MSL discard_fragment()) lowering. demote = true: OpDemoteToHelperInvocation (needs the device feature shaderDemoteToHelperInvocation; the module then
  * declares Capability DemoteToHelperInvocation, gated by LAGFX_VK_CAP_DEMOTE) - the fragment stops writing but still takes part in derivatives, like a Metal discarded fragment [I].
  * demote = false (the default; valid on every device): OpKill, which ends the invocation; it is a block terminator, so the block is split with a constant-true
- * OpBranchConditional, except inside the two recognised single-loop plans whose OpPhi parents are fixed labels: there the discard is DROPPED and counted.
+ * OpBranchConditional. That also holds inside the two recognised single-loop plans: the only OpPhi parent that can be a block being split is the plan's ENTRY block, and the
+ * split moves that label (S06; an earlier revision dropped the discard there). Kill vs demote [V: SPV_EXT_demote_to_helper_invocation text]: demote
+ * "does not necessarily terminate the invocation", is not a flow-control instruction (control flow stays uniform, derivatives stay valid), stores after it are suppressed;
+ * OpKill terminates the invocation and is a block terminator (SPIR-V 1.6 deprecates it in favour of OpTerminateInvocation / OpDemoteToHelperInvocation [V: changelog]).
  * Per thread (the resolver translates on one thread); set it before each translation. */
 void lagfx_air2spv_set_discard_demote(bool demote);
-/* Process totals: lowered as demote / as OpKill / dropped (loop plan). */
+/* Process totals: lowered as demote / as OpKill; `dropped` is kept for the log format and is always 0 since the loop-plan case is lowered. */
 typedef struct { uint64_t demote, kill, dropped; } lagfx_discard_totals_t;
 void lagfx_air2spv_discard_totals(lagfx_discard_totals_t *out);
+
+/* D2 candidate, OPT-IN (default OFF): lower air.fmin / fmax / clamp / fast_* / saturate with GLSL.std.450 NMin / NMax / NClamp instead of FMin / FMax / FClamp (a NaN operand then yields the other
+ * operand). mode 1 = on, 0 = off, -1 = follow the environment variable LAGFX_SPV_NANMAX=1 (the default state). Process-wide. Off leaves every translation byte-identical. */
+void lagfx_air2spv_set_nanmax(int mode);
 
 /* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
  * Locations follow `vs_out` (the paired vertex module's output keys) via
