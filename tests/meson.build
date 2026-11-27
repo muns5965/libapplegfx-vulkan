@@ -2064,3 +2064,16 @@ if fs.is_file(meson.current_source_dir() / 'display-diag-gamma-owner-unit.c')
   )
   test('display diagnostics: gamma region read prefers the mapping owner task (unit)', display_diag_gamma_owner_test)
 endif
+
+# Spec-audit regressions (docs/spec-audit.md): srem -> OpSRem, <3 x T> member layout (LLVM alloc size), [[instance_id]] -> InstanceIndex.
+if fs.is_file(meson.current_source_dir() / 'air2spv-spec-audit-unit.c')
+  air2spv_specaudit_test = executable('air2spv-spec-audit-unit',
+    'air2spv-spec-audit-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv spec-audit regressions (unit)', air2spv_specaudit_test,
+    workdir : meson.current_source_dir() / '..')
+endif
