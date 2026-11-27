@@ -356,7 +356,8 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
         bind[*n_bind].kind = (uint8_t)tmp[t].kind;
         bind[*n_bind].stage = (uint8_t)st;
         bind[*n_bind].metal_index = (int16_t)midx;
-        bind[*n_bind].cxs = 0, bind[*n_bind].cxs_raw = 0, bind[*n_bind].dim3 = (uint8_t)(tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].image_dim == 2u);   /* Dim3D sampled image: needs a 3D view */
+        bind[*n_bind].cxs = 0, bind[*n_bind].cxs_raw = 0, bind[*n_bind].dim3 = (uint8_t)(tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].image_dim == 2u);
+        bind[*n_bind].arr = (uint8_t)(tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].image_dim == 1u && tmp[t].image_arrayed);   /* Dim3D sampled image: needs a 3D view */
         /* writable = the arg metadata allows writes (air.write / air.read_write: every non-const `device T *`) AND the translated module has a use that may write through the
          * binding (reflect may_write). Metadata alone over-reports: VfxXgh's `vertex_buffer` is air.read_write, yet the function is `readonly` and its SPIR-V never stores to it. */
         bind[*n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(wr && tmp[t].may_write) : 0u;

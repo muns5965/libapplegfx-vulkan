@@ -93,7 +93,8 @@ struct lagfx_a64_obj {
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t wgen;                      /* buffer: bumped at every write the mirror knows of (guest upload, blit / fill / texture->buffer copy, linear push, shader-writable bind, tile kernel) */
     uint64_t rd_epoch; bool gpu_dirty;  /* buffer: exec epoch of the last read from the guest's pages; written by the GPU (blit / push / shader / tile) since that read */
-    VkImageView view3;                  /* sampled VK_IMAGE_VIEW_TYPE_3D view of a 3D texture (level 0); lazily made */
+    VkImageView view3;                  /* sampled VK_IMAGE_VIEW_TYPE_3D view of a 3D texture (all mip levels); lazily made */
+    VkImageView mview, aview;           /* sampled views of the whole mip chain: mview = 2D (layer 0), aview = 2D_ARRAY (all layers); lazily made, only for textures with mips > 1 / array shaders */
     VkImageView sview;                  /* sampled view when it differs from view (A8Unorm: components 0,0,0,R); lazily made */
     uint64_t lin_seen; bool lin_pulled; /* linear texture: wgen of the backing buffer when the image last took (pulled) or gave (pushed) the buffer's bytes; image is current iff lin_pulled && lin_seen == buffer wgen */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
@@ -133,8 +134,16 @@ bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref);
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x);
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b);
-VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* 2D textures only (a 3D one yields VK_NULL_HANDLE) */
-/* The sampled view of a 3D mirror texture (VK_IMAGE_VIEW_TYPE_3D, level 0): feeds a texture3d (Dim3D) descriptor. VK_NULL_HANDLE for a non-3D object or one without sampled usage. */
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* 2D textures only (a 3D one yields VK_NULL_HANDLE): 2D view of layer 0, ALL mip levels */
+/* The sampled view a shader's image dimensionality asks for (dim3: Dim3D; arr: Dim2D arrayed), and what of the texture it leaves out. *flags (may be NULL) gets:
+ *   LAGFX_A64_SV_MIPS_DROPPED   the texture has mip levels the view does not cover (only when the whole-chain view could not be made: a counted fallback to level 0)
+ *   LAGFX_A64_SV_LAYERS_DROPPED the texture has array layers a non-array (2D) shader cannot address: layer 0 only
+ *   LAGFX_A64_SV_MIP_VIEW       the view covers more than level 0
+ *   LAGFX_A64_SV_ARRAY_VIEW     a 2D_ARRAY view was bound (arr)
+ * VK_NULL_HANDLE when no legal view exists (3D vs 2D mismatch, no sampled usage, view creation failed). */
+enum { LAGFX_A64_SV_MIPS_DROPPED = 1, LAGFX_A64_SV_LAYERS_DROPPED = 2, LAGFX_A64_SV_MIP_VIEW = 4, LAGFX_A64_SV_ARRAY_VIEW = 8 };
+VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, uint32_t *flags);
+/* The sampled view of a 3D mirror texture (VK_IMAGE_VIEW_TYPE_3D, all mip levels): feeds a texture3d (Dim3D) descriptor. VK_NULL_HANDLE for a non-3D object or one without sampled usage. */
 VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);

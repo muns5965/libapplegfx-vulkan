@@ -733,11 +733,16 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
              * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
             if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
             /* The shader's image dimensionality must be the texture's: a Dim3D descriptor needs a 3D view of a 3D image, a Dim2D one a 2D view (anything else is invalid Vulkan). */
-            VkImageView v = s->bind[i].dim3 ? lagfx_a64_res_sample_view3d(r->x, t) : lagfx_a64_res_sample_view(r->x, t);
+            uint32_t svf = 0;
+            VkImageView v = lagfx_a64_res_sample_view_for(r->x, t, s->bind[i].dim3 != 0, s->bind[i].arr != 0, &svf);
             if (!v && lagfx_a64_res_is_3d(t) != (s->bind[i].dim3 != 0)) { CNT(p).ext_tex_dim_mismatch++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             if (v && s->bind[i].dim3) CNT(p).ext_tex3d_binds++;
-            if (v && t->mips > 1u) CNT(p).ext_tex_mips_base_only++;       /* the view is level 0 only: levels >= 1 are never sampled (APPROX), counted per bound descriptor per draw */
-            if (v && t->layers > 1u) CNT(p).ext_tex_layers_base_only++;   /* the view is layer 0 only (2D, not 2D-array): layers >= 1 are never sampled (APPROX) */
+            /* The view covers the texture's whole mip chain (and, for a texture2d_array shader, every layer). What it still leaves out is counted per bound descriptor per draw: levels
+             * the whole-chain view could not be made for (fallback to level 0), and array layers a non-array (texture2d) shader cannot address (layer 0). */
+            if (v && (svf & LAGFX_A64_SV_MIPS_DROPPED)) CNT(p).ext_tex_mips_base_only++;
+            if (v && (svf & LAGFX_A64_SV_LAYERS_DROPPED)) CNT(p).ext_tex_layers_base_only++;
+            if (v && (svf & LAGFX_A64_SV_MIP_VIEW)) CNT(p).ext_tex_mip_views++;
+            if (v && (svf & LAGFX_A64_SV_ARRAY_VIEW)) CNT(p).ext_tex_array_views++;
             if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
