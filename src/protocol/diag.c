@@ -11,6 +11,7 @@
 #include "../vulkan/caps.h"
 #include "../vulkan/sampler_cache.h"
 #include "display_diag.h"
+#include "gap_diag.h"
 #include "object_resolver.h"
 #include "../common/log.h"
 
@@ -64,6 +65,7 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
     lagfx_dd_set_reader(dd_read_region);
     lagfx_dd_set_owner_lookup(dd_owner);
     lagfx_dd_note_cmd(p, src, chan, raw, length);   /* display diagnostics: counts / read-only captures, no effect on dispatch */
+    lagfx_gap_note_cmd(t, p->diag2.t0_ns, src, chan, seq, n, raw, length);   /* idle-gap diagnostics (default on; LAGFX_GAPDIAG=0 off): lines only, no effect on dispatch */
     /* Bounded: the first 64 of each (source, opcode) and every 64th after that; root commands only the first 16. Counters above never stop. */
     uint64_t cap = src == LAGFX_DIAG_ROOT ? 16u : 64u;
     if (n > cap && (n % 64u) != 0u) return;
@@ -366,5 +368,6 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         LAGFX_LOG("%s", gl);
     }
     lagfx_dd_log_stats(final);   /* g7-pvg-ops: display-path counters (capped) */
+    if (final) lagfx_gap_final(t);   /* g7-gap-final: gaps, longest gap, op 0x0009 events, last command age */
     lagfx_draw_diag_flush(p, final);   /* per-draw tuples seen since the last statistics (bounded; formats and logs outside the draw path) */
 }

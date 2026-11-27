@@ -14,6 +14,7 @@
 #include "arm64_completion.h"
 #include "arm64_dump.h"
 #include "draw_diag.h"
+#include "gap_diag.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -1099,6 +1100,8 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
+    for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS && k < 2u; k++)   /* idle-gap diagnostics: logged only in the window after a gap, one relaxed load otherwise */
+        lagfx_gap_note_pass(d.colors[k].texture_ref, d.colors[k].slot, d.colors[k].load_action, d.colors[k].store_action, d.colors[k].clear_color, fw, fh, d.color_attachment_count);
     if (r->cap) {
         lagfx_a64_cap_att_in_t ai[4]; uint32_t na = 0;
         for (uint32_t k = 0; k < 4u; k++) if (r->rts[k]) { memset(&ai[na], 0, sizeof ai[na]); ai[na].o = r->rts[k], ai[na].slot = k, ai[na].load = cap_load[k]; for (int c = 0; c < 4; c++) ai[na].clear[c] = (float)cap_clear[k][c]; na++; }
@@ -1188,6 +1191,7 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (!prepare_pipeline(r, p, prim)) return false;
     apply_encoder_state(r, p);
     if (r->dsobj && (lagfx_a64_dss_depth_test(&r->es.dss) || lagfx_a64_dss_stencil_test(&r->es.dss))) CNT(p).ds_draws++;
+    lagfx_gap_note_draw(prim, r->region.vp_x, r->region.vp_y, r->region.vp_w, r->region.vp_h, r->region.vp_z_set ? r->region.vp_znear : 0.0f, r->region.vp_z_set ? r->region.vp_zfar : 1.0f, r->region.sc_x, r->region.sc_y, r->region.sc_w, r->region.sc_h, r->rt_w, r->rt_h);   /* idle-gap diagnostics: window only */
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
     r->region.metal = true, r->region.lim_dim = (float)(r->vk->phys_props.limits.maxViewportDimensions[0] < r->vk->phys_props.limits.maxViewportDimensions[1] ? r->vk->phys_props.limits.maxViewportDimensions[0] : r->vk->phys_props.limits.maxViewportDimensions[1]),
         r->region.lim_lo = r->vk->phys_props.limits.viewportBoundsRange[0], r->region.lim_hi = r->vk->phys_props.limits.viewportBoundsRange[1];

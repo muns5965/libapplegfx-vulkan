@@ -26,6 +26,7 @@ lagfx_sources += files(
   'arm64_exec_run.c',     # ARM64 Render segment execution on Vulkan (LAGFX_ARM64_EXEC=1)
   'draw_diag.c',    # bounded per-draw diagnostics (G7_DRAW_DIAG)
   'diag.c',         # command diagnostics (logging + counters only)
+  'gap_diag.c',     # idle-gap diagnostics (default on): gap detector, op 0x0009 line, first swaps / pass / draw after a gap
   'display_diag.c', # display-path diagnostics: swap format, gamma capture (read-only), cursor/vbl counters
   'test_api.c',     # Test API exports: dispatch_one, mmio_read/write
    'object_resolver.c',  # Phase B object ID resolver for metallib lookup

@@ -2192,3 +2192,14 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-spec-audit-unit.c')
   test('air2spv spec-audit regressions (unit)', air2spv_specaudit_test,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# Idle-gap diagnostics: gap detector, op 0x0009 line, first swaps / pass / draws after a gap (no device).
+if fs.is_file(meson.current_source_dir() / 'gap-diag-unit.c')
+  gap_diag_unit_test = executable('gap-diag-unit',
+    'gap-diag-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('idle-gap diagnostics (unit)', gap_diag_unit_test)
+endif
