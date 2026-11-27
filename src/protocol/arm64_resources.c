@@ -87,7 +87,7 @@ typedef struct { lagfx_protocol_t *p; lagfx_a64_stats_t st; lagfx_a64_obj_t **ob
     lagfx_a64_texwhy_t mk_why;   /* why the last obj_make returned NULL (TEXWHY_*; 0 = not a texture failure) */
     struct { uint32_t task, ref, entry[3]; uint32_t why; } fail[128]; uint32_t nfail;   /* memo of the newest failed creations (ring), keyed by (task, ref, entry): lagfx_a64_res_diagnose */
 } mgr2_t;
-int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = the next swap fence check reports a timeout without looking, 3 = the next exec submit fails, 4 = the next mapped write-back finish finds the descriptor unreadable */
+int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = the next swap fence check reports a timeout without looking, 3 = the next exec submit fails, 4 = the next mapped write-back finish finds the descriptor unreadable, 5 = the next exec fence wait (res_end) fails (device lost), 6 = the next res_poll fence check fails, 7 = the next exec fence wait (res_end) times out and stays timed out (hook becomes 10) until the test sets it back to 0 or to 6, 8 = the next sync_to_guest submit fails, 9 = the next sync_to_guest wait is not DONE. Plain global, default 0, set by tests only (never from env or protocol input) */
 #define MRUN(p) ((p)->diag2.exec.run)
 #define BUSY(m) ((m)->cur || (m)->pending || (m)->sw_fence)
 #define MAX_MS 256u
@@ -519,12 +519,12 @@ static void ms_wb_verify(lagfx_protocol_t *p, msurf_t *ms, const lagfx_guest_sur
 }
 
 /* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted).
- * Returns 1 written, 0 not written (descriptor unreadable: owed again; transfer failed; or this generation recorded nothing for the surface), -1 the guest re-mapped the surface since the pixels were taken (dropped). */
+ * Returns 1 written, 0 not written (descriptor unreadable: counted, owed again in swap mode only; transfer failed; or this generation recorded nothing for the surface), -1 the guest re-mapped the surface since the pixels were taken (dropped). */
 static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms, uint64_t gen) {
     if (!ms->down_pending || ms->down_gen != gen) { if (ms->down_gen != gen) MRUN(p).wb_down_skipped_not_recorded++; return 0; }   /* (same generation, already finished: a second ref of the same surface in one exec, not counted) */   /* this exec / sync / swap copy did not record the copy for this surface: its staging bytes are not ours to write (a pending recording of another generation is left alone) */
     ms->down_pending = false;
     lagfx_guest_surface_t gs;
-    if (lagfx_a64_test_hook == 4 ? (lagfx_a64_test_hook = 0, true) : !ms_desc(p, ms->mapping, &gs)) { ms->owed = true; MRUN(p).wb_finish_desc_unreadable_owed++; return 0; }   /* descriptor unreadable: the frame is retried by the next display / sync, not lost */
+    if (lagfx_a64_test_hook == 4 ? (lagfx_a64_test_hook = 0, true) : !ms_desc(p, ms->mapping, &gs)) { if (mapped_wb_on_swap()) ms->owed = true; MRUN(p).wb_finish_desc_unreadable_owed++; return 0; }   /* descriptor unreadable: counted. Swap mode only: the surface is owed again and paid by the next display swap. Immediate mode: diagnostic only, NOT recovered (display_swap does nothing outside =swap), so the flag is not set there */
     if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return -1; }
     if (ms->id_set && (gs.page_list_gpa != ms->id_pl || gs.alloc != ms->id_alloc || gs.first_offset != ms->id_first || gs.npages != ms->id_np || gs.row_bytes != ms->id_row ||
                       (ms->id_hash && ms_list_hash(p, &gs) != ms->id_hash))) { MRUN(p).mapped_remapped++; return -1; }
@@ -1227,6 +1227,17 @@ static lagfx_vk_wait_result_t fence_wait(struct lagfx_vk_state *vk, VkFence f, u
     return r == VK_NOT_READY || r == VK_TIMEOUT ? LAGFX_VK_WAIT_TIMEOUT : LAGFX_VK_WAIT_FAILED;
 }
 
+/* tests only: the mapped surface's pending-copy state (-1 unknown mapping, else down_pending) / mark it pending under a generation no exec ever had */
+int lagfx_a64_test_ms_down_pending(lagfx_protocol_t *p, uint32_t mapping) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    for (uint32_t i = 0; m && i < m->nms; i++) if (m->ms[i] && m->ms[i]->mapping == mapping) return m->ms[i]->down_pending;
+    return -1;
+}
+void lagfx_a64_test_ms_force_pending(lagfx_protocol_t *p, uint32_t mapping) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    for (uint32_t i = 0; m && i < m->nms; i++) if (m->ms[i] && m->ms[i]->mapping == mapping) m->ms[i]->down_pending = true, m->ms[i]->down_gen = ~0ull;
+}
+
 lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
     if (!x) return LAGFX_A64_FAILED;
     mgr2_t *m = x->m;
@@ -1251,6 +1262,8 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
         return LAGFX_A64_FAILED;
     }
     lagfx_vk_wait_result_t r = lagfx_vk_wait_bounded(x->vk, x->fence, 0);   /* env LAGFX_GPU_WAIT_MS, default 2000 */
+    if (lagfx_a64_test_hook == 5) lagfx_a64_test_hook = 0, r = LAGFX_VK_WAIT_FAILED;
+    else if (lagfx_a64_test_hook == 7) lagfx_a64_test_hook = 10, r = LAGFX_VK_WAIT_TIMEOUT;   /* 10 = hold: the pending exec keeps reporting a timeout until the test resets the hook */
     if (r == LAGFX_VK_WAIT_OK) return exec_finish(x);
     if (r == LAGFX_VK_WAIT_TIMEOUT) {   /* NOT finished, NOT failed: keep everything alive, the caller polls */
         m->st.gpu_timeout++;
@@ -1267,7 +1280,7 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x) {
     return LAGFX_A64_FAILED;
 }
 
-static bool pending_wait(struct lagfx_vk_state *vk, mgr2_t *m) { return m->pending->fence && lagfx_vk_wait_bounded(vk, m->pending->fence, 0) == LAGFX_VK_WAIT_OK; }
+static bool pending_wait(struct lagfx_vk_state *vk, mgr2_t *m) { return lagfx_a64_test_hook != 10 && m->pending->fence && lagfx_vk_wait_bounded(vk, m->pending->fence, 0) == LAGFX_VK_WAIT_OK; }
 
 static lagfx_a64_status_t swap_poll(lagfx_protocol_t *p, mgr2_t *m, uint32_t wait_ms);
 lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms) {
@@ -1276,6 +1289,8 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms) {
     if (m && !x && m->sw_fence) return swap_poll(p, m, wait_ms);
     if (!x) return LAGFX_A64_DONE;
     lagfx_vk_wait_result_t r = fence_wait(x->vk, x->fence, wait_ms);
+    if (lagfx_a64_test_hook == 10) r = LAGFX_VK_WAIT_TIMEOUT;
+    if (lagfx_a64_test_hook == 6) lagfx_a64_test_hook = 0, r = LAGFX_VK_WAIT_FAILED;
     if (r == LAGFX_VK_WAIT_OK) return exec_finish(x);
     if (r == LAGFX_VK_WAIT_TIMEOUT) return LAGFX_A64_PENDING;
     m->st.gpu_fail++;
@@ -1313,7 +1328,9 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
         }
     barrier(cb);
     if (ns) host_barrier(m, cb);   /* tex_record down / linear push copies (ms surfaces carry their own) */
-    bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;   /* pending/failed: nothing is written to the guest */
+    bool ok = vkEndCommandBuffer(cb) == VK_SUCCESS && lagfx_a64_test_hook != 8 && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;   /* pending/failed: nothing is written to the guest */
+    if (lagfx_a64_test_hook == 8) lagfx_a64_test_hook = 0;
+    else if (lagfx_a64_test_hook == 9) lagfx_a64_test_hook = 0, ok = false;
     if (cb) lagfx_vk_cmdbuf_free(vk, cb);
     if (!ok) {   /* the recorded copies will not be read: not pending (a timed-out one is parked by submit_wait only for the fence, its staging bytes are never written) */
         for (uint32_t i = 0; i < ns; i++) if (sel[i]->ms && sel[i]->ms->down_pending && sel[i]->ms->down_gen == gen) { sel[i]->ms->down_pending = false; MRUN(p).wb_down_pending_cleared_on_fail++; }

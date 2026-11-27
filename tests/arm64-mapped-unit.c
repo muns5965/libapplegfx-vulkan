@@ -285,6 +285,7 @@ static void synchronize(lagfx_protocol_t *p, uint32_t stamp, uint32_t ref) {
 
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
+    setenv("VK_LAYER_ENABLES", "VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT", 0);   /* the validation layer reads it at instance creation */
     g_dev = make_device();
     assert(g_dev);
     if (!g_dev->vk || !g_dev->vk->initialized) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
@@ -603,7 +604,7 @@ int main(void) {
       run_exec(p, 53, 0, 0, green, false, res, 1, false);
       assert(g_desc_fail_n == 0);   /* flag 4, nothing recorded for the surface */
       assert(cell(1) == 53 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab && CNT(p).wb_down_skipped_not_recorded > sk); }
-    { /* unreadable descriptor at finish: nothing written, counted, the surface is owed again and a display swap (=swap) pays it */
+    { /* unreadable descriptor at finish, IMMEDIATE mode (default): counted only; owed is NOT set (nothing would pay it), so a later =swap display swap writes nothing */
       const uint32_t res[1][2] = { { REF_M1, 4 } };
       static const double red4[4] = { 1, 0, 0, 1 };
       surf_fill(SENT);
@@ -611,10 +612,104 @@ int main(void) {
       lagfx_a64_test_hook = 4;
       run_exec(p, 54, REF_M1, 2, red4, false, res, 1, true);
       assert(lagfx_a64_test_hook == 0 && CNT(p).wb_finish_desc_unreadable_owed == ow + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0);
       setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
+      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab);   /* not owed: immediate mode does not recover */
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK"); }
+    { /* the same in =swap mode: owed again, the next display swap pays it */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      static const double red4[4] = { 1, 0, 0, 1 };
+      surf_fill(SENT);
+      uint64_t ow = CNT(p).wb_finish_desc_unreadable_owed;
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
+      lagfx_a64_test_hook = 4;
+      run_exec(p, 55, REF_M1, 2, red4, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 0 && CNT(p).wb_finish_desc_unreadable_owed == ow + 1 && *surf_px(32, 40) == 0xabababab);
       assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == RED);
       unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK"); }
-    printf("PASS: host-read barrier recorded, data unchanged; failed submit clears the pending copy and the stale copy is not written; unreadable descriptor keeps the frame owed\n");
+    { /* a pending copy of a generation this exec never had is refused: guest unchanged, counted, and the foreign pending flag is left alone; a normal exec then re-records it */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      uint64_t sk = CNT(p).wb_down_skipped_not_recorded, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      invalidate(p, 56, REF_M1, 1, 0, 0, 0);
+      lagfx_a64_test_ms_force_pending(p, MAP_OK);
+      assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 1);
+      g_desc_fail_n = 1;
+      run_exec(p, 57, 0, 0, green, false, res, 1, false);
+      assert(g_desc_fail_n == 0 && cell(1) == 57 && CNT(p).wb_down_skipped_not_recorded == sk + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 1);
+      run_exec(p, 58, REF_M1, 2, green, false, res, 1, true);
+      assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx + 1 && *surf_px(32, 40) == GREEN); }
+    { /* sync_to_guest: submit failure (hook 8) and a not-DONE wait (hook 9) clear the pending copy and write nothing; a normal synchronize then writes */
+      const uint32_t res[1][2] = { { REF_M1, 2 } };
+      for (int hk = 8; hk <= 9; hk++) {
+          uint64_t cl = CNT(p).wb_down_pending_cleared_on_fail, wbx = CNT(p).mapped_written_back;
+          run_exec(p, 59 + hk, REF_M1, 2, blue, false, res, 1, true);   /* GPU has blue, guest not told (flag 2 only, immediate mode off) */
+          surf_fill(SENT);
+          lagfx_a64_test_hook = hk;
+          synchronize(p, 70 + hk, REF_M1);
+          assert(lagfx_a64_test_hook == 0 && CNT(p).wb_down_pending_cleared_on_fail == cl + 1 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      }
+      synchronize(p, 80, REF_M1);
+      assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && *surf_px(32, 40) == BLUE); }
+    { /* fence TIMEOUT of the exec (hook 7): kept pending, NOT cleared, nothing written; the poll then writes it */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      uint64_t cl = CNT(p).wb_down_pending_cleared_on_fail, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      lagfx_a64_test_hook = 7;
+      run_exec(p, 81, REF_M1, 2, green, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 10 && lagfx_a64_res_is_pending(p) && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 1);
+      assert(CNT(p).wb_down_pending_cleared_on_fail == cl && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_res_poll(p, 0) == LAGFX_A64_PENDING && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 1 && *surf_px(32, 40) == 0xabababab);   /* still held */
+      lagfx_a64_test_hook = 0;
+      assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_DONE && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).wb_down_pending_cleared_on_fail == cl && CNT(p).mapped_written_back == wbx + 1 && *surf_px(32, 40) == GREEN); }
+    { /* fence failure / device lost: in res_end (hook 5) and in res_poll after a timeout (hooks 7 then 6): the pending copy is cleared, nothing is written */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      uint64_t cl = CNT(p).wb_down_pending_cleared_on_fail, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      lagfx_a64_test_hook = 5;
+      run_exec(p, 82, REF_M1, 2, blue, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 0 && !lagfx_a64_res_is_pending(p) && CNT(p).wb_down_pending_cleared_on_fail == cl + 1 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      lagfx_a64_test_hook = 7;
+      run_exec(p, 83, REF_M1, 2, blue, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 10 && lagfx_a64_res_is_pending(p) && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 1);
+      lagfx_a64_test_hook = 6;
+      assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_FAILED && lagfx_a64_test_hook == 0 && !lagfx_a64_res_is_pending(p));
+      assert(CNT(p).wb_down_pending_cleared_on_fail == cl + 2 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab); }
+    printf("PASS: host-read barrier recorded, data unchanged; failed submit / sync failure / device lost clear the pending copy, timeout keeps it, foreign generation refused; unreadable descriptor counted (owed in swap mode only)\n");
+
+    /* (8) validation control: a deliberate read-after-write hazard (fill, then copy from the filled buffer, no barrier) must be flagged by synchronization validation.
+     * Proves the layer is live when it reports 0 messages for everything above. Soft: if the layer / sync validation is not available it only says so. */
+    { struct lagfx_vk_state *vk = g_dev->vk;
+      uint64_t base = lagfx_vk_validation_msg_count;
+      VkBuffer bf[2]; VkDeviceMemory bm[2]; bool okc = vk->debug_messenger != NULL;
+      for (int i = 0; okc && i < 2; i++) {
+          VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4096, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+          VkMemoryRequirements rq; VkPhysicalDeviceMemoryProperties mp; uint32_t ty = ~0u;
+          okc = vkCreateBuffer(vk->device, &bi, NULL, &bf[i]) == VK_SUCCESS;
+          if (!okc) break;
+          vkGetBufferMemoryRequirements(vk->device, bf[i], &rq); vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &mp);
+          for (uint32_t k = 0; k < mp.memoryTypeCount; k++) if ((rq.memoryTypeBits & (1u << k))) { ty = k; break; }
+          VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = ty };
+          okc = ty != ~0u && vkAllocateMemory(vk->device, &ai, NULL, &bm[i]) == VK_SUCCESS && vkBindBufferMemory(vk->device, bf[i], bm[i], 0) == VK_SUCCESS;
+      }
+      VkCommandBuffer cb = VK_NULL_HANDLE; VkCommandBufferBeginInfo bgi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+      if (okc) okc = lagfx_vk_cmdbuf_alloc(vk, &cb) == LAGFX_OK && vkBeginCommandBuffer(cb, &bgi) == VK_SUCCESS;
+      if (okc) {
+          VkBufferCopy cp = { 0, 0, 4096 };
+          vkCmdFillBuffer(cb, bf[0], 0, 4096, 0x11223344u);
+          vkCmdCopyBuffer(cb, bf[0], bf[1], 1, &cp);   /* RAW hazard: no barrier between the fill's write and this read */
+          vkEndCommandBuffer(cb);
+          VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+          vkQueueSubmit(vk->graphics_queue, 1, &si, VK_NULL_HANDLE);
+          vkQueueWaitIdle(vk->graphics_queue);
+      }
+      uint64_t seen = lagfx_vk_validation_msg_count - base;
+      printf("INFO: validation control (deliberate RAW hazard): %s (%llu message(s))\n", !okc ? "not run (no messenger / setup failed)" : seen ? "FLAGGED, layer is live" : "NOT flagged (synchronization validation not active)", (unsigned long long)seen);
+      if (getenv("LAGFX_REQUIRE_SYNC_CONTROL")) assert(okc && seen > 0);
+      lagfx_vk_validation_msg_count = base;   /* the control's own messages are expected; everything else must stay at 0 */
+      if (cb) lagfx_vk_cmdbuf_free(vk, cb);
+      for (int i = 0; i < 2; i++) if (okc) { vkDestroyBuffer(vk->device, bf[i], NULL); vkFreeMemory(vk->device, bm[i], NULL); } }
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
