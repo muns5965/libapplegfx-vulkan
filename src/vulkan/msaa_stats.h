@@ -44,6 +44,7 @@ typedef struct lagfx_msaa_stats {
     uint64_t pipes_ms;                 /* pipelines built with rasterizationSamples > 1 (count taken from the pass: the pipeline descriptor field is not decoded) */
     uint64_t draws_ms;                 /* draws recorded into a multisampled pass */
     uint64_t sampled_ms_refused;       /* shader texture bindings of a multisampled texture refused (no AIR texture2d_ms read in the translator): draw skipped */
+    uint64_t fbfetch_ms_variants, fbfetch_ms_reads;   /* multisampled framebuffer fetch: fragment modules rewritten (spv_msfetch.c) / OpImageReads changed */
     uint64_t fbfetch_ms_refused;       /* framebuffer-fetch draws in a multisampled pass refused (input attachment of a multisampled image needs a multisampled SubpassData type) */
     uint64_t tile_ms_refused;          /* tile-shader records in a multisampled pass refused (the pass would be suspended / resumed around a resolve) */
     uint64_t blit_ms_refused;          /* blit commands naming a multisampled texture refused */

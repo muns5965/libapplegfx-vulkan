@@ -143,6 +143,10 @@ typedef struct {
 int lagfx_spv_unnorm_rewrite(const uint8_t *spv, size_t spv_len, const uint32_t *bindings, uint32_t nb, int convert_unresolved,
                              uint8_t **out, size_t *out_len, lagfx_spv_unnorm_report_t *rep);
 
+/* Framebuffer fetch in a multisampled pass (spv_msfetch.c): SubpassData images become multisampled and every plain OpImageRead of one reads the invocation's SampleId.
+ * 1 = rewritten (*out malloc'ed, *nreads reads changed), 0 = nothing to do, -1 = unsupported form / malformed. */
+int lagfx_spv_msfetch_rewrite(const uint8_t *spv, size_t spv_len, uint8_t **out, size_t *out_len, uint32_t *nreads);
+
 #ifdef __cplusplus
 }
 #endif

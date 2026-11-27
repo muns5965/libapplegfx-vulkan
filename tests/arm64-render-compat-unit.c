@@ -162,6 +162,7 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
         if (!g_rc_fs[g_rc.fs]) g_rc_fs[g_rc.fs] = rc_module(vk, w[g_rc.fs], sz[g_rc.fs]);
         rc_layout(vk, n);
         out->desc.fragment_shader = g_rc_fs[g_rc.fs], out->desc.layout = g_rc_pl[n - 1], out->dsl = g_rc_dsl[n - 1];
+        out->desc.fragment_spv = w[g_rc.fs], out->desc.fragment_spv_bytes = sz[g_rc.fs];   /* the MS fetch rewrite needs the words, as in production (arm64_pipeline.c) */
         out->n_bind = (uint32_t)n;
         for (int i = 0; i < n; i++) out->bind[i].binding = (uint8_t)(24 + i), out->bind[i].kind = LAGFX_A64_BIND_INPUT, out->bind[i].stage = 1, out->bind[i].metal_index = (int16_t)i,
                                     out->bind[i].ia_class = g_rc.fs == FS_U ? 1u : 0u;

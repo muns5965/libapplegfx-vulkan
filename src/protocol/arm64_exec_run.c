@@ -93,7 +93,7 @@ typedef struct {
     uint32_t ncache;
     /* Shader variants for draws that bind an unnormalized-coordinates sampler (spv_unnorm.c): keyed by the set of unnormalized sampler slots of the vertex / fragment table. rc 0 = the shader never
      * samples through them (original shader), 1 = rewritten module(s), -1 = an unsupported use (draw skipped). Built lazily at the first such draw, owned by this object. */
-    struct { uint32_t vmask, fmask; int rc; VkShaderModule vm, fm; } fv[A64_FS_VARIANTS]; uint32_t nfv;
+    struct { uint32_t vmask, fmask; uint8_t ms; int rc; VkShaderModule vm, fm; } fv[A64_FS_VARIANTS];   /* ms: the fragment module is the multisampled-fetch rewrite (spv_msfetch.c) */ uint32_t nfv;
     uint32_t ref;
 } a64_pipe_t;
 
@@ -522,7 +522,11 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     lagfx_pipeline_desc_t d = pp->src.desc;
     if (key >> 4) {
         const uint32_t vi = (key >> 4) - 1u;
-        if (vi < pp->nfv) { if (pp->fv[vi].vm) d.vertex_shader = pp->fv[vi].vm; if (pp->fv[vi].fm) d.fragment_shader = pp->fv[vi].fm; }
+        if (vi < pp->nfv) {
+            if (pp->fv[vi].vm) d.vertex_shader = pp->fv[vi].vm;
+            if (pp->fv[vi].fm) d.fragment_shader = pp->fv[vi].fm;
+            if (pp->fv[vi].ms) d.sample_shading = 1u, d.min_sample_shading_permille = 1000u;   /* the fetch reads SampleId: one invocation per sample */
+        }
     }
     d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
     if (nslots == 1u && fmts[0] == VK_FORMAT_UNDEFINED) d.no_color = 1;   /* a depth/stencil-only pass: the one colour slot is unused */
@@ -833,6 +837,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
         } else if (s->bind[i].kind == LAGFX_A64_BIND_INPUT) {   /* framebuffer fetch: colour attachment mi of the open pass */
             lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
             if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; DDM(3); return false; }
+            if (!(t->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) { if (t->samples_req > 1u) p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; DDM(3); return false; }   /* the view's usage must include it (a descriptor of an image without it is invalid) */
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x1f0u);
@@ -938,16 +943,16 @@ static uint32_t unnorm_mask(const a64_run_t *r, const a64_pipe_t *pp, uint32_t s
 
 /* The shader variant for a draw whose samplers at vmask / fmask are unnormalized. Returns 0 = the shaders as resolved (they never sample through those samplers: NOT a reason to skip),
  * 1 + index = a variant of the pipeline (rewritten per use by lagfx_spv_unnorm_rewrite), -1 = skip the draw (an unsupported use, no SPIR-V to analyse, or the module could not be made; counted). */
-static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uint32_t vmask, uint32_t fmask) {
+static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uint32_t vmask, uint32_t fmask, bool msfetch) {
     for (uint32_t i = 0; i < pp->nfv; i++)
-        if (pp->fv[i].vmask == vmask && pp->fv[i].fmask == fmask) return pp->fv[i].rc < 0 ? -1 : pp->fv[i].rc == 0 ? 0 : (int)i + 1;
+        if (pp->fv[i].vmask == vmask && pp->fv[i].fmask == fmask && pp->fv[i].ms == (uint8_t)msfetch) return pp->fv[i].rc < 0 ? -1 : pp->fv[i].rc == 0 ? 0 : (int)i + 1;
     if (pp->nfv == A64_FS_VARIANTS) { CNT(p).ext_unnorm_unsup[4]++; return -1; }   /* more distinct sampler situations than the table holds (not seen in any capture) */
     const uint32_t slot = pp->nfv++;
-    pp->fv[slot].vmask = vmask, pp->fv[slot].fmask = fmask, pp->fv[slot].rc = 0, pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE;
+    pp->fv[slot].vmask = vmask, pp->fv[slot].fmask = fmask, pp->fv[slot].ms = (uint8_t)msfetch, pp->fv[slot].rc = 0, pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE;
     int rc_all = 0;
     for (uint32_t st = 0; st < 2u; st++) {
         const uint32_t mask = st ? fmask : vmask;
-        if (!mask) continue;
+        if (!mask && !(st && msfetch)) continue;
         uint32_t bn[A64_MAX_FSAMP], nb = 0;
         for (uint32_t i = 0; i < pp->src.n_bind && nb < A64_MAX_FSAMP; i++) {
             const lagfx_a64_bind_t *b = &pp->src.bind[i];
@@ -956,11 +961,19 @@ static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uin
         const uint8_t *spv = (const uint8_t *)(st ? pp->src.desc.fragment_spv : pp->src.desc.vertex_spv);
         const size_t sz = st ? pp->src.desc.fragment_spv_bytes : pp->src.desc.vertex_spv_bytes;
         uint8_t *o = NULL; size_t osz = 0; lagfx_spv_unnorm_report_t rep;
-        int rc = spv ? lagfx_spv_unnorm_rewrite(spv, sz, bn, nb, 1, &o, &osz, &rep) : -2;
+        memset(&rep, 0, sizeof rep);
+        int rc = !mask ? 0 : spv ? lagfx_spv_unnorm_rewrite(spv, sz, bn, nb, 1, &o, &osz, &rep) : -2;
         if (rc == -2) { CNT(p).ext_unnorm_unsup[4]++; rc_all = -1; continue; }   /* the resolver gave no SPIR-V: the uses cannot be judged */
         CNT(p).ext_unnorm_use_implicit0 += rep.implicit_to_lod0, CNT(p).ext_unnorm_use_bias_dropped += rep.bias_dropped, CNT(p).ext_unnorm_use_offset_folded += rep.offset_folded;
         CNT(p).ext_unnorm_use_explicit_kept += rep.explicit_kept, CNT(p).ext_unnorm_use_grad_kept += rep.grad_kept, CNT(p).ext_unnorm_use_gather_kept += rep.gather_kept, CNT(p).ext_unnorm_use_unresolved += rep.uses_unresolved;
-        if (rc < 0) {
+        if (rc >= 0 && st && msfetch) {   /* framebuffer fetch in a multisampled pass: the (possibly already unnorm-rewritten) fragment module reads the invocation's sample */
+            uint8_t *o2 = NULL; size_t o2sz = 0; uint32_t nr = 0;
+            const int r2 = lagfx_spv_msfetch_rewrite(rc == 1 ? o : spv, rc == 1 ? osz : sz, &o2, &o2sz, &nr);
+            if (r2 < 0) { p->diag2.exec.msaa.fbfetch_ms_refused++; rc = -3; }
+            else if (r2 == 1) { free(o); o = o2, osz = o2sz, rc = 1; p->diag2.exec.msaa.fbfetch_ms_variants++, p->diag2.exec.msaa.fbfetch_ms_reads += nr; }
+        }
+        if (rc == -3) rc_all = -1;
+        else if (rc < 0) {
             CNT(p).ext_unnorm_unsup[0] += rep.unsup_dref, CNT(p).ext_unnorm_unsup[1] += rep.unsup_proj, CNT(p).ext_unnorm_unsup[2] += rep.unsup_sparse, CNT(p).ext_unnorm_unsup[3] += rep.unsup_image_dim, CNT(p).ext_unnorm_unsup[4] += rep.unsup_other;
             LAGFX_WARN("arm64 pipeline %u: %s shader samples through an unnormalized-coordinates sampler in a way Vulkan forbids (dref %u proj %u sparse %u image_dim %u other %u): draws with this sampler are skipped (counted)",
                        pp->ref, st ? "fragment" : "vertex", rep.unsup_dref, rep.unsup_proj, rep.unsup_sparse, rep.unsup_image_dim, rep.unsup_other);
@@ -983,9 +996,11 @@ static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uin
 static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (prim > 4u) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; return false; }
     if (prim == 0u && r->pipe->src.no_point_size) { p->diag2.exec.pipe.point_no_size++; CNT(p).draws_skipped++; return false; }   /* Metal needs [[point_size]] too */
-    if (r->ms.samples > 1u)   /* framebuffer fetch of multisampled attachments needs a multisampled SubpassData input type in the shader, which the translator does not emit: refused, counted */
+    bool msfetch = false;   /* framebuffer fetch of multisampled attachments: the shader needs a multisampled SubpassData type and a per-sample read (spv_msfetch.c) */
+    if (r->ms.samples > 1u)
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
-            if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.msaa.fbfetch_ms_refused++; CNT(p).draws_skipped++; return false; }
+            if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) msfetch = true;
+    if (msfetch && !r->vk->have_sample_rate_shading) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.sample_shading_refused++; CNT(p).draws_skipped++; return false; }   /* no per-sample shading on this device: refused, counted */
     if (!r->vk->have_local_read)   /* a pipeline that reads the attachments cannot run without the device feature */
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
@@ -999,11 +1014,11 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     uint32_t alt = 0;   /* unnormalized-coordinates samplers in this draw: the shader USES that sample through them are rewritten (per OpSampledImage, spv_unnorm.c); a shader that never samples through them runs unchanged */
     {
         const uint32_t vmask = unnorm_mask(r, r->pipe, 0), fmask = unnorm_mask(r, r->pipe, 1);
-        if (vmask | fmask) {
-            int v = unnorm_variant(r, p, r->pipe, vmask, fmask);
-            if (v < 0) { CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
-            if (v == 0) CNT(p).ext_unnorm_unused++;
-            else alt = (uint32_t)v << 4, CNT(p).ext_unnorm_lod0++;
+        if (vmask | fmask | (uint32_t)msfetch) {
+            int v = unnorm_variant(r, p, r->pipe, vmask, fmask, msfetch);
+            if (v < 0) { if (!msfetch) CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
+            if (v == 0) { if (vmask | fmask) CNT(p).ext_unnorm_unused++; }
+            else alt = (uint32_t)v << 4, (vmask | fmask) ? (void)CNT(p).ext_unnorm_lod0++ : (void)0;
         }
     }
     VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim | alt);

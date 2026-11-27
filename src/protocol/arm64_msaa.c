@@ -23,7 +23,7 @@ int lagfx_a64_msaa_tex_gate(lagfx_protocol_t *p, uint32_t mtype, uint32_t sample
 bool lagfx_a64_msaa_plan_image(lagfx_protocol_t *p, const lagfx_fmtcap_backend_t *be, lagfx_a64_obj_t *o, VkSampleCountFlagBits *ns, lagfx_fmtcap_usage_t *cu) {
     const bool ds = o->ds_aspects != 0;
     const VkImageUsageFlags req = ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    const VkImageUsageFlags opt_ms = ds ? 0u : VK_IMAGE_USAGE_SAMPLED_BIT;   /* texelFetch of a sample; no transfers (a multisampled image cannot take part in a buffer copy) */
+    const VkImageUsageFlags opt_ms = ds ? 0u : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);   /* texelFetch of a sample; input attachment = per-sample framebuffer fetch (spv_msfetch.c); no transfers (a multisampled image cannot take part in a buffer copy) */
     const VkImageUsageFlags opt_1x = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | (ds ? 0u : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT));
     lagfx_msaa_plan_t pl;
     const lagfx_msaa_mode_t mode = lagfx_msaa_mode();

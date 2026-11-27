@@ -19,6 +19,7 @@
 #include "protocol/arm64_msaa.h"
 #include "vulkan/msaa_stats.h"
 #include <math.h>
+#include "air2spv/spv_reflect.h"
 static float half_to_float(uint16_t h) { const uint32_t sg = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u; float v = e == 0 ? ldexpf((float)m, -24) : ldexpf((float)(m | 1024u), (int)e - 25); return sg ? -v : v; }
 
 #define REF_MS8  30u   /* BGRA8 multisample texture */
@@ -143,6 +144,19 @@ static int cov4(bool flip, uint32_t x, uint32_t y, int *ambiguous) {
         c += (e0 > 0 && e1 > 0 && e2 > 0) || (e0 < 0 && e1 < 0 && e2 < 0);
     }
     return c;
+}
+/* multisampled framebuffer fetch: every covered SAMPLE reads its own clear (0) and writes +0.25 red; the resolve then holds red = 63.75 * k / 4 (k = covered samples), alpha / green / blue 0. *partial = pixels with 0 < k < 4 */
+static bool fetch_matches(const gr_t *g, bool flip, unsigned *partial) {
+    unsigned part = 0;
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
+        int amb = 0; const int k = cov4(flip, x, y, &amb);
+        if (amb) continue;
+        if (k > 0 && k < 4) part++;
+        const uint32_t v = px(g->bgra, x, y); const double want = 63.75 * k / 4.0;
+        if (fabs((double)((v >> 16) & 255) - want) > 2.0 || (v >> 24) != 0 || (v & 255) != 0 || ((v >> 8) & 255) != 0) { if (partial) *partial = part; return false; }
+    }
+    if (partial) *partial = part;
+    return true;
 }
 /* returns 1 when the BGRA8 (f16 = false) or RGBA16F image equals the reference with the given flip; *partial = pixels with 0 < k < 4 */
 static bool resolved_matches(const gr_t *g, bool f16, bool flip, unsigned *partial) {
@@ -306,6 +320,17 @@ static uint32_t devinfo_msaa(uint32_t mode, lagfx_msaa_stats_t *ms) {
     return v;
 }
 
+/* validation messages of the shader / pipeline kind that a bad rewrite would cause (the layer here may be older than dynamic_rendering_local_read: its layout / barrier / renderPass messages are the same for a 1x fetch and are not counted) */
+static unsigned g_shader_msgs;
+static void shader_msg_hook(const char *m) { if (strstr(m, "SPIR-V") || strstr(m, "OpTypeImage") || strstr(m, "SubpassData") || strstr(m, "SampleId") || strstr(m, "sampleRateShading") || strstr(m, "VUID-VkPipelineMultisampleStateCreateInfo") || strstr(m, "Sample")) g_shader_msgs++; }
+static int spv_val(const uint8_t *spv, size_t sz) {
+    if (system("spirv-val --version >/dev/null 2>&1") != 0) return 0;   /* tool absent: skipped here, the layer / lavapipe run is the check */
+    char path[64] = "/tmp/lagfx-msf-XXXXXX"; int fd = mkstemp(path); assert(fd >= 0);
+    FILE *f = fdopen(fd, "wb"); fwrite(spv, 1, sz, f); fclose(f);
+    char cmd[160]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s >/dev/null 2>&1", path);
+    int rc = system(cmd); remove(path); return rc == 0 ? 1 : -1;
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -441,10 +466,30 @@ int main(void) {
       sc_t c = sc(REF_MSX, 80, 4, 2, 4, 2, REF_TEX); gr_run(&c, &g); assert(g.ms.ms_tex_bad_shape >= 1 && g.draws == 0);                                  /* 4 samples on a plain 2D type */
       puts("PASS bad shapes (type 4 with 1 sample, type 8, 4 samples on type 2): refused with ms_tex_bad_shape, no draw"); }
 
-    /* 12: framebuffer fetch (input attachment) in a multisampled pass: refused, counted; MS + fb-fetch is NOT supported (Vulkan input attachments of a multisampled image need a multisampled SubpassData) */
-    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F; gr_run(&s, &g);
-      assert(g.ms.fbfetch_ms_refused >= 1 && g.draws == 0 && g.skipped >= 1);
-      puts("PASS framebuffer fetch in a multisampled pass: refused and counted (fbfetch_ms_refused), draw skipped; the split-draw path is not entered"); }
+    /* 12a: the rewrite itself: valid SPIR-V (spirv-val), every plain image read gets a sample, a module without a SubpassData is left alone */
+    { const uint32_t *w[2] = { k_fs_acc_f_spv, k_fs_acc_mrt_spv }; const size_t zs[2] = { sizeof k_fs_acc_f_spv, sizeof k_fs_acc_mrt_spv };
+      for (int k = 0; k < 2; k++) {
+          uint8_t *o = NULL; size_t osz = 0; uint32_t nr = 0;
+          assert(lagfx_spv_msfetch_rewrite((const uint8_t *)w[k], zs[k], &o, &osz, &nr) == 1 && nr == (uint32_t)(k + 1) && o && osz >= zs[k]);
+          assert(spv_val(o, osz) >= 0); free(o);
+      }
+      uint8_t *o = NULL; size_t osz = 0; uint32_t nr = 7;
+      assert(lagfx_spv_msfetch_rewrite((const uint8_t *)k_fs_half_spv, sizeof k_fs_half_spv, &o, &osz, &nr) == 0 && o == NULL);   /* no SubpassData: nothing to do */
+      puts("PASS multisampled fetch rewrite: valid SPIR-V (1 / 2 reads), a shader without a SubpassData is untouched"); }
+
+    /* 12: framebuffer fetch (input attachment) in a multisampled pass: a multisampled SubpassData read per SAMPLE (SPIR-V rewrite, sample-rate shading); the resolve equals the CPU coverage reference */
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F; g_shader_msgs = 0; lagfx_vk_validation_hook = shader_msg_hook; gr_run(&s, &g); lagfx_vk_validation_hook = NULL;
+      unsigned part = 0; assert(g_shader_msgs == 0);
+      assert(g.ms.fbfetch_ms_refused == 0 && g.ms.fbfetch_ms_variants >= 1 && g.ms.fbfetch_ms_reads >= 1 && g.draws == 1 && g.skipped == 0);
+      assert(fetch_matches(&g, false, &part) || fetch_matches(&g, true, &part));
+      assert(part >= 4);   /* edge pixels are partially covered: the fetch really is per sample, not one value per pixel */
+      puts("PASS framebuffer fetch in a multisampled pass: per-sample read (fbfetch_ms_variants/reads counted), resolve equals the coverage reference, no validation message");
+      /* negative control: a device without sample-rate shading refuses, counts, draws nothing */
+      const bool srs = g_dev->vk->have_sample_rate_shading; g_dev->vk->have_sample_rate_shading = false;
+      gr_run(&s, &g);
+      g_dev->vk->have_sample_rate_shading = srs;
+      assert(g.ms.fbfetch_ms_refused >= 1 && g.ms.sample_shading_refused >= 1 && g.draws == 0 && g.skipped >= 1);
+      puts("PASS negative: no sample-rate shading -> multisampled fetch refused (fbfetch_ms_refused, sample_shading_refused), draw skipped"); }
 
     /* 13: mixed sample counts in one pass. EXACT: the whole pass is rejected; COMPAT (control): the 1x second attachment is ignored, counted, the pass still draws */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.slot1_ref = REF_TEX2; s.sentinel = true; gr_run(&s, &g);
