@@ -1499,14 +1499,10 @@ VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o
     return mk_sampled_view(x, o, &o->view3, VK_IMAGE_VIEW_TYPE_3D, 1u);
 }
 
-VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+/* Level 0 / layer 0 sampled view (the render-target view; the A8Unorm component swizzle variant for format 1). */
+static VkImageView base_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     VkImageView v = tex_view(x, o, VK_IMAGE_USAGE_SAMPLED_BIT);
-    if (!v) return v;
-    if (o->mips > 1u && !o->ms) {   /* the whole chain of layer 0; the level-0-only view is the counted fallback (lagfx_a64_res_sample_view_for reports it) */
-        VkImageView m = mk_sampled_view(x, o, &o->mview, VK_IMAGE_VIEW_TYPE_2D, 1u);
-        if (m) return m;
-    }
-    if (o->mtl_format != 1u || o->ms) return v;
+    if (!v || o->mtl_format != 1u || o->ms) return v;
     /* MTLPixelFormatA8Unorm (1) samples as (0, 0, 0, a) (Metal's documented read of an alpha-only format); the image is R8_UNORM, so the view moves red into alpha.
      * From Metal's documentation, not checked against a device. */
     if (!o->sview) {
@@ -1517,7 +1513,17 @@ VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) 
     return o->sview;
 }
 
-VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, uint32_t *flags) {
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    VkImageView v = base_sample_view(x, o);
+    if (!v) return v;
+    if (o->mips > 1u && !o->ms) {   /* the whole chain of layer 0; the level-0-only view is the counted fallback (lagfx_a64_res_sample_view_for reports it) */
+        VkImageView m = mk_sampled_view(x, o, &o->mview, VK_IMAGE_VIEW_TYPE_2D, 1u);
+        if (m) return m;
+    }
+    return v;
+}
+
+VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, bool base_only, uint32_t *flags) {
     uint32_t f = 0;
     VkImageView v = VK_NULL_HANDLE;
     if (x && o && o->kind == LAGFX_A64_TEXTURE && !o->ds_aspects) {
@@ -1529,6 +1535,10 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
                 v = mk_sampled_view(x, o, &o->aview, VK_IMAGE_VIEW_TYPE_2D_ARRAY, o->layers ? o->layers : 1u);
                 if (v) f |= LAGFX_A64_SV_ARRAY_VIEW | (o->mips > 1u ? LAGFX_A64_SV_MIP_VIEW : 0u);
             }
+        } else if (!dim3 && base_only) {   /* a sampler of the draw uses unnormalized coordinates: Vulkan wants a view of ONE level and ONE layer for it (counted) */
+            v = base_sample_view(x, o);
+            if (v && o->mips > 1u) f |= LAGFX_A64_SV_MIPS_DROPPED;
+            if (v && o->layers > 1u) f |= LAGFX_A64_SV_LAYERS_DROPPED;
         } else if (!dim3) {
             v = lagfx_a64_res_sample_view(x, o);
             if (v && o->mips > 1u) f |= (o->mview && v == o->mview) ? LAGFX_A64_SV_MIP_VIEW : LAGFX_A64_SV_MIPS_DROPPED;

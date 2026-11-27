@@ -140,9 +140,10 @@ VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
  *   LAGFX_A64_SV_LAYERS_DROPPED the texture has array layers a non-array (2D) shader cannot address: layer 0 only
  *   LAGFX_A64_SV_MIP_VIEW       the view covers more than level 0
  *   LAGFX_A64_SV_ARRAY_VIEW     a 2D_ARRAY view was bound (arr)
- * VK_NULL_HANDLE when no legal view exists (3D vs 2D mismatch, no sampled usage, view creation failed). */
+ * base_only: a plain 2D shader of a draw that has an unnormalized-coordinates sampler in the same stage gets the level 0 / layer 0 view (Vulkan: a view sampled with such a sampler has levelCount
+ * and layerCount 1), whatever the texture has (counted via the DROPPED flags). VK_NULL_HANDLE when no legal view exists (3D vs 2D mismatch, no sampled usage, view creation failed). */
 enum { LAGFX_A64_SV_MIPS_DROPPED = 1, LAGFX_A64_SV_LAYERS_DROPPED = 2, LAGFX_A64_SV_MIP_VIEW = 4, LAGFX_A64_SV_ARRAY_VIEW = 8 };
-VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, uint32_t *flags);
+VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, bool base_only, uint32_t *flags);
 /* The sampled view of a 3D mirror texture (VK_IMAGE_VIEW_TYPE_3D, all mip levels): feeds a texture3d (Dim3D) descriptor. VK_NULL_HANDLE for a non-3D object or one without sampled usage. */
 VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);

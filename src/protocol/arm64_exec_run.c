@@ -674,6 +674,7 @@ static void buf_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, ui
  * a feedback loop skips the draw (counted): Metal leaves those undefined. The key (pipeline gen, then per binding the object gen and offset) lets consecutive
  * draws share one set; a replaced object has a new gen, so a stale set is never reused. Mirror textures stay in GENERAL layout (valid for sampling), so no
  * layout change is recorded inside the pass. A set is parked in the deferred list and freed only once no recorded / running work can use it. */
+static uint32_t unnorm_mask(const a64_run_t *r, const a64_pipe_t *pp, uint32_t stage);
 static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) {
     const lagfx_a64_pipeline_src_t *s = &pp->src;
     if (!s->n_bind) return true;
@@ -682,6 +683,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     VkDescriptorImageInfo ii[LAGFX_A64_MAX_BINDINGS];
     VkWriteDescriptorSet w[LAGFX_A64_MAX_BINDINGS];
     uint64_t key = 1469598103934665603ull ^ pp->h.gen;
+    /* A draw with an unnormalized-coordinates sampler in a stage: Vulkan only lets such a sampler read a view of ONE level and ONE layer, and which image a sampler is paired with is the
+     * shader's business (known only to the SPIR-V rewrite), so every plain 2D sampled texture of that stage gets its level 0 / layer 0 view (a texture with more is counted as dropped). */
+    const bool unn[2] = { unnorm_mask(r, pp, 0) != 0, unnorm_mask(r, pp, 1) != 0 };
 #define DDM(k) (r->ddm.bkind = (k), r->ddm.stage = (uint8_t)st, r->ddm.slot = mi_s, r->ddm.vkb = s->bind[i].binding, r->ddm.ref = 0)
 #define MIX(v) key = (key ^ (uint64_t)(v)) * 1099511628211ull
     for (uint32_t i = 0; i < s->n_bind; i++) {
@@ -734,7 +738,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
             /* The shader's image dimensionality must be the texture's: a Dim3D descriptor needs a 3D view of a 3D image, a Dim2D one a 2D view (anything else is invalid Vulkan). */
             uint32_t svf = 0;
-            VkImageView v = lagfx_a64_res_sample_view_for(r->x, t, s->bind[i].dim3 != 0, s->bind[i].arr != 0, &svf);
+            VkImageView v = lagfx_a64_res_sample_view_for(r->x, t, s->bind[i].dim3 != 0, s->bind[i].arr != 0, !s->bind[i].dim3 && !s->bind[i].arr && unn[st], &svf);
             if (!v && lagfx_a64_res_is_3d(t) != (s->bind[i].dim3 != 0)) { CNT(p).ext_tex_dim_mismatch++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             if (v && s->bind[i].dim3) CNT(p).ext_tex3d_binds++;
             /* The view covers the texture's whole mip chain (and, for a texture2d_array shader, every layer). What it still leaves out is counted per bound descriptor per draw: levels

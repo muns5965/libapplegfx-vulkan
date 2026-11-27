@@ -11,10 +11,11 @@
 
 #ifdef LAGFX_HAVE_VULKAN
 #include "arm64-exec-texview-shaders.h"
+#include "arm64-exec-res-shaders.h"   /* k_fs_unorm_spv: texture(sampler2D(tex@24, smp@25), gl_FragCoord.xy), implicit LOD */
 
 #define REF_SAMP 8u
 extern uint64_t lagfx_vk_validation_msg_count;
-static struct { int arr; VkShaderModule m[2], fsm[2]; VkDescriptorSetLayout dsl; VkPipelineLayout pl; } g_t;
+static struct { int arr; VkShaderModule m[2], fsm[3]; VkDescriptorSetLayout dsl; VkPipelineLayout pl; } g_t;
 
 static bool tv_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
     (void)c; (void)t; (void)ref; (void)e;
@@ -26,7 +27,9 @@ static bool tv_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
     }
     VkShaderModule *fsm = g_t.fsm;   /* one per shader */
     if (!fsm[g_t.arr]) {
-        VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = g_t.arr ? sizeof k_fs_arr_spv : sizeof k_fs_lod2d_spv, .pCode = g_t.arr ? k_fs_arr_spv : k_fs_lod2d_spv };
+        const uint32_t *code = g_t.arr == 2 ? k_fs_unorm_spv : g_t.arr ? k_fs_arr_spv : k_fs_lod2d_spv;
+        size_t bytes = g_t.arr == 2 ? sizeof k_fs_unorm_spv : g_t.arr ? sizeof k_fs_arr_spv : sizeof k_fs_lod2d_spv;
+        VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = code };
         assert(vkCreateShaderModule(vk->device, &ci, NULL, &fsm[g_t.arr]) == VK_SUCCESS);
     }
     if (!g_t.pl) {
@@ -42,7 +45,8 @@ static bool tv_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
     out->desc.n_vtx_inputs = 1, out->desc.vtx_in_loc[0] = 0, out->desc.vtx_in_comp[0] = 2, out->desc.vtx_stride = 8;
     out->vertex_buffer_index = 0;
     out->n_bind = 2;
-    out->bind[0].binding = 24, out->bind[0].kind = LAGFX_A64_BIND_IMAGE, out->bind[0].stage = 1, out->bind[0].metal_index = 0, out->bind[0].arr = (uint8_t)g_t.arr;
+    out->bind[0].binding = 24, out->bind[0].kind = LAGFX_A64_BIND_IMAGE, out->bind[0].stage = 1, out->bind[0].metal_index = 0, out->bind[0].arr = (uint8_t)(g_t.arr == 1);
+    if (g_t.arr == 2) out->desc.fragment_spv = k_fs_unorm_spv, out->desc.fragment_spv_bytes = sizeof k_fs_unorm_spv;   /* what arm64_pipeline.c hands over: the exec rewrites it per unnormalized use (spv_unnorm.c) */
     out->bind[1].binding = 25, out->bind[1].kind = LAGFX_A64_BIND_SAMPLER, out->bind[1].stage = 1, out->bind[1].metal_index = 0;
     return true;
 }
@@ -208,6 +212,36 @@ static void test_array(void) {
     puts("PASS: 2D_ARRAY view of all layers x all levels: sixteen (layer, level) colours read back exactly; one-layer array, 2D-shader-on-array (layer 0, counted) controls");
 }
 
+/* The integration case: unnormalized-coordinates samplers (the exec's explicit-LOD-0 shader variant, spv_unnorm.c) on a multi-mip texture. Vulkan only lets such a sampler read a view of one
+ * level and one layer, so the draw gets the level 0 view (counted as dropped mips) and reads the texels of level 0 whatever the texture holds; the same shader with a NORMALIZED sampler
+ * (coordinates in texels = far outside [0, 1], so the implicit LOD is huge) reads the last level through the whole-chain view. */
+static uint32_t w_zero(uint32_t cx, uint32_t cy) { (void)cx; (void)cy; return col(0, 0); }
+static uint32_t w_last(uint32_t cx, uint32_t cy) { (void)cx; (void)cy; return col(0, 3); }
+static void test_unnorm_mips(void) {
+    uint8_t img[RT_W * RT_H * 4];
+    g_clamp_lo = -1.f;
+    lagfx_protocol_t *p = tv_run(2, 0x06000000u, 2, 4, 1);   /* SYNTHETIC word: mip linear + unnormalized (bit 31 clear), as arm64-exec-res-unit.c */
+    tv_exec(p, img);
+    __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_unnorm_lod0 == 1 && R->ext_unnorm_skipped == 0 && R->ext_samp_unnorm == 1);
+    check("unnormalized sampler on a 4-level texture", img, w_zero);
+    assert(R->ext_tex_mips_base_only == 1 && R->ext_tex_mip_views == 0);   /* the Vulkan restriction is a counted drop */
+    done(p);
+    p = tv_run(2, 0x86000000u, 2, 4, 1);   /* normalized, mip linear: implicit LOD of texel-unit coordinates selects the last level */
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_unnorm_lod0 == 0 && R->ext_tex_mips_base_only == 0 && R->ext_tex_mip_views == 1);
+    check("normalized sampler, implicit LOD, 4-level texture", img, w_last);
+    done(p);
+    p = tv_run(2, 0x06000000u, 3, 4, 4);   /* unnormalized sampler, plain 2D shader, 4-layer 4-level texture: level 0 / layer 0 view, both counted */
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_tex_mips_base_only == 1 && R->ext_tex_layers_base_only == 1);
+    check("unnormalized sampler on a layered 4-level texture", img, w_zero);
+    done(p);
+    puts("PASS: unnormalized sampler variant + multi-mip texture: level 0 view (Vulkan: one level / one layer), counted; the normalized control reads the last level of the same chain");
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -215,9 +249,10 @@ int main(void) {
     if (!(g_dev->vk && g_dev->vk->initialized)) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_mip_chain();
     test_array();
+    test_unnorm_mips();
     assert(lagfx_vk_validation_msg_count == 0);   /* checked before the test's own shader modules / layouts are destroyed */
     struct lagfx_vk_state *vk = g_dev->vk;
-    for (int i = 0; i < 2; i++) { if (g_t.m[i]) vkDestroyShaderModule(vk->device, g_t.m[i], NULL); if (g_t.fsm[i]) vkDestroyShaderModule(vk->device, g_t.fsm[i], NULL); }
+    for (int i = 0; i < 3; i++) { if (i < 2 && g_t.m[i]) vkDestroyShaderModule(vk->device, g_t.m[i], NULL); if (g_t.fsm[i]) vkDestroyShaderModule(vk->device, g_t.fsm[i], NULL); }
     if (g_t.pl) vkDestroyPipelineLayout(vk->device, g_t.pl, NULL);
     if (g_t.dsl) vkDestroyDescriptorSetLayout(vk->device, g_t.dsl, NULL);
     lagfx_device_free(g_dev);
