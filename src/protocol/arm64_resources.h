@@ -203,6 +203,8 @@ bool lagfx_a64_res_enabled(void);
 
 lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const uint8_t *res, uint32_t nres);
 lagfx_a64_obj_t  *lagfx_a64_res_object(lagfx_a64_rexec_t *x, uint32_t ref);
+/* The TEXWHY_* of the newest recorded failed creation of `ref` in this exec's task (TEXWHY_NOT_MIRRORED when none is recorded). Used to tell a refused multisample texture from other missing refs. */
+unsigned          lagfx_a64_res_fail_why(lagfx_a64_rexec_t *x, uint32_t ref);
 void              lagfx_a64_res_blit_segment(lagfx_a64_rexec_t *x, const uint8_t *body, uint32_t len);
 lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x);   /* x is freed unless PENDING */
 /* Polls the pending exec of this protocol (waits at most wait_ms; 0 = just check). DONE also when nothing is pending. While pending, begin() returns NULL. */

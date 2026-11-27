@@ -4,6 +4,8 @@
 
 #include <string.h>
 
+lagfx_msaa_mode_t lagfx_msaa_mode(void) { return lagfx_msaa_compat_env() ? LAGFX_MSAA_MODE_COMPAT : LAGFX_MSAA_MODE_EXACT; }
+
 VkSampleCountFlagBits lagfx_msaa_choose(VkSampleCountFlags supported, uint32_t requested, bool *clamped) {
     if (requested == 0) requested = 1;
     if (requested > 16) requested = 16;
@@ -124,8 +126,20 @@ uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t adver
 
 int lagfx_msaa_plan(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
                     VkImageUsageFlags optional_1x, lagfx_msaa_plan_t *out) {
+    return lagfx_msaa_plan_mode(be, fmt, w, h, requested, required, optional_ms, optional_1x, LAGFX_MSAA_MODE_COMPAT, out);
+}
+
+int lagfx_msaa_plan_mode(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
+                         VkImageUsageFlags optional_1x, lagfx_msaa_mode_t mode, lagfx_msaa_plan_t *out) {
     memset(out, 0, sizeof *out);
     out->requested = requested ? requested : 1u;
+    if (mode == LAGFX_MSAA_MODE_EXACT && out->requested > 1u) {   /* exactly the requested count or nothing */
+        lagfx_fmtcap_usage_t u;
+        if (out->requested > 16u || (out->requested & (out->requested - 1u))) return LAGFX_MSAA_EXACT_REFUSED;   /* not a Vulkan / Metal count */
+        if (!lagfx_fmtcap_image_usage(be, fmt, VK_IMAGE_TYPE_2D, w, h, 1, 1, 1, (VkSampleCountFlagBits)out->requested, required, optional_ms, &u)) return LAGFX_MSAA_EXACT_REFUSED;
+        out->samples = (VkSampleCountFlagBits)out->requested, out->usage = u.usage, out->dropped = u.dropped;
+        return LAGFX_MSAA_OK;
+    }
     uint32_t want = out->requested > 16u ? 16u : out->requested;
     uint32_t s = 1;
     while ((s << 1) <= want) s <<= 1;   /* largest power of two <= request (Metal counts are 1, 2, 4, 8) */

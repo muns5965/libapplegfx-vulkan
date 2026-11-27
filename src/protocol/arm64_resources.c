@@ -713,12 +713,14 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (o->ds_aspects) {   /* depth / stencil attachment: a plain 2D image of one level, content only on the device */
             if ((mtype != 2 && ms_req <= 1u) || o->mips != 1) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
             o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
-            if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
+            const uint64_t dsr0 = p->diag2.exec.msaa.ms_tex_refused;
+            if (!create_image(vk, m, o)) { MKFAIL(p->diag2.exec.msaa.ms_tex_refused != dsr0 ? TEXWHY_C_MSAA : TEXWHY_C_VULKAN); goto bad; }
             return o;
         }
         if (ms_req > 1u) {   /* multisampled colour texture: a device image only (no guest pages, no blit, no write-back, no sampling by the shaders yet), see arm64_msaa.h */
             o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
-            if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
+            const uint64_t msr0 = p->diag2.exec.msaa.ms_tex_refused;
+            if (!create_image(vk, m, o)) { MKFAIL(p->diag2.exec.msaa.ms_tex_refused != msr0 ? TEXWHY_C_MSAA : TEXWHY_C_VULKAN); goto bad; }   /* c_msaa: the multisample plan refused it (exact count not offered) */
             return o;
         }
         if (!make_buf(vk, o->length, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o->buf, &o->buf_mem, &o->map)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
@@ -854,6 +856,12 @@ lagfx_a64_obj_t *lagfx_a64_res_object(lagfx_a64_rexec_t *x, uint32_t ref) {
         if (o->linear) lin_pull_x(x, o);
     }
     return o;
+}
+
+unsigned lagfx_a64_res_fail_why(lagfx_a64_rexec_t *x, uint32_t ref) {
+    if (!x || !x->m || !x->t) return TEXWHY_NOT_MIRRORED;
+    for (uint32_t i = 0; i < 128u && i < x->m->nfail; i++) if (x->m->fail[i].task == x->t->id && x->m->fail[i].ref == ref) return x->m->fail[i].why;
+    return TEXWHY_NOT_MIRRORED;
 }
 
 lagfx_a64_rexec_t *lagfx_a64_res_begin(lagfx_protocol_t *p, uint32_t task, const uint8_t *res, uint32_t nres) {
