@@ -454,8 +454,16 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     if (keys_out && !lagfx_air_stage_keys(m, true, keys_out)) memset(keys_out, 0, sizeof *keys_out);   /* vertex: its output keys, for the paired fragment */
     lagfx_stage_link_totals_t l0, l1;
     lagfx_air2spv_link_totals(&l0);
+    lagfx_discard_totals_t d0, d1;
+    lagfx_air2spv_discard_totals(&d0);
+    {   /* air.discard_fragment: OpDemoteToHelperInvocation where the device enabled shaderDemoteToHelperInvocation, else OpKill (S06) */
+        lagfx_device_t *dv = (lagfx_device_t *)p->dev;
+        lagfx_air2spv_set_discard_demote(dv && dv->vk && (dv->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)));
+    }
     lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys; a typed vs_keys also links the interface types */
     lagfx_air2spv_link_totals(&l1);   /* process-wide counters: the delta is this translation's (resolution runs on one thread) */
+    lagfx_air2spv_discard_totals(&d1);
+    CNTP(p).discard_demote += d1.demote - d0.demote; CNTP(p).discard_kill += d1.kill - d0.kill; CNTP(p).discard_dropped += d1.dropped - d0.dropped;
     CNTP(p).link_mismatch_fixed += l1.mismatch_fixed - l0.mismatch_fixed; CNTP(p).link_missing_zeroed += l1.missing_zeroed - l0.missing_zeroed; CNTP(p).link_unlinked += l1.unlinked - l0.unlinked;
     if (st == LAGFX_OK && *spv) {
         *nab = lagfx_air_arg_bindings(m, ab, LAGFX_A64_MAX_ARGS);

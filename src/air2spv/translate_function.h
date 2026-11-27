@@ -113,6 +113,16 @@ typedef struct { uint64_t mismatch_fixed, missing_zeroed, unlinked; } lagfx_stag
 typedef struct { uint64_t int_int, int_int_unhandled; } lagfx_conv_totals_t;
 void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out);
 
+/* air.discard_fragment (MSL discard_fragment()) lowering. demote = true: OpDemoteToHelperInvocation (needs the device feature shaderDemoteToHelperInvocation; the module then
+ * declares Capability DemoteToHelperInvocation, gated by LAGFX_VK_CAP_DEMOTE) - the fragment stops writing but still takes part in derivatives, like a Metal discarded fragment [I].
+ * demote = false (the default; valid on every device): OpKill, which ends the invocation; it is a block terminator, so the block is split with a constant-true
+ * OpBranchConditional, except inside the two recognised single-loop plans whose OpPhi parents are fixed labels: there the discard is DROPPED and counted.
+ * Per thread (the resolver translates on one thread); set it before each translation. */
+void lagfx_air2spv_set_discard_demote(bool demote);
+/* Process totals: lowered as demote / as OpKill / dropped (loop plan). */
+typedef struct { uint64_t demote, kill, dropped; } lagfx_discard_totals_t;
+void lagfx_air2spv_discard_totals(lagfx_discard_totals_t *out);
+
 /* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
  * Locations follow `vs_out` (the paired vertex module's output keys) via
  * `own_in` (this module's per-argument keys). Either may be NULL → legacy

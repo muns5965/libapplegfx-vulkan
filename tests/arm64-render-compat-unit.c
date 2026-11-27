@@ -18,9 +18,9 @@
 extern uint64_t lagfx_vk_validation_msg_count;
 
 /* ---- scenario state read by the resolver ---- */
-enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF };
+enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF, FS_DISC };
 static struct { int fs; bool blend; } g_rc;
-static VkShaderModule g_rc_fs[5]; static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
+static VkShaderModule g_rc_fs[6]; static uint8_t *g_disc_spv; static size_t g_disc_bytes;   /* FS_DISC: a fragment shader translated from a fixture by the test */ static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
 
 static VkShaderModule rc_module(struct lagfx_vk_state *vk, const uint32_t *w, size_t bytes) {
     VkShaderModule m; VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = w };
@@ -47,7 +47,9 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
     out->desc.blend_set = 1, out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
     for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     out->desc.blend_src_rgb = out->desc.blend_src_a = VK_BLEND_FACTOR_ONE, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ZERO;   /* blend off by default */
-    if (g_rc.fs == FS_HALF) {
+    if (g_rc.fs == FS_DISC) {
+        out->desc.fragment_shader = rc_module(vk, (const uint32_t *)(const void *)g_disc_spv, g_disc_bytes);   /* a fresh module per run: the SPIR-V changes with the mode under test */
+    } else if (g_rc.fs == FS_HALF) {
         if (!g_rc_fs[FS_HALF]) g_rc_fs[FS_HALF] = rc_module(vk, k_fs_half_spv, sizeof k_fs_half_spv);
         out->desc.fragment_shader = g_rc_fs[FS_HALF];
         if (g_rc.blend) out->desc.blend_enable = 1, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;   /* premultiplied source-over */
@@ -320,6 +322,48 @@ static void test_viewport_semantics(void) {
     puts("PASS: Metal viewport used as recorded (wider than the target, negative / fractional origin; empty or inexpressible = nothing drawn, counted); scissor clamped to the target, not rescaled");
 }
 
+/* S06 (docs/spec-audit.md): air.discard_fragment must discard. Translate a hand-written fragment shader `if (pos.x < 8) discard_fragment(); return red;` (and an unconditional-discard one),
+ * run it on the 16x16 RGBA16Float target through the real pipeline path, with OpKill (default) and OpDemoteToHelperInvocation (when the device enabled it). */
+#include "air/bitcode_reader.h"
+#include "air2spv/translate.h"
+#include "vulkan/caps.h"
+static bool load_disc(const char *fixture, bool demote) {
+    char path[600]; snprintf(path, sizeof path, "%s/fixtures/%s", SRCDIR, fixture);
+    FILE *f = fopen(path, "rb"); if (!f) return false;
+    fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+    uint8_t *bc = malloc((size_t)n); if (!bc || fread(bc, 1, (size_t)n, f) != (size_t)n) { fclose(f); free(bc); return false; }
+    fclose(f);
+    lagfx_air_module_t *m = NULL; lagfx_stage_keys_t vso; memset(&vso, 0, sizeof vso);
+    bool ok = lagfx_air_module_open(bc, (size_t)n, &m) == LAGFX_OK && m;
+    free(g_disc_spv); g_disc_spv = NULL;
+    lagfx_air2spv_set_discard_demote(demote);
+    if (ok) ok = lagfx_air2spv_translate_module_ex(m, &vso, &g_disc_spv, &g_disc_bytes) == LAGFX_OK && g_disc_spv;
+    lagfx_air2spv_set_discard_demote(false);
+    if (m) lagfx_air_module_free(m);
+    free(bc);
+    return ok;
+}
+static void test_discard_fragment(void) {
+    static rc_res_t r; const uint32_t refs_f[2] = { REF_TEX2, 0 };
+    const bool have_demote = (g_dev->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)) != 0;
+    for (int mode = 0; mode < 2; mode++) {
+        if (mode && !have_demote) { puts("note: device does not enable shaderDemoteToHelperInvocation: demote mode not run"); break; }
+        g_rc.fs = FS_DISC;
+        assert(load_disc("spec_discard_branch.air.bc", mode == 1));
+        rc_run(refs_f, ZERO4, NULL, b_list1, false, &r);
+        assert(r.draws == 1 && r.pipe_fail == 0);
+        assert(h16(r.half, 12, 14, 0) == 0x3c00u);   /* x >= 8, inside the triangle: red */
+        assert(h16(r.half, 12, 14, 3) == 0x3c00u);
+        assert(h16(r.half, 4, 14, 0) == 0u && h16(r.half, 4, 14, 3) == 0u);   /* x < 8, inside the triangle: discarded, keeps the clear */
+        assert(load_disc("spec_discard_linear.air.bc", mode == 1));
+        rc_run(refs_f, ZERO4, NULL, b_list1, false, &r);
+        assert(r.draws == 1 && r.pipe_fail == 0);
+        assert(h16(r.half, 12, 14, 0) == 0u && h16(r.half, 4, 14, 0) == 0u);   /* everything discarded */
+    }
+    free(g_disc_spv); g_disc_spv = NULL;
+    puts("PASS: air.discard_fragment discards (OpKill in a split block; OpDemoteToHelperInvocation when the device enables it): branch shader keeps x<8 at the clear, unconditional discard leaves the target untouched");
+}
+
 /* ---- injected less-capable device (wraps the real queries; overrides one format / usage) ---- */
 typedef struct { lagfx_fmtcap_backend_t real; VkFormat fmt; VkFormatFeatureFlags clear; VkImageUsageFlags refuse_any; VkImageUsageFlags refuse_all; } inj_t;
 static inj_t g_inj; static lagfx_fmtcap_backend_t g_inj_be;
@@ -416,6 +460,7 @@ int main(void) {
     test_fetch_class();
     test_clear_integer_class();
     test_viewport_semantics();
+    test_discard_fragment();
     test_injected_formats();
     test_msaa_texture_refused();
     lagfx_device_free(g_dev);

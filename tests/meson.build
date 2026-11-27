@@ -2127,6 +2127,7 @@ if fs.is_file(meson.current_source_dir() / 'arm64-render-compat-unit.c') and vul
     'arm64-render-compat-unit.c',
     include_directories : [include_dir, internal_include_dir, include_directories('../src')],
     dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
     build_by_default : true,
   )
   test('arm64 render compat (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1'])

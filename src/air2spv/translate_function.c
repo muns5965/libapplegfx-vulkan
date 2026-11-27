@@ -425,6 +425,7 @@ typedef struct {
     uint8_t                   cap_int8;          /* OpCapability Int8 emitted */
     uint8_t                   cap_int16;         /* OpCapability Int16 emitted */
     uint8_t                   cap_float16;       /* OpCapability Float16 emitted */
+    bool                      kill_nosplit;      /* a recognised loop plan is being emitted: its OpPhi parents are fixed labels, so a block cannot be split here (air.discard_fragment is dropped, counted) */
     uint32_t                  id_uint;           /* OpTypeInt 32 0 */
     uint32_t                  id_int32;          /* OpTypeInt 32 1 — currently unused */
     uint32_t                  id_int64;          /* OpTypeInt 64 1 */
@@ -4528,6 +4529,34 @@ static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t
 }
 
 
+static _Thread_local bool g_discard_demote;
+static lagfx_discard_totals_t g_discard_totals;
+void lagfx_air2spv_set_discard_demote(bool demote) { g_discard_demote = demote; }
+void lagfx_air2spv_discard_totals(lagfx_discard_totals_t *out) {
+    if (!out) return;
+    out->demote = __atomic_load_n(&g_discard_totals.demote, __ATOMIC_RELAXED);
+    out->kill = __atomic_load_n(&g_discard_totals.kill, __ATOMIC_RELAXED);
+    out->dropped = __atomic_load_n(&g_discard_totals.dropped, __ATOMIC_RELAXED);
+}
+/* air.discard_fragment (void, no operands) -> OpDemoteToHelperInvocation when the device has the feature, else OpKill in a split block (see lagfx_air2spv_set_discard_demote). */
+static void emit_discard_fragment(xlate_ctx_t *c) {
+    if (g_discard_demote) {
+        lagfx_spv_builder_emit_op(c->b, 5380u /* OpDemoteToHelperInvocation */, NULL, 0);   /* its capability + extension are declared by lagfx_spv_declare_used_caps */
+        __atomic_fetch_add(&g_discard_totals.demote, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    if (c->kill_nosplit) { __atomic_fetch_add(&g_discard_totals.dropped, 1u, __ATOMIC_RELAXED); return; }
+    uint32_t bool_ty = emit_type_bool(c);
+    uint32_t t = lagfx_spv_builder_alloc_id(c->b), kill_l = lagfx_spv_builder_alloc_id(c->b), cont_l = lagfx_spv_builder_alloc_id(c->b);
+    { uint32_t o[] = { bool_ty, t }; lagfx_spv_builder_emit_op(c->b, 41u /* OpConstantTrue */, o, 2); }
+    { uint32_t o[] = { cont_l, 0u /* SelectionControl None */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECTION_MERGE, o, 2); }
+    { uint32_t o[] = { t, kill_l, cont_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_BRANCH_CONDITIONAL, o, 3); }
+    { uint32_t o[] = { kill_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
+    lagfx_spv_builder_emit_op(c->b, 252u /* OpKill */, NULL, 0);
+    { uint32_t o[] = { cont_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
+    __atomic_fetch_add(&g_discard_totals.kill, 1u, __ATOMIC_RELAXED);
+}
+
 /* Bit width of an AIR integer type spelling inside an air.convert name: "i8" / "i16" / "i32" / "i64" or "v<N>i<W>" with W in that set; 0 otherwise (also for "i1"). Reads up to the next '.' or the end. */
 static int conv_int_bits(const char *t) {
     if (*t == 'v') { t++; if (*t < '0' || *t > '9') return 0; while (*t >= '0' && *t <= '9') t++; }
@@ -5549,6 +5578,12 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         strncmp(fn_name, "air.", 4u) != 0 && strncmp(fn_name, "llvm.", 5u) != 0 &&
         emit_helper_fncall(c, fn_idx, inst, callee_slot_idx,
                            result_value_id, next_val_id, fn_name)) {
+        return;
+    }
+
+    /* === air.discard_fragment (MSL discard_fragment()) [I: spelling not in the corpus] === */
+    if (!glsl_inst && result_value_id == 0u && c->stage == LAGFX_XLATE_STAGE_FRAGMENT && strcmp(fn_name, "air.discard_fragment") == 0) {
+        emit_discard_fragment(c);
         return;
     }
 
@@ -8484,6 +8519,7 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
         if (plan.valid) {
             LAGFX_TRACE("translate_function: recognised single loop "
                         "(header bb=%u merge bb=%u)", plan.header_bb, plan.merge_bb);
+            c->kill_nosplit = true;
             return translate_body_loop(c, &plan);
         }
     }
@@ -8492,6 +8528,7 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
         if (plan.valid) {
             LAGFX_TRACE("translate_function: recognised guarded loop "
                         "(header bb=%u merge bb=%u)", plan.header_bb, plan.merge_bb);
+            c->kill_nosplit = true;
             return translate_body_guarded_loop(c, &plan);
         }
     }

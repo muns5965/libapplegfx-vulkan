@@ -29,6 +29,7 @@ enum {
     LAGFX_VK_CAP_SUBGROUP,       /* GroupNonUniform (SubgroupSize / SubgroupLocalInvocationId builtins)  <- VkPhysicalDeviceVulkan11Properties::subgroupSupportedOperations BASIC + COMPUTE stage */
     LAGFX_VK_CAP_SUBGROUP_SHUFFLE, /* GroupNonUniformShuffle (simd_shuffle*)                              <- subgroupSupportedOperations SHUFFLE + COMPUTE stage */
     LAGFX_VK_CAP_SUBGROUP_SHUFFLE_RELATIVE, /* GroupNonUniformShuffleRelative (shuffle_up/down)                  <- subgroupSupportedOperations SHUFFLE_RELATIVE + COMPUTE stage (a separate Vulkan feature bit) */
+    LAGFX_VK_CAP_DEMOTE,         /* DemoteToHelperInvocation (OpDemoteToHelperInvocation: air.discard_fragment)    <- VkPhysicalDeviceVulkan13Features::shaderDemoteToHelperInvocation (VK_EXT_shader_demote_to_helper_invocation) */
     LAGFX_VK_CAP_COUNT
 };
 #define LAGFX_VK_CAP_BIT(c) (1u << (c))

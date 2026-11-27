@@ -304,6 +304,10 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT && po + 40 < sizeof pl; c++)
                 if (Q->stub_missing_cap[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " stub_missing_cap_%s=%llu", lagfx_vk_cap_name(c), U(stub_missing_cap[c]));
         }
+        if (Q->discard_demote || Q->discard_kill || Q->discard_dropped) {
+            size_t po = strlen(pl);
+            if (po + 120 < sizeof pl) snprintf(pl + po, sizeof pl - po, " discard_fragment[demote=%llu kill=%llu dropped=%llu]", U(discard_demote), U(discard_kill), U(discard_dropped));
+        }
         {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
             size_t po = strlen(pl);
             if (po + 200 < sizeof pl)

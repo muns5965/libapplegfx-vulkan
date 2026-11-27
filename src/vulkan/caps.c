@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel", "demote" };
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -132,6 +132,7 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
             case 4434: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16); break;
             case 4435: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); break;
             case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16); break;
+            case 5379: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE); break;   /* DemoteToHelperInvocation <- shaderDemoteToHelperInvocation */
             case 4441: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB); break;
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
             case 61: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP); break;                                        /* GroupNonUniform */
@@ -186,15 +187,21 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
     if (!spv_used_caps(w, n, &used)) return false;   /* unanalysable: do not pretend the module needs nothing */
     /* what is ALREADY declared: scan OpCapability words directly */
     uint32_t declared_ids[64]; unsigned nd = 0;
-    size_t after_caps = 5; bool has_ext8 = false, has_ext16 = false;
+    size_t after_caps = 5; bool has_ext8 = false, has_ext16 = false, has_extd = false;
     for (size_t i = 5; i < n;) {
         uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
         if (!len || i + len > n) break;
         if (op == 17u) { if (nd >= 64u) return false; declared_ids[nd++] = w[i + 1]; after_caps = i + len; }
         else if (op == 10u) { if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_8bit_storage", 20)) has_ext8 = true; if (len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_KHR_16bit_storage", 21)) has_ext16 = true; }
         else if (op != 10u) break;   /* capabilities and extensions come first; the first other instruction ends the preamble */
+        if (op == 10u && len >= 2u && !strncmp((const char *)&w[i + 1], "SPV_EXT_demote_to_helper_invocation", 35)) has_extd = true;
         i += len;
     }
+    /* OpDemoteToHelperInvocation (5380) anywhere in the body needs Capability DemoteToHelperInvocation (5379) and, below SPIR-V 1.6, its extension (S06: air.discard_fragment) */
+    bool uses_demote = false;
+    for (size_t i = 5; i < n;) { uint32_t len = w[i] >> 16; if (!len || i + len > n) break; if ((w[i] & 0xffffu) == 5380u) uses_demote = true; i += len; }
+    bool has_demote_cap = false;
+    for (unsigned d = 0; d < nd; d++) if (declared_ids[d] == 5379u) has_demote_cap = true;
     uint32_t add[8]; unsigned na = 0; bool need8 = false, need16 = false;
     for (unsigned j = 0; j < sizeof k / sizeof k[0]; j++) {
         if (!(used & LAGFX_VK_CAP_BIT(k[j].cap))) continue;
@@ -206,8 +213,10 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
     }
     bool ext = need8 && !has_ext8 && w[1] < 0x00010500u;
     bool ext16 = need16 && !has_ext16 && w[1] < 0x00010300u;   /* 16-bit storage is core from SPIR-V 1.3 */
-    if (!na && !ext && !ext16) return true;
-    size_t extra = (size_t)na * 2u + (ext ? 7u : 0u) + (ext16 ? 7u : 0u);
+    if (uses_demote && !has_demote_cap) add[na++] = 5379u;
+    bool extd = uses_demote && !has_extd && w[1] < 0x00010600u;
+    if (!na && !ext && !ext16 && !extd) return true;
+    size_t extra = (size_t)na * 2u + (ext ? 7u : 0u) + (ext16 ? 7u : 0u) + (extd ? 10u : 0u);
     uint32_t *nw = malloc((n + extra) * 4u);
     if (!nw) return false;
     memcpy(nw, w, after_caps * 4u);
@@ -215,6 +224,7 @@ bool lagfx_spv_declare_used_caps(uint8_t **spv, size_t *bytes) {
     for (unsigned a = 0; a < na; a++) { nw[o++] = (2u << 16) | 17u; nw[o++] = add[a]; }
     if (ext) { nw[o++] = (7u << 16) | 10u; char name[24] = "SPV_KHR_8bit_storage"; memcpy(&nw[o], name, 24); o += 6; }
     if (ext16) { nw[o++] = (7u << 16) | 10u; char name[24] = "SPV_KHR_16bit_storage"; memcpy(&nw[o], name, 24); o += 6; }
+    if (extd) { nw[o++] = (10u << 16) | 10u; char name[36] = "SPV_EXT_demote_to_helper_invocation"; memcpy(&nw[o], name, 36); o += 9; }
     memcpy(nw + o, w + after_caps, (n - after_caps) * 4u);
     free(*spv);
     *spv = (uint8_t *)nw;

@@ -576,6 +576,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe11.storageInputOutput16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
     if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
+    if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
     {   /* simd-group (subgroup) operations a compute shader may use: Metal's simd_* intrinsics map to GroupNonUniform*; the device must offer them in the COMPUTE stage */
@@ -608,6 +609,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     feat12.storageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8)) ? VK_TRUE : VK_FALSE;
     feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)) ? VK_TRUE : VK_FALSE;
     feat12.storagePushConstant8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8)) ? VK_TRUE : VK_FALSE;
+    feat13.shaderDemoteToHelperInvocation = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)) ? VK_TRUE : VK_FALSE;
     feat11.storageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)) ? VK_TRUE : VK_FALSE;
     feat11.uniformAndStorageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16)) ? VK_TRUE : VK_FALSE;
     feat11.storagePushConstant16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16)) ? VK_TRUE : VK_FALSE;

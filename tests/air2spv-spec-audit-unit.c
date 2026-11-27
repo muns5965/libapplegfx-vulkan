@@ -8,11 +8,13 @@
  *  2. A struct { <3 x float>, float } under the AIR data layout (v96:128:128) has the second member at byte 16 (LLVM alloc size of <3 x float> is 16; checked with
  *     opt instcombine on the same data layout): the Block's Offset decorations must say 16, not 12.
  *  3. [[instance_id]] is Vulkan InstanceIndex (BuiltIn 43), not a second VertexIndex (BuiltIn 42).
+ *  5. air.discard_fragment: OpKill (split block) by default, OpDemoteToHelperInvocation + capability + extension when enabled; both counted.
  *  4. int -> int air.convert extends by the SOURCE signedness (OpSConvert for a signed source, OpUConvert for an unsigned one); same width is OpBitcast.
  */
 #include "air2spv/translate.h"
 #include "air2spv/translate_function.h"
 #include "air/bitcode_reader.h"
+#include "vulkan/caps.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -55,6 +57,15 @@ static int count_op(const uint32_t *w, size_t nw, uint32_t opcode) {
     int n = 0;
     for (size_t i = 5; i < nw;) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == opcode) n++; i += wc; }
     return n;
+}
+
+static bool has_cap(const uint32_t *w, size_t nw, uint32_t cap) {
+    for (size_t i = 5; i < nw;) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == 17u && w[i + 1] == cap) return true; i += wc; }
+    return false;
+}
+static bool has_ext(const uint32_t *w, size_t nw, const char *name) {
+    for (size_t i = 5; i < nw;) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == 10u && !strncmp((const char *)&w[i + 1], name, strlen(name) + 1u)) return true; i += wc; }
+    return false;
 }
 
 int main(void) {
@@ -102,6 +113,34 @@ int main(void) {
         EXPECT(count_op(w, nw, 124u) == 1, "convert int: OpBitcast count %d, want 1 (same-width i32 -> i32)", count_op(w, nw, 124u));
         EXPECT(ct.int_int >= 3u && ct.int_int_unhandled == 0u, "convert int: lowered %llu unhandled %llu", (unsigned long long)ct.int_int, (unsigned long long)ct.int_int_unhandled);
         free(w);
+    }
+    /* 5. air.discard_fragment (S06): OpKill in a split block by default, OpDemoteToHelperInvocation (+ capability + extension) when the device has the feature */
+    {
+        static const char *const fx[2] = { "spec_discard_linear.air.bc", "spec_discard_branch.air.bc" };
+        for (int f = 0; f < 2; f++) {
+            lagfx_discard_totals_t t0, t1;
+            lagfx_air2spv_set_discard_demote(false); lagfx_air2spv_discard_totals(&t0);
+            w = translate(fx[f], false, &nw);
+            lagfx_air2spv_discard_totals(&t1);
+            if (w) {
+                EXPECT(count_op(w, nw, 252u) == 1 && count_op(w, nw, 5380u) == 0, "%s kill mode: OpKill %d OpDemote %d, want 1 / 0", fx[f], count_op(w, nw, 252u), count_op(w, nw, 5380u));
+                EXPECT(count_op(w, nw, 17u) >= 1 && !has_cap(w, nw, 5379u), "%s kill mode: DemoteToHelperInvocation must not be declared", fx[f]);
+                EXPECT(t1.kill - t0.kill == 1u && t1.demote == t0.demote && t1.dropped == t0.dropped, "%s kill mode: counters", fx[f]);
+                free(w);
+            }
+            lagfx_air2spv_set_discard_demote(true); lagfx_air2spv_discard_totals(&t0);
+            w = translate(fx[f], false, &nw);
+            lagfx_air2spv_discard_totals(&t1);
+            if (w) {
+                EXPECT(count_op(w, nw, 5380u) == 1 && count_op(w, nw, 252u) == 0, "%s demote mode: OpDemote %d OpKill %d, want 1 / 0", fx[f], count_op(w, nw, 5380u), count_op(w, nw, 252u));
+                EXPECT(has_cap(w, nw, 5379u), "%s demote mode: Capability DemoteToHelperInvocation not declared", fx[f]);
+                EXPECT(has_ext(w, nw, "SPV_EXT_demote_to_helper_invocation"), "%s demote mode: SPV_EXT_demote_to_helper_invocation not declared", fx[f]);
+                EXPECT(t1.demote - t0.demote == 1u && t1.kill == t0.kill, "%s demote mode: counters", fx[f]);
+                uint32_t req = 0; EXPECT(lagfx_spv_required_caps_ex(w, nw * 4u, &req) && (req & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)), "%s demote mode: required-caps scan misses the demote capability", fx[f]);
+                free(w);
+            }
+        }
+        lagfx_air2spv_set_discard_demote(false);
     }
     if (g_fail) { printf("air2spv-spec-audit-unit: %d failure(s)\n", g_fail); return 1; }
     printf("air2spv-spec-audit-unit: OK\n");
