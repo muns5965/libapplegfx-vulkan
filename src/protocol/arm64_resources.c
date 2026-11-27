@@ -9,6 +9,7 @@
 #include "../common/le.h"
 #include "../common/log.h"
 #include "../vulkan/command.h"
+#include "../vulkan/devinfo.h"
 #include "../vulkan/render_target.h"
 #include "../vulkan/surface_writeback.h"
 #include "../translate/blit_encoder.h"
@@ -135,6 +136,7 @@ static bool make_buf(struct lagfx_vk_state *vk, VkDeviceSize size, VkBufferUsage
     VkMemoryRequirements rq;
     vkGetBufferMemoryRequirements(vk->device, *b, &rq);
     uint32_t mt = mem_type(vk, rq.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    lagfx_vk_devinfo_note_staging(vk->phys_device, mt, rq.memoryTypeBits, size, (uint32_t)usage);   /* diagnostic only: logs the chosen type once per distinct index */
     VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = rq.size, .memoryTypeIndex = mt };
     void *mp = NULL;
     if (mt == UINT32_MAX || vkAllocateMemory(vk->device, &ai, NULL, m) != VK_SUCCESS) { *m = VK_NULL_HANDLE; goto fail_buf; }

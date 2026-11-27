@@ -49,6 +49,7 @@
  */
 
 #include "instance.h"
+#include "devinfo.h"
 #include "pipeline_matrix.h"
 #include "command.h"
 #include "pipeline.h"
@@ -712,6 +713,19 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         snprintf(s->driver_name, sizeof s->driver_name, "%s", drv.driverName), snprintf(s->driver_info, sizeof s->driver_info, "%s", drv.driverInfo);
     }
     if (feat13.subgroupSizeControl != VK_TRUE) s->sg_control = false;
+    {   /* what vkCreateDevice was actually given: the feature VALUES from the structs chained into dci (feat2 / feat11 / feat12 / feat13, lr_en and ro_en only when chained: have_local_read / have_raster_order),
+         * and the real wanted_dev_exts array. VK_EXT_shader_tile_image is never requested here (no such extension name in wanted_dev_exts, no tile-image feature struct in the chain) -> 0. */
+        const lagfx_vkdev_enabled_t en = {
+            .exts = wanted_dev_exts, .n_exts = wanted_dev_n,
+            .dynamicRendering = feat13.dynamicRendering, .dynamicRenderingLocalRead = s->have_local_read ? (int32_t)lr_en.dynamicRenderingLocalRead : 0,
+            .rasterizationOrderColorAttachmentAccess = s->have_raster_order ? (int32_t)ro_en.rasterizationOrderColorAttachmentAccess : 0,
+            .shaderTileImageColorReadAccess = 0, .shaderTileImageDepthReadAccess = 0, .shaderTileImageStencilReadAccess = 0,
+            .subgroupSizeControl = feat13.subgroupSizeControl, .computeFullSubgroups = feat13.computeFullSubgroups,
+            .shaderFloat16 = feat12.shaderFloat16, .shaderInt64 = feat2.features.shaderInt64, .shaderInt8 = feat12.shaderInt8,
+            .storageBuffer16BitAccess = feat11.storageBuffer16BitAccess, .storageBuffer8BitAccess = feat12.storageBuffer8BitAccess,
+            .variablePointers = feat11.variablePointers, .variablePointersStorageBuffer = feat11.variablePointersStorageBuffer };
+        lagfx_vk_devinfo_log_once_ex(s->phys_device, &en);   /* read-only g7-vkdev diagnostic (devinfo.h), WARN, once per process */
+    }
     {   /* printed once per process: Metal's simdgroup is 32 lanes; a kernel that maps lanes to pixels needs a 32-wide subgroup (pinned when the device allows it) */
         static bool sg_printed;
         if (!sg_printed) {

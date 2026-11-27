@@ -1907,6 +1907,15 @@ pipeline_reduce_test = executable('pipeline-reduce-unit',
 )
 test('pipeline reduction ladder (unit, lavapipe)', pipeline_reduce_test, timeout : 300)
 
+# Read-only device diagnostic g7-vkdev (identity, full extension list, feature summary): structure checks on the available ICD, skip (77) without one.
+vkdev_info_test = executable('vkdev-info-unit',
+  'vkdev-info-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('device diagnostic g7-vkdev (unit, lavapipe)', vkdev_info_test)
+
 # Constexpr sampler extraction (AIR global -> i64 word -> decoded state).
 if fs.is_file(meson.current_source_dir() / 'air2spv-constexpr-sampler-unit.c')
   constexpr_sampler_test = executable('air2spv-constexpr-sampler-unit',
