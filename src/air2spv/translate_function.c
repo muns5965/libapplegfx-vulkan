@@ -30,6 +30,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <math.h>
 
@@ -425,7 +426,7 @@ typedef struct {
     uint8_t                   cap_int8;          /* OpCapability Int8 emitted */
     uint8_t                   cap_int16;         /* OpCapability Int16 emitted */
     uint8_t                   cap_float16;       /* OpCapability Float16 emitted */
-    bool                      kill_nosplit;      /* a recognised loop plan is being emitted: its OpPhi parents are fixed labels, so a block cannot be split here (air.discard_fragment is dropped, counted) */
+    bool                      in_entry_block;    /* a recognised loop plan is emitting its ENTRY block: the header / merge OpPhis name c->id_entry_label as that edge's parent, so a block split there (OpKill) must move that label (S06) */
     uint32_t                  id_uint;           /* OpTypeInt 32 0 */
     uint32_t                  id_int32;          /* OpTypeInt 32 1 — currently unused */
     uint32_t                  id_int64;          /* OpTypeInt 64 1 */
@@ -4529,6 +4530,26 @@ static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t
 }
 
 
+/* D2 (docs/spec-audit.md), OPT-IN, default OFF: FMin / FMax / FClamp -> NMin / NMax / NClamp (GLSL.std.450 79 / 80 / 81). [V] spec text: FMin / FMax / FClamp leave the result undefined when an operand is NaN;
+ * NMin / NMax return the other operand when exactly one is NaN (a NaN only when both are), NClamp = min(max(x, lo), hi) with those. MSL fmax / fmin / clamp return the non-NaN operand [I] (the
+ * air.fast_* spellings of the corpus allow any result for a NaN [I]). Enabled by the environment variable LAGFX_SPV_NANMAX=1 (read once) or lagfx_air2spv_set_nanmax(1); the default output is
+ * byte-identical (the A2Xghfc pair: 119 FMax / 45 FMin / 92 FClamp stay as they are). A separate diagnostic rewrite of finished SPIR-V exists for the repro / reduce ladders
+ * (lagfx_spv_variant_nanmax, row LRD_NANMAX). Whether Adreno distinguishes the two is [N]: needs the phone. */
+static _Atomic int g_nanmax_override = -1;   /* -1: environment; 0 / 1: forced (tests) */
+static _Atomic int g_nanmax_env = -1;
+void lagfx_air2spv_set_nanmax(int mode) { atomic_store(&g_nanmax_override, mode < 0 ? -1 : mode ? 1 : 0); }
+static bool nanmax_on(void) {
+    int o = atomic_load(&g_nanmax_override);
+    if (o >= 0) return o != 0;
+    int e = atomic_load(&g_nanmax_env);
+    if (e < 0) { const char *v = getenv("LAGFX_SPV_NANMAX"); e = v && v[0] == '1' && v[1] == '\0'; atomic_store(&g_nanmax_env, e); }
+    return e != 0;
+}
+static uint32_t nanmax_map(uint32_t glsl_inst) {
+    if (!nanmax_on()) return glsl_inst;
+    return glsl_inst == LAGFX_SPV_GLSL_FMIN ? LAGFX_SPV_GLSL_NMIN : glsl_inst == LAGFX_SPV_GLSL_FMAX ? LAGFX_SPV_GLSL_NMAX : glsl_inst == LAGFX_SPV_GLSL_FCLAMP ? LAGFX_SPV_GLSL_NCLAMP : glsl_inst;
+}
+
 static _Thread_local bool g_discard_demote;
 static lagfx_discard_totals_t g_discard_totals;
 void lagfx_air2spv_set_discard_demote(bool demote) { g_discard_demote = demote; }
@@ -4545,7 +4566,6 @@ static void emit_discard_fragment(xlate_ctx_t *c) {
         __atomic_fetch_add(&g_discard_totals.demote, 1u, __ATOMIC_RELAXED);
         return;
     }
-    if (c->kill_nosplit) { __atomic_fetch_add(&g_discard_totals.dropped, 1u, __ATOMIC_RELAXED); return; }
     uint32_t bool_ty = emit_type_bool(c);
     uint32_t t = lagfx_spv_builder_alloc_id(c->b), kill_l = lagfx_spv_builder_alloc_id(c->b), cont_l = lagfx_spv_builder_alloc_id(c->b);
     { uint32_t o[] = { bool_ty, t }; lagfx_spv_builder_emit_op(c->b, 41u /* OpConstantTrue */, o, 2); }
@@ -4554,6 +4574,10 @@ static void emit_discard_fragment(xlate_ctx_t *c) {
     { uint32_t o[] = { kill_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
     lagfx_spv_builder_emit_op(c->b, 252u /* OpKill */, NULL, 0);
     { uint32_t o[] = { cont_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
+    /* The block that flows on is now cont_l. The only OpPhi parent that can be the block being split is the entry block of a recognised loop plan (header phis, and the merge phis of the
+     * guarded loop, name c->id_entry_label for the entry edge): move it. Every other parent (id_continue, id_loop_exit, case blocks of the dispatch lowering) is a block of its own whose
+     * LAST block is the one that branches, and no phi is emitted for the body / merge blocks of the plans. */
+    if (c->in_entry_block) c->id_entry_label = cont_l;
     __atomic_fetch_add(&g_discard_totals.kill, 1u, __ATOMIC_RELAXED);
 }
 
@@ -5001,7 +5025,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             }
             uint32_t res = resolve_value_spv(c, result_value_id);
             if (!res) res = lagfx_spv_builder_alloc_id(c->b);
-            uint32_t o[] = { rty, res, c->id_glsl, LAGFX_SPV_GLSL_FCLAMP, x, lo, hi };
+            uint32_t o[] = { rty, res, c->id_glsl, nanmax_map(LAGFX_SPV_GLSL_FCLAMP), x, lo, hi };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 7);
             bind_value_spv(c, result_value_id, res);
             set_result_air_type(c, result_value_id, result_ty_air);
@@ -5688,7 +5712,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     ops[0] = result_spv_type;
     ops[1] = result_spv;
     ops[2] = c->id_glsl;
-    ops[3] = glsl_inst;
+    ops[3] = nanmax_map(glsl_inst);
     uint32_t n_ops = 4u;
     for (uint8_t a = 0; a < entry_num_args; a++) {
         if (arg_slot_idx + a >= inst->num_ops) break;
@@ -5700,7 +5724,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     if (entry_3way && n_ops == 7u) {
         /* fmax3/fmin3(a,b,c) = op(op(a,b),c): the first ExtInst takes (a,b) into a fresh id, the second folds in c. */
         uint32_t tmp = lagfx_spv_builder_alloc_id(c->b);
-        uint32_t o1[] = { result_spv_type, tmp, c->id_glsl, glsl_inst, ops[4], ops[5] };
+        uint32_t o1[] = { result_spv_type, tmp, c->id_glsl, ops[3], ops[4], ops[5] };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o1, 6);
         ops[4] = tmp; ops[5] = ops[6]; n_ops = 6u;
     }
@@ -7574,8 +7598,10 @@ static lagfx_status_t translate_body_loop(xlate_ctx_t *c,
     /* --- entry block (already open via emit_module_vars_and_function) --- */
     {
         uint32_t v = c->inst_id_base;
+        c->in_entry_block = true;
         emit_block_body(c, bbs[plan->entry_bb].first_inst,
                         bbs[plan->entry_bb].last_inst, &v);
+        c->in_entry_block = false;
     }
     { uint32_t ops[] = { id_header };
       lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_BRANCH, ops, 1); }
@@ -7815,8 +7841,10 @@ static lagfx_status_t translate_body_guarded_loop(
     /* --- entry block (already open): guard insts + selection guard --- */
     {
         uint32_t v = c->inst_id_base;
+        c->in_entry_block = true;
         emit_block_body(c, bbs[plan->entry_bb].first_inst,
                         bbs[plan->entry_bb].last_inst, &v);
+        c->in_entry_block = false;
     }
     /* The guard's condition is the entry block's terminator's cond operand
      * (ops[2], relative to the value-id AT the terminator). */
@@ -8561,7 +8589,6 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
         if (plan.valid) {
             LAGFX_TRACE("translate_function: recognised single loop "
                         "(header bb=%u merge bb=%u)", plan.header_bb, plan.merge_bb);
-            c->kill_nosplit = true;
             return translate_body_loop(c, &plan);
         }
     }
@@ -8570,7 +8597,6 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
         if (plan.valid) {
             LAGFX_TRACE("translate_function: recognised guarded loop "
                         "(header bb=%u merge bb=%u)", plan.header_bb, plan.merge_bb);
-            c->kill_nosplit = true;
             return translate_body_guarded_loop(c, &plan);
         }
     }
