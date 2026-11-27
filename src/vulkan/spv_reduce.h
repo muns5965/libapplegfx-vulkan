@@ -19,6 +19,7 @@
  *   MIN_LOADS      (with MIN_ENTRY) the minimal entry also OpLoads the Location inputs selected by input_sel (and the BuiltIn inputs selected by blt_sel); the loaded values stay unused
  *   MIN_WIRE       (with MIN_ENTRY) the same loads, and every float32 Output variable receives the sum of them (chunks of the loaded scalars), i.e. the inputs are wired straight to the outputs
  *   CXS_FOLD       the translator's constexpr-sampler variables (OpName "lagfx.cxs.*") are removed and their loads read the sampler variable with the highest binding that is NOT a constexpr one
+ *   SSA            (LRD_SSA*) the finished module goes through lagfx_spv_ssa_promote (src/vulkan/spv_ssa.h; meaning-preserving) BEFORE the POST passes below
  *   POST passes (run on the finished module, any combination, each independent; all keep spirv-val validity and the observable behaviour of the module):
  *     PRUNE_BLK    blocks unreachable from the function's first block are deleted (a block still named as a merge / continue target of a reachable construct stays as a one-instruction stub)
  *     PRUNE_VAR    Function variables that no instruction refers to are deleted
@@ -43,6 +44,8 @@ enum {
     LRD_SSBO_SHRINK = 1u << 14, LRD_SSBO_RT = 1u << 15, LRD_DYN_CONST = 1u << 16, LRD_DYN_SELECT = 1u << 17, LRD_INPUT_CONST = 1u << 18,
     LRD_PRUNE_BLK = 1u << 19, LRD_PRUNE_VAR = 1u << 20, LRD_PRUNE_WOVAR = 1u << 21, LRD_MEM_STORE = 1u << 22, LRD_MEM_LOAD = 1u << 23, LRD_MEM_LOAD_IN = 1u << 24,
     LRD_MIN_LOADS = 1u << 25, LRD_MIN_WIRE = 1u << 26, LRD_CXS_FOLD = 1u << 27,
+    LRD_SSA = 1u << 28, LRD_SSA_DCE = 1u << 29, LRD_SSA_DCEIN = 1u << 30, LRD_SSA_AGG = 1u << 31,   /* spv_ssa.c: Function variables -> SSA values (+ dead-value cleanup / Input loads / aggregates); runs before the POST passes */
+    LRD_SSA_MASK = LRD_SSA | LRD_SSA_DCE | LRD_SSA_DCEIN | LRD_SSA_AGG,
     LRD_POST_MASK = LRD_PRUNE_BLK | LRD_PRUNE_VAR | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_MEM_LOAD_IN,
 };
 enum { LRD_UC_NUM = 1, LRD_UC_STRUCT = 2, LRD_UC_PTR = 4, LRD_UC_COMPOSITE = 8 };                                   /* OpUndef type classes */
@@ -57,6 +60,7 @@ typedef struct {
     uint32_t ssbo_len;         /* LRD_SSBO_SHRINK: new element count (0 = 16) */
     uint32_t input_sel;        /* LRD_INPUT_CONST: bit k = loads of the k-th Location-decorated Input variable become OpConstantNull; LRD_MIN_LOADS / MIN_WIRE: bit k = that input is loaded */
     uint32_t blt_sel;          /* LRD_MIN_LOADS / MIN_WIRE: bit k = the k-th BuiltIn Input variable (declaration order) is loaded */
+    uint32_t ssa_maxphi;       /* LRD_SSA*: a local whose promotion would need an OpPhi with more than this many incoming edges stays in memory (0 = no limit) */
     uint32_t dyn_top;          /* LRD_DYN_*: only the dyn_top functions with the most dynamic vector accesses (0 = every function) */
     uint8_t  stub[LAGFX_RED_MAXFN];   /* by function index */
 } lagfx_red_recipe_t;

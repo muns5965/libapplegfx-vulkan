@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 /* libapplegfx-vulkan — DIAGNOSTIC SPIR-V reduction rewrites (see spv_reduce.h). Pure C. */
 #include "spv_reduce.h"
+#include "spv_ssa.h"
 #include "air2spv/binding_alloc.h"
 
 #include <stdio.h>
@@ -1070,7 +1071,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         if (e == 0) { snprintf(a->why, sizeof a->why, "function %u (id %u) cannot be rewritten safely (return type not null-able / unexpected layout)", k, m->fn[k].id); rc = 0; goto done; }
     }
     uint32_t changes = a->c_stub + a->c_undef + a->c_use + a->c_sw + a->c_swc + a->c_lp + a->c_smp + a->c_lod0 + a->c_deriv + a->c_read + a->c_ia + a->c_pruned + a->c_min + a->c_dynconst + a->c_dynsel + a->c_ssbo + a->c_input + a->c_cxs + (a->cut_idx ? 1u : 0u);
-    if (!changes && !(B & LRD_POST_MASK)) { snprintf(a->why, sizeof a->why, "the rewrite changes nothing in this module"); rc = 0; goto done; }
+    if (!changes && !(B & (LRD_POST_MASK | LRD_SSA_MASK))) { snprintf(a->why, sizeof a->why, "the rewrite changes nothing in this module"); rc = 0; goto done; }
     /* assemble: header + filtered global section + new globals + functions */
     wb_t fin = { 0 };
     if (wb_put(&fin, w, 5)) goto done;
@@ -1108,6 +1109,19 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
             p += wc;
         }
     }
+    char ssa_info[300] = "";
+    if (B & LRD_SSA_MASK) {
+        uint32_t *o3 = NULL;
+        size_t n3 = 0;
+        lagfx_ssa_stats_t sst;
+        unsigned sf = ((B & LRD_SSA_DCE) ? LSSA_DCE : 0u) | ((B & LRD_SSA_DCEIN) ? (LSSA_DCE | LSSA_DCE_INPUT) : 0u) | ((B & LRD_SSA_AGG) ? LSSA_AGG : 0u) | LSSA_MAXPHI(r->ssa_maxphi);
+        int sr = lagfx_spv_ssa_promote(fin.w, fin.n, sf, &o3, &n3, &sst, a->why, sizeof a->why);
+        if (sr < 0) { free(fin.w); goto done; }
+        if (sr == 0) { free(fin.w); rc = 0; goto done; }
+        free(fin.w), fin.w = o3, fin.n = n3;
+        snprintf(ssa_info, sizeof ssa_info, "ssa: locals %u promoted %u (escaped %u, aggregate-skipped %u, wide-phi-skipped %u) phis %u (placed %u trivial %u dead %u) undef %u loads-removed %u stores-removed %u dce-removed %u inst %u->%u ",
+                 sst.vars, sst.promoted, sst.escaped, sst.skipped_agg, sst.skipped_wide, sst.phis_kept, sst.phis_placed, sst.phis_trivial, sst.phis_dead, sst.undefs, sst.loads_removed, sst.stores_removed, sst.dce_removed, sst.inst_before, sst.inst_after);
+    }
     post_t ps;
     memset(&ps, 0, sizeof ps);
     if (B & LRD_POST_MASK) {
@@ -1116,6 +1130,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         int pr = post_prune(fin.w, fin.n, B, &o2, &n2, &ps, a->why, sizeof a->why);
         if (pr < 0) { free(fin.w); goto done; }
         if (pr == 0) { free(fin.w); rc = 0; goto done; }
+        if (pr == 2 && (B & LRD_SSA_MASK)) pr = 3;
         if (pr == 2) { free(fin.w); snprintf(a->why, sizeof a->why, "the post pass finds nothing to remove in this module (the result would equal its base)"); rc = 0; goto done; }
         if (pr == 1) { free(fin.w); fin.w = o2, fin.n = n2; }
     }
@@ -1129,6 +1144,7 @@ int lagfx_red_apply(const uint32_t *w, size_t words, const lagfx_red_recipe_t *r
         ADDI(a->c_undef, "undef->null=%u ", a->c_undef); ADDI(a->c_use, "undef-operands->null=%u ", a->c_use); ADDI(a->c_sw, "switch->default=%u ", a->c_sw); ADDI(a->c_swc, "switch->frequent-case=%u ", a->c_swc);
         ADDI(a->c_lp, "loop-back-edges->one-trip=%u ", a->c_lp); ADDI(a->c_smp, "samples->null=%u ", a->c_smp); ADDI(a->c_lod0, "implicit->explicit-lod0=%u ", a->c_lod0);
         ADDI(a->c_deriv, "derivatives->null=%u ", a->c_deriv); ADDI(a->c_read, "imageread->null=%u ", a->c_read); ADDI(a->c_ia, "input-attachment-decls/loads-dropped=%u ", a->c_ia); ADDI(a->c_dynconst, "dyn-access->composite-extract/insert=%u ", a->c_dynconst); ADDI(a->c_dynsel, "dyn-access->select-chain=%u ", a->c_dynsel); ADDI(a->c_ssbo, "big-arrays-shrunk/runtime=%u ", a->c_ssbo); ADDI(a->c_input, "input-loads->null=%u ", a->c_input);
+        ADDI(ssa_info[0], "%s", ssa_info);
         ADDI(a->c_cxs, "constexpr-sampler-loads-redirected=%u ", a->c_cxs); ADDI(a->c_minload, "entry-loads=%u ", a->c_minload); ADDI(a->c_wire, "outputs-wired=%u ", a->c_wire);
         ADDI(ps.blk || ps.blk_stub, "unreachable-blocks-removed=%u (+%u kept as stubs, %u instr) ", ps.blk, ps.blk_stub, ps.blk_instr); ADDI(ps.var, "unused-locals-removed=%u ", ps.var);
         ADDI(ps.wovar, "write-only-locals-removed=%u (+%u stores, %u chains) ", ps.wovar, ps.wo_store, ps.wo_chain); ADDI(ps.store, "stores-to-write-only-locals-removed=%u ", ps.store);

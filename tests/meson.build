@@ -2141,3 +2141,17 @@ msaa_test = executable('vulkan-msaa-unit',
   build_by_default : true,
 )
 test('vulkan msaa colour path (unit, lavapipe + injected devices)', msaa_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+# Opt-in SSA promotion of translated SPIR-V (LAGFX_SPV_SSA, src/vulkan/spv_ssa.c): structure + spirv-val checks, and a bit-exact comparison against the unreduced shaders on lavapipe
+# (compute stress shader, translated fragment fixtures incl. the A2Xghfc uber shader), with a negative control. Part 2 skips without a Vulkan 1.3 device.
+if vulkan_dep.found()
+  spv_ssa_test = executable('spv-ssa-lavapipe',
+    'spv-ssa-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-D_GNU_SOURCE', '-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('spv ssa promotion (unit + lavapipe equivalence)', spv_ssa_test, timeout : 600,
+    workdir : meson.current_source_dir() / '..')
+endif

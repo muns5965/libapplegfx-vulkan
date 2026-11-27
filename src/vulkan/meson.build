@@ -20,6 +20,7 @@ lagfx_sources += files(
   'spv_iface.c',
   'pipeline_matrix.c',
   'spv_reduce.c',
+  'spv_ssa.c',
   'pipeline_reduce.c',
   'descriptor_layout.c',
   'render_target.c',

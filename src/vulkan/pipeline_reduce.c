@@ -329,7 +329,7 @@ static int row_recipe(L_t *l, const char *id, const char *what, const lagfx_red_
     uint32_t *o = NULL;
     size_t on = 0;
     char info[480] = "";
-    int preserving = !(r->bits & ~(LRD_DYN_CONST | LRD_DYN_SELECT | LRD_POST_MASK));
+    int preserving = !(r->bits & ~(LRD_DYN_CONST | LRD_DYN_SELECT | LRD_POST_MASK | LRD_SSA_MASK));
     for (uint32_t k = 0; k < LAGFX_RED_MAXFN; k++) if (r->stub[k]) preserving = 0;
     if (r->cut_blocks) preserving = 0;
     if (r->ssbo_len) preserving = 0;
@@ -871,6 +871,27 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
         recipe_from_mask(l, CH11, &r);
         r.bits |= LRD_CXS_FOLD;
         row_recipe(l, "CXF.CH11", "CH11 + constexpr samplers folded", &r, NULL, 0, 0);
+        /* (f) SSA promotion of the Function variables (src/vulkan/spv_ssa.c; meaning-preserving, validated offline with spirv-val and numerically on lavapipe, see docs/research/ssa-promotion.md) */
+        {
+            static const struct { const char *id, *what; uint32_t bits; int base; } sr[] = {
+                { "SSA", "Function variables promoted to SSA values + OpPhi (scalar/vector/matrix locals whose address never escapes); nothing else removed except dead phis", LRD_SSA, 3 },
+                { "SSAD", "SSA + unused side-effect-free values deleted (Input loads kept)", LRD_SSA | LRD_SSA_DCE, 3 },
+                { "SSADI", "SSA + unused side-effect-free values deleted incl. unused Input loads", LRD_SSA | LRD_SSA_DCEIN, 3 },
+                { "SSADA", "SSA incl. array/struct locals + unused values deleted (Input loads kept)", LRD_SSA | LRD_SSA_DCE | LRD_SSA_AGG, 3 },
+                { "SSAP", "SSADI + unreachable blocks + write-only locals + unneeded memory accesses removed (the smallest meaning-preserving form)", LRD_SSA | LRD_SSA_DCEIN | LRD_PRUNE_BLK | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_PRUNE_VAR, 3 },
+                { "SSAW8", "SSA + unused values deleted, but a local whose promotion needs an OpPhi with more than 8 incoming edges stays in memory (keeps the 467-way merge phis out)", LRD_SSA | LRD_SSA_DCE, 4 },
+                { "SSAW64", "SSA + unused values deleted, but a local whose promotion needs an OpPhi with more than 64 incoming edges stays in memory", LRD_SSA | LRD_SSA_DCE, 5 },
+                { "SSAP", "SSADI + the post passes on the CH10 reductions (inputs live)", LRD_SSA | LRD_SSA_DCEIN | LRD_PRUNE_BLK | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_PRUNE_VAR, 0 },
+                { "SSAP", "SSADI + the post passes on the CH11 reductions (inputs nulled)", LRD_SSA | LRD_SSA_DCEIN | LRD_PRUNE_BLK | LRD_PRUNE_WOVAR | LRD_MEM_STORE | LRD_MEM_LOAD | LRD_PRUNE_VAR, 1 } };
+            for (size_t q = 0; q < sizeof sr / sizeof sr[0]; q++) {
+                memset(&r, 0, sizeof r);
+                if (sr[q].base == 0) recipe_from_mask(l, CH10, &r); else if (sr[q].base == 1) recipe_from_mask(l, CH11, &r);
+                r.bits |= sr[q].bits;
+                if (sr[q].base == 4) r.ssa_maxphi = 8; else if (sr[q].base == 5) r.ssa_maxphi = 64;
+                if (sr[q].base < 3) snprintf(id, sizeof id, "%s.%s", sr[q].id, sr[q].base ? "CH11" : "CH10"); else snprintf(id, sizeof id, "%s", sr[q].id);
+                row_recipe(l, id, sr[q].what, &r, NULL, 0, 0);
+            }
+        }
 #undef LOCTXT
     }
     if (!cfg->list_only) {
