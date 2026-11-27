@@ -11,6 +11,7 @@
 #include "protocol/arm64_exec_run.h"
 #include "protocol/arm64_resources.h"
 #include "protocol/arm64_completion.h"
+#include "protocol/arm64_hold.h"
 #include "protocol/arm64_objects.h"
 #include "device.h"
 #include "libapplegfx-vulkan.h"
@@ -321,8 +322,15 @@ int main(void) {
 
     /* (1) clear + triangle into a type-11 target with flag 0x04: the pixels land in the guest surface pages at the row pitch / first offset, padding untouched */
     surf_fill(SENT);
+    lagfx_hold_reset();
     { const uint32_t res[1][2] = { { REF_M1, 2 | 4 } };
       run_exec(p, 1, REF_M1, 2, green, true, res, 1, true); }
+    { lagfx_hold_stats_t hs;   /* the hold ledger saw this exec: drain (outermost only), the fence wait + write-back with its byte count, the pipeline creation + build */
+      lagfx_hold_get(&hs);
+      assert(hs.ph[LAGFX_HOLD_DRAIN].n == 1 && hs.ph[LAGFX_HOLD_DRAIN].total_ns >= hs.ph[LAGFX_HOLD_EXEC_END].total_ns);
+      assert(hs.ph[LAGFX_HOLD_EXEC_END].n == 1 && hs.ph[LAGFX_HOLD_EXEC_END].bytes == SW * SH * 4u && hs.ph[LAGFX_HOLD_EXEC_END].total_ns > 0);
+      assert(hs.ph[LAGFX_HOLD_RESOLVE].n >= 1 && hs.ph[LAGFX_HOLD_PIPE_BUILD].n == 1 && hs.ph[LAGFX_HOLD_PIPE_FAIL].n == 0);
+      assert(hs.ph[LAGFX_HOLD_POLL].n >= 1); }
     assert(cell(1) == 1 && lagfx_arm64_cq_pending(p) == 0);
     assert(CNT(p).no_target == 0 && CNT(p).passes == 1 && CNT(p).draws == 1 && CNT(p).draws_skipped == 0);
     assert(CNT(p).mapped_created == 1 && CNT(p).mapped_uploaded == 1 && CNT(p).mapped_written_back == 1 && CNT(p).mapped_unsupported == 0 && CNT(p).mapped_no_desc == 0);

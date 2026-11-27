@@ -12,6 +12,7 @@
 #include "arm64_resources.h"
 #include "arm64_tile.h"
 #include "arm64_completion.h"
+#include "arm64_hold.h"
 #include "arm64_dump.h"
 #include "draw_diag.h"
 #include "gap_diag.h"
@@ -279,7 +280,10 @@ static void *make_pipeline(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_e
     a64_pipe_t *pp = calloc(1, sizeof *pp);
     if (!pp) return NULL;
     pp->h.kind = K_PIPE, pp->ref = ref;
-    if (!r->resolver(r->resolver_ctx, p, t, ref, e, &pp->src)) { CNT(p).pipeline_unresolved++; free(pp); return NULL; }
+    const uint64_t hold_t0 = lagfx_hold_now_ns();
+    const bool resolved = r->resolver(r->resolver_ctx, p, t, ref, e, &pp->src);
+    lagfx_hold_note(LAGFX_HOLD_RESOLVE, hold_t0, 0);
+    if (!resolved) { CNT(p).pipeline_unresolved++; free(pp); return NULL; }
     return pp;
 }
 
@@ -555,7 +559,10 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
         }
     }
     VkPipeline pl = VK_NULL_HANDLE;
-    if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
+    const uint64_t hold_t0 = lagfx_hold_now_ns();
+    const bool built = lagfx_pipeline_build(r->vk->device, &d, &pl) == LAGFX_OK;
+    lagfx_hold_note(built ? LAGFX_HOLD_PIPE_BUILD : LAGFX_HOLD_PIPE_FAIL, hold_t0, 0);
+    if (!built) {
         p->diag2.exec.pipe.pipe_build_failed++;
         lagfx_a64_dump_spirv(p, d.vertex_spv, d.vertex_spv_bytes, d.fragment_spv, d.fragment_spv_bytes);   /* LAGFX_ARM64_DUMP=1 + dir: the failing modules, for offline spirv-val */
         cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r);   /* failure cache: the same (pipeline, formats, topology) is not rebuilt (and re-logged) on every draw */
@@ -1853,7 +1860,9 @@ lagfx_a64_exec_status_t lagfx_a64_exec_end(lagfx_protocol_t *p) {
     pass_end(r);
     lagfx_a64_rexec_t *x = r->x;
     r->x = NULL, r->cap = NULL;   /* the capture now belongs to the mirror's finish hook (written once the fence signalled) */
+    const uint64_t hold_t0 = lagfx_hold_now_ns(), hold_down0 = CNT(p).mapped_bytes_down;
     lagfx_a64_status_t st = lagfx_a64_res_end(x);   /* submits once, bounded wait (lagfx_vk_wait_bounded), then the flag-0x04 write-backs if DONE */
+    lagfx_hold_note(LAGFX_HOLD_EXEC_END, hold_t0, CNT(p).mapped_bytes_down - hold_down0);
     lagfx_arm64_submit_ctx_t *ctx = lagfx_arm64_submit_current(p);
     switch (st) {
     case LAGFX_A64_DONE:

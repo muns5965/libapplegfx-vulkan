@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 #include "arm64_completion.h"
+#include "arm64_hold.h"
 #include "../device.h"
 #include "../common/le.h"
 #include "../common/log.h"
@@ -302,6 +303,7 @@ size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p) {
     if (!lagfx_protocol_is_valid(p)) return 0;
     { struct timespec pts; clock_gettime(CLOCK_MONOTONIC, &pts); __atomic_store_n(&p->diag2.last_poll_ns, (uint64_t)pts.tv_sec * 1000000000ull + (uint64_t)pts.tv_nsec, __ATOMIC_RELAXED); }   /* diagnostics: when was the queue last given a chance to retire */
     if (!lagfx_a64_exec_trylock(p)) return 0;   /* another thread is draining / retiring / tearing down: it polls itself */
+    const uint64_t hold_t0 = lagfx_hold_now_ns();
     size_t n = 0;
     if (p->a64cq) {
         struct lagfx_arm64_cq *cq = p->a64cq;
@@ -315,6 +317,7 @@ size_t lagfx_arm64_poll_completions(lagfx_protocol_t *p) {
         p->a64_redrive(p);
         if (p->a64cq && pthread_mutex_trylock(&p->a64cq->lock) == 0) { n += p->a64cq->pending ? retire_locked(p, p->a64cq) : 0; pthread_mutex_unlock(&p->a64cq->lock); }
     }
+    lagfx_hold_note(LAGFX_HOLD_POLL, hold_t0, 0);
     lagfx_a64_exec_unlock(p);
     return n;
 }
