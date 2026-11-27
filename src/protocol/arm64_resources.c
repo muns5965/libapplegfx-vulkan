@@ -502,11 +502,12 @@ static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms, uint64_t 
 
 /* LAGFX_WB_VERIFY=1 only: read-only check that the guest pages hold what was just written (see lagfx_guest_surface_verify). Never changes ms or the guest. */
 static void ms_wb_verify(lagfx_protocol_t *p, msurf_t *ms, const lagfx_guest_surface_t *gs) {
-    static lagfx_wbv_gate_t gate;
+    static lagfx_wbv_gate_t gates[2];   /* [0] BGRA, [1] RGhA: the big display surface has its own budget, the many small BGRA ones must not use it up */
     static uint32_t lines;
-    if (gs->bpp != 4u) return;
-    if (!lagfx_wbv_admit(&gate, lagfx_wbv_now_ns())) {
-        if (gate.done >= LAGFX_WBV_MAX_COMPARES && !gate.capped_logged && lines < 40u) gate.capped_logged = true, lines++, LAGFX_WARN("wbverify cap reached (%u compares)", LAGFX_WBV_MAX_COMPARES);
+    if (gs->bpp != 4u && gs->bpp != 8u) return;
+    lagfx_wbv_gate_t *gate_p = &gates[gs->bpp == 8u];
+    if (!lagfx_wbv_admit(gate_p, lagfx_wbv_now_ns())) {
+        if (gate_p->done >= LAGFX_WBV_MAX_COMPARES && !gate_p->capped_logged && lines < 40u) gate_p->capped_logged = true, lines++, LAGFX_WARN("wbverify cap reached (%u compares, bpp %u)", LAGFX_WBV_MAX_COMPARES, gs->bpp);
         return;
     }
     lagfx_wbv_result_t r;
@@ -515,9 +516,10 @@ static void ms_wb_verify(lagfx_protocol_t *p, msurf_t *ms, const lagfx_guest_sur
     lines++;
     unsigned long long swap = (unsigned long long)p->diag2.disp.op_swap;
     if (st != LAGFX_OK) { LAGFX_WARN("wbverify swap=%llu ms=%u %ux%u row=%llu first=%u npages=%u fourcc=%08x: read-back failed (status %d)", swap, ms->mapping, ms->w, ms->h, (unsigned long long)gs->row_bytes, gs->first_offset, gs->npages, gs->fourcc, (int)st); return; }
-    LAGFX_WARN("wbverify swap=%llu ms=%u %ux%u row=%llu first=%u npages=%u fourcc=%08x rgb_mismatch=%llu alpha_only_mismatch=%llu of %llu first_diff=%d,%d pages_skipped=%llu hash_algo=pvgpix_u32_fnv1a_full hash_written=%016llx hash_guest=%016llx hash_guest2=%016llx stable=%d",
-               swap, ms->mapping, r.w, r.h, (unsigned long long)gs->row_bytes, gs->first_offset, gs->npages, gs->fourcc, (unsigned long long)r.rgb_mismatch, (unsigned long long)r.alpha_only_mismatch, (unsigned long long)r.pixels,
-               r.first_x, r.first_y, (unsigned long long)r.pages_skipped, (unsigned long long)r.hash_buf, (unsigned long long)r.hash_guest, (unsigned long long)r.hash_guest2, r.stable ? 1 : 0);
+    LAGFX_WARN("wbverify swap=%llu ms=%u %ux%u row=%llu first=%u npages=%u fourcc=%08x bpp=%u rgb_mismatch=%llu alpha_only_mismatch=%llu of %llu first_diff=%d,%d pages_skipped=%llu hash_algo=%s hash_written=%016llx hash_guest=%016llx hash_guest2=%016llx stable=%d half_nonfinite_px=%llu half_negative_px=%llu half_above_one_px=%llu (raw guest-page round trip only: no GPU image, no colour)",
+               swap, ms->mapping, r.w, r.h, (unsigned long long)gs->row_bytes, gs->first_offset, gs->npages, gs->fourcc, r.bpp, (unsigned long long)r.rgb_mismatch, (unsigned long long)r.alpha_only_mismatch, (unsigned long long)r.pixels,
+               r.first_x, r.first_y, (unsigned long long)r.pages_skipped, r.bpp == 8u ? "u64_fnv1a_full" : "pvgpix_u32_fnv1a_full", (unsigned long long)r.hash_buf, (unsigned long long)r.hash_guest, (unsigned long long)r.hash_guest2, r.stable ? 1 : 0,
+               (unsigned long long)r.half_nonfinite, (unsigned long long)r.half_negative, (unsigned long long)r.half_above_one);
 }
 
 /* after the fence: staging buffer -> guest pages (rows at first_offset + y * row; absent pages skipped and counted).

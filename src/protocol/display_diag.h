@@ -118,6 +118,22 @@ static inline int lagfx_dd_is_identity3x3(const uint8_t *b, size_t len) {
     return 1;
 }
 
+/* Op 0x0a payload as seen on the wire (g7_lagfx logs, 14 runs, identical): 4 control words {0, 1, 0, 0x0c}, then float32 1.0f at payload word 4 and word 9 (stride 5
+ * words), zeros between. That is a 3x3 identity held as three float4 rows starting at payload byte 16 (diagonal stride = 4 + 1 words). The third diagonal element (word 14)
+ * lies past the 64 bytes the diag raw dump prints, so it is INFERRED from the stride, not seen; the 4 control words are not interpreted here.
+ * lagfx_dd_is_identity3x3 above reads 9 words at payload byte 0 as a packed matrix and therefore called this payload "not identity" (its words 0..8 = 0,1,0,0xc,1.0,0,0,0,0).
+ * Returns 1 when payload[16..64) is {1,0,0,0, 0,1,0,0, 0,0,1,0} (the 4th element of each row is padding, not checked; -0.0f accepted as 0), else 0. */
+static inline int lagfx_dd_is_identity_op0a(const uint8_t *b, size_t len) {
+    if (!b || len < 64u) return 0;
+    for (int r = 0; r < 3; r++)
+        for (int c = 0; c < 3; c++) {
+            uint32_t w = lagfx_dd_rd32(b + 16 + 16 * r + 4 * c);
+            if (r == c) { if (w != 0x3f800000u) return 0; }
+            else if (w != 0u && w != 0x80000000u) return 0;
+        }
+    return 1;
+}
+
 /* ---- stateful part (display_diag.c) ---- */
 typedef struct lagfx_protocol lagfx_protocol_t;
 

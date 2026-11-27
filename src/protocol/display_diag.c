@@ -69,15 +69,16 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
     if (op == 0x22u) { op_seen(&s_op22, op, chan); return; }
     if (op == 0x0au) {
         op_seen(&s_op0a, op, chan);
-        if (skip + 36u <= plen) {
-            int id = lagfx_dd_is_identity3x3(pl + skip, plen - skip);
+        if (skip + 64u <= plen) {   /* 4 control words + 3 float4 rows (see lagfx_dd_is_identity_op0a); the old packed-3x3 test at payload byte 0 mis-classified the real payload */
+            int id = lagfx_dd_is_identity_op0a(pl + skip, plen - skip);
             if (id) INC(s_op0a_ident); else INC(s_op0a_nonident);
             uint64_t k = GET(s_op0a_ident) + GET(s_op0a_nonident);
             if (k <= 2u) {
                 const uint8_t *m = pl + skip;
-                dd_say("g7-pvg-gamma: op0a #%llu ch=%u identity3x3=%d words=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x (read-only; INFER: float32, offset = after the barrier slots)",
-                          (unsigned long long)k, chan, id, lagfx_dd_rd32(m), lagfx_dd_rd32(m + 4), lagfx_dd_rd32(m + 8), lagfx_dd_rd32(m + 12), lagfx_dd_rd32(m + 16),
-                          lagfx_dd_rd32(m + 20), lagfx_dd_rd32(m + 24), lagfx_dd_rd32(m + 28), lagfx_dd_rd32(m + 32));
+                char w[16 * 9 + 4]; size_t o = 0;
+                for (int i = 0; i < 16; i++) o += (size_t)snprintf(w + o, sizeof w - o, "%s%08x", i ? "," : "", lagfx_dd_rd32(m + 4 * i));
+                dd_say("g7-pvg-gamma: op0a #%llu ch=%u identity_rows=%d words=%s (read-only; layout INFER: 4 control words, then float32 rows of 4 from payload byte 16; the third diagonal element is not in older logs)",
+                          (unsigned long long)k, chan, id, w);
             }
         }
         return;
@@ -102,14 +103,24 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
                 dd_say("g7-pvg-gamma: region not read: %s (valid=%d task=%u)", s_reader ? "no live task for the last 0x44" : "no reader registered", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task);
             } else {
                 uint8_t *buf = (uint8_t *)malloc(0x4000u);
-                bool ok = buf && s_reader(p, p->diag2.last44_global_task, 0x118000u, 0x4000u, buf);
+                /* The last 0x44 is only a guess for the task that owns the region (vm2: last 0x44 = task 6, the display surface was created by task 2). Try it first, then every other live task. */
+                uint32_t task = p->diag2.last44_global_task, tried = 0;
+                bool ok = false;
+                if (buf) {
+                    ok = s_reader(p, task, 0x118000u, 0x4000u, buf), tried = 1;
+                    for (uint32_t i = 0; !ok && i < LAGFX_MAX_TASKS; i++) {
+                        if (!p->tasks[i].live || p->tasks[i].id == p->diag2.last44_global_task) continue;
+                        tried++;
+                        if (s_reader(p, p->tasks[i].id, 0x118000u, 0x4000u, buf)) ok = true, task = p->tasks[i].id;
+                    }
+                }
                 if (ok) {
                     lagfx_dd_gamma_t g; char line[420];
                     lagfx_dd_gamma_summarize(buf, 0x4000u, &g); lagfx_dd_gamma_format(line, sizeof line, &g);
                     __atomic_store_n(&s_gamma_done, 1u, __ATOMIC_RELAXED);
-                    dd_say("g7-pvg-gamma: region task=%u va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", p->diag2.last44_global_task, line);
+                    dd_say("g7-pvg-gamma: region task=%u (last 0x44 task=%u, %u task(s) tried) va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", task, p->diag2.last44_global_task, tried, line);
                 } else {
-                    dd_say("g7-pvg-gamma: region read FAILED task=%u va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", p->diag2.last44_global_task, (unsigned long long)GET(s_gamma_attempts));
+                    dd_say("g7-pvg-gamma: region read FAILED task=%u (%u task(s) tried) va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", p->diag2.last44_global_task, tried, (unsigned long long)GET(s_gamma_attempts));
                 }
                 free(buf);
             }

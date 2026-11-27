@@ -100,34 +100,48 @@ out:
     return res;
 }
 
-static uint64_t wbv_hash(const uint8_t *b, uint64_t px) {
+static uint64_t wbv_hash(const uint8_t *b, uint64_t px, uint32_t bpp) {
     uint64_t h = 1469598103934665603ull;
+    if (bpp == 8u) { for (uint64_t i = 0; i < px; i++) { uint64_t v = lagfx_le64(b + i * 8u); h = (h ^ v) * 1099511628211ull; } return h; }   /* RGhA: one step per whole LE u64 pixel (NOT comparable with Henge's pvgpix, which hashes converted BGRA) */
     for (uint64_t i = 0; i < px; i++) { uint32_t v = lagfx_le32(b + i * 4u); h = (h ^ v) * 1099511628211ull; }
     return h;
 }
+/* binary16 class of one channel: exponent 31 = Inf/NaN; sign bit with a non-zero magnitude = negative (-0.0 is not counted); above one = magnitude > 0x3c00 and finite. */
+static bool half_nonfinite(uint16_t h) { return (h & 0x7c00u) == 0x7c00u; }
+static bool half_negative(uint16_t h) { return (h & 0x8000u) && (h & 0x7fffu); }
+static bool half_above_one(uint16_t h) { return !(h & 0x8000u) && (h & 0x7fffu) > 0x3c00u && !half_nonfinite(h); }
 lagfx_status_t lagfx_guest_surface_verify(const lagfx_shell_callbacks_t *shell, const lagfx_guest_surface_t *s, const uint8_t *buf, uint32_t w, uint32_t h, size_t stride, lagfx_wbv_result_t *r) {
-    if (!shell || !s || !buf || !r || !w || !h || s->bpp != 4u || stride < (size_t)w * 4u) return LAGFX_ERR_INVALID_ARG;
+    if (!shell || !s || !buf || !r || !w || !h || (s->bpp != 4u && s->bpp != 8u) || stride < (size_t)w * s->bpp) return LAGFX_ERR_INVALID_ARG;
+    const uint32_t bpp = s->bpp;
     if (w > s->width) w = s->width;
     if (h > s->height) h = s->height;
     memset(r, 0, sizeof *r);
-    r->w = w, r->h = h, r->bpp = 4u, r->first_x = r->first_y = -1, r->pixels = (uint64_t)w * h;
-    uint8_t *g = malloc((size_t)w * h * 4u), *tight = malloc((size_t)w * h * 4u);
+    r->w = w, r->h = h, r->bpp = bpp, r->first_x = r->first_y = -1, r->pixels = (uint64_t)w * h;
+    uint8_t *g = malloc((size_t)w * h * bpp), *tight = malloc((size_t)w * h * bpp);
     if (!g || !tight) { free(g); free(tight); return LAGFX_ERR_OUT_OF_MEMORY; }
     lagfx_guest_surface_xfer_stats_t st = { 0, 0, 0 }, st2 = { 0, 0, 0 };
-    lagfx_status_t res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * 4u, false, &st);
+    lagfx_status_t res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * bpp, false, &st);
     if (res != LAGFX_OK) goto out;
-    for (uint32_t y = 0; y < h; y++) memcpy(tight + (size_t)y * w * 4u, buf + (size_t)y * stride, (size_t)w * 4u);   /* valid pixels only: no row padding */
-    r->hash_buf = wbv_hash(tight, r->pixels), r->hash_guest = wbv_hash(g, r->pixels), r->pages_skipped = st.pages_skipped;
+    for (uint32_t y = 0; y < h; y++) memcpy(tight + (size_t)y * w * bpp, buf + (size_t)y * stride, (size_t)w * bpp);   /* valid pixels only: no row padding */
+    r->hash_buf = wbv_hash(tight, r->pixels, bpp), r->hash_guest = wbv_hash(g, r->pixels, bpp), r->pages_skipped = st.pages_skipped;
     for (uint64_t i = 0; i < r->pixels; i++) {
-        const uint8_t *a = tight + i * 4u, *b = g + i * 4u;
-        bool rgb = a[0] != b[0] || a[1] != b[1] || a[2] != b[2];
-        if (!rgb && a[3] == b[3]) continue;
+        const uint8_t *a = tight + i * bpp, *b = g + i * bpp;
+        if (bpp == 8u) {   /* RGhA: raw 16-bit channels r, g, b, a (LE); compared bit for bit, so NaN payloads and -0.0 count too */
+            uint16_t c[4];
+            for (int k = 0; k < 4; k++) c[k] = (uint16_t)(a[2 * k] | a[2 * k + 1] << 8);
+            if (half_nonfinite(c[0]) || half_nonfinite(c[1]) || half_nonfinite(c[2]) || half_nonfinite(c[3])) r->half_nonfinite++;
+            if (half_negative(c[0]) || half_negative(c[1]) || half_negative(c[2]) || half_negative(c[3])) r->half_negative++;
+            if (half_above_one(c[0]) || half_above_one(c[1]) || half_above_one(c[2]) || half_above_one(c[3])) r->half_above_one++;
+        }
+        bool rgb = bpp == 8u ? memcmp(a, b, 6) != 0 : (a[0] != b[0] || a[1] != b[1] || a[2] != b[2]);
+        bool alpha = bpp == 8u ? (a[6] != b[6] || a[7] != b[7]) : a[3] != b[3];
+        if (!rgb && !alpha) continue;
         if (rgb) r->rgb_mismatch++; else r->alpha_only_mismatch++;
         if (r->first_x < 0) r->first_x = (int32_t)(i % w), r->first_y = (int32_t)(i / w);
     }
-    res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * 4u, false, &st2);   /* second read into the same buffer: is the guest side stable? */
+    res = lagfx_guest_surface_xfer(shell, s, g, w, h, (size_t)w * bpp, false, &st2);   /* second read into the same buffer: is the guest side stable? */
     if (res != LAGFX_OK) goto out;
-    r->hash_guest2 = wbv_hash(g, r->pixels), r->stable = r->hash_guest2 == r->hash_guest;
+    r->hash_guest2 = wbv_hash(g, r->pixels, bpp), r->stable = r->hash_guest2 == r->hash_guest;
 out:
     free(g); free(tight);
     return res;

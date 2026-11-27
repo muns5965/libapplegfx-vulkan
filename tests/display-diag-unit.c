@@ -72,6 +72,19 @@ int main(void) {
     put32(id, 1, 0u); put32(id, 8, 0x40000000u); CHECK(lagfx_dd_is_identity3x3(id, sizeof id) == 0);
     CHECK(lagfx_dd_is_identity3x3(id, 35) == 0 && lagfx_dd_is_identity3x3(NULL, 36) == 0);
 
+    /* op 0x0a payload as logged (64 bytes after the 12-byte header): 4 control words then float4 rows. The packed-3x3 test above rejects it (that was the "identity=0 other=2" of the
+     * g7-pvg-ops line); the row-aware test accepts it. Words 14 (third diagonal) is inferred from the stride, see the comment in display_diag.h. */
+    { uint8_t op[64]; memset(op, 0, sizeof op);
+      put32(op, 1, 1u); put32(op, 3, 0x0cu); put32(op, 4, 0x3f800000u); put32(op, 9, 0x3f800000u); put32(op, 14, 0x3f800000u);
+      CHECK(lagfx_dd_is_identity3x3(op, sizeof op) == 0);
+      CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 1);
+      put32(op, 15, 0x7fc00000u); CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 1);   /* the 4th element of a row is padding */
+      put32(op, 6, 0x80000000u); CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 1);    /* -0.0 */
+      put32(op, 6, 0x3f800000u); CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 0);    /* a non-zero off-diagonal element */
+      put32(op, 6, 0u); put32(op, 9, 0x40000000u); CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 0);   /* 2.0 on the diagonal */
+      put32(op, 9, 0x3f800000u); put32(op, 14, 0u); CHECK(lagfx_dd_is_identity_op0a(op, sizeof op) == 0);
+      put32(op, 14, 0x3f800000u); CHECK(lagfx_dd_is_identity_op0a(op, 63) == 0 && lagfx_dd_is_identity_op0a(NULL, 64) == 0); }
+
     free(b); free(copy);
     printf(fails ? "display-diag-unit: %d FAILED\n" : "display-diag-unit: all passed\n", fails);
     return fails != 0;

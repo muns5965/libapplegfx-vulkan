@@ -1513,6 +1513,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-surface-writeback-unit.c')
   test('arm64 completion fence + guest surface writeback (lavapipe)', sw_test)
 endif
 
+# Display diagnostics through lagfx_dd_note_cmd: op 0x0a identity classification, gamma-region task choice (no Vulkan device).
+if fs.is_file(meson.current_source_dir() / 'display-diag-gamma-unit.c')
+  display_diag_gamma_test = executable('display-diag-gamma-unit',
+    'display-diag-gamma-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('display diagnostics: op 0x0a classification + gamma region task (unit)', display_diag_gamma_test)
+endif
+
 # LAGFX_WB_VERIFY read-only writeback comparison (no Vulkan: fake guest memory).
 if fs.is_file(meson.current_source_dir() / 'arm64-wb-verify-unit.c')
   wbv_test = executable('arm64-wb-verify-unit',
