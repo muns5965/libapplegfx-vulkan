@@ -1698,6 +1698,20 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-compute-lavapipe.c') and vul
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Metal SIMD-group semantics of translated compute kernels (queries, shuffles, fills; native + logical widths) vs a CPU reference on a Vulkan 1.3 device (lavapipe); the invocation -> subgroup
+# mapping is measured; SIMD-group operations without an implementation must fail the translation. Skips (77) without a device / capability.
+if fs.is_file(meson.current_source_dir() / 'air2spv-simd-semantics-lavapipe.c') and vulkan_dep.found()
+  simd_semantics_test = executable('air2spv-simd-semantics-lavapipe',
+    'air2spv-simd-semantics-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv SIMD-group semantics vs Metal reference (lavapipe)', simd_semantics_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # ARM64 render exec: storage images (shader-written textures), vertex-stage textures / samplers, unnormalized samplers, writable storage buffers.
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-res-unit.c') and vulkan_dep.found()
   ex_test = executable('arm64-exec-res-unit',
