@@ -583,6 +583,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe11.storageInputOutput16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
     if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
+    if (probe12.shaderBufferInt64Atomics && probe12.shaderSharedInt64Atomics && have_shader_int64) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64);   /* Int64Atomics on StorageBuffer AND Workgroup memory (the translator emits both) */
     if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
@@ -613,6 +614,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
     feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
+    feat12.shaderBufferInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64)) ? VK_TRUE : VK_FALSE;
+    feat12.shaderSharedInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64)) ? VK_TRUE : VK_FALSE;
     feat12.storageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8)) ? VK_TRUE : VK_FALSE;
     feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)) ? VK_TRUE : VK_FALSE;
     feat12.storagePushConstant8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8)) ? VK_TRUE : VK_FALSE;

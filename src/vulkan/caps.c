@@ -6,7 +6,7 @@
 #include <string.h>
 #include <ctype.h>
 
-static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel", "demote" };
+static const char *const k_names[LAGFX_VK_CAP_COUNT] = { "int64", "int16", "int8", "float16", "sb8", "ub8", "pc8", "sb16", "ub16", "pc16", "io16", "varptr_sb", "varptr", "spirv14", "subgroup", "sg_shuffle", "sg_shuffle_rel", "demote", "atomic64", "atomic_f32_add" };
 
 const char *lagfx_vk_cap_name(unsigned cap) { return cap < LAGFX_VK_CAP_COUNT ? k_names[cap] : "?"; }
 
@@ -133,6 +133,8 @@ bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask) {
             case 4435: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16); break;
             case 4436: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16); break;
             case 5379: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE); break;   /* DemoteToHelperInvocation <- shaderDemoteToHelperInvocation */
+            case 12: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64); break;                                         /* Int64Atomics */
+            case 6033: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC_F32_ADD); break;                                /* AtomicFloat32AddEXT */
             case 4441: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB); break;
             case 4442: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR); break;
             case 61: m |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP); break;                                        /* GroupNonUniform */
