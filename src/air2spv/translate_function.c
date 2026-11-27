@@ -10792,7 +10792,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     if ((t_unlowered.n_llvm && !env_flag1("LAGFX_ALLOW_UNLOWERED_LLVM")) || (t_unlowered.n && env_flag1("LAGFX_STRICT_INTRINSICS"))) {
         const bool llvm_first = t_unlowered.n_llvm && !env_flag1("LAGFX_ALLOW_UNLOWERED_LLVM");
         LAGFX_WARN("air2spv: module not translated: %u call(s) have no lowering and would be undefined values (first: %s)", llvm_first ? t_unlowered.n_llvm : t_unlowered.n, llvm_first ? t_unlowered.first_llvm : t_unlowered.first);
-        __atomic_add_fetch(&g_uc_refused, 1u, __ATOMIC_RELAXED);
+        atomic_fetch_add_explicit(&g_uc_refused, 1u, memory_order_relaxed);
         t_unlowered_refused = true;
         st = LAGFX_ERR_PROTOCOL;
         goto fail;
