@@ -36,3 +36,18 @@ calls analysed per call chain) and prints, per origin class and per module, how 
 are unused / dead / lane-dead / reach an address, a branch-or-select condition, or an Output / buffer /
 image store. Needs `stdbuf` (coreutils). `python3 tools/spv_undef_flow.py module.spv` prints the sinks of
 each OpUndef of one module.
+
+## f1_fp16_surface_analysis.py
+
+Offline, read-only analysis of RGBA16Float (VK_FORMAT_R16G16B16A16_SFLOAT) snapshots in a
+`LAGFX_ARM64_DUMP_DATA` capture directory (`index.txt` + `cap_*.bin`, see
+`src/protocol/arm64_capture.h`): pitch / truncation check, binary16 class counts
+(zero / subnormal / normal / Inf / NaN) and min / max / mean per channel, bit-exact comparison of
+successive snapshots, and an optional comparison with 8-bit PNG frames (same clamp-and-round policy as
+Henge's `pvg_half.h` mode 0). It states what the bytes are; it does not judge colour.
+
+**Dependencies:** Python 3.10+, numpy.
+
+```sh
+python3 -I tools/f1_fp16_surface_analysis.py DUMP_DIR [--out PNG_DIR] [--png-compare frame.png ...]
+```
