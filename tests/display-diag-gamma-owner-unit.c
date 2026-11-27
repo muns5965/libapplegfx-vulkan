@@ -11,16 +11,19 @@
 #include "protocol/state.h"
 #include "protocol/display_diag.h"
 #include <assert.h>
+#include "protocol/gamma_diag.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+static bool g_table;   /* readers return the identity table (checksum matches the descriptor) or zeros (readable but mismatching) */
 static uint32_t g_calls, g_first, g_can[16], g_ncan;
 static bool reader(lagfx_protocol_t *p, uint32_t task, uint64_t va, uint32_t len, uint8_t *out) {
     (void)p; if (!g_calls++) g_first = task;
     bool ok = false; for (uint32_t i = 0; i < g_ncan; i++) ok |= g_can[i] == task;
     if (!ok || va != 0x118000u || len != 0x4000u) return false;
     memset(out, 0, len);
+    if (g_table) for (uint32_t c = 0; c < 3; c++) for (uint32_t i = 0; i < 257; i++) { float f = (float)i / 256.0f; memcpy(out + 4u * (c * 257u + i), &f, 4); }   /* identity LUT: wrapping word sum 0x48400000 */
     return true;
 }
 static bool g_owner_known; static uint64_t g_owner_map; static uint32_t g_owner_task;
@@ -42,14 +45,22 @@ int main(void) {
     w32(op8, 12 + 8, 7); w32(op8, 12 + 16, 0x118000u); w32(op8, 12 + 24, 0x4000u); w32(op8, 12 + 32, 0x101u); w32(op8, 12 + 36, 0x48400000u);
     char line[2048];
 
-    /* 1. owner known, every task could read it: the owner is asked first and alone */
+    /* 1. owner known, every task could read it and the owner's read matches the checksum: the owner is asked first and alone */
+    g_table = true;
     g_ncan = 3; g_can[0] = 2; g_can[1] = 6; g_can[2] = 9;
     g_owner_known = true; g_owner_map = 7; g_owner_task = 9;
     lagfx_dd_note_cmd(p, 1, 4, op8, 52);
     lagfx_dd_stats_line(line, sizeof line);
     assert(field(line, "read_done=") == 1);
     assert(g_calls == 1 && g_first == 9);
-    printf("display-diag-gamma-owner-unit OK (owner task asked first, alone)\n");
+    /* 2. g7-gamma-select: the owner is asked first but its read does not match the checksum (zeros): the other live tasks are asked too (all mismatch here: nothing accepted, bounded) */
+    lagfx_gd_test_reset();   /* the first scenario accepted a table (one-shot) */
+    g_table = false; g_calls = 0; g_first = 0; g_owner_map = 8; w32(op8, 12 + 8, 8);
+    lagfx_dd_note_cmd(p, 1, 4, op8, 52);
+    assert(g_first == 9 && g_calls == 3);   /* owner 9, then last 0x44 = 6, then 2 */
+    lagfx_dd_stats_line(line, sizeof line);
+    assert(field(line, "read_done=") == 1);
+    printf("display-diag-gamma-owner-unit OK (owner task asked first, alone when it matches; others asked when it mismatches)\n");
     free(p);
     return 0;
 }

@@ -205,7 +205,10 @@ int main(void) {
         lagfx_gd_test_reset(); g_owner_task = 2;
         op8(p, 9, 0x118000, 0x4000, 257, sum);
         lagfx_gd_stats_get(&s); stats_ok(&s);
-        assert(s.read_done == 1 && s.sum_match == 0 && s.sum_mismatch == 1);
+        /* g7-gamma-select: owner 2 reads fine but its checksum mismatches, so the other live task (5) is asked in the same attempt and selected (before: stopped at the mismatch) */
+        assert(s.read_done == 1 && s.sum_match == 1 && s.sum_mismatch == 0 && s.sel_accepted == 1 && s.sel_rejected_mismatch == 1);
+        log_load(); assert(strstr(g_log, "region task=5 via=last44(owner not accepted)") || strstr(g_log, "region task=5 via=scan("));
+        assert(strstr(g_log, "gamma-select attempt=1 result=ACCEPTED task=5"));
         fin(p);
     }
 

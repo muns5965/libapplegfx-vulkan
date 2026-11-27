@@ -34,12 +34,17 @@ static lagfx_gd_stats_t s_st;
 static uint64_t s_desc_lines, s_parse_lines, s_walk_lines, s_probe_lines, s_ram_lines, s_map_lines, s_probe_reads, s_probe_match;
 static bool s_have_last, s_have_nonzero; static lagfx_gd_desc_t s_last, s_nonzero;
 static int s_busy;
+/* selected-LUT record (see lagfx_gd_select_t); guarded by a tiny spin flag so the getter is safe against the op 0x08 thread */
+static lagfx_gd_select_t s_sel; static uint8_t s_sel_data[3u * 4096u * 4u]; static int s_sel_lock;
+static void sel_lock(void) { while (__atomic_test_and_set(&s_sel_lock, __ATOMIC_ACQUIRE)) { } }
+static void sel_unlock(void) { __atomic_clear(&s_sel_lock, __ATOMIC_RELEASE); }
 
 void lagfx_gd_test_reset(void) {
     memset(&s_st, 0, sizeof s_st);
     s_desc_lines = s_parse_lines = s_walk_lines = s_probe_lines = s_ram_lines = s_map_lines = s_probe_reads = s_probe_match = 0;
     s_have_last = s_have_nonzero = false;
     memset(&s_last, 0, sizeof s_last); memset(&s_nonzero, 0, sizeof s_nonzero);
+    sel_lock(); memset(&s_sel, 0, sizeof s_sel); sel_unlock();
     __atomic_clear(&s_busy, __ATOMIC_RELEASE);
 }
 
@@ -50,6 +55,8 @@ void lagfx_gd_stats_get(lagfx_gd_stats_t *o) {
     o->applied_ok = 0;   /* nothing applies a gamma table: this is a constant, not a counter */
     o->sum_match = GET(s_st.sum_match); o->sum_mismatch = GET(s_st.sum_mismatch);
     o->descs_seen = GET(s_st.descs_seen); o->desc_changes = GET(s_st.desc_changes);
+    o->sel_accepted = GET(s_st.sel_accepted); o->sel_ambiguous = GET(s_st.sel_ambiguous); o->sel_no_match = GET(s_st.sel_no_match);
+    o->sel_rejected_mismatch = GET(s_st.sel_rejected_mismatch); o->sel_rejected_nofit = GET(s_st.sel_rejected_nofit); o->sel_rejected_unreadable = GET(s_st.sel_rejected_unreadable);
 }
 
 size_t lagfx_gd_stats_suffix(char *out, size_t cap) {
@@ -59,6 +66,15 @@ size_t lagfx_gd_stats_suffix(char *out, size_t cap) {
                      (unsigned long long)s.applied_ok, (unsigned long long)s.sum_match, (unsigned long long)s.sum_mismatch, (unsigned long long)s.descs_seen,
                      (unsigned long long)s.desc_changes, (unsigned long long)GET(s_probe_reads), (unsigned long long)GET(s_probe_match));
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
+}
+
+size_t lagfx_gd_select_get(lagfx_gd_select_t *o, uint8_t *copy, size_t cap) {
+    size_t n = 0;
+    sel_lock();
+    if (o) *o = s_sel;
+    if (s_sel.state == LAGFX_GD_SEL_ACCEPTED && copy) { n = (size_t)s_sel.nwords * 4u; if (n > cap) n = cap; memcpy(copy, s_sel_data, n); }
+    sel_unlock();
+    return n;
 }
 
 /* lagfx_gd_task_read / lagfx_gd_task_read_bool live in diag.c: they need the arm64 / legacy translators, and this module must not pull the protocol layers into every static-library consumer. */
@@ -194,7 +210,18 @@ static void gd_lut_probe(lagfx_protocol_t *p, uint64_t n, const lagfx_gd_desc_t 
 
 static bool is_sample(uint64_t n) { return n <= 4u || (n <= 64u && (n & (n - 1u)) == 0u); }   /* 1 2 3 4 8 16 32 64 */
 
-/* ---- the region read (the existing diagnostic, moved here with its classification) ---- */
+static bool gd_sel_accepted(void) { return GET(s_st.sel_accepted) != 0u; }
+
+/* ---- the region read + address-space selection ----
+ * A read only counts as ACCEPTED when the region decodes (3 * count words fit) AND its wrapping u32 word sum equals the descriptor's checksum. The preferred task (owner of the
+ * mapping, else the last 0x44) is asked first; if it reads but is not accepted (or does not read), the last 0x44 and every other live task are asked in the same attempt. Exactly
+ * one matching task is selected; two or more matching fallback tasks are reported as ambiguous and nothing is selected. A match by the preferred task ends the attempt (the
+ * other tasks are not read: "owner asked first and alone" is kept). Reads per attempt <= LAGFX_MAX_TASKS + 1; attempts <= GD_MAX_REGION_ATTEMPTS. */
+#define GD_SEL_MAX_CAND  (LAGFX_MAX_TASKS + 1u)
+#define GD_SEL_LIST_MAX  16u
+typedef struct { uint32_t task; const char *via; } gd_cand_t;
+typedef struct { uint32_t task; const char *via; char line[420]; lagfx_gd_lut_t l; } gd_rec_t;
+
 static void gd_region_read(lagfx_protocol_t *p, const lagfx_gd_desc_t *d, lagfx_dd_reader_t reader, lagfx_dd_owner_t owner_fn) {
     const uint64_t att = INC(s_st.read_attempts);
     /* The task that CREATED the display mapping (named by this very op 0x08) owns the region: ask it first. The last 0x44 is only a guess (vm2: last 0x44 = task 6, the
@@ -207,38 +234,86 @@ static void gd_region_read(lagfx_protocol_t *p, const lagfx_gd_desc_t *d, lagfx_
         return;
     }
     uint8_t *buf = (uint8_t *)malloc(d->len);
-    uint32_t task = have_owner ? owner : p->diag2.last44_global_task, tried = 0;
-    const char *via = have_owner ? "owner" : "last44";
-    bool ok = false, any_translated = false;
-    if (buf) {
-        int r = rd_any(p, reader, task, d->off, (uint32_t)d->len, buf);
-        tried = 1; ok = r == LAGFX_GD_RD_OK; any_translated |= r == LAGFX_GD_RD_OK || r == LAGFX_GD_RD_PHYS_FAIL;
-        if (!ok && have_owner && have_task && p->diag2.last44_global_task != owner) {
-            tried++;
-            r = rd_any(p, reader, p->diag2.last44_global_task, d->off, (uint32_t)d->len, buf);
-            any_translated |= r == LAGFX_GD_RD_OK || r == LAGFX_GD_RD_PHYS_FAIL;
-            if (r == LAGFX_GD_RD_OK) ok = true, task = p->diag2.last44_global_task, via = "last44(owner failed)";
-        }
-        for (uint32_t i = 0; !ok && i < LAGFX_MAX_TASKS; i++) {
-            if (!p->tasks[i].live || (have_owner && p->tasks[i].id == owner) || (have_task && p->tasks[i].id == p->diag2.last44_global_task)) continue;
-            tried++;
-            r = rd_any(p, reader, p->tasks[i].id, d->off, (uint32_t)d->len, buf);
-            any_translated |= r == LAGFX_GD_RD_OK || r == LAGFX_GD_RD_PHYS_FAIL;
-            if (r == LAGFX_GD_RD_OK) ok = true, task = p->tasks[i].id, via = "scan(DIAGNOSTIC FALLBACK: neither the owner nor the last 0x44 could read it; the same VA may exist in several tasks)";
-        }
+    if (!buf) return;
+    /* candidate order: preferred, last 0x44 (if different), every other live task */
+    gd_cand_t cand[GD_SEL_MAX_CAND]; uint32_t nc = 0;
+    const uint32_t pref = have_owner ? owner : p->diag2.last44_global_task;
+    cand[nc].task = pref; cand[nc++].via = have_owner ? "owner" : "last44";
+    if (have_owner && have_task && p->diag2.last44_global_task != owner) { cand[nc].task = p->diag2.last44_global_task; cand[nc++].via = "last44(owner not accepted)"; }
+    for (uint32_t i = 0; i < LAGFX_MAX_TASKS && nc < GD_SEL_MAX_CAND; i++) {
+        if (!p->tasks[i].live || (have_owner && p->tasks[i].id == owner) || (have_task && p->tasks[i].id == p->diag2.last44_global_task)) continue;
+        cand[nc].task = p->tasks[i].id; cand[nc++].via = "scan(DIAGNOSTIC FALLBACK: neither the owner nor the last 0x44 was accepted; the same VA may exist in several tasks)";
     }
+    gd_rec_t first, acc; bool have_first = false, have_acc = false;
+    uint32_t tried = 0, nmatch = 0, mtasks[4] = {0}, nread = 0, nmis = 0, nfit = 0, nunr = 0;
+    bool any_translated = false, ok = false, pref_unreadable = false;
+    char rej[300]; size_t rk = 0; rej[0] = 0;
+    for (uint32_t i = 0; i < nc; i++) {
+        tried++;
+        int r = rd_any(p, reader, cand[i].task, d->off, (uint32_t)d->len, buf);
+        any_translated |= r == LAGFX_GD_RD_OK || r == LAGFX_GD_RD_PHYS_FAIL;
+        if (r != LAGFX_GD_RD_OK) {
+            nunr++; INC(s_st.sel_rejected_unreadable); if (i == 0) pref_unreadable = true;
+            if (rk + 40 < sizeof rej) rk += (size_t)snprintf(rej + rk, sizeof rej - rk, " task=%u:%s", cand[i].task, rd_name(r));
+            continue;
+        }
+        ok = true; nread++;
+        lagfx_gd_lut_t l; lagfx_gd_lut_decode(buf, (size_t)d->len, d->count, d->sum, &l);
+        gd_rec_t *rec = NULL;
+        if (!have_first) { rec = &first; have_first = true; }
+        const bool match = l.fits && l.sum_match;
+        if (match) {
+            if (nmatch < 4u) mtasks[nmatch] = cand[i].task;
+            nmatch++;
+            if (nmatch == 1u) {
+                rec = &acc; have_acc = true;
+                sel_lock(); memcpy(s_sel_data, buf, (size_t)l.nwords * 4u); sel_unlock();   /* the validated words; the rest of the page is not kept */
+            }
+        } else if (l.fits) {
+            nmis++; INC(s_st.sel_rejected_mismatch);
+            if (rk + 48 < sizeof rej) rk += (size_t)snprintf(rej + rk, sizeof rej - rk, " task=%u:sum=0x%08x!=0x%08x", cand[i].task, l.sum, d->sum);
+        } else {
+            nfit++; INC(s_st.sel_rejected_nofit);
+            if (rk + 40 < sizeof rej) rk += (size_t)snprintf(rej + rk, sizeof rej - rk, " task=%u:nofit", cand[i].task);
+        }
+        if (rec) {
+            lagfx_dd_gamma_t g; lagfx_dd_gamma_summarize(buf, d->len, &g); lagfx_dd_gamma_format(rec->line, sizeof rec->line, &g);
+            rec->task = cand[i].task; rec->l = l;
+            /* via text keeps the older strings: "last44(owner failed)" when the owner could not even read */
+            rec->via = (i == 1u && have_owner && pref_unreadable) ? "last44(owner failed)" : cand[i].via;
+        }
+        if (match && i == 0) break;   /* the preferred task matched: stop, the others are not asked */
+    }
+    const gd_rec_t *shown = have_acc ? &acc : have_first ? &first : NULL;
     if (ok) {
-        lagfx_dd_gamma_t g; char line[420]; lagfx_gd_lut_t l;
-        lagfx_dd_gamma_summarize(buf, d->len, &g); lagfx_dd_gamma_format(line, sizeof line, &g);
-        lagfx_gd_lut_decode(buf, (size_t)d->len, d->count, d->sum, &l);
         INC(s_st.read_done); INC(s_st.translate_ok);
-        if (l.fits) { if (l.sum_match) INC(s_st.sum_match); else INC(s_st.sum_mismatch); }
+        if (nmatch == 1u) { INC(s_st.sel_accepted); INC(s_st.sum_match); }
+        else { INC(s_st.sum_mismatch); if (nmatch >= 2u) INC(s_st.sel_ambiguous); else INC(s_st.sel_no_match); }
         gd_say("g7-pvg-gamma: region task=%u via=%s (owner=%d last 0x44 task=%u, %u task(s) tried) va=0x%llx len=0x%llx %s lut_decode[fits=%d sum=0x%08x expect=0x%08x match=%d ramp_maxdev=%.6f] (INFER: the descriptor's offset is a task virtual address; the checksum is the wrapping u32 sum of 3*count words, see gamma_diag.h; a read that succeeds in the wrong task does NOT match; never applied)",
-               task, via, have_owner ? (int)owner : -1, p->diag2.last44_global_task, tried, (unsigned long long)d->off, (unsigned long long)d->len, line, (int)l.fits, l.sum, d->sum, (int)l.sum_match, (double)l.maxdev);
+               shown->task, shown->via, have_owner ? (int)owner : -1, p->diag2.last44_global_task, tried, (unsigned long long)d->off, (unsigned long long)d->len, shown->line, (int)shown->l.fits, shown->l.sum, d->sum, (int)shown->l.sum_match, (double)shown->l.maxdev);
+        /* the one selection line per attempt (<= GD_MAX_REGION_ATTEMPTS lines in total) */
+        char selfld[40]; selfld[0] = 0;
+        if (nmatch) snprintf(selfld, sizeof selfld, " %s=%u", nmatch == 1u ? "task" : "first_match", mtasks[0]);
+        gd_say("g7-pvg-gamma: gamma-select attempt=%llu result=%s%s (owner=%d preferred=%u) tried=%u readable=%u rejected[mismatch=%u nofit=%u unreadable=%u]:%s (selection only: nothing is applied)",
+               (unsigned long long)att, nmatch == 1u ? "ACCEPTED" : nmatch >= 2u ? "AMBIGUOUS" : "NO_MATCH", selfld, have_owner ? (int)owner : -1, pref,
+               tried, nread, nmis, nfit, nunr, rk ? rej : " none");
+        if (nmatch >= 2u) { gd_say("g7-pvg-gamma: gamma-select AMBIGUOUS: %u tasks match the checksum (first %u, %u): not choosing", nmatch, mtasks[0], mtasks[1]); }
+        sel_lock();
+        if (nmatch == 0u) memset(&s_sel, 0, sizeof s_sel);   /* no stale AMBIGUOUS from an earlier attempt */
+        if (nmatch == 1u) {
+            memset(&s_sel, 0, sizeof s_sel);
+            s_sel.state = LAGFX_GD_SEL_ACCEPTED; s_sel.task = mtasks[0]; s_sel.preferred = mtasks[0] == pref; s_sel.count = d->count; s_sel.sum = d->sum;
+            s_sel.va = d->off; s_sel.len = d->len; s_sel.nwords = acc.l.nwords; s_sel.attempt = (uint32_t)att;
+        } else if (nmatch >= 2u) {
+            memset(&s_sel, 0, sizeof s_sel);
+            s_sel.state = LAGFX_GD_SEL_AMBIGUOUS; s_sel.ntasks = nmatch; for (uint32_t k = 0; k < 4u && k < nmatch; k++) s_sel.tasks[k] = mtasks[k];
+            s_sel.count = d->count; s_sel.sum = d->sum; s_sel.va = d->off; s_sel.len = d->len; s_sel.attempt = (uint32_t)att;
+        }
+        sel_unlock();
     } else {
         if (any_translated) { INC(s_st.translate_ok); INC(s_st.phys_read_fail); } else INC(s_st.unmapped);
         gd_say("g7-pvg-gamma: region read FAILED task=%u owner=%d (%u task(s) tried) va=0x%llx len=0x%llx (INFER: offset is not a plain task VA, or the page is unmapped) reason=%s attempt=%llu",
-               task, have_owner ? (int)owner : -1, tried, (unsigned long long)d->off, (unsigned long long)d->len, any_translated ? "phys_read_fail" : "unmapped", (unsigned long long)att);
+               pref, have_owner ? (int)owner : -1, tried, (unsigned long long)d->off, (unsigned long long)d->len, any_translated ? "phys_read_fail" : "unmapped", (unsigned long long)att);
     }
     free(buf);
 }
@@ -265,7 +340,7 @@ void lagfx_gd_note_op8(lagfx_protocol_t *p, uint32_t chan, const uint8_t *pl, ui
         s_last = d; s_have_last = true;
     }
     if (d.off != 0) { s_nonzero = d; s_have_nonzero = true; }
-    if (d.off != 0 && GET(s_st.read_done) == 0u && GET(s_st.read_attempts) < GD_MAX_REGION_ATTEMPTS) gd_region_read(p, &d, reader, owner);
+    if (d.off != 0 && !gd_sel_accepted() && GET(s_st.read_attempts) < GD_MAX_REGION_ATTEMPTS) gd_region_read(p, &d, reader, owner);
     if (is_sample(n)) {
         uint32_t k = 0;
         for (uint32_t i = 0; i < LAGFX_MAX_TASKS && k < GD_MAX_TASKS_PER_EVENT; i++) if (p->tasks[i].live) { k++; gd_walk_task(p, n, &p->tasks[i]); }

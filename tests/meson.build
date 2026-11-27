@@ -2277,6 +2277,17 @@ if fs.is_file(meson.current_source_dir() / 'gamma-diag-unit.c')
   test('display diagnostics: gamma descriptor 16 KiB reads, counters, layout (unit)', gamma_diag_test)
 endif
 
+# Gamma LUT address-space selection (g7-gamma-select): owner mismatch -> other task, owner match, no match (bounded), ambiguity; fake status reader, no Vulkan device.
+if fs.is_file(meson.current_source_dir() / 'gamma-select-unit.c')
+  gamma_select_test = executable('gamma-select-unit',
+    'gamma-select-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('gamma LUT address-space selection (unit)', gamma_select_test)
+endif
+
 # g7-pvg-ops clock: its origin is the first command the diagnostics see, not the first tracked op or the first statistics line (links the library, no Vulkan device).
 if fs.is_file(meson.current_source_dir() / 'display-diag-clock-unit.c')
   display_diag_clock_test = executable('display-diag-clock-unit',
