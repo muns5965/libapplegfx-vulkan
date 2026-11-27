@@ -1080,6 +1080,13 @@ if py3_exe.found() and fs.is_file(meson.project_source_root() / 'tools' / 'test_
     workdir : meson.project_source_root())
 endif
 
+# Dump pair derivation shared by tools/check-dump-spirv.sh and tools/check-stage-interfaces.py (reused function refs: the fn lines AFTER a pso define it).
+if py3_exe.found() and fs.is_file(meson.project_source_root() / 'tools' / 'test_dump_pairs.py')
+  test('dump pso pair derivation (python)', py3_exe,
+    args : ['-W', 'ignore', meson.project_source_root() / 'tools' / 'test_dump_pairs.py'],
+    workdir : meson.project_source_root())
+endif
+
 # air.sample_texture_2d -> real OpImageSampleImplicitLod lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-unit.c')
   air2spv_txs_deps = [libapplegfx_vulkan_dep]
