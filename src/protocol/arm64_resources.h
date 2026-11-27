@@ -93,6 +93,7 @@ struct lagfx_a64_obj {
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t wgen;                      /* buffer: bumped at every write the mirror knows of (guest upload, blit / fill / texture->buffer copy, linear push, shader-writable bind, tile kernel) */
     uint64_t rd_epoch; bool gpu_dirty;  /* buffer: exec epoch of the last read from the guest's pages; written by the GPU (blit / push / shader / tile) since that read */
+    VkImageView view3;                  /* sampled VK_IMAGE_VIEW_TYPE_3D view of a 3D texture (level 0); lazily made */
     VkImageView sview;                  /* sampled view when it differs from view (A8Unorm: components 0,0,0,R); lazily made */
     uint64_t lin_seen; bool lin_pulled; /* linear texture: wgen of the backing buffer when the image last took (pulled) or gave (pushed) the buffer's bytes; image is current iff lin_pulled && lin_seen == buffer wgen */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */
@@ -130,7 +131,10 @@ bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref);
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x);
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b);
-VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* 2D textures only (a 3D one yields VK_NULL_HANDLE) */
+/* The sampled view of a 3D mirror texture (VK_IMAGE_VIEW_TYPE_3D, level 0): feeds a texture3d (Dim3D) descriptor. VK_NULL_HANDLE for a non-3D object or one without sampled usage. */
+VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* A host-visible storage buffer (zeroed, persistently mapped) owned by the exec and freed with it, e.g. an aligned copy of a misaligned buffer range. */

@@ -38,6 +38,7 @@ typedef struct {
     uint32_t                 set;
     uint32_t                 binding;
     lagfx_spv_binding_kind_t kind;
+    uint8_t                  image_dim;  /* SAMPLED_IMAGE / STORAGE_IMAGE only: the OpTypeImage Dim operand (1 = Dim2D, 2 = Dim3D, 3 = Cube; 0 = not an image) */
     uint8_t                  may_write;  /* STORAGE_BUFFER only: 0 = the module PROVABLY never writes through it (every use of the variable / its access chains is a load or an
                                           * array length), 1 = a store / atomic / copy / call / phi / pointer escape was found (or the module is too large to analyse).
                                           * Several variables of one binding (byte-buffer views) are OR-ed. Not set for other kinds. */
@@ -50,6 +51,11 @@ typedef struct {
  * resource-free colour shader -> an empty pipeline layout is correct). */
 size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                                   lagfx_spv_binding_t *out, size_t cap);
+
+/* A constexpr sampler of the module: the Binding of its sampler variable and the raw i64 sampler word of the AIR (decode with lagfx_constexpr_sampler_decode). The
+ * translator names such variables "lagfx.cxs.<16 hex>" (OpName; LAGFX_CXS_NAME_PREFIX). Returns the TOTAL found; writes up to `cap` (ascending id order). */
+typedef struct { uint32_t binding; uint64_t raw; } lagfx_spv_cxs_t;
+size_t lagfx_spv_reflect_constexpr_samplers(const uint8_t *spv, size_t spv_len, lagfx_spv_cxs_t *out, size_t cap);
 
 /* A vertex stage-in attribute: a Location-decorated Input variable in the
  * VERTEX shader (the translator emits one per float/vector arg that is not a

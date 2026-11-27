@@ -243,6 +243,7 @@ static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     }
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
     if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
+    if (o->view3) vkDestroyImageView(vk->device, o->view3, NULL);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);
@@ -1348,6 +1349,21 @@ static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsa
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
     }
     return o->view;
+}
+
+bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o) { return o && o->kind == LAGFX_A64_TEXTURE && is_tex3d(o); }
+
+/* The whole level 0 of a 3D mirror texture as a 3D view. Level 0 only, as the 2D view: the sampler's LOD range is clamped to it by the exec (a sampler with a mip
+ * filter samples the base level). The A8Unorm component swizzle of the 2D path applies here too. */
+VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o || o->kind != LAGFX_A64_TEXTURE || !is_tex3d(o) || o->ds_aspects || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
+    if (!o->view3) {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_3D, .format = o->format,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (o->mtl_format == 1u) vi.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view3) != VK_SUCCESS) { o->view3 = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    }
+    return o->view3;
 }
 
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {

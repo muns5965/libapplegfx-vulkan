@@ -23,6 +23,7 @@
 #include "translate.h"
 #include "spv_builder.h"
 #include "common/log.h"
+#include "constexpr_sampler.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -379,6 +380,13 @@ typedef struct {
      * results that alias a buffer arg. Freed with the other side tables. */
     uint8_t                  *arg_alias;
     uint32_t                  id_default_sampler_var; /* constexpr-sampler fallback (0=none) */
+    /* One sampler variable (own descriptor binding) per constexpr sampler of the module (air.sampler_states; fragment stage). The runtime builds the
+     * VkSampler from the decoded word named in the variable's OpName ("lagfx.cxs.<16 hex>", see LAGFX_CXS_NAME_PREFIX). */
+    uint32_t                  n_cxs;
+    uint32_t                  id_cxs_var[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint32_t                  cxs_global[LAGFX_CONSTEXPR_SAMPLER_MAX];   /* module value id of the @global behind the sampler operand */
+    lagfx_constexpr_sampler_t cxs_dec[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint8_t                   cap_imgq;           /* OpCapability ImageQuery emitted (pixel-coordinate conversion) */
     uint32_t                  id_image_t;        /* OpTypeImage 2D float, Sampled=1 */
     uint32_t                  id_sampler_t;      /* OpTypeSampler */
     uint32_t                  id_sampimg_t;      /* OpTypeSampledImage */
@@ -525,6 +533,11 @@ static void copy_module_state(xlate_ctx_t *dst, const xlate_ctx_t *src) {
     dst->id_ptr_uc_image   = src->id_ptr_uc_image;
     dst->id_ptr_uc_sampler = src->id_ptr_uc_sampler;
     dst->id_default_sampler_var = src->id_default_sampler_var;
+    dst->n_cxs = src->n_cxs;
+    memcpy(dst->id_cxs_var, src->id_cxs_var, sizeof dst->id_cxs_var);
+    memcpy(dst->cxs_global, src->cxs_global, sizeof dst->cxs_global);
+    memcpy(dst->cxs_dec, src->cxs_dec, sizeof dst->cxs_dec);
+    dst->cap_imgq = src->cap_imgq;
     dst->helpers        = src->helpers;
 }
 
@@ -1413,6 +1426,44 @@ static uint32_t emit_type_image2d_f(xlate_ctx_t *c) {
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, ops, 8);
     c->id_image_t = id;
     return id;
+}
+
+/* Constexpr samplers (fragment stage): allocate one sampler variable per sampler the module declares in air.sampler_states. Those whose word does not decode
+ * (layout check failed) get no variable: a sample through one degrades to the default sampler and says so (LAGFX_WARN at the sample). */
+static void cxs_alloc(xlate_ctx_t *c) {
+    c->n_cxs = 0;
+    lagfx_constexpr_sampler_t all[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint32_t n = lagfx_air_extract_constexpr_samplers(c->m, all, LAGFX_CONSTEXPR_SAMPLER_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        if (!all[i].valid) { LAGFX_WARN("constexpr sampler @%u: word 0x%016llx does not match the known layout -- samples through it use the default sampler", all[i].global_index, (unsigned long long)all[i].raw); continue; }
+        c->cxs_dec[c->n_cxs] = all[i];
+        c->cxs_global[c->n_cxs] = all[i].global_index;
+        c->id_cxs_var[c->n_cxs] = lagfx_spv_builder_alloc_id(c->b);
+        c->n_cxs++;
+    }
+}
+
+/* Index of the constexpr sampler a sample call's sampler operand (ABSOLUTE value id) names, or -1. */
+static int cxs_find(const xlate_ctx_t *c, uint32_t abs_value_id) {
+    if (!c->n_cxs) return -1;
+    int32_t g = lagfx_air_sampler_operand_global(c->m, c->body, c->arg_id_base + c->num_args, abs_value_id);
+    if (g < 0) return -1;
+    for (uint32_t k = 0; k < c->n_cxs; k++) if (c->cxs_global[k] == (uint32_t)g) return (int)k;
+    return -1;
+}
+
+/* Binding + name of every constexpr sampler variable; `binding` is advanced. Called after the default sampler's decorations. */
+static void cxs_decorate(xlate_ctx_t *c, uint32_t *binding) {
+    for (uint32_t k = 0; k < c->n_cxs; k++) {
+        uint32_t d_set[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_set, 3);
+        uint32_t d_bind[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_BINDING, (*binding)++ };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
+        char nm[48];
+        snprintf(nm, sizeof nm, LAGFX_CXS_NAME_PREFIX "%016llx", (unsigned long long)c->cxs_dec[k].raw);
+        uint32_t pre[] = { c->id_cxs_var[k] };
+        lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, nm, NULL, 0);
+    }
 }
 
 /* Shared OpTypeImage 3D float (Sampled=1): a `texture3d<T, access::sample>` argument. */
@@ -2493,10 +2544,11 @@ static void emit_prologue(xlate_ctx_t *c) {
          * sampler to load. */
         if (needs_default_sampler(c))
             c->id_default_sampler_var = lagfx_spv_builder_alloc_id(c->b);
+        if (c->id_default_sampler_var) cxs_alloc(c);   /* textures exist: the module's constexpr samplers get their own bindings */
 
         frag_link_decide(c, n_fa);
         uint32_t prefix[] = { LAGFX_SPV_EXECUTION_MODEL_FRAGMENT, c->id_main };
-        uint32_t suffix[3u * LAGFX_MAX_VERTEX_ARGS + LAGFX_MAX_BYTEBUF_VIEWS];
+        uint32_t suffix[3u * LAGFX_MAX_VERTEX_ARGS + LAGFX_MAX_BYTEBUF_VIEWS + LAGFX_CONSTEXPR_SAMPLER_MAX];
         uint32_t n_iface = 0u;
         for (uint32_t k = 0; k < c->num_color_outputs; k++)
             suffix[n_iface++] = c->id_color_vars[k];
@@ -2507,6 +2559,7 @@ static void emit_prologue(xlate_ctx_t *c) {
             if (c->arg_rt_var[i])        suffix[n_iface++] = c->arg_rt_var[i];
         }
         if (c->id_default_sampler_var) suffix[n_iface++] = c->id_default_sampler_var;
+        for (uint32_t k = 0; k < c->n_cxs; k++) suffix[n_iface++] = c->id_cxs_var[k];
         for (uint32_t v = 0; v < c->n_bytebuf_views; v++)
             suffix[n_iface++] = c->bytebuf_view[v].var_id;
         lagfx_spv_builder_emit_op_string(c->b, LAGFX_SPV_OP_ENTRY_POINT,
@@ -2560,6 +2613,7 @@ static void emit_prologue(xlate_ctx_t *c) {
                                    LAGFX_SPV_DECORATION_BINDING, binding++ };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
         }
+        cxs_decorate(c, &binding);   /* constexpr samplers: one binding each, after the default sampler */
         /* Input attachments (framebuffer fetch): set 0, a fixed binding range above the resources (24 + n), InputAttachmentIndex n. */
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_rt_var[i]) continue;
@@ -2691,6 +2745,10 @@ static void emit_arg_resource_vars(xlate_ctx_t *c, uint32_t n_args) {
         uint32_t ptr_id = emit_type_ptr_uc_sampler(c);
         uint32_t var_ops[] = { ptr_id, c->id_default_sampler_var,
                                 LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 3);
+    }
+    for (uint32_t k = 0; k < c->n_cxs; k++) {
+        uint32_t var_ops[] = { emit_type_ptr_uc_sampler(c), c->id_cxs_var[k], LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 3);
     }
     if (c->id_image_t) (void)emit_type_sampled_image(c);
@@ -3631,6 +3689,14 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
                     if (a == c->arg_resource_var[k]) ok = true;
                 }
                 if (want == 2u && a && a == c->id_default_sampler_var) ok = true;
+                if (want == 2u && !ok) {   /* a constexpr sampler passed on to the helper: its own variable */
+                    int ck = cxs_find(c, vid);
+                    if (ck >= 0) {
+                        a = c->id_cxs_var[ck]; ok = true;
+                        if (!c->cxs_dec[ck].normalized)   /* UNSUPPORTED: the helper's sample only sees a sampler parameter, so it cannot divide the texel coordinates by the image size */
+                            LAGFX_WARN("constexpr sampler @%u uses pixel coordinates and is passed to a helper function: UNSUPPORTED, the helper samples with unconverted coordinates (normalized sampler)", c->cxs_dec[ck].global_index);
+                    }
+                }
                 if (!ok)
                     a = (want == 2u && c->id_default_sampler_var)
                             ? c->id_default_sampler_var : first;
@@ -4978,6 +5044,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         uint32_t samp_slot = callee_slot_idx + 2u;
         uint32_t uv_slot   = callee_slot_idx + 3u;
         if (inst->num_ops > uv_slot) {
+            int cxs_k = -1;   /* index of the constexpr sampler this sample uses, or -1 */
             uint32_t tex_var = resolve_value_spv(c,
                 resolve_relative((uint32_t)inst->ops[tex_slot], next_val_id));
             uint32_t samp_var = resolve_value_spv(c,
@@ -5005,9 +5072,14 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                         if (tex_var == v) tex_ok = 1;
                     }
                 }
-                if (!samp_ok)
-                    samp_var = c->id_default_sampler_var ? c->id_default_sampler_var
-                                                         : first_samp;
+                /* A constexpr sampler declared in the body (or in a helper): its own variable, bound by the host to the decoded state. */
+                cxs_k = cxs_find(c, resolve_relative((uint32_t)inst->ops[samp_slot], next_val_id));
+                if (cxs_k >= 0) { samp_var = c->id_cxs_var[cxs_k]; samp_ok = 1; }
+                if (!samp_ok) {
+                    LAGFX_WARN("sample_texture: sampler operand is neither a bound sampler argument nor a decodable constexpr sampler -- %s used (state not applied)",
+                               c->id_default_sampler_var ? "the default sampler" : "the first sampler argument");
+                    samp_var = c->id_default_sampler_var ? c->id_default_sampler_var : first_samp;
+                }
                 if (!tex_ok)
                     tex_var = first_tex;
             }
@@ -5026,6 +5098,22 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 uint32_t samp_val = lagfx_spv_builder_alloc_id(c->b);
                 { uint32_t o[] = { samp_t, samp_val, samp_var };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, o, 3); }
+                /* Pixel (unnormalized) constexpr sampler: Metal coord::pixel coordinates are texels of level 0. The host sampler is a NORMALIZED one with the decoded
+                 * address modes / filters, so the coordinate is divided by the image size here (OpImageQuerySizeLod, level 0) -- explicit, no Vulkan unnormalized-coordinate
+                 * restrictions (which would need explicit-LOD sampling and 1D/2D images, no mips, no anisotropy). The bit-15 meaning is INFER (constexpr_sampler.h). */
+                if (cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) {
+                    const uint32_t nl = is3d ? 3u : 2u;
+                    if (!c->cap_imgq) { c->cap_imgq = 1u; uint32_t cap[] = { 50u /* ImageQuery */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1); }
+                    uint32_t u32 = emit_type_int_w(c, 32u, 0u), vu = emit_type_vec(c, u32, nl), vf = nl == 3u ? emit_type_vec3_f(c) : emit_type_vec2_f(c);
+                    uint32_t sz = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vu, sz, img_val, emit_const_uint32(c, 0u) }; lagfx_spv_builder_emit_op(c->b, 103u /* OpImageQuerySizeLod */, o, 4); }
+                    uint32_t szf = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vf, szf, sz }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONVERT_U_TO_F, o, 3); }
+                    uint32_t un = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vf, un, uv_spv, szf }; lagfx_spv_builder_emit_op(c->b, 136u /* OpFDiv */, o, 4); }
+                    uv_spv = un;
+                    if (c->cxs_dec[cxs_k].mip_filter) LAGFX_WARN("constexpr sampler @%u: pixel coordinates with a mip filter -- the host sampler samples level 0 only", c->cxs_dec[cxs_k].global_index);
+                }
                 uint32_t sampled = lagfx_spv_builder_alloc_id(c->b);
                 { uint32_t o[] = { simg_t, sampled, img_val, samp_val };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SAMPLED_IMAGE, o, 4); }

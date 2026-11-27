@@ -48,6 +48,11 @@ extern "C" {
 
 #define LAGFX_CONSTEXPR_SAMPLER_MAX 16u
 
+/* The translator names the sampler variable of a constexpr sampler "lagfx.cxs.<16 hex digits of the raw i64 word>" (OpName) so that the host can recover the state
+ * from the SPIR-V alone (spv_reflect: lagfx_spv_reflect_constexpr_samplers). Coordinates of a pixel (unnormalized) constexpr sampler are divided by the image size
+ * IN THE SHADER; the host sampler is always a normalized one (see sampler_cache.h lagfx_sampler_state_from_constexpr_norm). */
+#define LAGFX_CXS_NAME_PREFIX "lagfx.cxs."
+
 typedef struct {
     uint32_t global_index;   /* module value id of the @__air_sampler_state global */
     uint64_t raw;            /* the i64 initializer */
