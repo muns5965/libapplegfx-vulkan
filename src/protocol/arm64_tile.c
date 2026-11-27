@@ -440,8 +440,7 @@ static VkBuffer tile_gather(lagfx_a64_rexec_t *x, lagfx_protocol_t *p, lagfx_a64
     if (!o->map || range > TILE_GATHER_MAX) { TILE(p).gather_failed++; return VK_NULL_HANDLE; }
     if (lagfx_a64_res_gpu_pending(x, o)) {
         if (!lagfx_a64_res_scratch_xfer(x, range, &sb, NULL)) { TILE(p).gather_failed++; return VK_NULL_HANDLE; }
-        def[*ndef].o = o, def[*ndef].off = off, def[*ndef].len = range, def[*ndef].dst = sb, (*ndef)++;
-        TILE(p).gathered++, TILE(p).gather_gpu++;
+        def[*ndef].o = o, def[*ndef].off = off, def[*ndef].len = range, def[*ndef].dst = sb, (*ndef)++;   /* counted once the copy is recorded */
         return sb;
     }
     if (!lagfx_a64_res_scratch(x, range, &sb, &mp)) { TILE(p).gather_failed++; return VK_NULL_HANDLE; }
@@ -512,6 +511,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     VkDescriptorBufferInfo bi[TILE_MAX_BIND]; VkDescriptorImageInfo ii[TILE_MAX_BIND]; VkWriteDescriptorSet w[TILE_MAX_BIND];
     VkDeviceSize sb_align = lim->minStorageBufferOffsetAlignment ? lim->minStorageBufferOffsetAlignment : 1;
     tile_gcopy_t gdef[TILE_MAX_BIND]; uint32_t ngdef = 0;
+    lagfx_a64_obj_t *wobj[TILE_MAX_BIND]; uint32_t nwobj = 0;   /* buffers the kernel may write: marked once the dispatch is validated */
     for (uint32_t i = 0; i < tp->n_bind; i++) {
         const tile_bind_t *b = &tp->bind[i];
         uint32_t mi = (uint32_t)(int32_t)b->metal_index;
@@ -531,7 +531,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
                 doff = 0;
             }
             bi[i] = (VkDescriptorBufferInfo){ dbuf, doff, range }, w[i].pBufferInfo = &bi[i];
-            lagfx_a64_res_buf_written(e->x, o);   /* the kernel may write it: a linear texture over it is stale from here on */
+            if (b->written) wobj[nwobj++] = o;   /* the kernel may write it: a linear texture over it is stale from here on; a read-only buffer is not touched (unknown access counts as written) */
         } else if (b->kind == TB_TEXTURE) {
             lagfx_a64_obj_t *o = t->tex[mi];
             if (!o || o->linear) { TILE(p).skip_unbound++; return false; }
@@ -554,7 +554,13 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     if (tp->n_bind) vkUpdateDescriptorSets(vk->device, tp->n_bind, w, 0, NULL);
     /* validated: end the rendering instance (attachments -> GENERAL), dispatch, resume with LOAD */
     e->suspend(e->ctx);
-    for (uint32_t k = 0; k < ngdef; k++) (void)lagfx_a64_res_gather_record(e->x, gdef[k].o, gdef[k].off, gdef[k].len, gdef[k].dst);   /* outside the pass: GPU copies of buffers written earlier in this exec */
+    for (uint32_t k = 0; k < ngdef; k++) {   /* outside the pass: GPU copies of buffers written earlier in this exec */
+        if (lagfx_a64_res_gather_record(e->x, gdef[k].o, gdef[k].off, gdef[k].len, gdef[k].dst)) { TILE(p).gathered++, TILE(p).gather_gpu++; continue; }
+        TILE(p).gather_failed++, TILE(p).skip_unaligned++;   /* no dispatch on old bytes: put the pass back and skip */
+        if (!e->resume(e->ctx)) TILE(p).resume_failed++;
+        return false;
+    }
+    for (uint32_t k = 0; k < nwobj; k++) lagfx_a64_res_buf_written(e->x, wobj[k]);
     VkCommandBuffer cb = lagfx_a64_res_cmdbuf(e->x);
     VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);

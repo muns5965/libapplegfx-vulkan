@@ -131,6 +131,7 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_FN_FRAG 25u
 #define REF_UV  26u
 #define REF_MAT 27u
+#define REF_GMS 60u       /* 4x multisampled BGRA8 target, 64 x 64 (freshness tests) */
 #define REF_POS0 28u      /* NPOS position buffer objects, all over the same guest page (distinct objects = distinct gather cache generations) */
 #define NPOS 12u
 #define GRT_DIM 64u
@@ -541,11 +542,11 @@ static void seg_end(uint8_t type, uint8_t cont) {
     va_write(g_segoff[g_nseg], g_cb, g_cbn); g_nseg++;
 }
 static void exec_segs(lagfx_protocol_t *p, uint32_t task) {
-    uint32_t refs[10 + NPOS], flags[10 + NPOS], nr = 0;
-    const uint32_t fixed[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_GTEX, REF_GRT_A, REF_GRT_B, REF_PIPE_TEX, REF_UV, REF_MAT };
+    uint32_t refs[11 + NPOS], flags[11 + NPOS], nr = 0;
+    const uint32_t fixed[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_GTEX, REF_GRT_A, REF_GRT_B, REF_PIPE_TEX, REF_UV, REF_MAT, REF_GMS };
     for (uint32_t i = 0; i < sizeof fixed / sizeof *fixed; i++) { refs[nr] = fixed[i]; flags[nr++] = (fixed[i] == REF_SRC || fixed[i] == REF_UBO || fixed[i] == REF_WBUF) ? 1u : 0u; }
     for (uint32_t i = 0; i < NPOS; i++) { refs[nr] = REF_POS0 + i; flags[nr++] = 0; }
-    uint32_t w[3 + 2 * (10 + NPOS) + 4 * 8], n = 0;
+    uint32_t w[3 + 2 * (11 + NPOS) + 4 * 8], n = 0;
     w[n++] = task; w[n++] = nr; w[n++] = g_nseg;
     for (uint32_t i = 0; i < nr; i++) { w[n++] = refs[i]; w[n++] = flags[i]; }
     for (uint32_t i = 0; i < g_nseg; i++) { memcpy(w + n, &g_segoff[i], 8); n += 2; memcpy(w + n, &g_seglen[i], 8); n += 2; }
@@ -608,6 +609,63 @@ static void run_fresh_tile(lagfx_protocol_t *p, lagfx_task_entry_t *t) {
     if (got != 0.0f) { puts("FAIL: (f3) the tile dispatch read a stale uniform buffer copy"); exit(1); }
     assert(TILE(p).gather_gpu - gg0 >= 1u);
 }
+/* One draw of cell c of the open pass: the position buffer object posref at off, the cell's viewport. */
+static void fresh_draw_cell(uint32_t posref, uint64_t off, uint32_t c) {
+    cb_bufs(125, 0, &posref, 1); cb_buf_offset(0, off);
+    cb_viewport((c % CELLS_ROW) * CELL, (c / CELLS_ROW) * CELL, CELL, CELL); cb_draw(4, 0, 4);
+}
+static void fresh_pass_open(uint32_t grt) {
+    const uint32_t tex[1] = { REF_GTEX }, vb[3] = { REF_POS0, REF_UV, REF_MAT };
+    cb_pass(grt, 2, B4); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+}
+static uint32_t read_cell(lagfx_protocol_t *p, lagfx_task_entry_t *t, uint32_t ref, uint32_t c) {
+    uint32_t px[GRT_DIM * GRT_DIM];
+    assert(lagfx_a64_exec_readback_texture(p, t, ref, px, sizeof px, NULL, NULL));
+    return px[(c / CELLS_ROW) * CELL * GRT_DIM + (c % CELLS_ROW) * CELL];
+}
+/* (f5) a write is pending while the open pass is MULTISAMPLED (no GPU copy possible there): that draw gets the host bytes, and they must not be taken as fresh by a later 1x pass that
+ * binds the same range. */
+static void run_fresh_ms(lagfx_protocol_t *p, lagfx_task_entry_t *t) {
+    g_nseg = 0;
+    seg_begin(); blit_fill(REF_POS0, 0, 0x100, 0); seg_end(2, 0);
+    seg_begin(); cb_pass(REF_GTEX, 2, G4); fresh_pass_open(REF_GMS); fresh_draw_cell(REF_POS0, POS_OFFS[0], 0); seg_end(0, 0);
+    seg_begin(); fresh_pass_open(REF_GRT_B); fresh_draw_cell(REF_POS0, POS_OFFS[0], 0); seg_end(0, 0);
+    uint64_t hs0 = RUNC(p).ext_gather_host_stale, gp0 = RUNC(p).ext_gather_gpu, sf0 = RUNC(p).submit_failed, gf0 = RUNC(p).ext_gather_failed;
+    exec_segs(p, 1);
+    assert(RUNC(p).submit_failed == sf0 && RUNC(p).ext_gather_failed == gf0);
+    uint32_t c0 = read_cell(p, t, REF_GRT_B, 0);
+    printf("INFO: (f5) multisampled pass, then a 1x pass: host-stale copies %llu, GPU copies %llu, 1x pass cell0 %08x (want %08x)\n", (unsigned long long)(RUNC(p).ext_gather_host_stale - hs0), (unsigned long long)(RUNC(p).ext_gather_gpu - gp0), c0, BLUE);
+    assert(RUNC(p).ext_gather_host_stale - hs0 == 1u && RUNC(p).ext_gather_gpu - gp0 == 1u);
+    if (c0 != BLUE) { puts("FAIL: (f5) the 1x pass reused the stale copy of the multisampled pass"); exit(1); }
+}
+/* (f8) a pass that is ended and begun again for a GPU copy keeps what it drew before and draws after. Cells 1 and 3 are drawn before / after the copy that cell 0 needs, cell 2 not at all. */
+static void run_fresh_pass_keep(lagfx_protocol_t *p, lagfx_task_entry_t *t) {
+    g_nseg = 0;
+    seg_begin(); blit_fill(REF_POS0, 0, 0x100, 0); seg_end(2, 0);
+    seg_begin(); cb_pass(REF_GTEX, 2, G4); fresh_pass_open(REF_GRT_A);
+    fresh_draw_cell(REF_POS0 + 1, POS_OFFS[1], 1);
+    fresh_draw_cell(REF_POS0, POS_OFFS[0], 0);
+    fresh_draw_cell(REF_POS0 + 2, POS_OFFS[2], 3);
+    seg_end(0, 0);
+    uint64_t gp0 = RUNC(p).ext_gather_gpu, sf0 = RUNC(p).submit_failed, gf0 = RUNC(p).ext_gather_failed;
+    exec_segs(p, 1);
+    assert(RUNC(p).submit_failed == sf0 && RUNC(p).ext_gather_failed == gf0 && RUNC(p).ext_gather_gpu - gp0 == 1u);
+    uint32_t c[4] = { read_cell(p, t, REF_GRT_A, 0), read_cell(p, t, REF_GRT_A, 1), read_cell(p, t, REF_GRT_A, 2), read_cell(p, t, REF_GRT_A, 3) };
+    printf("INFO: (f8) pass ended and resumed for a GPU copy: cells %08x %08x %08x %08x (want blue, green, blue, green)\n", c[0], c[1], c[2], c[3]);
+    if (c[0] != BLUE || c[1] != GREEN || c[2] != BLUE || c[3] != GREEN) { puts("FAIL: (f8) the pass lost what it drew before the copy or after it"); exit(1); }
+}
+/* (f7) a tile kernel that only READS a buffer does not mark it written: two dispatches over the same unaligned uniforms and no write in the exec need no GPU copy. */
+static void run_fresh_tile_readonly(lagfx_protocol_t *p) {
+    static const double sent[4] = { SENT, SENT, SENT, SENT };
+    g_nseg = 0;
+    seg_begin(); cb_pass(REF_DST, 2, sent); cb_pipeline(REF_TILE); cb_tile_buf(0, REF_UBO, UBO_UNAL); cb_tile_buf(1, REF_WBUF, 0); cb_tile_tex(0, REF_SRC);
+    cb_dispatch_region(g_S, 4, 0, 0, g_S, 4); cb_dispatch_region(g_S, 4, g_S, 0, g_S, 4); seg_end(0, 0);
+    uint64_t td0 = TILE(p).dispatches, gg0 = TILE(p).gather_gpu, tg0 = TILE(p).gathered, tf0 = TILE(p).gather_failed;
+    exec_segs(p, 1);
+    printf("INFO: (f7) two tile dispatches over a read-only unaligned buffer: gathers %llu (by GPU %llu)\n", (unsigned long long)(TILE(p).gathered - tg0), (unsigned long long)(TILE(p).gather_gpu - gg0));
+    assert(TILE(p).dispatches - td0 == 2u && TILE(p).gather_failed == tf0 && TILE(p).gathered - tg0 == 2u);
+    if (TILE(p).gather_gpu != gg0) { puts("FAIL: (f7) a read-only tile buffer was treated as written"); exit(1); }
+}
 static void test_fresh(const uint8_t *lib, size_t libn) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     struct lagfx_vk_state *vk = g_dev->vk;
@@ -619,6 +677,14 @@ static void test_fresh(const uint8_t *lib, size_t libn) {
     run_fresh(p, t, 1, "(f1) blit fill between the draws");
     run_fresh(p, t, 2, "(f2) blit buffer copy between the draws");
     run_fresh_tile(p, t);
+    run_fresh_tile_readonly(p);
+    {   /* the multisampled target: descriptor type 4, sample count 4 */
+        put_texture(REF_GMS, 0x900, GRT_DIM, GRT_DIM, 80, 4, 0);
+        uint8_t ty = 4, sc = 4; const uint32_t rec = 12 + 0x18 + 36;
+        va_write(VA_PAY + 0x900 + rec + 12, &ty, 1); va_write(VA_PAY + 0x900 + rec + 12 + 18, &sc, 1);
+    }
+    run_fresh_ms(p, t);
+    run_fresh_pass_keep(p, t);
     puts("PASS: a gather after a GPU write recorded earlier in the same exec sees the new bytes; without a write the copy is reused");
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
 }

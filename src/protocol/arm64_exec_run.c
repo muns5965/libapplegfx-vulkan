@@ -712,13 +712,17 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
     if (!lagfx_a64_res_scratch_xfer(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
     int g = pend ? gather_gpu(r, p, b, off, range, sb) : 0;
     if (g < 0) { CNT(p).ext_gather_failed++; return VK_NULL_HANDLE; }   /* the slot stays allocated (freed with the exec) */
+    r->gc_bytes += range;
     if (g) CNT(p).ext_gather_gpu++;
     else {
-        if (pend) CNT(p).ext_gather_host_stale++;   /* a write is pending but the GPU copy was not possible: the host bytes may be older */
         memcpy(mp, b->map + off, (size_t)range);
+        if (pend) {   /* a write is pending but the GPU copy was not possible (multisampled pass): these host bytes may be older than the buffer. They serve THIS draw only; registering them
+                       * under the current wgen would let a later draw (e.g. in a 1x pass, where the GPU copy works) take them as fresh. */
+            CNT(p).ext_gather_host_stale++, CNT(p).ext_gathered++, CNT(p).ext_gather_bytes += range;
+            return sb;
+        }
     }
     r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].wgen = b->wgen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
-    r->gc_bytes += range;
     CNT(p).ext_gathered++, CNT(p).ext_gather_bytes += range;
     return sb;
 }
@@ -798,6 +802,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     VkDescriptorBufferInfo bi[LAGFX_A64_MAX_BINDINGS];
     VkDescriptorImageInfo ii[LAGFX_A64_MAX_BINDINGS];
     VkWriteDescriptorSet w[LAGFX_A64_MAX_BINDINGS];
+    lagfx_a64_obj_t *wl[LAGFX_A64_MAX_BINDINGS]; uint32_t nwl = 0;   /* shader-writable buffers of this draw: marked written only when the draw is going to be recorded */
     uint64_t key = 1469598103934665603ull ^ pp->h.gen;
     /* A draw with an unnormalized-coordinates sampler in a stage: Vulkan only lets such a sampler read a view of ONE level and ONE layer, and which image a sampler is paired with is the
      * shader's business (known only to the SPIR-V rewrite), so every plain 2D sampled texture of that stage gets its level 0 / layer 0 view (a texture with more is counted as dropped). */
@@ -815,7 +820,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
             if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; buf_miss(r, p, pp, i, b, off); return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
-            if (s->bind[i].writable) lagfx_a64_res_buf_written(r->x, b);   /* the shader may write it: a linear texture over it is stale from here on */
+            if (s->bind[i].writable) wl[nwl++] = b;   /* the shader may write it: a linear texture over it is stale from here on, and a gather of it needs the GPU (marked below) */
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
             if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
             if (off % r->min_sb_align) {   /* Metal allows any 4-aligned offset, Vulkan only multiples of minStorageBufferOffsetAlignment: bind an aligned copy of the range */
@@ -905,6 +910,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
         p->diag2.exec.pipe.desc_sets++;
     }
     vkCmdBindDescriptorSets(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_BIND_POINT_GRAPHICS, s->desc.layout, 0, 1, &ds, 0, NULL);
+    for (uint32_t k = 0; k < nwl; k++) lagfx_a64_res_buf_written(r->x, wl[k]);   /* every descriptor is valid and bound: the draw follows */
     return true;
 }
 
