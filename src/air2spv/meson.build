@@ -22,6 +22,7 @@ air2spv_sources = files(
     'emit_unop.c',
     'translate.c',
    'constexpr_sampler.c',
+   'ce_cast.c',
     'translate_function.c',
     'spv_undef_report.c',
     'spv_reflect.c',

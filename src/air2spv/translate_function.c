@@ -22,6 +22,7 @@
 #include "translate_function.h"
 #include "translate.h"
 #include "spv_builder.h"
+#include "ce_cast.h"
 #include "common/log.h"
 
 #include <stdint.h>
@@ -8631,6 +8632,7 @@ static void xlate_ctx_free_fn(xlate_ctx_t *c) {
  * ctx) emits the OpConstants and records the ids in the shared helpers
  * struct; later calls (helper ctxs) copy the recorded bindings — the
  * constants themselves live once in the types section. */
+static void bind_ce_casts(xlate_ctx_t *c, const lagfx_air_constant_t *tab, uint32_t n, uint32_t base, bool local, uint32_t *spv_cache);
 static void bind_module_constants(xlate_ctx_t *c) {
     uint32_t n_mod_consts = 0;
     const lagfx_air_constant_t *cs = lagfx_air_module_constants(c->m, &n_mod_consts);
@@ -8772,6 +8774,137 @@ static void bind_module_constants(xlate_ctx_t *c) {
             if (h && h->mod_const_spv) h->mod_const_spv[i] = spv_id;
         }
     }
+    bind_ce_casts(c, cs, n_mod_consts, mod_val_base, false, h ? h->mod_const_spv : NULL);
+}
+
+
+/* ===================================================================
+ * Constant-expression casts (CST_CODE_CE_CAST = 11: [opcode, src type, src ABSOLUTE value id])
+ *
+ * The semantics are LLVM LangRef's (public): the cast of a constant is the constant the cast would compute.
+ * Folded here, for scalar sources of the widths the translator has types for (i1/i8/i16/i32/i64, half, float):
+ *   trunc / zext / sext (integers), fptoui / fptosi (in range; an out-of-range result is poison -> OpUndef),
+ *   uitofp / sitofp (round to nearest even), fptrunc / fpext (half <-> float), bitcast (int <-> float of equal width, int -> int),
+ *   ptrtoint(null) = 0, inttoptr(0) = null, bitcast / addrspacecast of a pointer (the same address: aliases the SPIR-V value of the source if it is bound).
+ * Cast of undef / poison is undef / poison (LangRef), so it stays an OpUndef. Not folded (left unresolved, the operand then falls back to a typed OpUndef as before):
+ *   vector sources, double, i128 and wider, ptrtoint / inttoptr of a non-null value (the address is not representable in SPIR-V).
+ * A cast whose root is the ADDRESS of a module global is not materialised: the translator creates no SPIR-V variable for AIR globals (samplers are decoded from the
+ * global's initialiser by constexpr_sampler.c, which follows these casts itself), so no placeholder is emitted either - an OpUndef there would claim "undefined" for a
+ * value that is merely not representable, and nothing consumes it.
+ * =================================================================== */
+static bool ce_scalar_type(const lagfx_air_type_t *t, bool *is_float, bool *is_ptr, uint32_t *width) {
+    *is_float = false; *is_ptr = false;
+    switch (t->kind) {
+        case LAGFX_AIR_TYPE_INTEGER: {
+            uint32_t w = t->num_op >= 1u ? t->op[0] : 32u;
+            if (w != 1u && w != 8u && w != 16u && w != 32u && w != 64u) return false;
+            *width = w; return true;
+        }
+        case LAGFX_AIR_TYPE_FLOAT: *is_float = true; *width = 32u; return true;
+        case LAGFX_AIR_TYPE_HALF:  *is_float = true; *width = 16u; return true;
+        case LAGFX_AIR_TYPE_POINTER: *is_ptr = true; *width = 64u; return true;
+        default: return false;
+    }
+}
+
+/* the value of constant `vid` (local or module table), or !ok */
+static void ce_source(xlate_ctx_t *c, uint32_t vid,
+                      const lagfx_air_constant_t *lc, uint32_t n_lc, uint32_t lc_base, const lagfx_ce_val_t *lfold,
+                      const lagfx_air_constant_t *mc, uint32_t n_mc, uint32_t m_base, const lagfx_ce_val_t *mfold,
+                      lagfx_ce_val_t *out) {
+    memset(out, 0, sizeof *out);
+    const lagfx_air_constant_t *k = NULL;
+    if (lc && vid >= lc_base && vid - lc_base < n_lc) { if (lfold && lfold[vid - lc_base].ok) { *out = lfold[vid - lc_base]; return; } k = &lc[vid - lc_base]; }
+    else if (mc && vid >= m_base && vid - m_base < n_mc) { if (mfold && mfold[vid - m_base].ok) { *out = mfold[vid - m_base]; return; } k = &mc[vid - m_base]; }
+    if (!k || k->type_index >= c->num_air_types) return;
+    uint32_t nt = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    bool isf, isp; uint32_t w;
+    if (k->type_index >= nt || !ce_scalar_type(&ts[k->type_index], &isf, &isp, &w)) return;
+    out->is_float = isf; out->width = w;
+    switch (k->kind) {
+        case LAGFX_AIR_CONST_INTEGER: if (isf || isp) return; out->bits = (uint64_t)k->payload.i64 & lagfx_ce_mask(w); out->ok = true; return;
+        case LAGFX_AIR_CONST_FLOAT:   if (!isf) return; out->bits = (uint64_t)k->payload.i64 & lagfx_ce_mask(w); out->ok = true; return;
+        case LAGFX_AIR_CONST_NULL:    out->bits = 0; out->is_ptr_null = isp; out->ok = true; return;
+        case LAGFX_AIR_CONST_UNDEF:   out->undef = true; out->ok = true; return;
+        case LAGFX_AIR_CONST_UNKNOWN: if (k->raw_code == 26u) { out->undef = true; out->ok = true; } return;   /* CST_CODE_POISON */
+        default: return;
+    }
+}
+
+/* Bind every CE_CAST constant of one table. tab/n/base: the table and its first absolute value id; local: the function-local table (else the module table);
+ * spv_cache (module table only): receives the SPIR-V id of each bound constant. */
+static void bind_ce_casts(xlate_ctx_t *c, const lagfx_air_constant_t *tab, uint32_t n, uint32_t base, bool local, uint32_t *spv_cache) {
+    if (!tab || !n) return;
+    uint32_t n_lc = 0, n_mc = 0, nf = 0, nt = 0;
+    const lagfx_air_constant_t *lc = c->body ? lagfx_air_function_body_local_constants(c->body, &n_lc) : NULL;
+    const lagfx_air_constant_t *mc = lagfx_air_module_constants(c->m, &n_mc);
+    (void)lagfx_air_module_functions(c->m, &nf);
+    uint32_t ng = lagfx_air_module_num_globalvars(c->m);
+    uint32_t lc_base = c->arg_id_base + c->num_args, m_base = ng + nf;
+    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &nt);
+    lagfx_ce_val_t *fold = (lagfx_ce_val_t *)calloc(n, sizeof *fold);
+    uint8_t *st = (uint8_t *)calloc(n, 1);   /* 0 pending, 1 resolved (bound), 2 resolved: address of a module global, deliberately no placeholder */
+    if (!fold || !st) { free(fold); free(st); return; }
+    for (int pass = 0; pass < 4; pass++) {
+        bool progress = false;
+        for (uint32_t i = 0; i < n; i++) {
+            const lagfx_air_constant_t *k = &tab[i];
+            if (st[i] || k->kind != LAGFX_AIR_CONST_UNKNOWN || k->raw_code != 11u || k->type_index >= nt) continue;
+            const uint32_t *ops = local ? (const uint32_t *)lagfx_air_function_body_payload_ptr(c->body, k->payload.bytes.offset)
+                                        : (const uint32_t *)(k->payload.bytes.offset ? lagfx_air_module_string(c->m, k->payload.bytes.offset) : NULL);
+            if (!ops || k->payload.bytes.len < 3u * sizeof(uint32_t)) continue;
+            uint32_t opc = ops[0], src_vid = ops[2], vid = base + i;
+            bool dst_f, dst_p; uint32_t dw;
+            if (!ce_scalar_type(&ts[k->type_index], &dst_f, &dst_p, &dw)) continue;   /* vector / double / wide: unresolved, as before */
+            lagfx_ce_val_t src, res;
+            ce_source(c, src_vid, lc, n_lc, lc_base, local ? fold : NULL, mc, n_mc, m_base, local ? NULL : fold, &src);
+            if (src.ok && lagfx_ce_fold(opc, &src, dst_f, dst_p, dw, &res)) {
+                uint32_t spv = 0;
+                if (res.undef) {
+                    /* cast of undef / poison = undef / poison (LangRef) */
+                    if (local && !air_type_requires_extra_cap(c, k->type_index, 0))
+                        spv = emit_undef_at(c, emit_air_type(c, k->type_index), "ce_cast_of_undef", __LINE__, vid);
+                } else if (dst_p) { uint32_t o[] = { emit_air_type(c, k->type_index), lagfx_spv_builder_alloc_id(c->b) }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, 46u /* OpConstantNull */, o, 2); }
+                else if (dst_f) { uint32_t o[] = { dw == 32u ? emit_type_float32(c) : emit_type_half(c), lagfx_spv_builder_alloc_id(c->b), (uint32_t)res.bits }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
+                else if (dw == 1u) { uint32_t o[] = { emit_type_bool(c), lagfx_spv_builder_alloc_id(c->b) }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, res.bits ? 41u : 42u, o, 2); }
+                else if (dw == 64u) { uint32_t o[] = { emit_type_int_w(c, 64u, 0u), lagfx_spv_builder_alloc_id(c->b), (uint32_t)(res.bits & 0xFFFFFFFFu), (uint32_t)(res.bits >> 32u) }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 4); }
+                else { uint32_t o[] = { emit_type_int_w(c, dw, 0u), lagfx_spv_builder_alloc_id(c->b), (uint32_t)res.bits }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
+                fold[i] = res; st[i] = 1; progress = true;
+                if (!spv) continue;
+                bind_value_spv(c, vid, spv);
+                if (spv_cache) spv_cache[i] = spv;
+                if (!res.undef && !dst_f && !dst_p) {
+                    if (dw == 64u) { if ((int64_t)res.bits >= INT32_MIN && (int64_t)res.bits <= INT32_MAX) bind_value_lit_i32(c, vid, (int32_t)(int64_t)res.bits); }
+                    else if (dw > 1u) bind_value_lit_i32(c, vid, (int32_t)(uint32_t)res.bits);
+                }
+                continue;
+            }
+            /* bitcast / addrspacecast of a pointer keeps the address: the same SPIR-V value, once the source is bound */
+            if ((opc == 11u || opc == 12u) && dst_p && src_vid != vid) {
+                uint32_t sid = resolve_value_spv(c, src_vid);
+                if (sid) { bind_value_spv(c, vid, sid); if (spv_cache) spv_cache[i] = sid; st[i] = 1; progress = true; continue; }
+                bool src_is_global_addr = src_vid < ng;
+                if (!src_is_global_addr) {
+                    const lagfx_air_constant_t *sk = NULL; uint32_t si = 0;
+                    if (local && src_vid >= lc_base && src_vid - lc_base < n) { si = src_vid - lc_base; sk = &tab[si]; }
+                    else if (!local && src_vid >= base && src_vid - base < n) { si = src_vid - base; sk = &tab[si]; }
+                    src_is_global_addr = sk && st[si] == 2;
+                }
+                if (src_is_global_addr) { st[i] = 2; progress = true; }   /* the address of a module global: not materialised in SPIR-V, nothing consumes it */
+            }
+        }
+        if (!progress) break;
+    }
+    /* what is still unresolved keeps the old behaviour: a typed OpUndef placeholder in the function-local table (the module table never had one) */
+    if (local) {
+        for (uint32_t i = 0; i < n; i++) {
+            const lagfx_air_constant_t *k = &tab[i];
+            if (st[i] || k->kind != LAGFX_AIR_CONST_UNKNOWN || k->raw_code != 11u || k->type_index >= nt) continue;
+            if (air_type_requires_extra_cap(c, k->type_index, 0)) continue;
+            bind_value_spv(c, base + i, emit_undef_at(c, emit_air_type(c, k->type_index), "const_unknown(code11)", __LINE__, base + i));
+        }
+    }
+    free(fold); free(st);
 }
 
 /* Bind the body's function-local constants at value-ids
@@ -8880,6 +9013,7 @@ static void bind_local_constants(xlate_ctx_t *c) {
             case LAGFX_AIR_CONST_UNKNOWN: {
                 /* OpUndef of the constant's type. UNKNOWN covers LLVM's
                  * POISON code (26); treat as undef. */
+                if (k->kind == LAGFX_AIR_CONST_UNKNOWN && k->raw_code == 11u) break;   /* CE_CAST: folded / aliased / placeholder-ed by bind_ce_casts below */
                 if (air_type_requires_extra_cap(c, ty_air, 0)) break;
                 uint32_t ty_spv = emit_air_type(c, ty_air);
                 { static char nm[64]; if (k->kind == LAGFX_AIR_CONST_UNDEF) snprintf(nm, sizeof nm, "const_undef(code3)"); else snprintf(nm, sizeof nm, "const_unknown(code%d)", (int)k->raw_code);
@@ -8966,6 +9100,7 @@ static void bind_local_constants(xlate_ctx_t *c) {
         }
         if (spv_id) bind_value_spv(c, vid, spv_id);
     }
+    bind_ce_casts(c, local_consts, n_local_consts, lc_base, true, NULL);
 }
 
 /* ===================================================================

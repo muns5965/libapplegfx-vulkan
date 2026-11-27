@@ -24,3 +24,15 @@ size: ≥ 5, ≤ ~200 per metallib.
 a single module. Per-function splitting is Stage 50.5 part 3 (needs
 a `metallib_dump` C helper that calls `lagfx_metallib_get_bitcode`
 per function).
+
+## undef-census.py / spv_undef_flow.py
+
+OpUndef census of the translated shaders of an arm64 GPU dump (census item X03).
+`python3 tools/undef-census.py <build dir> <dump dir> [work dir]` re-translates the dump with
+`examples/dump-translate` (as shipped, and with `LAGFX_UNDEF_NOCACHE=1` so that every OpUndef has one
+creation site, attributed by `LAGFX_UNDEF_SITES=1`), walks each module with `spv_undef_flow.py`
+(def-use graph over the SPIR-V binary: per-lane taint, memory per variable and constant access path,
+calls analysed per call chain) and prints, per origin class and per module, how many OpUndef values
+are unused / dead / lane-dead / reach an address, a branch-or-select condition, or an Output / buffer /
+image store. Needs `stdbuf` (coreutils). `python3 tools/spv_undef_flow.py module.spv` prints the sinks of
+each OpUndef of one module.
