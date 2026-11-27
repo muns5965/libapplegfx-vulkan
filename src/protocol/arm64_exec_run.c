@@ -995,6 +995,20 @@ static bool dup_of_color(const a64_run_t *r, const lagfx_a64_obj_t *o) {
     return false;
 }
 
+/* EXACT-mode whole-pass rejection (arm64_msaa.h): undoes whatever begin_pass has begun so far (attachment layouts back to GENERAL, resolve targets, depth / stencil), records NO
+ * rendering for the pass (no load / clear op is ever executed), counts ms_pass_refused with the reason. The following records of the pass find no target and draw nothing. */
+static void reject_pass(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *ds_begun, const char *what, int idx, const char *why, uint32_t ref) {
+    lagfx_a64_msaa_veto_t v; memset(&v, 0, sizeof v);
+    if (idx >= 0) snprintf(v.what, sizeof v.what, "%s%d", what, idx); else snprintf(v.what, sizeof v.what, "%s", what);
+    v.why = why, v.ref = ref;
+    for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
+    lagfx_a64_msaa_pass_abort(r->x, &r->ms);
+    if (ds_begun) lagfx_a64_res_ds_end(r->x, ds_begun);
+    memset(r->rts, 0, sizeof r->rts), r->nslots = 0, r->ms.samples = 0;
+    lagfx_a64_msaa_reject(p, &v);
+    CNT(p).no_target++; tag_partial(p, 26);
+}
+
 /* tag 26 (inner opcode 0x1a): the 584-byte pass descriptor, parsed by the existing lagfx_parse_render_pass_descriptor (render_pass.c). Up to four colour
  * attachments (by original slot) and one depth / stencil texture are rendered to; begin/end of the dynamic rendering go through the existing render encoder
  * (translate/render_encoder.c). */
@@ -1014,6 +1028,12 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         lagfx_a64_dss_default(&r->es.dss);
         r->es.dirty = true;
     }
+    bool strict = false;   /* EXACT mode and a multisampled attachment named: all-or-nothing pass (arm64_msaa.h) */
+    lagfx_a64_msaa_look_t look;   /* the objects the descriptor names, looked up once */
+    {
+        lagfx_a64_msaa_veto_t veto;
+        if (!lagfx_a64_msaa_pass_gate(p, r->x, &r->ms, &d, vk_core13(r->vk), &look, &strict, &veto)) { lagfx_a64_msaa_reject(p, &veto); CNT(p).no_target++; tag_partial(p, 26); return; }
+    }
     /* colour attachments by their ORIGINAL slot (the fragment output location); up to 4. The SAME mirror object a blit / sync / write-back of this exec
      * resolves for the ref. A slot whose target cannot be built is left unused (and counted), the others still render. */
     VkRenderingAttachmentInfo ca[4];
@@ -1026,16 +1046,18 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     const bool capw = r->cap && lagfx_a64_cap_pass_wanted(r->cap);
     if (capw) {   /* capture: contents BEFORE the pass, copied while the attachments are still in GENERAL (nothing is recorded otherwise) */
         for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++)
-            if (d.colors[k].slot < 4u) lagfx_a64_cap_pre(r->cap, lagfx_a64_res_object(r->x, d.colors[k].texture_ref));
+            if (d.colors[k].slot < 4u) lagfx_a64_cap_pre(r->cap, look.c[k]);
     }
     for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS; k++) {
         uint32_t slot = d.colors[k].slot;
-        if (slot >= 4u) { CNT(p).extra_attach_ignored++; continue; }
-        uint64_t lin0 = lagfx_a64_res_stats(p)->linear_unsupported;
-        lagfx_a64_obj_t *t = lagfx_a64_res_object(r->x, d.colors[k].texture_ref);
-        if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
+        if (slot >= 4u) { if (strict) { reject_pass(r, p, NULL, "colour", (int)slot, "slot_out_of_range", d.colors[k].texture_ref); return; } CNT(p).extra_attach_ignored++; continue; }
+        lagfx_a64_obj_t *t = look.c[k];
+        if (look.lin[k]) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
+        if (strict && (!t || t->kind != LAGFX_A64_TEXTURE)) { reject_pass(r, p, NULL, "colour", (int)slot, "texture_missing", d.colors[k].texture_ref); return; }
         if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; if (!t) lagfx_a64_msaa_note_missing(p, r->x, d.colors[k].texture_ref); continue; }
+        if (strict && !lagfx_a64_msaa_attach_ok(p, t)) { reject_pass(r, p, NULL, "colour", (int)slot, "host_sample_count_differs", d.colors[k].texture_ref); return; }
         if (!lagfx_a64_msaa_attach_ok(p, t)) { CNT(p).no_target++; continue; }   /* exact mode: never render into an image whose host sample count is not the guest's */
+        if (strict && first && lagfx_a64_msaa_obj_samples(t) != r->ms.samples) { reject_pass(r, p, NULL, "colour", (int)slot, "mixed_sample_counts", d.colors[k].texture_ref); return; }
         if (first && lagfx_a64_msaa_obj_samples(t) != r->ms.samples) { CNT(p).extra_attach_ignored++; p->diag2.exec.msaa.attach_mixed_ignored++; continue; }   /* one sample count per pass (Vulkan: every attachment equals rasterizationSamples) */
         uint32_t load = d.colors[k].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
         VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -1044,11 +1066,11 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) lagfx_fmtcap_clear_color(t->format, d.colors[k].clear_color, &cv.color);   /* the union member follows the format's numeric class (S04) */
         VkImageView view; uint32_t w, h;
         if (!(t->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) p->diag2.exec.fmt.target_not_attachable++;   /* the device cannot render to this format (counted: not a silent no_target) */
-        if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
-        if (first && (w != fw || h != fh)) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* one render area for all attachments */
+        if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { if (strict) { reject_pass(r, p, NULL, "colour", (int)slot, "target_begin_failed", d.colors[k].texture_ref); return; } CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
+        if (first && (w != fw || h != fh)) { lagfx_a64_res_target_end(r->x, t); if (strict) { reject_pass(r, p, NULL, "colour", (int)slot, "extent_mismatch", d.colors[k].texture_ref); return; } CNT(p).extra_attach_ignored++; continue; }   /* one render area for all attachments */
         bool dup = false;
         for (uint32_t q = 0; q < 4u; q++) dup |= r->rts[q] == t;
-        if (dup) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* the same image twice is not a valid attachment set */
+        if (dup) { lagfx_a64_res_target_end(r->x, t); if (strict) { reject_pass(r, p, NULL, "colour", (int)slot, "duplicate_attachment", d.colors[k].texture_ref); return; } CNT(p).extra_attach_ignored++; continue; }   /* the same image twice is not a valid attachment set */
         if (!first) first = t, fw = w, fh = h, r->ms.samples = lagfx_a64_msaa_obj_samples(t);
         r->rts[slot] = t;
         cap_load[slot] = load; for (int c = 0; c < 4; c++) cap_clear[slot][c] = d.colors[k].clear_color[c];
@@ -1056,6 +1078,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         {   /* multisampled texture: store action / resolve texture (arm64_msaa.c); a plain texture keeps STORE (a resolve action on it is counted) */
             const lagfx_a64_obj_t *att[4] = { r->rts[0], r->rts[1], r->rts[2], r->rts[3] };
             lagfx_a64_msaa_color(p, r->x, &r->ms, slot, slot, t, d.colors[k].store_action, d.colors[k].resolve_texture_ref, d.colors[k].resolve_level || d.colors[k].resolve_slice, att, &ca[slot]);
+            if (strict && r->ms.fail) { reject_pass(r, p, NULL, "resolve", (int)slot, r->ms.fail, d.colors[k].resolve_texture_ref); return; }   /* a resolve the store action requires could not be set up */
         }
         if (slot + 1u > nslots) nslots = slot + 1u;
         if (slot > 0u) CNT(p).multi_attach++;
@@ -1069,16 +1092,20 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     if (d.has_depth || d.has_stencil) {
         uint32_t dref = d.has_depth ? d.depth_texture_ref : 0u, sref = d.has_stencil ? d.stencil_texture_ref : 0u;
         lagfx_a64_obj_t *o = NULL;
+        if (strict && !vk_core13(r->vk)) { reject_pass(r, p, NULL, "depth", -1, "no_depth_stencil_support", dref ? dref : sref); return; }
         if (!vk_core13(r->vk)) { CNT(p).ds_no_device_support++; p->diag2.exec.pipe.stub_depth_stencil++; }
         else {
-            o = lagfx_a64_res_object(r->x, dref ? dref : sref);
+            o = look.ds;
             if (!o) lagfx_a64_msaa_note_missing(p, r->x, dref ? dref : sref);
             else if (!lagfx_a64_msaa_attach_ok(p, o)) o = NULL;   /* counted below as ds_attach_unsupported */
+            if (strict && (!o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || (dref && !(o->ds_aspects & 1u)) || (!dref && !(o->ds_aspects & 2u)) || (dref && sref && sref != dref) || (dref && d.depth_level))) { reject_pass(r, p, NULL, dref ? "depth" : "stencil", -1, "depth_stencil_texture_unusable", dref ? dref : sref); return; }
             if (!o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || (dref && !(o->ds_aspects & 1u)) || (!dref && !(o->ds_aspects & 2u))) { CNT(p).ds_attach_unsupported++; o = NULL; }
             else if (dref && sref && sref != dref) { CNT(p).ds_split_ignored++; }   /* the stencil lives in another texture: only the depth one is attached */
             else if (dref && d.depth_level) { CNT(p).ds_attach_unsupported++; o = NULL; }
         }
         if (o && lagfx_a64_res_ds_begin(r->x, o, &dview, &dw, &dh)) {
+            if (strict && ((first && (dw < fw || dh < fh)) || dup_of_color(r, o))) { reject_pass(r, p, o, dref ? "depth" : "stencil", -1, "extent_or_duplicate", dref ? dref : sref); return; }
+            if (strict && first && lagfx_a64_msaa_obj_samples(o) != r->ms.samples) { reject_pass(r, p, o, dref ? "depth" : "stencil", -1, "mixed_sample_counts", dref ? dref : sref); return; }
             if ((first && (dw < fw || dh < fh)) || dup_of_color(r, o)) { CNT(p).ds_attach_unsupported++; CNT(p).extra_attach_ignored++; }   /* attachments must cover the render area */
             else if (first && lagfx_a64_msaa_obj_samples(o) != r->ms.samples) { CNT(p).ds_attach_unsupported++; p->diag2.exec.msaa.ds_mismatch_ignored++; }   /* depth / stencil and colour of one pass share one sample count */
             else {
@@ -1086,7 +1113,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
                 if (!first) r->ms.samples = lagfx_a64_msaa_obj_samples(o);   /* a depth-only multisampled pass */
                 if (r->ms.samples > 1u && (d.depth_resolve_texture_ref || d.stencil_resolve_texture_ref || d.depth_store_action >= 2u || d.stencil_store_action >= 2u)) p->diag2.exec.msaa.ds_resolve_unsupported++;   /* depth / stencil resolve: stored only */
             }
-        } else if (o) CNT(p).ds_attach_unsupported++;
+        } else if (o) { if (strict) { reject_pass(r, p, NULL, dref ? "depth" : "stencil", -1, "ds_begin_failed", dref ? dref : sref); return; } CNT(p).ds_attach_unsupported++; }
     }
     if (!first && !dso) { CNT(p).no_target++; tag_partial(p, 26); return; }
     if (dso) {
@@ -1116,6 +1143,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         lagfx_a64_msaa_pass_abort(r->x, &r->ms);
         if (dso) lagfx_a64_res_ds_end(r->x, dso);
         memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
+        if (strict) { lagfx_a64_msaa_veto_t v; memset(&v, 0, sizeof v); snprintf(v.what, sizeof v.what, "pass"), v.why = "render_begin_failed"; lagfx_a64_msaa_reject(p, &v); }
         CNT(p).no_target++; tag_partial(p, 26); return;
     }
     if (dso) {

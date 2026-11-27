@@ -67,6 +67,7 @@ typedef struct {
     lagfx_msaa_stats_t ms;
     uint64_t draws, skipped, no_target, msaa_refused, val;
     char line[1100];
+    char rej[96];   /* reason of the whole-pass rejection of the run ("" when the pass was not rejected) */
 } gr_t;
 
 enum { P_PLAIN, P_DEFERRED, P_DEFERRED_NO_TAGS };
@@ -101,6 +102,7 @@ static void gr_run(const sc_t *s, gr_t *out) {
     out->draws = p->diag2.exec.run.draws, out->skipped = p->diag2.exec.run.draws_skipped, out->no_target = p->diag2.exec.run.no_target, out->msaa_refused = p->diag2.exec.fmt.msaa_refused;
     out->val = lagfx_vk_validation_msg_count - v0;
     lagfx_msaa_stats_line(&p->diag2.exec.msaa, out->line, sizeof out->line);
+    if (out->ms.ms_pass_refused) snprintf(out->rej, sizeof out->rej, "%s", lagfx_a64_msaa_last_reject());
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex2 = false;
 }
@@ -160,6 +162,11 @@ static bool resolved_matches(const gr_t *g, bool f16, bool flip, unsigned *parti
     if (partial) *partial = part;
     return true;
 }
+static bool is_untouched(const uint8_t *img, size_t n) {   /* 0x55 sentinel intact, or 0xee = the readback found no mirror object (a texture no executed pass named is never created) */
+    bool a = true, b = true;
+    for (size_t i = 0; i < n; i++) a &= img[i] == 0x55, b &= img[i] == 0xee;
+    return a || b;
+}
 static bool is_sentinel(const uint8_t *img, size_t n) { for (size_t i = 0; i < n; i++) if (img[i] != 0x55) return false; return true; }
 
 static sc_t sc(uint32_t ref, uint32_t fmt, uint32_t bpp, uint32_t type, uint32_t samples, uint16_t store, uint32_t res) {
@@ -181,7 +188,9 @@ static void cb_pass_ms_depth(uint32_t cref, uint32_t dref, uint16_t dstore) {   
     memcpy(r, &dref, 4); memcpy(r + 0x14, &dload, 2); memcpy(r + 0x16, &dstore, 2); memcpy(r + 0x1c, &one, 8);
     cb_cmd(26, r, sizeof r);
 }
-typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_stats_t ms; uint64_t draws, skipped, no_target, pipes_built, ds_unsup; char line[1100]; } mp_t;
+typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_stats_t ms; uint64_t draws, skipped, no_target, pipes_built, ds_unsup, val; char line[1100]; char rej[96]; } mp_t;
+#define REF_MSD8 34u   /* multisampled depth texture asked with 8 samples: refused in exact mode on a 1|4 device */
+static unsigned g_mp_extra;   /* bit 0: REF_MS16 as a 8-sample colour texture (refused); bit 1: REF_MSD8 (refused 8-sample depth) */
 static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
@@ -194,6 +203,13 @@ static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
         const uint32_t rec = 12 + 0x18 + 36; const uint8_t ty = 4, ns = 4;
         va_write(VA_PAY + 0xe00 + rec + 12, &ty, 1); va_write(VA_PAY + 0xe00 + rec + 12 + 18, &ns, 1);
     }
+    if (g_mp_extra & 1u) put_ms_tex(REF_MS16, VPN_MS16, 115, 8, 4, 8);
+    if (g_mp_extra & 2u) {
+        put_ds_tex(REF_MSD8, 0xf00, 252);
+        const uint32_t rec = 12 + 0x18 + 36; const uint8_t ty = 4, ns = 8;
+        va_write(VA_PAY + 0xf00 + rec + 12, &ty, 1); va_write(VA_PAY + 0xf00 + rec + 12 + 18, &ns, 1);
+    }
+    { static uint8_t f[RT_W * RT_H * 4]; memset(f, 0x55, sizeof f); va_write((uint64_t)VPN_MSX << 14, f, sizeof f); }   /* the plain REF_MSX: sentinel, so "untouched" can be told from "written" */
     g_res_tex2 = true; g_rc.fs = FS_HALF; g_rc.blend = false;
     lagfx_a64_exec_set_pipeline_resolver(p, rc_resolver, NULL);
     val_begin();
@@ -204,6 +220,7 @@ static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     if (!lagfx_a64_exec_readback_texture(p, t, REF_MSX, o->msx, sizeof o->msx, &w, &h)) memset(o->msx, 0xee, sizeof o->msx);
     o->ms = p->diag2.exec.msaa, o->draws = p->diag2.exec.run.draws, o->skipped = p->diag2.exec.run.draws_skipped, o->no_target = p->diag2.exec.run.no_target, o->pipes_built = p->diag2.exec.pipe.pipes_built, o->ds_unsup = p->diag2.exec.run.ds_attach_unsupported;
     lagfx_msaa_stats_line(&p->diag2.exec.msaa, o->line, sizeof o->line);
+    if (o->ms.ms_pass_refused) snprintf(o->rej, sizeof o->rej, "%s", lagfx_a64_msaa_last_reject());
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex2 = false;
 }
@@ -219,6 +236,23 @@ static void b_pipe_key(void) {
     cb_pass_gen(REF_TEX, 2, 1, 0); draw_tri();
 }
 static void b_pipe_key_1x_only(void) { cb_pass_gen(REF_TEX, 2, 1, 0); draw_tri(); cb_pass_gen(REF_TEX, 2, 1, 0); draw_tri(); }
+/* general pass: colour slot 0 (ref0, load clear, store st0, resolve res0), optional colour slot 1 (ref1, st1, res1), optional depth (dref, load clear 1.0, store dst, resolve dres) */
+static void cb_pass_full(uint32_t ref0, uint16_t st0, uint32_t res0, uint32_t ref1, uint16_t st1, uint32_t res1, uint32_t dref, uint16_t dst, uint32_t dres) {
+    uint8_t r[584]; memset(r, 0, sizeof r);
+    const uint32_t refs[2] = { ref0, ref1 }, ress[2] = { res0, res1 }; const uint16_t sts[2] = { st0, st1 }; const uint16_t load = 2, dload = 2; const double one = 1.0;
+    for (int k = 0; k < 2; k++) if (refs[k]) { uint8_t *c = r + 0x4c + 0x3c * k; memcpy(c, &refs[k], 4); memcpy(c + 4, &ress[k], 4); memcpy(c + 20, &load, 2); memcpy(c + 22, &sts[k], 2); }
+    if (dref) { memcpy(r, &dref, 4); memcpy(r + 4, &dres, 4); memcpy(r + 0x14, &dload, 2); memcpy(r + 0x16, &dst, 2); memcpy(r + 0x1c, &one, 8); }
+    cb_cmd(26, r, sizeof r);
+}
+/* every rejected pass names a 4x colour attachment; the remaining attachment / resolve target is what is refused. REF_TEX stays the resolve target of the (valid) first attachment. */
+static void b_rej_second_colour(void) { cb_pass_full(REF_MS8, 2, REF_TEX, REF_MS16, 1, 0, 0, 0, 0); draw_tri(); }          /* slot 1 = 8x texture the device refuses */
+static void b_rej_second_colour_after_ok(void) { cb_pass_full(REF_MS8, 2, REF_TEX, REF_MS16, 1, 0, 0, 0, 0); draw_tri(); cb_pass_gen(REF_MSX, 2, 1, 0); draw_tri(); }   /* a plain 1x pass follows */
+static void b_rej_depth(void) { cb_pass_full(REF_MS8, 2, REF_TEX, 0, 0, 0, REF_MSD8, 1, 0); draw_tri(); }                      /* depth = 8x texture the device refuses */
+static void b_rej_resolve_wrong_shape(void) { cb_pass_full(REF_MS8, 2, REF_TEX2, 0, 0, 0, 0, 0, 0); draw_tri(); }             /* resolve target of another format */
+static void b_rej_resolve_none(void) { cb_pass_full(REF_MS8, 2, 0, 0, 0, 0, 0, 0, 0); draw_tri(); }                           /* resolve action, no resolve texture */
+static void b_rej_resolve_missing(void) { cb_pass_full(REF_MS8, 3, 77, 0, 0, 0, 0, 0, 0); draw_tri(); }                       /* resolve texture ref the mirror has not */
+static void b_rej_mixed(void) { cb_pass_full(REF_MS8, 2, REF_MSX, REF_TEX2, 1, 0, 0, 0, 0); draw_tri(); }                      /* second colour attachment is a plain 1x texture */
+static void b_ok_two_colour_ms(void) { cb_pass_full(REF_MS8, 2, REF_MSX, 0, 0, 0, 0, 0, 0); draw_tri(); }                       /* control: a valid exact pass of the same shape */
 static void b_ds_resolve(void) { cb_pass_ms_depth(REF_MS8, REF_MSD, 3); draw_tri(); }
 static bool msx_matches(const mp_t *m, bool flip) { gr_t g; memset(&g, 0, sizeof g); memcpy(g.bgra, m->msx, sizeof g.bgra); return resolved_matches(&g, false, flip, NULL); }
 static bool tex_matches(const mp_t *m, bool flip) { gr_t g; memset(&g, 0, sizeof g); memcpy(g.bgra, m->tex, sizeof g.bgra); return resolved_matches(&g, false, flip, NULL); }
@@ -260,15 +294,17 @@ int main(void) {
       assert(is_sentinel(g.bgra, sizeof g.bgra) && g.ms.resolves == 0 && g.ms.ms_attach == 1 && g.draws == 1 && g.val == 0);
       puts("PASS store action 1 with a resolve texture: not resolved, the resolve target is untouched"); }
 
-    /* 4: resolve action without a resolve texture: stored, counted */
+    /* 4 (EXACT): resolve action without a resolve texture: the resolve target the store action requires is refused -> the WHOLE pass is rejected (compat twin below: stored, counted, draws) */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, 0); s.sentinel = true; gr_run(&s, &g);
-      assert(is_sentinel(g.bgra, sizeof g.bgra) && g.ms.resolve_no_target == 1 && g.ms.resolves == 0 && g.draws == 1 && g.val == 0);
-      puts("PASS resolve action without a resolve texture: stored, resolve_no_target counted, target untouched"); }
+      assert(is_sentinel(g.bgra, sizeof g.bgra) && g.ms.resolve_no_target == 1 && g.ms.resolves == 0 && g.draws == 0 && g.ms.draws_ms == 0 && g.ms.ms_pass_refused == 1 && g.ms.ms_attach == 0 && g.ms.ms_passes == 0 && g.val == 0);
+      assert(!strcmp(g.rej, "resolve0: resolve_texture_none"));
+      puts("PASS exact: resolve action without a resolve texture: whole pass rejected (ms_pass_refused, reason resolve0: resolve_texture_none), no draw, target untouched"); }
 
-    /* 5: resolve texture of the wrong shape (RGBA16F target for a BGRA8 attachment): refused, counted */
+    /* 5 (EXACT): resolve texture of the wrong shape (RGBA16F target for a BGRA8 attachment): whole pass rejected */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX2); s.sentinel = true; gr_run(&s, &g);
-      assert(is_sentinel(g.half, sizeof g.half) && g.ms.resolve_no_target == 1 && g.ms.resolves == 0 && g.val == 0);
-      puts("PASS resolve texture of another format: refused, resolve_no_target counted"); }
+      assert(is_sentinel(g.half, sizeof g.half) && g.ms.resolve_no_target == 1 && g.ms.resolves == 0 && g.draws == 0 && g.ms.ms_pass_refused == 1 && g.ms.ms_attach == 0 && g.val == 0);
+      assert(!strcmp(g.rej, "resolve0: resolve_shape_mismatch"));
+      puts("PASS exact: resolve texture of another format: whole pass rejected (resolve0: resolve_shape_mismatch), no draw, target untouched"); }
 
     /* 6: deferred store action / resolve texture (tags 102 / 150 after the pass; descriptor action 4 = Unknown) */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 4, REF_TEX); s.sentinel = true; s.mode = P_DEFERRED; gr_run(&s, &g);
@@ -287,6 +323,7 @@ int main(void) {
     { sc_t s = sc(REF_MS8, 80, 4, 4, 8, 2, REF_TEX); s.sentinel = true; gr_run(&s, &g);
       assert(g.ms.ms_exact_refused == 1 && g.ms.ms_tex_refused == 1 && g.ms.ms_images_created == 0 && g.ms.ms_compat_clamped == 0 && g.ms.ms_compat_1x == 0 && g.ms.ms_pass_refused == 1);
       assert(g.draws == 0 && g.no_target >= 1 && g.ms.resolves == 0 && g.ms.draws_ms == 0 && g.ms.pipes_ms == 0 && is_sentinel(g.bgra, sizeof g.bgra) && g.val == 0 && strstr(g.line, "mode=exact"));
+      assert(!strcmp(g.rej, "colour0: multisample_texture_refused"));
       puts("PASS exact: 8 samples asked, device offers 1|4: texture refused (ms_exact_refused), pass attachment skipped (ms_pass_refused), no draw, resolve target untouched"); }
     /* 9e: EXACT: 2 samples on 1|4 (lavapipe has no 2x): refused */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 2, 2, REF_TEX); s.sentinel = true; gr_run(&s, &g);
@@ -330,7 +367,7 @@ int main(void) {
     /* mode switched after a compat image exists: an exact-mode pass must not render into the approximation */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 8, 2, REF_TEX); s.sentinel = true; gr_run_switch(&s, &g);
       assert(g.ms.ms_compat_clamped == 1 && g.ms.ms_pass_refused == 1 && g.draws == 0 && is_sentinel(g.bgra, sizeof g.bgra) && g.val == 0);
-      puts("PASS exact-mode pass over a texture made in compat mode: attachment refused (ms_pass_refused), nothing drawn"); }
+      puts("PASS exact-mode pass over a texture made in compat mode: whole pass rejected (ms_pass_refused), nothing drawn"); }
     unsetenv("LAGFX_MSAA_COMPAT");
 
     /* 11: bad descriptor shapes: refused, counted, the pass names a texture that does not exist (no draw) */
@@ -344,10 +381,21 @@ int main(void) {
       assert(g.ms.fbfetch_ms_refused >= 1 && g.draws == 0 && g.skipped >= 1);
       puts("PASS framebuffer fetch in a multisampled pass: refused and counted (fbfetch_ms_refused), draw skipped; the split-draw path is not entered"); }
 
-    /* 13: mixed sample counts in one pass: the 1x second attachment is ignored, counted */
-    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.slot1_ref = REF_TEX2; gr_run(&s, &g);
-      assert(g.ms.attach_mixed_ignored == 1 && g.ms.resolves == 1 && g.draws == 1 && g.val == 0);
-      puts("PASS mixed sample counts in one pass: the other attachment is ignored (attach_mixed_ignored)"); }
+    /* 13: mixed sample counts in one pass. EXACT: the whole pass is rejected; COMPAT (control): the 1x second attachment is ignored, counted, the pass still draws */
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.slot1_ref = REF_TEX2; s.sentinel = true; gr_run(&s, &g);
+      assert(g.ms.ms_pass_refused == 1 && g.ms.attach_mixed_ignored == 0 && g.ms.resolves == 0 && g.draws == 0 && g.ms.ms_attach == 0 && is_sentinel(g.bgra, sizeof g.bgra) && !strcmp(g.rej, "colour1: mixed_sample_counts") && g.val == 0);
+      puts("PASS exact: mixed sample counts in one pass: whole pass rejected (colour1: mixed_sample_counts), no draw, the first attachment's resolve target untouched");
+      setenv("LAGFX_MSAA_COMPAT", "1", 1);
+      sc_t c = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); c.slot1_ref = REF_TEX2; gr_run(&c, &g);
+      assert(g.ms.attach_mixed_ignored == 1 && g.ms.resolves == 1 && g.draws == 1 && g.ms.ms_pass_refused == 0 && g.val == 0);
+      puts("PASS compat: mixed sample counts in one pass: the other attachment is ignored (attach_mixed_ignored), the pass still draws");
+      /* compat twins of exact scenarios 4 / 5: stored + counted, the pass draws (behaviour unchanged by the exact-mode rule) */
+      sc_t a = sc(REF_MS8, 80, 4, 4, 4, 2, 0); a.sentinel = true; gr_run(&a, &g);
+      assert(is_sentinel(g.bgra, sizeof g.bgra) && g.ms.resolve_no_target == 1 && g.ms.resolves == 0 && g.draws == 1 && g.ms.ms_pass_refused == 0 && g.val == 0);
+      sc_t b = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX2); b.sentinel = true; gr_run(&b, &g);
+      assert(is_sentinel(g.half, sizeof g.half) && g.ms.resolve_no_target == 1 && g.draws == 1 && g.ms.ms_pass_refused == 0 && g.val == 0);
+      unsetenv("LAGFX_MSAA_COMPAT");
+      puts("PASS compat: resolve action without / with a wrong-shape resolve texture: stored, resolve_no_target counted, the pass still draws"); }
 
     /* store actions: 3 = StoreAndMultisampleResolve keeps the multisampled contents (pass B LOADs them and resolves again: same image), 2 = MultisampleResolve resolves too; the store op chosen for 2 is DONT_CARE */
     { static mp_t m;
@@ -374,11 +422,55 @@ int main(void) {
         assert(full > 40 && partial == 0); }   /* the 1x passes (through the 1x pipeline) have no partial-coverage pixel */
       puts("PASS pipeline cache: same shader / format at 1x and 4x -> 2 pipelines (pipes_built=2, pipes_ms=1), 1x again is a hit; validation: no message in the window"); }
 
-    /* depth / stencil resolve in a 4x pass: stored only, counted and printed under unsupported[ds_resolve=..] */
+    /* depth / stencil resolve in a 4x pass: not wired. COMPAT: stored only, counted and printed under unsupported[ds_resolve=..]; EXACT (below): the whole pass is rejected */
+    setenv("LAGFX_MSAA_COMPAT", "1", 1);
     { static mp_t m; mp_run(b_ds_resolve, &m, true);
       assert(m.ms.ms_passes == 1 && m.ms.ds_resolve_unsupported == 1 && m.draws == 1 && m.ms.ms_pass_refused == 0);
       assert(strstr(m.line, "unsupported[ds_resolve=1 "));
-      puts("PASS depth resolve (store action 3 on a 4x depth attachment): not implemented, counted ds_resolve_unsupported and printed under unsupported[]"); }
+      puts("PASS compat: depth resolve (store action 3 on a 4x depth attachment): not implemented, counted ds_resolve_unsupported and printed under unsupported[], pass stored-only"); }
+    unsetenv("LAGFX_MSAA_COMPAT");
+
+    /* ===== EXACT whole-pass rejection (task 1): ANY refused / inconsistent attachment or required resolve target rejects the WHOLE pass ===== */
+    { static mp_t ok, m;
+      /* control: the same pass shape with every attachment valid renders, resolves and draws (the rejections below are caused by the named attachment only) */
+      mp_run(b_ok_two_colour_ms, &ok, false);
+      assert(ok.ms.ms_pass_refused == 0 && ok.ms.ms_passes == 1 && ok.ms.resolves == 1 && ok.draws == 1 && ok.ms.draws_ms == 1 && msx_matches(&ok, false) != msx_matches(&ok, true) && ok.val == 0);
+      /* (a) 2 colour attachments, the second refused (8x not offered): FAIL-BEFORE: the first was rendered, resolved into REF_TEX and drawn (draws == 1, ms_pass_refused counted per attachment) */
+      g_mp_extra = 1u;
+      mp_run(b_rej_second_colour, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.ms.ms_exact_refused >= 1 && m.draws == 0 && m.ms.draws_ms == 0 && m.ms.pipes_ms == 0 && m.pipes_built == 0 && m.ms.ms_passes == 0 && m.ms.ms_attach == 0 && m.ms.resolves == 0);
+      assert(!strcmp(m.rej, "colour1: multisample_texture_refused") && m.ms.ms_images_created == 1);   /* only REF_MS8 exists as an image; the pass never touched it */
+      { gr_t g0; memset(&g0, 0, sizeof g0); memcpy(g0.bgra, m.tex, sizeof g0.bgra); assert(is_sentinel(g0.bgra, sizeof g0.bgra)); }   /* the first attachment's resolve target was NOT written */
+      assert(is_untouched(m.msx, sizeof m.msx) && m.val == 0);
+      puts("PASS exact: 2 colour attachments, the second refused: whole pass rejected (colour1: multisample_texture_refused), no draw, no pipeline, first attachment's resolve target untouched");
+      /* ... and the next (plain 1x) pass of the same command buffer renders normally: the rejection leaves no stuck state */
+      mp_run(b_rej_second_colour_after_ok, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 1 && m.ms.draws_ms == 0 && m.ms.resolves == 0 && !is_untouched(m.msx, sizeof m.msx) && is_sentinel(m.tex, sizeof m.tex) && m.val == 0);
+      { unsigned nonzero = 0; for (uint32_t i = 0; i < RT_W * RT_H; i++) { uint32_t v; memcpy(&v, m.msx + i * 4, 4); nonzero += v != 0; } assert(nonzero > 40); }
+      puts("PASS exact: after a rejected pass the next plain pass draws normally (1 draw), the rejected pass's resolve target is still untouched");
+      g_mp_extra = 0;
+      /* (b) depth attachment refused (8x depth not offered) with a valid 4x colour attachment */
+      g_mp_extra = 2u;
+      mp_run(b_rej_depth, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.draws_ms == 0 && m.ms.pipes_ms == 0 && m.ms.resolves == 0 && m.ms.ms_passes == 0 && is_untouched(m.msx, sizeof m.msx) && m.val == 0);
+      { gr_t g0; memset(&g0, 0, sizeof g0); memcpy(g0.bgra, m.tex, sizeof g0.bgra); assert(is_sentinel(g0.bgra, sizeof g0.bgra)); }
+      assert(!strcmp(m.rej, "depth: multisample_texture_refused"));
+      g_mp_extra = 0;
+      puts("PASS exact: depth attachment refused (8x depth not offered): whole pass rejected (depth: multisample_texture_refused), the 4x colour attachment is not rendered or resolved");
+      /* (c) resolve target refused: wrong format / none / missing ref / second colour a plain 1x texture */
+      mp_run(b_rej_resolve_wrong_shape, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.resolves == 0 && m.ms.ms_attach == 0 && is_untouched(m.msx, sizeof m.msx) && is_sentinel(m.tex, sizeof m.tex) && !strcmp(m.rej, "resolve0: resolve_shape_mismatch") && m.val == 0);
+      mp_run(b_rej_resolve_none, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.ms_attach == 0 && is_untouched(m.msx, sizeof m.msx) && !strcmp(m.rej, "resolve0: resolve_texture_none") && m.val == 0);
+      mp_run(b_rej_resolve_missing, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.ms_attach == 0 && is_untouched(m.msx, sizeof m.msx) && !strcmp(m.rej, "resolve0: resolve_texture_missing") && m.val == 0);
+      mp_run(b_rej_mixed, &m, false);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.attach_mixed_ignored == 0 && m.ms.ms_attach == 0 && is_untouched(m.msx, sizeof m.msx) && !strcmp(m.rej, "colour1: mixed_sample_counts") && m.val == 0);
+      puts("PASS exact: resolve target refused (wrong format / none / missing ref) and a mixed-sample second attachment: whole pass rejected with the specific reason, no draw, nothing written");
+      /* (d) depth / stencil resolve (not wired): the pass is rejected, not stored-only */
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.ms.ds_resolve_unsupported == 1 && m.draws == 0 && m.ms.ms_passes == 0 && !strcmp(m.rej, "depth: depth_stencil_resolve_unsupported") && m.val == 0);
+      puts("PASS exact: depth store action 3 (resolve) on a 4x depth attachment: whole pass rejected (depth_stencil_resolve_unsupported), counted ds_resolve_unsupported"); }
 
     /* the unsupported[] group names every unimplemented multisample feature */
     { lagfx_msaa_stats_t z; memset(&z, 0, sizeof z); z.ds_resolve_unsupported = 1, z.sampled_ms_refused = 2, z.air_ms_ops = 3, z.air_sample_builtins = 4, z.fbfetch_ms_refused = 5, z.tile_ms_refused = 6, z.blit_ms_refused = 7, z.capture_ms_skipped = 8;
