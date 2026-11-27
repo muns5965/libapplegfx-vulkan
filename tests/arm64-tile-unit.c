@@ -121,6 +121,7 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_FN 5u
 #define REF_TILE 6u
 #define REF_DST4 7u       /* an RGBA8 target: the imageblock storage image does not match (fail closed) */
+#define REF_DSTB 8u       /* a BGRA8 target (MTLPixelFormat 80 = VK_FORMAT_B8G8R8A8_UNORM): the unformatted-image kernel variant */
 
 static void entry(uint32_t ref, uint32_t type, uint32_t size, uint64_t addr) {
     uint32_t e[3] = { type | size << 8, (uint32_t)addr, (uint32_t)(addr >> 32) };
@@ -239,11 +240,11 @@ static uint32_t cb_finish(void) {
     return g_cbn;
 }
 static void exec_refs(lagfx_protocol_t *p, uint32_t task, uint32_t len) {
-    static const uint32_t refs[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_DST4 };
-    static const uint32_t flags[] = { 1, 0, 1, 1, 0 };
-    uint32_t w[3 + 2 * 5 + 4], n = 0;
-    w[n++] = task; w[n++] = 5; w[n++] = 1;
-    for (uint32_t i = 0; i < 5; i++) { w[n++] = refs[i]; w[n++] = flags[i]; }
+    static const uint32_t refs[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_DST4, REF_DSTB };
+    static const uint32_t flags[] = { 1, 0, 1, 1, 0, 0 };
+    uint32_t w[3 + 2 * 6 + 4], n = 0;
+    w[n++] = task; w[n++] = 6; w[n++] = 1;
+    for (uint32_t i = 0; i < 6; i++) { w[n++] = refs[i]; w[n++] = flags[i]; }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
     submit(p, 0x43, 0, w, n);
@@ -261,8 +262,9 @@ static float h2f(uint16_t h) {
     else { r = 1.0f + (float)m / 1024.0f; for (int k = (int)e - 15; k > 0; k--) r *= 2.0f; for (int k = (int)e - 15; k < 0; k++) r *= 0.5f; }
     return s ? -r : r;
 }
+static float g_texscale = 1.0f;   /* the BGRA8 test scales the source so the unorm8 result is not saturated (powers of two: exact in half) */
 static float texv(uint32_t x, uint32_t y, int ch) {
-    switch (ch) { case 0: return (float)((x * 3 + y * 5) % 16); case 1: return (float)((x + y * 7) % 16); case 2: return (float)((x * y) % 16); default: return (float)((x + y) % 16); }
+    switch (ch) { case 0: return g_texscale * (float)((x * 3 + y * 5) % 16); case 1: return g_texscale * (float)((x + y * 7) % 16); case 2: return g_texscale * (float)((x * y) % 16); default: return g_texscale * (float)((x + y) % 16); }
 }
 
 #ifdef LAGFX_HAVE_VULKAN
@@ -280,6 +282,7 @@ static void build_objects(const uint8_t *lib, size_t libn, bool horizontal) {
     put_texture(REF_SRC, 0x000, g_TW, g_TH, 115, 8, VPN_SRC);
     put_texture(REF_DST, 0x100, g_W, g_H, 115, 8, 0);
     put_texture(REF_DST4, 0x200, g_W, g_H, 70, 4, 0);   /* RGBA8Unorm */
+    put_texture(REF_DSTB, 0x600, g_W, g_H, 80, 4, 0);   /* BGRA8Unorm */
     put_buffer_object(REF_UBO, 0x300, 0x4000, VPN_UBO);
     put_buffer_object(REF_WBUF, 0x320, 0x4000, VPN_WBUF);
     uint16_t *tp = calloc((size_t)g_TW * g_TH * 4, 2);
@@ -449,6 +452,56 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         puts("PASS: read-only tile buffers at offsets the device cannot bind are bound through aligned copies (result equals the CPU model); geometry + unaligned binds recorded");
     }
 
+    /* (5) B8G8R8A8_UNORM attachment: the kernel variant with an unformatted storage-image imageblock. The source is scaled (1/256) so the unorm8 result is not saturated; the
+     * attachment is cleared to four DIFFERENT logical channel values, so a swapped R / B (or any component mix-up) is visible: the expected bytes are in B, G, R, A memory order
+     * and the kernel's channel k must land in logical component k. unorm8 rounding: +-1. On a device without without-format storage access for B8G8R8A8 the dispatch is skipped
+     * and the cause counted (skip_rt_why 2 / 4 / 5): then only that is checked. */
+    {
+        const bool dev_nofmt = vk->have_storage_img_rw_nofmt;
+        g_texscale = 1.0f / 256.0f;
+        lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+        static const double clr[4] = { 0.2, 0.4, 0.6, 0.8 };
+        cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_all(g_S, 4);
+        exec_refs(p, 1, cb_finish());
+        if (TILE(p).dispatches == 1) {
+            assert(dev_nofmt && TILE(p).skip_rt == 0 && TILE(p).bgra8_dispatches == 1 && TILE(p).bgra8_variants == 1 && TILE(p).bgra8_variant_failed == 0 && TILE(p).resume_failed == 0 && RUNC(p).submit_failed == 0);
+            uint8_t *img = malloc((size_t)g_W * g_H * 4); uint32_t w, h;
+            assert(lagfx_a64_exec_readback_texture(p, t, REF_DSTB, img, (size_t)g_W * g_H * 4, &w, &h) && w == g_W && h == g_H);
+            unsigned bad = 0, sat = 0;
+            for (uint32_t y = 0; y < g_H; y++) for (uint32_t x = 0; x < g_W; x++) for (int ch = 0; ch < 4; ch++) {
+                static const int byte_of[4] = { 2, 1, 0, 3 };   /* logical R, G, B, A -> byte of a BGRA pixel */
+                float m = model(x, y, ch); if (m > 1.0f) m = 1.0f, sat++;
+                int want = (int)(m * 255.0f + 0.5f), got = img[((size_t)y * g_W + x) * 4 + byte_of[ch]];
+                if (got < want - 1 || got > want + 1) { if (bad++ < 6) printf("  BGRA8 mismatch (%u,%u).%d: got %d expected %d\n", x, y, ch, got, want); }
+            }
+            printf("tile BGRA8 whole-target dispatch: %u saturated channel values, %u mismatches\n", sat, bad);
+            assert(bad == 0 && sat == 0);
+            free(img);
+            /* a second dispatch in the same executor reuses the cached variant (no second translation) */
+            cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_region(g_S, 4, g_S, 0, g_S, g_H);
+            exec_refs(p, 1, cb_finish());
+            assert(TILE(p).dispatches == 2 && TILE(p).bgra8_dispatches == 2 && TILE(p).bgra8_variants == 1);
+            puts("PASS: B8G8R8A8_UNORM imageblock: unformatted-storage kernel variant runs, channel order (R,G,B,A -> BGRA bytes) and unorm8 conversion equal the CPU model, variant cached");
+        } else {
+            assert(TILE(p).skip_rt == 1 && (TILE(p).skip_rt_why[4] + TILE(p).skip_rt_why[5] + TILE(p).skip_rt_why[2]) == 1 && TILE(p).bgra8_dispatches == 0 && TILE(p).bgra8_variants == 0);
+            assert(TILE(p).skip_rt_first.valid && TILE(p).skip_rt_first.format == VK_FORMAT_B8G8R8A8_UNORM);
+            printf("SKIP-EXEC: this device cannot run a BGRA8 imageblock (why[2]=%llu why[4]=%llu why[5]=%llu): refused with its own counter, attachment untouched\n",
+                   (unsigned long long)TILE(p).skip_rt_why[2], (unsigned long long)TILE(p).skip_rt_why[4], (unsigned long long)TILE(p).skip_rt_why[5]);
+        }
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        /* the device feature gate: with the without-format feature reported off, the BGRA8 attachment is refused with its own cause (4), never dispatched */
+        const bool saved = vk->have_storage_img_rw_nofmt;
+        vk->have_storage_img_rw_nofmt = false;
+        p = new_task(&t, lib, libn);
+        cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_all(g_S, 4);
+        exec_refs(p, 1, cb_finish());
+        assert(TILE(p).dispatches == 0 && TILE(p).skip_rt == 1 && (TILE(p).skip_rt_why[4] == 1 || TILE(p).skip_rt_why[2] == 1) && TILE(p).bgra8_variants == 0);
+        vk->have_storage_img_rw_nofmt = saved;
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        g_texscale = 1.0f;
+        puts("PASS: BGRA8 imageblock without the device's unformatted storage access is refused with its own counter, nothing dispatched");
+    }
+
     /* (4) fail closed: unbound texture (not set), unbound buffer, and an attachment that is not Rgba16f */
     {
         lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
@@ -517,6 +570,74 @@ static void test_translate_widths(const uint8_t *bc, size_t bn) {
     free(nat); free(nat2); free(e32); free(e4);
     lagfx_air_module_free(m);
 }
+
+#ifdef LAGFX_HAVE_VULKAN
+/* ---- BGRA8 imageblock: classification (pure) and translation (no device) ---- */
+static uint64_t fnv64(const uint8_t *b, size_t n) { uint64_t h = 1469598103934665603ull; for (size_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull; return h; }
+static void test_rt_classify(void) {
+    const uint64_t RW = LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT | LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT;
+    lagfx_a64_tile_rt_probe_t ok16 = { .present = true, .format = VK_FORMAT_R16G16B16A16_SFLOAT, .usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, .has_view = true };
+    lagfx_a64_tile_rt_probe_t okb = { .present = true, .format = VK_FORMAT_B8G8R8A8_UNORM, .usage = VK_IMAGE_USAGE_STORAGE_BIT, .has_view = true, .nofmt_device = true, .f3_valid = true, .f3 = RW | 0x2000u };
+    uint32_t why = 99;
+    assert(LAGFX_A64_TILE_VKFMT_RGBA16F == (uint32_t)VK_FORMAT_R16G16B16A16_SFLOAT && LAGFX_A64_TILE_VKFMT_BGRA8 == (uint32_t)VK_FORMAT_B8G8R8A8_UNORM && LAGFX_A64_TILE_USAGE_STORAGE == (uint32_t)VK_IMAGE_USAGE_STORAGE_BIT);
+    assert(LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT == (uint64_t)VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT && LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT == (uint64_t)VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
+    assert(lagfx_a64_tile_rt_classify(&ok16, &why) == LAGFX_A64_TILE_RT_RGBA16F);                   /* the original path: no device feature needed */
+    assert(lagfx_a64_tile_rt_classify(&okb, &why) == LAGFX_A64_TILE_RT_BGRA8);
+    lagfx_a64_tile_rt_probe_t r;
+    r = ok16; r.present = false;                       assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 0);
+    r = ok16; r.format = VK_FORMAT_R8G8B8A8_UNORM;     assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 1);   /* RGBA8 stays refused */
+    r = okb;  r.format = VK_FORMAT_B8G8R8A8_SRGB;      assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 1);
+    r = ok16; r.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 2);
+    r = okb;  r.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT; assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 2);
+    r = ok16; r.has_view = false;                      assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 3);
+    r = okb;  r.linear = true;                         assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 3);
+    r = okb;  r.nofmt_device = false;                  assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 4);
+    r = okb;  r.f3_valid = false;                      assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 5);   /* pre-1.3: cannot ask the format */
+    r = okb;  r.f3 = LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT;  assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 5);   /* read only */
+    r = okb;  r.f3 = LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT; assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 5);   /* write only */
+    puts("PASS: imageblock attachment classes: RGBA16F accepted as before, BGRA8 accepted only with storage usage + view + device feature + format without-format bits, RGBA8 / sRGB refused, each cause distinct");
+}
+
+#include "air2spv/translate_function.h"
+/* the OpTypeImage format operands (Dim 2D storage images) and OpCapability values of a SPIR-V module */
+static void spv_scan(const uint8_t *spv, size_t n, uint32_t *fmt_rgba16f, uint32_t *fmt_unknown, uint32_t *cap55, uint32_t *cap56) {
+    *fmt_rgba16f = *fmt_unknown = *cap55 = *cap56 = 0;
+    for (size_t w = 5; (w + 1) * 4u <= n;) {
+        uint32_t ins = lagfx_le32(spv + w * 4u), op = ins & 0xffffu, wc = ins >> 16;
+        if (!wc || (w + wc) * 4u > n) break;
+        if (op == 25 && wc >= 9u && lagfx_le32(spv + (w + 7) * 4u) == 2u) { uint32_t f = lagfx_le32(spv + (w + 8) * 4u); if (f == 2u) (*fmt_rgba16f)++; else if (f == 0u) (*fmt_unknown)++; }   /* OpTypeImage ... Sampled=2 Format */
+        if (op == 17 && wc >= 2u) { uint32_t c = lagfx_le32(spv + (w + 1) * 4u); if (c == 55u) (*cap55)++; if (c == 56u) (*cap56)++; }
+        w += wc;
+    }
+}
+static void test_translate_bgra(const uint8_t *bc, size_t bn) {
+    lagfx_air_module_t *m = NULL;
+    assert(lagfx_air_module_open(bc, bn, &m) == LAGFX_OK && m);
+    uint8_t *nat = NULL, *bg = NULL, *nat2 = NULL; size_t nn = 0, bgn = 0, nn2 = 0;
+    assert(lagfx_air2spv_translate_module(m, &nat, &nn) == LAGFX_OK);
+    /* the Rgba16f translation is byte-for-byte what the base commit 30ccf5e produced (FNV-1a of tile_simd_blur_15, measured there) */
+    assert(nn == 4100u && fnv64(nat, nn) == 0x964e8c4e55e4c739ull);
+    lagfx_air2spv_set_imageblock_unformatted(1u);
+    assert(lagfx_air2spv_translate_module(m, &bg, &bgn) == LAGFX_OK);
+    lagfx_air2spv_set_imageblock_unformatted(0u);
+    assert(lagfx_air2spv_translate_module(m, &nat2, &nn2) == LAGFX_OK && nn2 == nn && !memcmp(nat, nat2, nn));   /* the setting is per call: back to the original output */
+    uint32_t a, b, c55, c56;
+    spv_scan(nat, nn, &a, &b, &c55, &c56);   assert(a == 1u && b == 0u && c55 == 0u && c56 == 0u);   /* original: one Rgba16f image, no without-format capabilities */
+    spv_scan(bg, bgn, &a, &b, &c55, &c56);   assert(a == 0u && b == 1u && c55 == 1u && c56 == 1u);   /* variant: one Unknown-format image, Read + Write WithoutFormat */
+    assert(bgn != nn || memcmp(bg, nat, nn));
+    if (system("spirv-val --version >/dev/null 2>&1") == 0) {
+        const char *nm = "/tmp/lagfx-tile-bgra.spv";
+        FILE *f = fopen(nm, "wb"); assert(f); fwrite(bg, 1, bgn, f); fclose(f);
+        char cmd[256]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s", nm);
+        assert(system(cmd) == 0);
+        remove(nm);
+        puts("PASS: BGRA8 imageblock translation: Image Format Unknown + StorageImageRead/WriteWithoutFormat, spirv-val (vulkan1.3) clean; the Rgba16f translation is byte-identical to the base commit's (hash) and unaffected by the setting");
+    } else puts("PASS: BGRA8 imageblock translation structure checked, Rgba16f output byte-identical to the base commit's (spirv-val not installed: validity not checked)");
+    free(nat); free(nat2); free(bg);
+    lagfx_air_module_free(m);
+}
+#endif
+
 #endif
 
 int main(void) {
@@ -533,6 +654,8 @@ int main(void) {
     uint32_t need = LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SUBGROUP_SHUFFLE);
     if ((vk->caps_enabled & need) != need) { puts("SKIP: device has no compute subgroup shuffle"); free(lib); free(bc); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_translate_widths(bc, bn);
+    test_rt_classify();
+    test_translate_bgra(bc, bn);
     test_tile(lib, ln, 0);
     /* forced logical simdgroups narrower than the device subgroup: the same group-boundary logic as 32 lanes inside a 64-wide Adreno subgroup (a logical group is the lower /
      * upper part of the physical subgroup), run on lavapipe's real 32-wide one */

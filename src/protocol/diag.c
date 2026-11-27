@@ -407,10 +407,16 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", ql);
             LAGFX_LOG("%s", ql);
         }
+        if (T->bgra8_dispatches || T->bgra8_variants || T->bgra8_variant_failed) {
+            char bl[200];
+            snprintf(bl, sizeof bl, "g7-gpu-tile-bgra8: dispatches=%llu variants_built=%llu variant_failed=%llu", (unsigned long long)T->bgra8_dispatches, (unsigned long long)T->bgra8_variants, (unsigned long long)T->bgra8_variant_failed);
+            fprintf(stderr, "%s\n", bl);
+            LAGFX_LOG("%s", bl);
+        }
         if (T->skip_rt) {   /* why imageblock attachments were refused (the g7-gpu-tile line only counts skipped[rt=N]) */
-            char rl[300];
-            snprintf(rl, sizeof rl, "g7-gpu-tile-rt: skip_rt=%llu why[no_attachment=%llu format_not_rgba16f=%llu no_storage_usage=%llu no_view_or_linear=%llu] first_refused{vkformat=%u usage=0x%x linear=%d}",
-                     (unsigned long long)T->skip_rt, (unsigned long long)T->skip_rt_why[0], (unsigned long long)T->skip_rt_why[1], (unsigned long long)T->skip_rt_why[2], (unsigned long long)T->skip_rt_why[3],
+            char rl[520];
+            snprintf(rl, sizeof rl, "g7-gpu-tile-rt: skip_rt=%llu why[no_attachment=%llu format_not_rgba16f=%llu no_storage_usage=%llu no_view_or_linear=%llu bgra8_no_nofmt_device=%llu bgra8_no_nofmt_format=%llu] first_refused{vkformat=%u usage=0x%x linear=%d}",
+                     (unsigned long long)T->skip_rt, (unsigned long long)T->skip_rt_why[0], (unsigned long long)T->skip_rt_why[1], (unsigned long long)T->skip_rt_why[2], (unsigned long long)T->skip_rt_why[3], (unsigned long long)T->skip_rt_why[4], (unsigned long long)T->skip_rt_why[5],
                      T->skip_rt_first.valid ? T->skip_rt_first.format : 0u, T->skip_rt_first.valid ? T->skip_rt_first.usage : 0u, (int)T->skip_rt_first.linear);
             fprintf(stderr, "%s\n", rl);
             LAGFX_LOG("%s", rl);

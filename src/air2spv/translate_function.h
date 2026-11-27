@@ -148,6 +148,10 @@ lagfx_status_t lagfx_air2spv_translate_function_ex(
  * thread's following translations. 0 = native (the device subgroup is the simdgroup; the default). See t_simd_emul in translate_function.c for the assumptions. */
 void lagfx_air2spv_set_simd_emulation(uint32_t width);
 
+/* Tile kernels: imageblock colour attachments named by `rt_mask` (bit n = attachment n) are declared as unformatted storage images (Image Format Unknown + the StorageImage
+ * Read/WriteWithoutFormat capabilities) instead of Rgba16f, for the calling thread's following translations. 0 = all Rgba16f (the default; output unchanged). */
+void lagfx_air2spv_set_imageblock_unformatted(uint32_t rt_mask);
+
 /* SIMD-group / quad-group operations (air.simd*, air.quad*, ...) the translator cannot translate (anything but the shuffles / queries listed above). Such a call used to
  * leave an OpUndef behind silently. A COMPUTE translation that meets one now FAILS (LAGFX_ERR_PROTOCOL); graphics stages still build but count them.
  *   lagfx_air2spv_last_unsupported_simd   the calling thread's last translation: number of such calls (0 = none) and the first one's name (first_name may be NULL)

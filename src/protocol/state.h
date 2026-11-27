@@ -635,7 +635,8 @@ typedef struct lagfx_protocol {
                 uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override, sg_emulated;
                 uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
                 uint64_t skip_no_pass, skip_no_pipe, skip_bad_rec, skip_local, skip_no_sg32, skip_rt, skip_unbound, skip_unaligned, skip_feedback, skip_desc, skip_pipe_build, resume_failed;
-                uint64_t skip_rt_why[4];                                /* skip_rt by cause: 0 no such colour attachment, 1 format is not R16G16B16A16_SFLOAT, 2 no STORAGE usage, 3 no view / linear (diagnostic: why an imageblock attachment was refused) */
+                uint64_t skip_rt_why[6];                                /* skip_rt by cause: 0 no such colour attachment, 1 format is neither R16G16B16A16_SFLOAT nor B8G8R8A8_UNORM, 2 no STORAGE usage, 3 no view / linear, 4 BGRA8: device lacks shaderStorageImageRead/WriteWithoutFormat, 5 BGRA8: format has no without-format storage access / not queryable (diagnostic: why an imageblock attachment was refused) */
+                uint64_t bgra8_dispatches, bgra8_variants, bgra8_variant_failed;   /* dispatches that ran with a B8G8R8A8 imageblock / kernel variants built for them / variant builds that failed (the dispatch is then skipped: skip_pipe_build) */
                 struct { uint32_t format, usage; uint8_t linear, valid; } skip_rt_first;   /* the first refused attachment: VkFormat, VkImageUsageFlags */
                 uint64_t gathered, gather_failed, unaligned_written;    /* read-only buffers bound through an aligned copy / copy impossible / unaligned buffers the kernel may write (skipped) */
 #define LAGFX_TILE_SEEN_MAX 8u

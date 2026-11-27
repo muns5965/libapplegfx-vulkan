@@ -339,6 +339,7 @@ typedef struct {
     uint32_t                  cs_n_iface;
     uint8_t                   cs_cap_gnu, cs_cap_shuffle;
     uint32_t                  cs_stimg_t, cs_stimg_ptr;      /* OpTypeImage 2D Rgba16f storage + its UniformConstant pointer */
+    uint32_t                  cs_stimg_tu, cs_stimg_ptru;    /* the same with Image Format Unknown (t_imageblock_unfmt) */
     uint32_t                  cs_stimg_var[8];               /* imageblock render-target k -> storage image variable */
     /* Effective-pointee override for a nonstruct `device T*` buffer arg
      * whose body accesses UNANIMOUSLY reinterpret it as a different element
@@ -2266,6 +2267,12 @@ static _Thread_local uint32_t t_simd_emul;
 
 void lagfx_air2spv_set_simd_emulation(uint32_t width) { t_simd_emul = width; }
 
+/* Imageblock storage images of a tile kernel: bit n set = colour attachment n is declared as an UNFORMATTED (Image Format Unknown) storage image and accessed with
+ * StorageImageReadWithoutFormat / StorageImageWriteWithoutFormat, so the descriptor's view can be any format the device allows without-format access for (used for BGRA8: SPIR-V
+ * has no Bgra8 image format). The texel components keep the view format's R, G, B, A order (Vulkan's texel input / output operations name them by component, not by byte), so the
+ * kernel's float4 maps to the attachment's logical (r, g, b, a) with no swizzle and the unorm <-> float conversion is the hardware's. 0 (default) = every imageblock is Rgba16f. */
+static _Thread_local uint32_t t_imageblock_unfmt;
+void lagfx_air2spv_set_imageblock_unformatted(uint32_t rt_mask) { t_imageblock_unfmt = rt_mask; }
 /* SIMD-group / quad-group operations the translator has no implementation for (everything under air.simd* / air.quad* that is not one of the shuffles or queries above:
  * simd_sum / _min / _max / _prefix_*, simd_ballot / _all / _any, simd_broadcast*, simd_is_first, quad_*, rotate, simdgroup_matrix, async copies, ...). Such a call was
  * dropped and its result became an OpUndef that downstream code stored silently. It is now counted, named, and makes a COMPUTE translation fail (no stub exists for a
@@ -2467,11 +2474,33 @@ static void cs_emit_entry_point(xlate_ctx_t *c) {
     }
 }
 
-/* The Rgba16f storage image backing imageblock render target `rt` (created on first use). */
+/* The OpTypeImage id of imageblock render target `rt` (after cs_imageblock_image created it). */
+static uint32_t cs_imageblock_type(const xlate_ctx_t *c, uint32_t rt) {
+    if (rt >= 8u) rt = 7u;
+    return ((t_imageblock_unfmt >> rt) & 1u) ? c->cs_stimg_tu : c->cs_stimg_t;
+}
+
+/* The storage image backing imageblock render target `rt` (created on first use): Rgba16f, or unformatted when t_imageblock_unfmt names the attachment. */
 static uint32_t cs_imageblock_image(xlate_ctx_t *c, uint32_t rt) {
     if (rt >= 8u) rt = 7u;
     if (c->cs_stimg_var[rt]) return c->cs_stimg_var[rt];
-    if (!c->cs_stimg_t) {
+    const bool unf = ((t_imageblock_unfmt >> rt) & 1u) != 0u;
+    if (unf && !c->cs_stimg_tu) {
+        c->cs_stimg_tu = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t io[] = { c->cs_stimg_tu, emit_type_float32(c), 1u /* 2D */, 0u, 0u, 0u, 2u /* Sampled=2: storage */, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, io, 8);
+        c->cs_stimg_ptru = lagfx_spv_builder_alloc_id(c->b);
+        uint32_t po[] = { c->cs_stimg_ptru, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT, c->cs_stimg_tu };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+        uint32_t cr[] = { 55u /* StorageImageReadWithoutFormat */ };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cr, 1);
+        if (!c->cap_siw) {
+            c->cap_siw = 1u;
+            uint32_t cw[] = { 56u /* StorageImageWriteWithoutFormat */ };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cw, 1);
+        }
+    }
+    if (!unf && !c->cs_stimg_t) {
         c->cs_stimg_t = lagfx_spv_builder_alloc_id(c->b);
         uint32_t io[] = { c->cs_stimg_t, emit_type_float32(c), 1u /* 2D */, 0u, 0u, 0u, 2u /* Sampled=2: storage */, 2u /* Rgba16f */ };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, io, 8);
@@ -2480,7 +2509,7 @@ static uint32_t cs_imageblock_image(xlate_ctx_t *c, uint32_t rt) {
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
     }
     uint32_t v = lagfx_spv_builder_alloc_id(c->b);
-    uint32_t vo[] = { c->cs_stimg_ptr, v, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
+    uint32_t vo[] = { unf ? c->cs_stimg_ptru : c->cs_stimg_ptr, v, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
     /* its own binding from the allocator (it used to be the fixed 40 + rt, which a kernel with more than 40 resources collided with); the reflector finds the attachment by this name */
     (void)decl_binding(c, v, LAGFX_SPV_BINDING_STORAGE_IMAGE, 1u, rt);
@@ -5813,7 +5842,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 ts[ts[cat].op[1]].num_op >= 1u && ts[ts[cat].op[1]].op[0] != 32u)
                 coord = cs_conv(c, LAGFX_SPV_OP_UCONVERT, uv2, coord);
             coord = cs_tile_coord(c, coord);
-            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, c->cs_stimg_t, img_var);
+            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, cs_imageblock_type(c, (uint32_t)(rt < 0 ? 0 : rt)), img_var);
             uint32_t o[] = { img, coord, val };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_WRITE, o, 3);
             return;
@@ -5831,7 +5860,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 ts[ts[cat].op[1]].num_op >= 1u && ts[ts[cat].op[1]].op[0] != 32u)
                 coord = cs_conv(c, LAGFX_SPV_OP_UCONVERT, uv2, coord);
             coord = cs_tile_coord(c, coord);
-            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, c->cs_stimg_t, img_var);
+            uint32_t img = cs_conv(c, LAGFX_SPV_OP_LOAD, cs_imageblock_type(c, (uint32_t)(rt < 0 ? 0 : rt)), img_var);
             uint32_t rgba = lagfx_spv_builder_alloc_id(c->b);
             uint32_t o[] = { v4f, rgba, img, coord };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_IMAGE_READ, o, 4);

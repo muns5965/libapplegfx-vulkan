@@ -41,7 +41,7 @@ Tag numbers are decimal in the code and in `g7-gpu-run tags(...)`; the reference
 | 0x1e (30) | default raster sample count | u32 (4) | partial (existing) | tags 30..36 "describe the pass that follows" |
 | 0x20 (32), 0x21 (33) | sample positions, rasterization rate map | | unsupported (existing) | |
 | 0x22, 0x23, 0x24 (34..36) | imageblock sample length, threadgroup memory length, tile size | u32 (4) | partial (existing) | |
-| 0x65 (101) | setBlendColor | 4 x f32 (16) | missing-known | pipelines with BlendColor factors are kept on the fixed state; needs `vkCmdSetBlendConstants` (raster owner) |
+| 0x65 (101) | setBlendColor | 4 x f32 (16) | implemented (host-tested, not device-verified) | stored per encoder (reset to 0,0,0,0 by a new pass); pipelines with BlendColor factors (11..14) use `VK_DYNAMIC_STATE_BLEND_CONSTANTS` and `vkCmdSetBlendConstants` is recorded before each of their draws; see docs/g7-bgra8-blendconst.md |
 | 0x66, 0x67, 0x69, 0x6a, 0x78, 0x79 (102, 103, 105, 106, 120, 121) | set{Color,Depth,Stencil}StoreAction(+Options) | 8..12 | missing-known | store action is always STORE |
 | 0x68 (104), 0x77 (119) | setDepthStencilState, setStencilReference | u32 ref (4) / (8) | missing-known | owned by the depth/stencil work; not seen in `/tmp/zx` logs |
 | 0x6b, 0x6c, 0x6d, 0x73, 0x7c, 0x88 (107, 108, 109, 115, 124, 136) | cull mode, depth bias, depth clip, front facing, fill mode, line width | | missing-known | raster owner |

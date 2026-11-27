@@ -9,8 +9,8 @@
  * Mapping (the translated kernel is produced by the air2spv COMPUTE stage, see src/air2spv/translate_function.c):
  *   - tile == one workgroup: the workgroup size (SpecId 0/1/2) is the dispatch's threads-per-tile, the tile grid covers the render area (or the region)
  *   - set 0: kernel buffers / textures / samplers at the bindings the translator chose (Metal indices from lagfx_air_arg_bindings), the imageblock of
- *     colour attachment N is a STORAGE_IMAGE at binding 40 + N (Rgba16f; the attachment must be R16G16B16A16_SFLOAT with storage usage, else the dispatch
- *     is skipped and counted)
+ *     colour attachment N is a STORAGE_IMAGE at binding 40 + N (Rgba16f; the attachment must be R16G16B16A16_SFLOAT with storage usage, or B8G8R8A8_UNORM with the
+ *     conditions below, else the dispatch is skipped and counted)
  *   - the tile origin the kernel adds is WorkgroupId * WorkgroupSize; a region dispatch shifts WorkgroupId with vkCmdDispatchBase
  *   - simd lanes: Metal's simdgroup is 32 lanes. A kernel that uses subgroup operations is only run with a 32-wide subgroup: native size 32, or
  *     requiredSubgroupSize = 32 through VK_EXT_subgroup_size_control (core 1.3) when the device allows it (vulkan/caps.c lagfx_vk_can_pin_subgroup32).
@@ -24,6 +24,8 @@
  *     hook: the unit tests run W=16 on a 32-wide lavapipe, which exercises the same logical-group boundary logic as W=32 on a 64-wide device).
  *     A kernel that calls a SIMD-group / quad-group operation the translator has no implementation for (simd_sum, simd_ballot, simd_all / any, prefix sums, broadcast, is_first,
  *     quad_* ...) is NOT built: tile.pipe_unsupported_simd counts it and the first operation's name is logged (air2spv lagfx_air2spv_last_unsupported_simd).
+ * Colour attachments: RGBA16F and BGRA8 (see lagfx_a64_tile_rt_classify); BGRA8 uses a second translation of the kernel (imageblock = unformatted storage image),
+ *   built on first use per attachment mask and cached on the tile pipeline. Other formats are skipped (tile.skip_rt, skip_rt_why).
  * Not mapped (counted): tile samplers (tags 0x9f / 0xa0: the default sampler is used), threadgroup / imageblock memory (0x9c), the render-target array
  * index of 0xa3, imageblock formats other than Rgba16f, draws while a tile pipeline is bound.
  */
@@ -49,6 +51,43 @@ enum {
     LAGFX_A64_TAG_TILE_REGION_RT = 163, LAGFX_A64_TAG_TILE_DIMS = 164
 };
 static inline bool lagfx_a64_is_tile_tag(uint32_t tag) { return tag >= 155u && tag <= 164u; }
+
+/* ---- imageblock attachment classes (pure; the dispatch uses it, tests call it) ----
+ * A tile kernel's imageblock of colour attachment N is a storage image the executor feeds from the attachment's own view:
+ *   RGBA16F  VK_FORMAT_R16G16B16A16_SFLOAT (97): the kernel's storage image is Rgba16f (the original path; unchanged).
+ *   BGRA8    VK_FORMAT_B8G8R8A8_UNORM (44): the kernel is re-translated with the imageblock as an UNFORMATTED storage image (SPIR-V has no Bgra8 format; access
+ *            WithoutFormat). Vulkan hands the shader the texel as (R, G, B, A) components of the VIEW FORMAT, so no byte swizzle is emitted, and the unorm8 <-> float
+ *            conversion (round to nearest, clamp to [0, 1]) is the format's own. Needs, all checked and counted separately (skip_rt_why): STORAGE usage on the image
+ *            (create_image only keeps it when the device accepts it for B8G8R8A8), the device features shaderStorageImageRead/WriteWithoutFormat, and the format's
+ *            VkFormatProperties3 STORAGE_READ/WRITE_WITHOUT_FORMAT bits (Vulkan 1.3; an older device is refused: the per-format answer cannot be had).
+ * why (skip_rt_why index): 0 no attachment, 1 format not supported by the tile path, 2 no STORAGE usage, 3 no view / linear, 4 BGRA8 but the device lacks
+ * shaderStorageImageRead/WriteWithoutFormat, 5 BGRA8 but the format has no without-format storage access (or it could not be queried). */
+#define LAGFX_A64_TILE_VKFMT_RGBA16F 97u
+#define LAGFX_A64_TILE_VKFMT_BGRA8   44u
+#define LAGFX_A64_TILE_USAGE_STORAGE 0x8u
+#define LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT  (1ull << 31)   /* VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT */
+#define LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT (1ull << 32)   /* VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT */
+enum { LAGFX_A64_TILE_RT_REFUSED = 0, LAGFX_A64_TILE_RT_RGBA16F = 1, LAGFX_A64_TILE_RT_BGRA8 = 2 };
+typedef struct {
+    bool present;            /* an attachment object is bound at the slot */
+    uint32_t format, usage;  /* VkFormat, VkImageUsageFlags of its image */
+    bool has_view, linear;
+    bool nofmt_device;       /* shaderStorageImageReadWithoutFormat and WriteWithoutFormat enabled on the device */
+    bool f3_valid; uint64_t f3;   /* VkFormatProperties3::optimalTilingFeatures of the format (f3_valid = it could be queried) */
+} lagfx_a64_tile_rt_probe_t;
+static inline uint32_t lagfx_a64_tile_rt_classify(const lagfx_a64_tile_rt_probe_t *r, uint32_t *why) {
+    uint32_t w = 0;
+    if (!r->present) w = 0;
+    else if (r->format != LAGFX_A64_TILE_VKFMT_RGBA16F && r->format != LAGFX_A64_TILE_VKFMT_BGRA8) w = 1;
+    else if (!(r->usage & LAGFX_A64_TILE_USAGE_STORAGE)) w = 2;
+    else if (!r->has_view || r->linear) w = 3;
+    else if (r->format == LAGFX_A64_TILE_VKFMT_RGBA16F) return LAGFX_A64_TILE_RT_RGBA16F;
+    else if (!r->nofmt_device) w = 4;
+    else if (!r->f3_valid || (r->f3 & (LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT | LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT)) != (LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT | LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT)) w = 5;
+    else return LAGFX_A64_TILE_RT_BGRA8;
+    if (why) *why = w;
+    return LAGFX_A64_TILE_RT_REFUSED;
+}
 
 #ifdef LAGFX_HAVE_VULKAN
 #include "arm64_exec_run.h"

@@ -693,6 +693,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     feat2.features.fragmentStoresAndAtomics = probe2.features.fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;
     feat2.features.vertexPipelineStoresAndAtomics = probe2.features.vertexPipelineStoresAndAtomics ? VK_TRUE : VK_FALSE;
     s->have_storage_img_write = feat2.features.shaderStorageImageWriteWithoutFormat && feat2.features.fragmentStoresAndAtomics;
+    feat2.features.shaderStorageImageReadWithoutFormat = probe2.features.shaderStorageImageReadWithoutFormat ? VK_TRUE : VK_FALSE;   /* unformatted storage reads: the tile kernel's BGRA8 imageblock (arm64_tile.c) */
+    s->have_storage_img_rw_nofmt = feat2.features.shaderStorageImageReadWithoutFormat && feat2.features.shaderStorageImageWriteWithoutFormat;
     s->have_vertex_stores = feat2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
     feat2.features.sampleRateShading = probe2.features.sampleRateShading ? VK_TRUE : VK_FALSE;   /* per-sample shading (sampleShadingEnable / SampleId): src/vulkan/msaa_host.h, unwired from the guest */
