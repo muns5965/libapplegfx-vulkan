@@ -29,5 +29,6 @@ lagfx_sources += files(
   'display_blit.c',
   'draw_record.c',
   'surface_writeback.c',
+  'gpu_readback.c',
   'sampler_cache.c',
 )

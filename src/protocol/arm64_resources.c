@@ -13,6 +13,7 @@
 #include "../vulkan/format_caps.h"
 #include "../vulkan/render_target.h"
 #include "../vulkan/surface_writeback.h"
+#include "../vulkan/gpu_readback.h"
 #include "../translate/blit_encoder.h"
 #include "../handlers/compute/blit_inner_ops.h"
 #include "opcodes.h"
@@ -107,6 +108,7 @@ typedef struct lagfx_a64_msurf {
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
     bool host_valid, guest_stale, down_pending, owed, id_set;
     uint64_t up_epoch, down_epoch, down_gen;   /* down_gen: the exec / sync / swap copy that recorded the pending image -> staging copy (0 = none) */
+    struct lagfx_rb_slot *rb;   /* LAGFX_WB_VERIFY / LAGFX_GPU_READBACK only: the independent GPU copy of the image (gpu_readback.h); NULL while off */
     uint64_t id_pl, id_alloc, id_row, id_hash; uint32_t id_first, id_np;   /* which guest pages the mirror was last taken from (the descriptor has no generation): a different page list = the guest re-mapped it */
 } msurf_t;
 
@@ -256,6 +258,7 @@ static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
     if (ms->img) vkDestroyImage(vk->device, ms->img, NULL);
     if (ms->img_mem) vkFreeMemory(vk->device, ms->img_mem, NULL);
     free_buf(vk, ms->stage, ms->stage_mem);
+    lagfx_rb_slot_free(vk, &ms->rb);
     free(ms);
 }
 
@@ -512,6 +515,7 @@ static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms, uint64_t 
     host_barrier(m, cb);
     barrier(cb);
     ms->down_pending = true, ms->down_epoch = m->epoch, ms->down_gen = gen;
+    if (lagfx_rb_enabled()) lagfx_rb_record(vk_of(m->p), &ms->rb, cb, ms->img, ms->format, ms->usage, ms->w, ms->h, ms->bpp, ms->mapping, gen, (uint64_t)m->p->diag2.disp.op_swap);   /* read-only extra copy of the same image for the g7-gpu-readback line */
     return true;
 }
 
@@ -552,6 +556,7 @@ static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms, uint64_t gen) {
     if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return 0; }
     MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
     if (lagfx_wbv_enabled()) ms_wb_verify(p, ms, &gs);
+    if (ms->rb) lagfx_rb_finish(vk_of(p), &ms->rb, ms_shell(p), &gs, ms->stage_map, gen, (uint64_t)p->diag2.disp.op_swap);
     ms->guest_stale = false;
     ms->owed = false;   /* whoever paid it (flag 4, synchronize, swap): the guest is current */
     return 1;

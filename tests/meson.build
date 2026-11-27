@@ -1640,6 +1640,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-mapped-unit.c') and vulkan_dep
   test('arm64 mapped textures (type 11) over guest surfaces (lavapipe, validation)', mp_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
 endif
 
+# F-2 independent GPU readback (LAGFX_WB_VERIFY / LAGFX_GPU_READBACK): pure compare tests + lavapipe integration with validation and negative controls.
+if fs.is_file(meson.current_source_dir() / 'gpu-readback-unit.c') and vulkan_dep.found()
+  rb_test = executable('gpu-readback-unit',
+    'gpu-readback-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('gpu readback A/B/C compare + negative controls (lavapipe, validation)', rb_test, env : ['LAGFX_VK_VALIDATION=1'], timeout : 120)
+endif
+
 # Pipeline-build failure diagnostics (log once per failure key, failing SPIR-V capture) on lavapipe.
 if fs.is_file(meson.current_source_dir() / 'arm64-pipefail-unit.c') and vulkan_dep.found()
   pf_test = executable('arm64-pipefail-unit',
