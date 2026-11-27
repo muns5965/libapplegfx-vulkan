@@ -4438,6 +4438,33 @@ static uint32_t ix_mul_hi(ix_t *x, bool is_signed, uint32_t a, uint32_t b, uint3
     return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, p);
 }
 
+/* popcount / bit reversal of any width in {8,16,32,64}. Vulkan only accepts a 32-bit Base for OpBitCount / OpBitReverse (VUID-StandaloneSpirv-Base-04781, spirv-val --target-env vulkan1.x),
+ * so the narrow and the 64-bit forms go through 32-bit words: 8/16: zero-extend, count / reverse, (reverse: shift the reversed word down by 32 - w), narrow again. 64: the two halves;
+ * count = count(lo) + count(hi); reverse = rev(lo) becomes the HIGH half and rev(hi) the LOW half. */
+static uint32_t ix_bitcount(ix_t *x, uint32_t v, uint32_t res) {
+    xlate_ctx_t *c = x->c; uint32_t w = x->w, t32 = ix_uty(x, 32u);
+    if (w == 32u) return ix_1(c, LAGFX_SPV_OP_BIT_COUNT, t32, res, v);
+    if (w < 32u) return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, ix_1(c, LAGFX_SPV_OP_BIT_COUNT, t32, 0u, ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v)));
+    uint32_t lo = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v);
+    uint32_t hi = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, x->ty, 0u, v, ix_const(x, 64u, 32u)));
+    uint32_t sum = ix_2(c, LAGFX_SPV_OP_IADD, t32, 0u, ix_1(c, LAGFX_SPV_OP_BIT_COUNT, t32, 0u, lo), ix_1(c, LAGFX_SPV_OP_BIT_COUNT, t32, 0u, hi));
+    return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, sum);
+}
+static uint32_t ix_bitreverse(ix_t *x, uint32_t v, uint32_t res) {
+    xlate_ctx_t *c = x->c; uint32_t w = x->w, t32 = ix_uty(x, 32u);
+    if (w == 32u) return ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, t32, res, v);
+    if (w < 32u) {
+        uint32_t r = ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, t32, 0u, ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v));
+        r = ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, t32, 0u, r, ix_const(x, 32u, 32u - w));
+        return ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, res, r);
+    }
+    uint32_t lo = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, v);
+    uint32_t hi = ix_1(c, LAGFX_SPV_OP_UCONVERT, t32, 0u, ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, x->ty, 0u, v, ix_const(x, 64u, 32u)));
+    uint32_t rlo = ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, t32, 0u, lo), rhi = ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, t32, 0u, hi);
+    uint32_t up = ix_2(c, LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL, x->ty, 0u, ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, 0u, rlo), ix_const(x, 64u, 32u));
+    return ix_2(c, LAGFX_SPV_OP_BITWISE_OR, x->ty, res, up, ix_1(c, LAGFX_SPV_OP_UCONVERT, x->ty, 0u, rhi));
+}
+
 /* add_sat / sub_sat, any width, on SPIR-V's wrapping IAdd/ISub:
  *   unsigned add: s = a + b;  overflow iff s < a            -> all ones
  *   unsigned sub: d = a - b;  underflow iff a < b           -> 0
@@ -4520,8 +4547,8 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
         ix_count_zeros(&x, true, arg[0], res); break;
     case K_CTZ:
         ix_count_zeros(&x, false, arg[0], res); break;
-    case K_POPCOUNT:     ix_1(c, LAGFX_SPV_OP_BIT_COUNT, x.ty, res, arg[0]); break;
-    case K_REVERSE_BITS: ix_1(c, LAGFX_SPV_OP_BIT_REVERSE, x.ty, res, arg[0]); break;
+    case K_POPCOUNT:     ix_bitcount(&x, arg[0], res); break;
+    case K_REVERSE_BITS: ix_bitreverse(&x, arg[0], res); break;
     case K_MUL_HI:       ix_mul_hi(&x, sign == 's', arg[0], arg[1], res); break;
     case K_ADD_SAT:      ix_add_sub_sat(&x, sign == 's', true, arg[0], arg[1], res); break;
     case K_SUB_SAT:      ix_add_sub_sat(&x, sign == 's', false, arg[0], arg[1], res); break;
@@ -4555,6 +4582,19 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
  * =================================================================== */
 static uint32_t ix_glsl2(xlate_ctx_t *c, uint32_t ty, uint32_t into, uint32_t inst, uint32_t a, uint32_t b) { uint32_t g[] = { c->id_glsl, inst, a, b }; return ix_e(c, LAGFX_SPV_OP_EXT_INST, ty, into, g, 4u); }
 
+static uint32_t ix_bswap(ix_t *x, uint32_t v, uint32_t res) {
+    xlate_ctx_t *c = x->c; uint32_t ty = x->ty, n = x->w / 8u, acc = 0u;
+    if (n == 1u) return ix_1(c, 83 /* OpCopyObject */, ty, res, v);
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t t = k ? ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, ty, 0u, v, ix_const(x, x->w, 8u * k)) : v;
+        t = ix_2(c, LAGFX_SPV_OP_BITWISE_AND, ty, 0u, t, ix_const(x, x->w, 0xffu));
+        uint32_t up = 8u * (n - 1u - k);
+        if (up) t = ix_2(c, LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL, ty, 0u, t, ix_const(x, x->w, up));
+        acc = acc ? ix_2(c, LAGFX_SPV_OP_BITWISE_OR, ty, k + 1u == n ? res : 0u, acc, t) : t;
+    }
+    return acc;
+}
+
 static bool llvm_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_inst_t *inst, uint32_t callee_slot_idx,
                           uint32_t result_value_id, uint32_t result_ty_air, uint32_t next_val_id) {
     if (strncmp(fn_name, "llvm.", 5u) != 0 || result_value_id == 0u || result_ty_air == LAGFX_AIR_TYPE_NONE) return false;
@@ -4565,19 +4605,29 @@ static bool llvm_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_i
     const char *ty = dot + 1;                       /* "i32" / "v4i16": must be exactly an integer overload type, nothing after it */
     { const char *q = ty; if (*q == 'v') { q++; if (*q < '1' || *q > '9') return false; while (*q >= '0' && *q <= '9') q++; }
       if (*q != 'i' || q[1] < '1' || q[1] > '9') return false; q++; while (*q >= '0' && *q <= '9') q++; if (*q) return false; }
-    enum { K_NONE, K_UMAX, K_UMIN, K_SMAX, K_SMIN } k = K_NONE;
+    enum { K_NONE, K_UMAX, K_UMIN, K_SMAX, K_SMIN, K_ABS, K_CTLZ, K_CTTZ, K_CTPOP, K_BITREV, K_BSWAP, K_FSHL, K_FSHR } k = K_NONE;
     uint32_t nargs = 0;
     if      (!strcmp(op, "umax"))       { k = K_UMAX;  nargs = 2u; }
     else if (!strcmp(op, "umin"))       { k = K_UMIN;  nargs = 2u; }
     else if (!strcmp(op, "smax"))       { k = K_SMAX;  nargs = 2u; }
     else if (!strcmp(op, "smin"))       { k = K_SMIN;  nargs = 2u; }
+    else if (!strcmp(op, "abs"))        { k = K_ABS;   nargs = 2u; }
+    else if (!strcmp(op, "ctlz"))       { k = K_CTLZ;  nargs = 2u; }
+    else if (!strcmp(op, "cttz"))       { k = K_CTTZ;  nargs = 2u; }
+    else if (!strcmp(op, "ctpop"))      { k = K_CTPOP; nargs = 1u; }
+    else if (!strcmp(op, "bitreverse")) { k = K_BITREV; nargs = 1u; }
+    else if (!strcmp(op, "bswap"))      { k = K_BSWAP; nargs = 1u; }
+    else if (!strcmp(op, "fshl"))       { k = K_FSHL;  nargs = 3u; }
+    else if (!strcmp(op, "fshr"))       { k = K_FSHR;  nargs = 3u; }
     if (k == K_NONE) return false;
     ix_t x;
     if (!ix_shape(c, result_ty_air, &x)) return false;
+    if (k == K_BSWAP && x.w < 16u && x.w != 8u) return false;
     uint32_t a0 = callee_slot_idx + 1u;
     if (inst->num_ops != a0 + nargs) return false;     /* the exact LangRef operand count: a different arity is not the intrinsic we know */
     uint32_t arg[3] = { 0 };
     for (uint32_t i = 0; i < nargs; i++) {
+        if (i == 1u && (k == K_ABS || k == K_CTLZ || k == K_CTTZ)) continue;   /* the i1 flag is never read (see above) */
         arg[i] = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[a0 + i], next_val_id), x.ty);
     }
     uint32_t res = resolve_value_spv(c, result_value_id);
@@ -4588,6 +4638,33 @@ static bool llvm_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_i
     case K_UMIN: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_UMIN, arg[0], arg[1]); break;
     case K_SMAX: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_SMAX, arg[0], arg[1]); break;
     case K_SMIN: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_SMIN, arg[0], arg[1]); break;
+    case K_ABS: {
+        uint32_t zero = ix_const(&x, w, 0u);
+        uint32_t neg = ix_2(c, LAGFX_SPV_OP_SLESS_THAN, ix_bty(&x), 0u, arg[0], zero);
+        uint32_t nx = ix_2(c, LAGFX_SPV_OP_ISUB, ty_, 0u, zero, arg[0]);
+        ix_3(c, LAGFX_SPV_OP_SELECT, ty_, res, neg, nx, arg[0]);
+        break;
+    }
+    case K_CTLZ:  ix_count_zeros(&x, true, arg[0], res); break;
+    case K_CTTZ:  ix_count_zeros(&x, false, arg[0], res); break;
+    case K_CTPOP: ix_bitcount(&x, arg[0], res); break;
+    case K_BITREV: ix_bitreverse(&x, arg[0], res); break;
+    case K_BSWAP: ix_bswap(&x, arg[0], res); break;
+    case K_FSHL: case K_FSHR: {
+        uint32_t m = ix_2(c, LAGFX_SPV_OP_BITWISE_AND, ty_, 0u, arg[2], ix_const(&x, w, w - 1u));
+        uint32_t rem = ix_2(c, LAGFX_SPV_OP_ISUB, ty_, 0u, ix_const(&x, w, w - 1u), m);        /* w - 1 - m, in [0, w-1] */
+        uint32_t one = ix_const(&x, w, 1u);
+        if (k == K_FSHL) {
+            uint32_t hi = ix_2(c, LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL, ty_, 0u, arg[0], m);
+            uint32_t lo = ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, ty_, 0u, ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, ty_, 0u, arg[1], one), rem);
+            ix_2(c, LAGFX_SPV_OP_BITWISE_OR, ty_, res, hi, lo);
+        } else {
+            uint32_t hi = ix_2(c, LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL, ty_, 0u, ix_2(c, LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL, ty_, 0u, arg[0], one), rem);
+            uint32_t lo = ix_2(c, LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL, ty_, 0u, arg[1], m);
+            ix_2(c, LAGFX_SPV_OP_BITWISE_OR, ty_, res, hi, lo);
+        }
+        break;
+    }
     default: return false;
     }
     bind_value_spv(c, result_value_id, res);

@@ -82,9 +82,9 @@ static const want_glsl_t g_minmax[] = { {39, 2}, {38, 2}, {42, 2}, {41, 2}, {45,
 static const want_op_t   o_none[]   = { {0, 0} };
 static const want_glsl_t g_none[]   = { {0, 0} };
 
-/* clz: i32 1 + i16 1 + i8 1 + i64 2 (halves) + v2i32 1 + v2i64 2 = 8 FindUMsb; ctz the same with FindILsb; popcount i32/i16/i64/v2i32 = 4; reverse_bits i32/i8/i64/v2i32 = 4 */
+/* clz: i32 1 + i16 1 + i8 1 + i64 2 (halves) + v2i32 1 + v2i64 2 = 8 FindUMsb; ctz the same with FindILsb; popcount i32/i16/i64 (two 32-bit halves)/v2i32 = 5; reverse_bits likewise = 5 (Vulkan: OpBitCount / OpBitReverse take a 32-bit Base only) */
 static const want_glsl_t g_bits[] = { {LAGFX_SPV_GLSL_FIND_UMSB, 8}, {LAGFX_SPV_GLSL_FIND_ILSB, 8}, {0, 0} };
-static const want_op_t   o_bits[] = { {LAGFX_SPV_OP_BIT_COUNT, 4}, {LAGFX_SPV_OP_BIT_REVERSE, 4}, {0, 0} };
+static const want_op_t   o_bits[] = { {LAGFX_SPV_OP_BIT_COUNT, 5}, {LAGFX_SPV_OP_BIT_REVERSE, 5}, {0, 0} };
 
 /* mul_hi.{u,s}.i32 / .i64 / .v2i32 -> OpU/SMulExtended (the 8/16-bit forms widen instead and emit none) */
 static const want_op_t o_umul1[] = { {LAGFX_SPV_OP_UMUL_EXTENDED, 1}, {LAGFX_SPV_OP_SMUL_EXTENDED, 0}, {0, 0} };

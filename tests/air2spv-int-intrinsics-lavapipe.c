@@ -318,6 +318,13 @@ static const case_t cases[] = {
     { "rt_llvm_uminsmin_fragment.air.bc", 65, 65, ref_l_uminsmin, 0, neg_l_uminsmin },
     { "rt_llvm_minmax64_fragment.air.bc", 65, 65, ref_l_minmax64, 0, neg_l_minmax64 },
     { "rt_llvm_minmaxvec_fragment.air.bc", 65, 65, ref_l_minmaxvec, 0, neg_l_minmaxvec },
+    { "rt_llvm_abs_fragment.air.bc",      65, 65, ref_l_abs,      0, neg_l_abs },
+    { "rt_llvm_bits32_fragment.air.bc",   65, 65, ref_bits32,     0, neg_l_bits32 },
+    { "rt_llvm_bitsnw_fragment.air.bc",   65, 65, ref_l_bitsnw,   0, neg_l_bitsnw },
+    { "rt_llvm_bitsflag_fragment.air.bc", 65, 65, ref_l_bitsflag, 0, neg_l_bitsflag },
+    { "rt_llvm_bswap_fragment.air.bc",    65, 65, ref_l_bswap,    0, neg_l_bswap },
+    { "rt_llvm_funnel_fragment.air.bc",   65, 65, ref_l_funnel,   0, neg_l_funnel },
+    { "rt_llvm_funnel2_fragment.air.bc",  65, 65, ref_l_funnel2,  0, neg_l_funnel2 },
     { "rt_llvm_fma_fragment.air.bc",      65, 65, ref_l_fma,      0, neg_l_fma },
 };
 
