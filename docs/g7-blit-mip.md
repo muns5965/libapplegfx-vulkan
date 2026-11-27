@@ -8,7 +8,7 @@ Files: `src/protocol/arm64_resources.c` (`blit_306`, `blit_319`), test `tests/ar
 
 Problem [V]: both functions recorded the 4-aligned middle `vkCmdFillBuffer` and bumped `wgen`/`gpu_dirty`, then took the unaligned head/tail staging slot (`x->ntmp >= MAX_TMP`, `make_buf`). If that failed the function returned false (counted `blit_rejected`) with the middle already in the command buffer.
 
-Fix [V]: the staging buffer (slot check, `make_buf`, pattern bytes, slot registration) is now acquired first; only after it succeeds are `wgen`/`gpu_dirty` set and any `vkCmd*` recorded. A rejected fill records nothing and leaves the buffer bookkeeping alone.
+Fix [V]: order is now validate range -> reserve the staging buffer (slot check, `make_buf`, pattern bytes, slot registration) -> record every `vkCmd*` -> only then `wgen++` / `gpu_dirty = true`. A rejected fill records nothing and leaves the buffer state alone.
 
 Audit of the other blit paths in the same file [I, by reading]: 300/302 (`buf_tex_copy`), 301, 303 validate everything before `lin_pull_x`/recording; `lin_pull_x` returns false before its own transfer is recorded and `lin_push_x` runs after the command with its result ignored by design (nothing to roll back). No other record-then-fail instance found, so nothing else was changed.
 

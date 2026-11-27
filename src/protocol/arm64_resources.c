@@ -1072,10 +1072,10 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
         memset(mp, v, 8);
         x->tmp_b[x->ntmp] = sb, x->tmp_m[x->ntmp] = sm, x->ntmp++;
     }
-    b->wgen++, b->gpu_dirty = true;
     if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
     if (head) { VkBufferCopy c = { 0, loc, head }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
     if (tail) { VkBufferCopy c = { 0, a1, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
+    b->wgen++, b->gpu_dirty = true;   /* only after every fallible step succeeded */
     return true;
 }
 
@@ -1097,9 +1097,9 @@ static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
         for (int i = 0; i < 4; i++) mp[i] = (uint8_t)(pat >> (8 * i));
         x->tmp_b[x->ntmp] = sb, x->tmp_m[x->ntmp] = sm, x->ntmp++;
     }
-    b->wgen++, b->gpu_dirty = true;
     if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
     if (tail) { VkBufferCopy c = { 0, loc + mid, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
+    b->wgen++, b->gpu_dirty = true;   /* only after every fallible step succeeded */
     return true;
 }
 

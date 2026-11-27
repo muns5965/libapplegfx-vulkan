@@ -219,30 +219,43 @@ static void test_buffer_copy_and_fill(void) {
     CHECK(S()->blit_rejected == rej0 + 2 && S()->blit_noop == noop0 + 4 && S()->blit_unsupported == uns0, "319: misaligned / out-of-range rejected, fences + invalidate-compressed no-ops");
 }
 
-/* A fill rejected for lack of a temporary staging slot (MAX_TMP == 64 per exec) must record nothing: before the fix the aligned middle of the rejected
- * fill was already in the command buffer. Then the same fill in a fresh exec is accepted and writes exactly head + middle + tail. */
+/* A fill rejected for lack of a temporary staging slot (MAX_TMP == 64 per exec) must record nothing and must not touch the resource state: before the fix the
+ * aligned middle of the rejected fill was already in the command buffer, and wgen / gpu_dirty were already updated. The 64 slots are used up on buffer A, the
+ * rejected fills target buffer B. wgen / gpu_dirty are private to the mirror (no accessor from a test, and a probe through the guest-upload path did not
+ * distinguish the old order), so their order is by code reading only [I]; the destination bytes are the observable regression. */
 static void test_fill_reject_records_nothing(void) {
     build_objects();
     uint8_t got[2 * PG], exp[2 * PG];
-    va_fill((uint64_t)VPN_B << 14, 0x11, 2 * PG);
-    uint32_t rf[2] = { R_B, 1 | 4 };
+    va_fill((uint64_t)VPN_A << 14, 0x11, 2 * PG); va_fill((uint64_t)VPN_B << 14, 0x11, 2 * PG);
+    uint32_t rf[4] = { R_A, 1 | 4, R_B, 1 | 4 };
     cmds_t c = {0};
-    memset(exp, 0x11, sizeof exp);
-    for (uint32_t i = 0; i < 64; i++) { c306(&c, R_B, 0x1001 + 16u * i, 1, 0x70); exp[0x1001 + 16u * i] = 0x70; }   /* each takes one staging slot */
+    for (uint32_t i = 0; i < 64; i++) c306(&c, R_A, 0x1001 + 16u * i, 1, 0x70);   /* each takes one staging slot */
     c306(&c, R_B, 0x2001, 0x41, 0xEE);                       /* head 3, aligned middle 0x3c, tail 2: needs a 65th slot */
     { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x2800); w64(q + 12, 0x1b); q[20] = 0xAA; }   /* 319: middle 0x18 + tail 3, also no slot */
     uint64_t rej0 = S()->blit_rejected, done0 = S()->blit_done;
-    run(rf, 1, &c);
-    va_read((uint64_t)VPN_B << 14, got, sizeof got);
+    run(rf, 2, &c);
     CHECK(S()->blit_done == done0 + 64 && S()->blit_rejected == rej0 + 2, "64 fills accepted, the 65th (306) and the 319 rejected for want of a staging slot");
-    CHECK(!memcmp(got, exp, sizeof got), "rejected 306 / 319 fills recorded nothing (aligned middle untouched), accepted ones exact");
+    va_read((uint64_t)VPN_B << 14, got, sizeof got); memset(exp, 0x11, sizeof exp);
+    CHECK(!memcmp(got, exp, sizeof got), "rejected 306 / 319 fills recorded nothing (aligned middle untouched in the guest pages)");
+    va_read((uint64_t)VPN_A << 14, got, sizeof got); for (uint32_t i = 0; i < 64; i++) exp[0x1001 + 16u * i] = 0x70;
+    CHECK(!memcmp(got, exp, sizeof got), "the 64 accepted fills are exact, neighbours preserved");
+    /* the guest changes B, then an exec with only no-op / zero-length fills on B: the guest's bytes must reach the mirror (B not marked GPU-dirty) and come back */
+    va_fill((uint64_t)VPN_B << 14, 0x55, 2 * PG);
+    c.n = 0; c306(&c, R_B, 0x3000, 0, 0x99); { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x3000); w64(q + 12, 0); q[20] = 1; }
+    uint64_t done1 = S()->blit_done;
+    run(rf + 2, 1, &c);
+    va_read((uint64_t)VPN_B << 14, got, sizeof got); memset(exp, 0x55, sizeof exp);
+    CHECK(S()->blit_done == done1 + 2, "zero-length 306 / 319 fills accepted");
+    CHECK(!memcmp(got, exp, sizeof got), "zero-length fills change nothing (guest bytes kept)");
+    /* accepted fills in a fresh exec: 306 (8-bit value, head 3 + middle + tail 2) and 319 (32-bit pattern, middle + 3 byte tail), neighbours preserved */
+    va_fill((uint64_t)VPN_B << 14, 0x11, 2 * PG);
     c.n = 0; c306(&c, R_B, 0x2001, 0x41, 0xEE);
     { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x2800); w64(q + 12, 0x1b); q[20] = 0xAA; q[21] = 0xBB; q[22] = 0xCC; q[23] = 0xDD; }
-    run(rf, 1, &c);
-    memset(exp + 0x2001, 0xEE, 0x41);
+    run(rf + 2, 1, &c);
+    memset(exp, 0x11, sizeof exp); memset(exp + 0x2001, 0xEE, 0x41);
     for (uint32_t i = 0; i < 0x1b; i++) exp[0x2800 + i] = (uint8_t)(0xDDCCBBAAu >> (8 * (i & 3)));
     va_read((uint64_t)VPN_B << 14, got, sizeof got);
-    CHECK(!memcmp(got, exp, sizeof got), "accepted unaligned 306 (head 3 + middle + tail 2) and 319 (middle + tail 3) fills write exact bytes");
+    CHECK(!memcmp(got, exp, sizeof got), "accepted unaligned 306 and 319 fills write exact bytes, neighbours preserved");
 }
 
 static void test_texture_roundtrip(void) {
