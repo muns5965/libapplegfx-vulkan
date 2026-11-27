@@ -10,6 +10,7 @@
 #include "../common/log.h"
 #include "../vulkan/command.h"
 #include "../vulkan/devinfo.h"
+#include "../vulkan/format_caps.h"
 #include "../vulkan/render_target.h"
 #include "../vulkan/surface_writeback.h"
 #include "../translate/blit_encoder.h"
@@ -236,6 +237,15 @@ static const struct { uint32_t mtl; VkFormat vk; uint8_t aspects; } k_dfmt[] = {
     {255, VK_FORMAT_D24_UNORM_S8_UINT, 3}, {260, VK_FORMAT_D32_SFLOAT_S8_UINT, 3},
 };
 
+/* The VkFormats the mirror can create (colour table, then depth / stencil), with their Metal numbers: the list the capability report (g7-fmtcap) and the format tests walk.
+ * Returns the total count; copies at most `cap` entries. */
+size_t lagfx_a64_res_format_list(VkFormat *vk, uint32_t *mtl, size_t cap) {
+    size_t n = 0;
+    for (size_t i = 0; i < sizeof k_fmt / sizeof *k_fmt; i++, n++) if (n < cap) { if (vk) vk[n] = k_fmt[i].vk; if (mtl) mtl[n] = k_fmt[i].mtl; }
+    for (size_t i = 0; i < sizeof k_dfmt / sizeof *k_dfmt; i++, n++) if (n < cap) { if (vk) vk[n] = k_dfmt[i].vk; if (mtl) mtl[n] = k_dfmt[i].mtl; }
+    return n;
+}
+
 /* ---- object lifetime ---- */
 
 static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
@@ -376,27 +386,31 @@ static VkImageAspectFlags ds_aspect_mask(const lagfx_a64_obj_t *o) {
 
 /* ---- object creation from the guest's table entry ---- */
 
+/* Usage trim bookkeeping: index into diag2.exec.fmt.dropped[] (0 storage, 1 input attachment, 2 colour attachment, 3 sampled, 4 transfer dst, 5 transfer src). */
+static void fmt_note_dropped(lagfx_protocol_t *p, VkImageUsageFlags dropped) {
+    static const VkImageUsageFlags k[6] = { VK_IMAGE_USAGE_STORAGE_BIT, VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_USAGE_SAMPLED_BIT, VK_IMAGE_USAGE_TRANSFER_DST_BIT, VK_IMAGE_USAGE_TRANSFER_SRC_BIT };
+    for (int i = 0; i < 6; i++) if (dropped & k[i]) p->diag2.exec.fmt.dropped[i]++;
+}
+
 static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *o) {
-    VkFormatProperties fp;
-    vkGetPhysicalDeviceFormatProperties(vk->phys_device, o->format, &fp);
+    lagfx_fmtcap_backend_t be_store;
+    const lagfx_fmtcap_backend_t *be = lagfx_fmtcap_active(vk->phys_device, &be_store);
     const bool ds = o->ds_aspects != 0;
-    if (ds && o->format == VK_FORMAT_D24_UNORM_S8_UINT && !(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) {
-        o->format = VK_FORMAT_D32_SFLOAT_S8_UINT;
-        vkGetPhysicalDeviceFormatProperties(vk->phys_device, o->format, &fp);
+    if (ds && o->format == VK_FORMAT_D24_UNORM_S8_UINT && !(lagfx_fmtcap_features(be, o->format) & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) o->format = VK_FORMAT_D32_SFLOAT_S8_UINT;
+    /* What the image can be used for is asked of the device as ONE mask (vkGetPhysicalDeviceImageFormatProperties2): a usage that is missing or refused in the combination is
+     * dropped and COUNTED (fmt.dropped / fmt.img_trimmed) instead of failing the texture or leaving the bit out unseen. Required: the transfers that mirror the guest bytes (a
+     * depth / stencil attachment only needs to be an attachment). input attachment = framebuffer fetch reads of a colour attachment (VUID 00338: the view usage must include
+     * it); it rides on COLOR_ATTACHMENT. */
+    const VkImageUsageFlags req = ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
+    const VkImageUsageFlags opt = ds ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+    lagfx_fmtcap_usage_t cu;
+    if (!lagfx_fmtcap_image_usage(be, o->format, o->img_type, o->width, o->height, o->depth, o->mips, is_tex3d(o) ? 1u : o->layers, VK_SAMPLE_COUNT_1_BIT, req, opt, &cu)) {
+        m->p->diag2.exec.fmt.refused[cu.why]++;
+        return false;
     }
-    VkImageUsageFlags u;
-    if (ds) {   /* attachment only; transfer usage just for the initial clear when the format offers it */
-        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)) return false;
-        u = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) u |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-    } else {
-        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-        if ((fp.optimalTilingFeatures & need) != need) return false;
-        u = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
-        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT) u |= VK_IMAGE_USAGE_SAMPLED_BIT;
-        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;   /* input attachment = framebuffer fetch reads (VUID 00338: the view usage must include it); the format feature is the same as colour attachment */
-        if (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) u |= VK_IMAGE_USAGE_STORAGE_BIT;
-    }
+    VkImageUsageFlags u = cu.usage;
+    m->p->diag2.exec.fmt.img_created++;
+    if (cu.dropped) { m->p->diag2.exec.fmt.img_trimmed++; fmt_note_dropped(m->p, cu.dropped); }
     o->usage = u;
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = o->img_type, .format = o->format,
         .extent = { o->width, o->height, o->depth }, .mipLevels = o->mips, .arrayLayers = is_tex3d(o) ? 1u : o->layers, .samples = VK_SAMPLE_COUNT_1_BIT,
@@ -655,7 +669,7 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (!ok) { MKFAIL(o->tex_block_h > 1 ? TEXWHY_C_FORMAT : TEXWHY_C_PAYLOAD); goto bad; }   /* block height > 1: a block-compressed layout */
         if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad; }
         if (mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
-        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); goto bad; }
+        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); p->diag2.exec.fmt.msaa_refused++; goto bad; }
         if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         if (mtype == 7) { if (!o->depth || o->depth > 2048) { MKFAIL(TEXWHY_C_DIMS); goto bad; } } else o->depth = 1;
         if (!dmips || dmips > LAGFX_A64_MAX_MIPS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
@@ -695,7 +709,7 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         o->format = VK_FORMAT_UNDEFINED;
         for (size_t i = 0; i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
         if (mtype != 2) { MKFAIL(TEXWHY_C_TYPE); goto bad_linear; }
-        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); goto bad_linear; }
+        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); p->diag2.exec.fmt.msaa_refused++; goto bad_linear; }
         if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad_linear; }
         if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad_linear; }
         o->img_type = VK_IMAGE_TYPE_2D, o->depth = 1, o->mips = 1, o->layers = 1, o->tex_mip_count = 1;

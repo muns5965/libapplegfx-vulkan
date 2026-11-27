@@ -253,6 +253,24 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", dl);
             LAGFX_LOG("%s", dl);
         }
+        {   /* format / usage / blend / MSAA / framebuffer-fetch ordering compat (read-only; only when something happened) */
+            const __typeof__(X->fmt) *F = &X->fmt;
+            uint64_t any = F->img_trimmed | F->blend_off_format | F->target_not_attachable | F->fbf_class_mismatch | F->fbf_split_draws | F->fbf_split_capped | F->fbf_split_unsupported | F->msaa_refused | F->devinfo_msaa_clamped;
+            for (int i = 0; i < 6; i++) any |= F->refused[i];
+            if (any) {
+                char fl[760];
+                snprintf(fl, sizeof fl,
+                         "g7-gpu-fmt: images[created=%llu trimmed=%llu dropped(storage=%llu input=%llu color=%llu sampled=%llu dst=%llu src=%llu) refused(required=%llu extent=%llu mips=%llu layers=%llu samples=%llu)] "
+                         "blend_off_format=%llu target_not_attachable=%llu fbf_class_mismatch=%llu fbf_split[draws=%llu subdraws=%llu capped=%llu unsupported=%llu] msaa_refused=%llu devinfo_msaa_clamped=%llu",
+                         (unsigned long long)F->img_created, (unsigned long long)F->img_trimmed, (unsigned long long)F->dropped[0], (unsigned long long)F->dropped[1], (unsigned long long)F->dropped[2],
+                         (unsigned long long)F->dropped[3], (unsigned long long)F->dropped[4], (unsigned long long)F->dropped[5], (unsigned long long)F->refused[1], (unsigned long long)F->refused[2],
+                         (unsigned long long)F->refused[3], (unsigned long long)F->refused[4], (unsigned long long)F->refused[5], (unsigned long long)F->blend_off_format,
+                         (unsigned long long)F->target_not_attachable, (unsigned long long)F->fbf_class_mismatch, (unsigned long long)F->fbf_split_draws, (unsigned long long)F->fbf_split_subdraws,
+                         (unsigned long long)F->fbf_split_capped, (unsigned long long)F->fbf_split_unsupported, (unsigned long long)F->msaa_refused, (unsigned long long)F->devinfo_msaa_clamped);
+                fprintf(stderr, "%s\n", fl);
+                LAGFX_LOG("%s", fl);
+            }
+        }
     }
     if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;

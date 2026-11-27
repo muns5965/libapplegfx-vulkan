@@ -2012,3 +2012,12 @@ if fs.is_file(meson.current_source_dir() / 'display-diag-unit.c')
   )
   test('display diagnostics helpers (unit)', display_diag_unit_test)
 endif
+
+# Format / usage / blend / sample-count capability queries (vkGetPhysicalDeviceFormatProperties2 / ImageFormatProperties2) with injected less-capable devices; real lavapipe sweep skips (B) without an ICD.
+format_caps_test = executable('vulkan-format-caps-unit',
+  'vulkan-format-caps-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('vulkan format / usage / blend / sample-count capabilities (unit, lavapipe + injected devices)', format_caps_test, env : ['LAGFX_VK_VALIDATION=1'])

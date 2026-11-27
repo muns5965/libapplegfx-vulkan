@@ -46,6 +46,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../vulkan/instance.h"
 #include "../vulkan/command.h"
 #include "../vulkan/draw_record.h"
+#include "../vulkan/format_caps.h"
 #include "../translate/render_encoder.h"
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
@@ -447,6 +448,51 @@ static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm
     pp->ncache++;
 }
 
+/* Blending needs the attachment format's COLOR_ATTACHMENT_BLEND feature (VUID-vkCmdDraw-blendEnable-04727: blendEnable must be VK_FALSE otherwise). The decoded / default
+ * blend state is switched OFF for a slot whose format cannot blend and the pipeline is built with that: counted (fmt.blend_off_format, one per slot per built pipeline), never
+ * built as an invalid draw. Without independentBlend every attachment must share one state (VUID 00605), so ONE unblendable attachment switches blending off for all. */
+static void blend_for_formats(a64_run_t *r, lagfx_protocol_t *p, lagfx_pipeline_desc_t *d, const VkFormat fmts[4], uint32_t nslots) {
+    lagfx_fmtcap_backend_t be_store;
+    const lagfx_fmtcap_backend_t *be = lagfx_fmtcap_active(r->vk->phys_device, &be_store);
+    struct { bool en; uint32_t sr, dr, orr, sa, da, oa; } eff[4];
+    const uint32_t n = nslots ? (nslots > 4u ? 4u : nslots) : 1u;
+    const bool s0_default = !d->blend_set;   /* blend_set == 0: the builder's fixed premultiplied source-over, enabled */
+    for (uint32_t i = 0; i < n; i++) {
+        bool own = i >= 1u && d->slot_blend[i].set && d->independent_blend;
+        if (own) eff[i].en = d->slot_blend[i].enable, eff[i].sr = d->slot_blend[i].src_rgb, eff[i].dr = d->slot_blend[i].dst_rgb, eff[i].orr = d->slot_blend[i].op_rgb,
+                 eff[i].sa = d->slot_blend[i].src_a, eff[i].da = d->slot_blend[i].dst_a, eff[i].oa = d->slot_blend[i].op_a;
+        else if (s0_default) eff[i].en = true, eff[i].sr = VK_BLEND_FACTOR_ONE, eff[i].dr = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, eff[i].orr = VK_BLEND_OP_ADD, eff[i].sa = VK_BLEND_FACTOR_ONE,
+                 eff[i].da = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, eff[i].oa = VK_BLEND_OP_ADD;
+        else eff[i].en = d->blend_enable != 0, eff[i].sr = d->blend_src_rgb, eff[i].dr = d->blend_dst_rgb, eff[i].orr = d->blend_op_rgb, eff[i].sa = d->blend_src_a, eff[i].da = d->blend_dst_a, eff[i].oa = d->blend_op_a;
+    }
+    bool ok[4], bad = false, any_bad_blend = false;
+    for (uint32_t i = 0; i < n; i++) {
+        VkFormat f = (nslots <= 1u) ? (d->no_color ? VK_FORMAT_UNDEFINED : d->color_format) : fmts[i];
+        ok[i] = f == VK_FORMAT_UNDEFINED || lagfx_fmtcap_blend_ok(be, f);
+        if (!ok[i]) { bad = true; if (eff[i].en) any_bad_blend = true; }
+    }
+    if (!bad || !any_bad_blend) return;
+    if (n <= 1u || !d->independent_blend) {   /* one shared state (or one attachment): off */
+        for (uint32_t i = 0; i < n; i++) if (!ok[i] && eff[i].en) p->diag2.exec.fmt.blend_off_format++;
+        d->blend_set = 1, d->blend_enable = 0, d->blend_src_rgb = d->blend_src_a = VK_BLEND_FACTOR_ONE, d->blend_dst_rgb = d->blend_dst_a = VK_BLEND_FACTOR_ZERO, d->blend_op_rgb = d->blend_op_a = VK_BLEND_OP_ADD;
+        if (s0_default) d->color_write_mask = 0xfu;   /* the fixed state wrote every channel; a decoded mask (0 = write nothing) stays as it is */
+        for (uint32_t i = 1; i < 4u; i++) d->slot_blend[i].set = 0;
+        return;
+    }
+    /* independent blend: slot 0 through the descriptor's fixed fields, the others through slot_blend[] (materialised for every attachment so a slot that copied attachment 0 keeps its own state) */
+    for (uint32_t i = 0; i < n; i++) {
+        const bool en = eff[i].en && ok[i];
+        if (eff[i].en && !ok[i]) p->diag2.exec.fmt.blend_off_format++;
+        if (i == 0u) {
+            if (s0_default) d->color_write_mask = 0xfu;
+            d->blend_set = 1, d->blend_enable = en, d->blend_src_rgb = eff[0].sr, d->blend_dst_rgb = eff[0].dr, d->blend_op_rgb = eff[0].orr, d->blend_src_a = eff[0].sa, d->blend_dst_a = eff[0].da, d->blend_op_a = eff[0].oa;
+        } else {
+            d->slot_blend[i].set = 1, d->slot_blend[i].enable = en, d->slot_blend[i].src_rgb = eff[i].sr, d->slot_blend[i].dst_rgb = eff[i].dr, d->slot_blend[i].op_rgb = eff[i].orr,
+            d->slot_blend[i].src_a = eff[i].sa, d->slot_blend[i].dst_a = eff[i].da, d->slot_blend[i].op_a = eff[i].oa;
+        }
+    }
+}
+
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
@@ -474,6 +520,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
             if (diff) p->diag2.exec.run.blend_indep_mismatch++;
         }
     }
+    blend_for_formats(r, p, &d, fmts, nslots);
     if (r->vk->have_raster_order) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
     d.topology_plus1 = (uint8_t)(topo + 1u);
     VkPipeline pl = VK_NULL_HANDLE;
@@ -828,6 +875,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         memset(&cv, 0, sizeof cv);
         if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) for (int c = 0; c < 4; c++) cv.color.float32[c] = (float)d.colors[k].clear_color[c];
         VkImageView view; uint32_t w, h;
+        if (!(t->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) p->diag2.exec.fmt.target_not_attachable++;   /* the device cannot render to this format (counted: not a silent no_target) */
         if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
         if (first && (w != fw || h != fh)) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* one render area for all attachments */
         bool dup = false;

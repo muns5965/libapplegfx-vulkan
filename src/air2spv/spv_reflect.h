@@ -42,6 +42,7 @@ typedef struct {
     uint8_t                  may_write;  /* STORAGE_BUFFER only: 0 = the module PROVABLY never writes through it (every use of the variable / its access chains is a load or an
                                           * array length), 1 = a store / atomic / copy / call / phi / pointer escape was found (or the module is too large to analyse).
                                           * Several variables of one binding (byte-buffer views) are OR-ed. Not set for other kinds. */
+    uint8_t                  sampled_class; /* INPUT_ATTACHMENT / SAMPLED_IMAGE / STORAGE_IMAGE: numeric class of the OpTypeImage Sampled Type (0 float, 1 unsigned int, 2 signed int); 0 otherwise */
     uint32_t                 role_index; /* INPUT_ATTACHMENT: the InputAttachmentIndex decoration = the colour attachment the variable reads (the BINDING NUMBER carries no meaning);
                                           * STORAGE_IMAGE named "lagfx.imageblock.<n>" (translator imageblock image): n = the colour attachment; otherwise LAGFX_SPV_NO_ROLE. */
 } lagfx_spv_binding_t;

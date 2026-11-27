@@ -61,6 +61,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     uint32_t *var_ptr = NULL, *var_sc = NULL;         /* OpVariable: ptr type id, storage class */
     uint32_t *ptr_pointee = NULL;                     /* OpTypePointer: pointee id */
     uint8_t  *is_image = NULL, *is_sampler = NULL, *is_struct = NULL, *is_sampled_image = NULL, *image_dim = NULL;
+    uint8_t  *type_class = NULL, *image_class = NULL;      /* OpTypeInt / OpTypeFloat id -> numeric class (0 float, 1 uint, 2 sint); OpTypeImage id -> class of its Sampled Type */
     uint32_t *root = NULL;                            /* id -> the storage-buffer variable a pointer id derives from (0 = none) */
     uint8_t  *var_written = NULL;                     /* per variable: something that may write through it was found */
     uint32_t *dec_role = NULL;                        /* InputAttachmentIndex / imageblock render target of the variable; LAGFX_SPV_NO_ROLE = none */
@@ -74,8 +75,9 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     is_image = calloc(sz, 1); image_dim = calloc(sz, 1); is_sampler = calloc(sz, 1); is_struct = calloc(sz, 1);
     is_sampled_image = calloc(sz, 1);
     root = calloc(sz, sizeof(uint32_t)); var_written = calloc(sz, 1);
+    type_class = calloc(sz, 1); image_class = calloc(sz, 1);
     dec_role = malloc(sz * sizeof(uint32_t));
-    if (!root || !var_written || !dec_role) goto done;
+    if (!root || !var_written || !dec_role || !type_class || !image_class) goto done;
     memset(dec_role, 0xff, sz * sizeof(uint32_t));
     if (!has_set || !has_bind || !is_var || !dec_set || !dec_bind || !var_ptr ||
         !var_sc || !ptr_pointee || !is_image || !image_dim || !is_sampler || !is_struct ||
@@ -114,7 +116,11 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                 }
                 break;
             case OP_TYPE_IMAGE:
-                if (wc >= 4u && W(1) < MAXID) { is_image[W(1)] = (W(3) == 6u) ? 2 : (wc >= 8u && W(7) == 2u) ? 3 : 1; image_dim[W(1)] = (uint8_t)W(3); }   /* Dim SubpassData = input attachment; Sampled=2 = storage image */
+                if (wc >= 4u && W(1) < MAXID) { is_image[W(1)] = (W(3) == 6u) ? 2 : (wc >= 8u && W(7) == 2u) ? 3 : 1; image_dim[W(1)] = (uint8_t)W(3); }
+                if (wc >= 4u && W(1) < MAXID && W(2) < MAXID) image_class[W(1)] = type_class[W(2)];   /* Dim SubpassData = input attachment; Sampled=2 = storage image */
+                break;
+            case 21u /* OpTypeInt: Width, Signedness */:
+                if (wc >= 4u && W(1) < MAXID) type_class[W(1)] = W(3) ? 2u : 1u;
                 break;
             case OP_TYPE_SAMPLER:
                 if (wc >= 2u && W(1) < MAXID) is_sampler[W(1)] = 1;
@@ -225,6 +231,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
             out[total].kind = kind;
             out[total].image_dim = (kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) && pointee < MAXID ? image_dim[pointee] : 0u;
             out[total].may_write = kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(var_written[id] || overflow_ids) : 0u;
+            out[total].sampled_class = (kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT || kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) && pointee < MAXID ? image_class[pointee] : 0u;
             out[total].role_index = (kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? dec_role[id] : LAGFX_SPV_NO_ROLE;
         }
         total++;
@@ -252,7 +259,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
             for (size_t b = 0; b < n; b++) if (out[b].set == out[a].set && out[b].binding == out[a].binding) out[b].may_write = 1;
 
 done:
-    free(root); free(var_written);
+    free(root); free(var_written); free(type_class); free(image_class);
     free(has_set); free(has_bind); free(is_var);
     free(dec_set); free(dec_bind); free(var_ptr); free(var_sc);
     free(ptr_pointee); free(is_image); free(image_dim); free(is_sampler); free(is_struct);

@@ -630,6 +630,18 @@ typedef struct lagfx_protocol {
                 struct lagfx_tile_geom { bool region; uint32_t ox, oy, rw, rh, tw, th, td, tgt_w, tgt_h; } geom[LAGFX_TILE_SEEN_MAX]; uint32_t n_geom;
                 struct lagfx_tile_unal { uint32_t metal_index; bool written; uint64_t off, len, align; } unal[LAGFX_TILE_SEEN_MAX]; uint32_t n_unal;
             } tile;
+            /* Format / usage / blend / MSAA / framebuffer-fetch ordering compat (src/vulkan/format_caps.c, arm64_resources.c, arm64_exec_run.c); printed as g7-gpu-fmt when any is non-zero. */
+            struct {
+                uint64_t img_created, img_trimmed;     /* mirror images created / of those, created with fewer usages than the mirror asked for (the device refused the combined mask or lacks a feature bit) */
+                uint64_t dropped[6];                   /* trimmed usages by kind: 0 storage, 1 input attachment, 2 colour attachment, 3 sampled, 4 transfer dst, 5 transfer src */
+                uint64_t refused[6];                   /* image creation refused by the capability query, by LAGFX_FMTCAP_* (why 0 = unused) */
+                uint64_t blend_off_format;             /* pipeline slots built with blending OFF because the attachment format has no COLOR_ATTACHMENT_BLEND feature (VUID-vkCmdDraw-blendEnable-04727) */
+                uint64_t target_not_attachable;        /* a pass named a texture whose format/usage cannot be a colour attachment on this device */
+                uint64_t fbf_class_mismatch;           /* draws skipped: the fragment shader reads an input attachment as float/uint/sint but the attachment format is another class (VUID-vkCmdDraw-format-07753) */
+                uint64_t fbf_split_draws, fbf_split_subdraws, fbf_split_capped, fbf_split_unsupported;   /* framebuffer-fetch draws without rasterization-order access: draws recorded one primitive at a time / the sub-draws made / draws over the cap (drawn whole) / topologies not split (drawn whole) */
+                uint64_t msaa_refused;                 /* textures refused because the guest descriptor names more than one sample (PVG sample-count field is not wired to the Vulkan multisample path: see src/vulkan/msaa.h) */
+                uint64_t devinfo_msaa_clamped;         /* guest device-info MSAASamples lowered because the host cannot do the advertised count */
+            } fmt;
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;

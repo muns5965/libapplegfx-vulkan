@@ -43,6 +43,7 @@ typedef struct {
     uint8_t dim3;       /* BIND_IMAGE: the shader declares a Dim3D sampled image (texture3d): only a 3D mirror texture (a 3D view) can feed it; a 2D one cannot, and vice versa */
     uint8_t cxs;        /* BIND_SAMPLER: a constexpr sampler of the shader (no Metal slot): the host builds the VkSampler from cxs_raw */
     uint64_t cxs_raw;   /* the raw i64 sampler word of the AIR (air2spv/constexpr_sampler.h) */
+    uint8_t ia_class;   /* BIND_INPUT: numeric class the shader reads the attachment as (lagfx_spv_binding_t::sampled_class: 0 float, 1 uint, 2 sint) */
 } lagfx_a64_bind_t;   /* one set-0 binding of a resolved pipeline */
 typedef struct {
     lagfx_pipeline_desc_t desc;
