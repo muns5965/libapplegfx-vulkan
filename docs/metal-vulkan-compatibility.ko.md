@@ -173,7 +173,15 @@ Blit opcode 24개 중 22개는 응답만 합니다.
 - Compute Dispatch, Tessellation, Indirect 및 중첩 Command Buffer: 미구현.
 - Blit opcode 24개 중 22개, 모든 Metal Fence와 Barrier, 대부분의 고정 기능 상태 설정, 정점 텍스처 및 Sampler 바인딩: 로그만 남김.
 - `CmdSynchronizeResources`는 미구현을 반환.
-- 픽셀 포맷 범위, Depth/Stencil Attachment, MSAA는 미검증.
+- 픽셀 포맷 범위와 Depth/Stencil Attachment는 실기에서 미검증이며, MSAA는 게스트 프로토콜에 연결되지 않음(5절).
 - Android에서 실제 PVG 경로를 시험한 기록이 없음. arm64 모드는 어떤 APK에도 포함되지 않음(README *시험 현황* 참조).
 
 관련 문서: [arm64-vmapple-correspondence.md](arm64-vmapple-correspondence.md).
+
+## 5. 렌더 호환성: Framebuffer Fetch, 포맷, MSAA
+
+아래 내용은 lavapipe와 Khronos 검증 레이어 1.3.275에서만 확인했다. 이 레이어는 VK_KHR_dynamic_rendering_local_read보다 오래되어 해당 Barrier에 거짓 오류를 내므로 그 판정에는 쓸 수 없고, 어떤 결과도 Adreno 드라이버를 예측하지 않는다.
+
+- **Framebuffer Fetch 순서(이슈 11).** 이전 색을 읽는 프래그먼트는 같은 픽셀의 앞선 프래그먼트가 끝나 있어야 한다. VK_EXT/ARM_rasterization_order_attachment_access가 없으면 이 보장은 Draw 사이(프레임버퍼 로컬 Barrier)에서만 성립한다. 장치에 기능이 없을 때 프리미티브나 인스턴스가 겹칠 수 있는 Draw는 그 Barrier를 사이에 두고 프리미티브(또는 인스턴스) 단위로 기록한다(`fbf_draw_split`, 상한 16384, `fbf_split_*` 카운터). Triangle Strip은 삼각형별 감김 방향을 유지한다. lavapipe는 한 Draw를 어차피 순서대로 그리므로 순서 보장 부재가 잘못된 픽셀로 나타나지 않는다. 그래서 시험은 기록된 하위 Draw 수와, 픽셀이 단일 Draw 기준과 같음을 확인한다. 셰이더의 Input Attachment 수치 클래스(float/uint/sint)가 Attachment 포맷과 다르면 거부하고 `fbf_class_mismatch`로 센다.
+- **포맷, 사용처, 블렌드(이슈 13).** `src/vulkan/format_caps.c`가 vkGetPhysicalDeviceFormatProperties2와 vkGetPhysicalDeviceImageFormatProperties2로 모든 미러 이미지의 usage 마스크를 묻는다. 거부된 조합은 선택 usage를 하나씩 빼고 센다(`img_trimmed`, `dropped[]`). 필수 usage가 없으면 거부를 센다. COLOR_ATTACHMENT_BLEND가 없는 포맷은 블렌드를 끄고 `blend_off_format`으로 센다. 컬러 Attachment가 될 수 없는 대상은 `target_not_attachable`로 센다.
+- **MSAA(이슈 12), 증거 공백.** Pass 디스크립터 디코더는 `store_action`과 `resolve_texture_ref`를 읽지만, 가진 덤프(/tmp/vm2/dump, /tmp/x231501/dump)에는 멀티샘플 Pass의 원시 Pass·텍스처 디스크립터가 없고, 418회 실행에 store·resolve 태그가 없으며, 파이프라인 샘플 수 필드도 해독되지 않는다. 그래서 텍스처 디스크립터의 샘플 수가 1을 넘으면 계속 거부하고(`msaa_refused`) 와이어 필드를 추측하지 않는다. Vulkan 쪽은 내부 API(`src/vulkan/msaa.h`: 샘플 수 선택, 멀티샘플 대상과 Resolve 대상, Metal Store Action을 storeOp/resolve로 변환, 파이프라인 `raster_samples`) 뒤에 구현해 1x/4x와 Resolve를 시험했다. 연결하려면 실제 멀티샘플 Pass 캡처가 먼저 필요하다. Device Info의 MSAASamples는 호스트 최대값(최소 1)으로 낮추고 `devinfo_msaa_clamped`로 센다.

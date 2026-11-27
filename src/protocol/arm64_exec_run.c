@@ -46,6 +46,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../vulkan/instance.h"
 #include "../vulkan/command.h"
 #include "../vulkan/draw_record.h"
+#include "../vulkan/format_caps.h"
 #include "../translate/render_encoder.h"
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
@@ -447,6 +448,51 @@ static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm
     pp->ncache++;
 }
 
+/* Blending needs the attachment format's COLOR_ATTACHMENT_BLEND feature (VUID-vkCmdDraw-blendEnable-04727: blendEnable must be VK_FALSE otherwise). The decoded / default
+ * blend state is switched OFF for a slot whose format cannot blend and the pipeline is built with that: counted (fmt.blend_off_format, one per slot per built pipeline), never
+ * built as an invalid draw. Without independentBlend every attachment must share one state (VUID 00605), so ONE unblendable attachment switches blending off for all. */
+static void blend_for_formats(a64_run_t *r, lagfx_protocol_t *p, lagfx_pipeline_desc_t *d, const VkFormat fmts[4], uint32_t nslots) {
+    lagfx_fmtcap_backend_t be_store;
+    const lagfx_fmtcap_backend_t *be = lagfx_fmtcap_active(r->vk->phys_device, &be_store);
+    struct { bool en; uint32_t sr, dr, orr, sa, da, oa; } eff[4];
+    const uint32_t n = nslots ? (nslots > 4u ? 4u : nslots) : 1u;
+    const bool s0_default = !d->blend_set;   /* blend_set == 0: the builder's fixed premultiplied source-over, enabled */
+    for (uint32_t i = 0; i < n; i++) {
+        bool own = i >= 1u && d->slot_blend[i].set && d->independent_blend;
+        if (own) eff[i].en = d->slot_blend[i].enable, eff[i].sr = d->slot_blend[i].src_rgb, eff[i].dr = d->slot_blend[i].dst_rgb, eff[i].orr = d->slot_blend[i].op_rgb,
+                 eff[i].sa = d->slot_blend[i].src_a, eff[i].da = d->slot_blend[i].dst_a, eff[i].oa = d->slot_blend[i].op_a;
+        else if (s0_default) eff[i].en = true, eff[i].sr = VK_BLEND_FACTOR_ONE, eff[i].dr = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, eff[i].orr = VK_BLEND_OP_ADD, eff[i].sa = VK_BLEND_FACTOR_ONE,
+                 eff[i].da = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA, eff[i].oa = VK_BLEND_OP_ADD;
+        else eff[i].en = d->blend_enable != 0, eff[i].sr = d->blend_src_rgb, eff[i].dr = d->blend_dst_rgb, eff[i].orr = d->blend_op_rgb, eff[i].sa = d->blend_src_a, eff[i].da = d->blend_dst_a, eff[i].oa = d->blend_op_a;
+    }
+    bool ok[4], bad = false, any_bad_blend = false;
+    for (uint32_t i = 0; i < n; i++) {
+        VkFormat f = (nslots <= 1u) ? (d->no_color ? VK_FORMAT_UNDEFINED : d->color_format) : fmts[i];
+        ok[i] = f == VK_FORMAT_UNDEFINED || lagfx_fmtcap_blend_ok(be, f);
+        if (!ok[i]) { bad = true; if (eff[i].en) any_bad_blend = true; }
+    }
+    if (!bad || !any_bad_blend) return;
+    if (n <= 1u || !d->independent_blend) {   /* one shared state (or one attachment): off */
+        for (uint32_t i = 0; i < n; i++) if (!ok[i] && eff[i].en) p->diag2.exec.fmt.blend_off_format++;
+        d->blend_set = 1, d->blend_enable = 0, d->blend_src_rgb = d->blend_src_a = VK_BLEND_FACTOR_ONE, d->blend_dst_rgb = d->blend_dst_a = VK_BLEND_FACTOR_ZERO, d->blend_op_rgb = d->blend_op_a = VK_BLEND_OP_ADD;
+        if (s0_default) d->color_write_mask = 0xfu;   /* the fixed state wrote every channel; a decoded mask (0 = write nothing) stays as it is */
+        for (uint32_t i = 1; i < 4u; i++) d->slot_blend[i].set = 0;
+        return;
+    }
+    /* independent blend: slot 0 through the descriptor's fixed fields, the others through slot_blend[] (materialised for every attachment so a slot that copied attachment 0 keeps its own state) */
+    for (uint32_t i = 0; i < n; i++) {
+        const bool en = eff[i].en && ok[i];
+        if (eff[i].en && !ok[i]) p->diag2.exec.fmt.blend_off_format++;
+        if (i == 0u) {
+            if (s0_default) d->color_write_mask = 0xfu;
+            d->blend_set = 1, d->blend_enable = en, d->blend_src_rgb = eff[0].sr, d->blend_dst_rgb = eff[0].dr, d->blend_op_rgb = eff[0].orr, d->blend_src_a = eff[0].sa, d->blend_dst_a = eff[0].da, d->blend_op_a = eff[0].oa;
+        } else {
+            d->slot_blend[i].set = 1, d->slot_blend[i].enable = en, d->slot_blend[i].src_rgb = eff[i].sr, d->slot_blend[i].dst_rgb = eff[i].dr, d->slot_blend[i].op_rgb = eff[i].orr,
+            d->slot_blend[i].src_a = eff[i].sa, d->slot_blend[i].dst_a = eff[i].da, d->slot_blend[i].op_a = eff[i].oa;
+        }
+    }
+}
+
 /* The VkPipeline for (pass colour format, topology): built lazily, cached on the pipeline object (which is per generation). */
 static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, const VkFormat fmts[4], uint32_t nslots, uint32_t topo) {
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
@@ -474,6 +520,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
             if (diff) p->diag2.exec.run.blend_indep_mismatch++;
         }
     }
+    blend_for_formats(r, p, &d, fmts, nslots);
     if (r->vk->have_raster_order) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
     d.topology_plus1 = (uint8_t)(topo + 1u);
     VkPipeline pl = VK_NULL_HANDLE;
@@ -716,6 +763,16 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     return true;
 }
 
+/* Same-pixel dependency inside a dynamic render pass (VK_KHR_dynamic_rendering_local_read): framebuffer-space stages only, VK_DEPENDENCY_BY_REGION_BIT, a global memory
+ * barrier (no image / buffer barriers: those would need the RENDERING_LOCAL_READ layout rules of VUID-vkCmdPipelineBarrier-image-09555). Colour writes -> input attachment
+ * read / colour read / colour write. */
+static void fetch_barrier(a64_run_t *r) {
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT };
+    vkCmdPipelineBarrier(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+        VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+}
+
 /* Everything a draw needs besides the vertex buffer: the VkPipeline of this primitive type (Metal 0 point, 1 line, 2 line strip, 3 triangle, 4 triangle strip =
  * the VkPrimitiveTopology values) bound in the open pass, and the descriptor set. False = draw skipped (counted). */
 static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
@@ -726,6 +783,11 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
     VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
     for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) fmts[i] = r->rts[i]->format;
+    for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) {   /* VUID-vkCmdDraw-format-07753: the numeric type of the attachment's format and the Sampled Type of the shader's input attachment must match */
+        const lagfx_a64_bind_t *b = &r->pipe->src.bind[i];
+        if (b->kind != LAGFX_A64_BIND_INPUT || b->metal_index < 0 || b->metal_index > 3 || !r->rts[b->metal_index]) continue;
+        if ((int)b->ia_class != lagfx_fmtcap_class(r->rts[b->metal_index]->format)) { p->diag2.exec.fmt.fbf_class_mismatch++, CNT(p).draws_skipped++; return false; }
+    }
     uint32_t alt = 0;   /* an unnormalized-coordinates sampler in a fragment sampler slot of this pipeline: only explicit-LOD sampling is valid, so the LOD 0 variant of the fragment shader */
     for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) {
         const int16_t mi = r->pipe->src.bind[i].metal_index;
@@ -744,10 +806,7 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     bool fetch = false;
     for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) fetch |= r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT;
     if (fetch || r->last_fetch) {   /* same-pixel dependency inside the pass: earlier colour writes -> this draw's input-attachment read, and (after a reading draw) its read -> later writes */
-        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-            .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT };
-        vkCmdPipelineBarrier(lagfx_a64_res_cmdbuf(r->x), VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+        fetch_barrier(r);
         if (fetch) p->diag2.exec.pipe.fbfetch_draws++;
     }
     r->last_fetch = fetch;
@@ -828,6 +887,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         memset(&cv, 0, sizeof cv);
         if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) for (int c = 0; c < 4; c++) cv.color.float32[c] = (float)d.colors[k].clear_color[c];
         VkImageView view; uint32_t w, h;
+        if (!(t->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) p->diag2.exec.fmt.target_not_attachable++;   /* the device cannot render to this format (counted: not a silent no_target) */
         if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */
         if (first && (w != fw || h != fh)) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* one render area for all attachments */
         bool dup = false;
@@ -995,6 +1055,57 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     return true;
 }
 
+/* Framebuffer fetch WITHOUT rasterization-order attachment access (the device lacks VK_EXT/ARM_rasterization_order_attachment_access, or LAGFX_VK_NO_RASTER_ORDER=1).
+ * Metal's fetch is ordered: a fragment reads what the previous fragment of the same pixel wrote, also inside ONE draw (primitives overlap, instances overlap). Vulkan only gives
+ * that with the extension ("from one fragment to the next, in rasterization order, without explicit synchronization"); without it a read of a pixel another primitive of the same
+ * draw writes is a data race, and a barrier is only possible BETWEEN draws. So the draw is recorded one primitive at a time (instance-major, then primitive order = the Vulkan
+ * primitive order of the Primitive Order section) with the by-region barrier between consecutive sub-draws. Capped (A64_FBF_SPLIT_MAX sub-draws); over the cap, or with a topology /
+ * device that cannot be split exactly, the draw is recorded whole and counted (fbf_split_capped / fbf_split_unsupported). Triangle strips: triangle i is {v_i, v_i+1+(i%2),
+ * v_i+2-(i%2)}; a 3-vertex strip draw from v_i is that triangle with the opposite winding for odd i, so the front face is flipped for those sub-draws (provoking vertex v_i is the
+ * same). Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
+#define A64_FBF_SPLIT_MAX 16384ull
+static bool fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint64_t *nprim, uint32_t *nv, uint32_t *step) {
+    if (r->vk->have_raster_order) return false;
+    bool fetch = false;
+    for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) fetch |= r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT;
+    if (!fetch) return false;
+    uint64_t n = d->count;
+    switch (d->prim) {
+    case 0: *nprim = n, *nv = 1, *step = 1; break;
+    case 1: *nprim = n / 2u, *nv = 2, *step = 2; break;
+    case 2: *nprim = n >= 2u ? n - 1u : 0u, *nv = 2, *step = 1; break;
+    case 3: *nprim = n / 3u, *nv = 3, *step = 3; break;
+    default: *nprim = n >= 3u ? n - 2u : 0u, *nv = 3, *step = 1; break;
+    }
+    if (*nprim * d->instances <= 1u) return false;   /* one primitive: nothing can overlap inside the draw */
+    if (d->prim == 4u && *nprim > 1u && !vk_core13(r->vk)) { p->diag2.exec.fmt.fbf_split_unsupported++; return false; }   /* the winding flip needs dynamic front face */
+    if (*nprim * d->instances > A64_FBF_SPLIT_MAX) { p->diag2.exec.fmt.fbf_split_capped++; return false; }
+    return true;
+}
+
+static lagfx_status_t fbf_draw_split(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint32_t index_start, uint64_t nprim, uint32_t nv, uint32_t step) {
+    VkCommandBuffer cb = lagfx_a64_res_cmdbuf(r->x);
+    const VkFrontFace base = r->es.winding == 1u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE;
+    bool flipped = false, first = true;
+    lagfx_status_t st = LAGFX_OK;
+    p->diag2.exec.fmt.fbf_split_draws++;
+    for (uint64_t inst = 0; inst < d->instances && st == LAGFX_OK; inst++)
+        for (uint64_t k = 0; k < nprim && st == LAGFX_OK; k++) {
+            if (!first) fetch_barrier(r);
+            first = false;
+            const bool odd = d->prim == 4u && (k & 1u);
+            if (odd != flipped && vk_core13(r->vk)) vkCmdSetFrontFace(cb, odd ? (base == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE) : base), flipped = odd;
+            const uint32_t off = (uint32_t)(k * step), fi = (uint32_t)d->base_instance + (uint32_t)inst;
+            if (p->diag2.exec.fmt.fbf_split_subdraws++ == 0u || k + inst == 0u) {   /* the first sub-draw of the draw goes through the encoder (dummy vertex buffer / log); the rest record directly: no per-sub-draw log line */
+                st = d->indexed ? lagfx_translate_render_draw_indexed(&r->rs, nv, 1u, index_start + off, (int32_t)d->base_vertex, fi)
+                                : lagfx_translate_render_draw(&r->rs, nv, 1u, (uint32_t)d->first_vertex + off, fi);
+            } else if (d->indexed) vkCmdDrawIndexed(cb, nv, 1u, index_start + off, (int32_t)d->base_vertex, fi);
+            else vkCmdDraw(cb, nv, 1u, (uint32_t)d->first_vertex + off, fi);
+        }
+    if (flipped) vkCmdSetFrontFace(cb, base);
+    return st;
+}
+
 /* Every draw record (tags 0..11 direct, 0x10 / 0x11 indirect; layouts in arm64_draw_decode.h). Indirect draws read their argument block from the mirror of
  * the argument buffer at record time (a snapshot, as the independent reference does: it does not see GPU writes of the same exec). A draw with zero vertices /
  * indices or zero instances draws nothing and is done, not skipped. */
@@ -1034,12 +1145,12 @@ static void draw_cmd_inner(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, cons
     if (di) di->have = true, di->d = d, di->index_start = index_start, di->ib = ib;
     if (!bind_for_draw(r, p, d.prim)) { tag_partial(p, tag); return; }
     lagfx_status_t st;
-    if (d.indexed) {
-        lagfx_translate_render_bind_index_buffer(&r->rs, ib->buf, d.index_offset, d.index_type == 1u ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
-        st = lagfx_translate_render_draw_indexed(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, index_start, (int32_t)d.base_vertex, (uint32_t)d.base_instance);
-    } else {
-        st = lagfx_translate_render_draw(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, (uint32_t)d.first_vertex, (uint32_t)d.base_instance);
-    }
+    uint64_t sp_n = 0; uint32_t sp_nv = 0, sp_step = 0;
+    const bool split = fbf_split_plan(r, p, &d, &sp_n, &sp_nv, &sp_step);
+    if (d.indexed) lagfx_translate_render_bind_index_buffer(&r->rs, ib->buf, d.index_offset, d.index_type == 1u ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    if (split) st = fbf_draw_split(r, p, &d, index_start, sp_n, sp_nv, sp_step);
+    else if (d.indexed) st = lagfx_translate_render_draw_indexed(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, index_start, (int32_t)d.base_vertex, (uint32_t)d.base_instance);
+    else st = lagfx_translate_render_draw(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, (uint32_t)d.first_vertex, (uint32_t)d.base_instance);
     if (st != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); return; }
     CNT(p).draws++;
     tag_done(p, tag);

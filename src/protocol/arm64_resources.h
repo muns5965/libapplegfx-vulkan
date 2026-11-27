@@ -117,6 +117,8 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
 /* Depth / stencil render targets (Metal 250 / 252 / 253 / 255 / 260 textures): a device image only (no guest pages, no blit, no sampling, no readback). ds_begin
  * returns the view over all aspects of the format and the level-0 extent and orders earlier writes before attachment access; the image stays in GENERAL. */
 bool lagfx_a64_res_ds_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h);
+/* The VkFormats the mirror can create, with their Metal pixel-format numbers (colour table, then depth / stencil). Returns the total count, copies at most `cap`. */
+size_t lagfx_a64_res_format_list(VkFormat *vk, uint32_t *mtl, size_t cap);
 void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* The 2D layer-0 level-0 view of a sampled texture (GENERAL layout, usable as SAMPLED_IMAGE in the shaders); VK_NULL_HANDLE if the format cannot be sampled / 3D. */
 /* Linear (buffer backed) textures, sampled: Metal reflects later buffer changes in the texture, the mirror image is a copy. lagfx_a64_res_sync_linear re-pulls every linear

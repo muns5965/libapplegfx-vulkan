@@ -328,6 +328,7 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
             if (why != LAGFX_A64_FBF_OK) { if (fbf_why) *fbf_why = why; return LAGFX_A64_MAP_FBFETCH; }
             bind[*n_bind].binding = (uint8_t)tmp[t].binding, bind[*n_bind].kind = (uint8_t)LAGFX_SPV_BINDING_INPUT_ATTACHMENT, bind[*n_bind].writable = 0;
             bind[*n_bind].stage = 1, bind[*n_bind].metal_index = (int16_t)tmp[t].role_index;
+            bind[*n_bind].ia_class = tmp[t].sampled_class;
             (*n_bind)++;
             continue;
         }
