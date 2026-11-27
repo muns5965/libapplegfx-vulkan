@@ -155,7 +155,8 @@ static uint32_t *qp_finish(qp_b *b, uint32_t *nwords) {
     uint32_t *o = (uint32_t *)malloc(n * 4), p = 0;
     o[p++] = 0x07230203u; o[p++] = 0x00010300u; o[p++] = 0; o[p++] = b->next_id; o[p++] = 0;
     qp_wb *s[] = { &b->caps, &b->exts, &b->mem, &b->entry, &b->modes, &b->annot, &b->types, &b->body };
-    for (int i = 0; i < 8; i++) { memcpy(o + p, s[i]->w, s[i]->n * 4); p += s[i]->n; free(s[i]->w); }
+    for (int i = 0; i < 8; i++) { if (s[i]->n) memcpy(o + p, s[i]->w, s[i]->n * 4);   /* integ6: an empty section has w == NULL (memcpy(.., NULL, 0) is UB) */
+        p += s[i]->n; free(s[i]->w); }
     *nwords = n;
     return o;
 }

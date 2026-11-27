@@ -204,7 +204,7 @@ static int cfg_build(S_t *s, uint32_t fi0, uint32_t fi1, uint32_t *lab2blk, cfg_
         if (!terminator_succ(s, c->b[q].i1, tmp, 4096, lab2blk, &n)) { free(sl); return 0; }
         c->succ_off[q] = (uint32_t)tot;
         if (tot + n > scap) { scap = (tot + n) * 2 + 16; uint32_t *p = realloc(sl, scap * 4); if (!p) { free(sl); return -1; } sl = p; }
-        memcpy(sl + tot, tmp, n * 4);
+        if (n) memcpy(sl + tot, tmp, n * 4);   /* integ6: sl is NULL while no successor has been stored; memcpy(NULL, .., 0) is UB (UBSan) */
         tot += n;
     }
     c->succ_off[nb] = (uint32_t)tot;
