@@ -33,5 +33,7 @@ int lagfx_blit_inner_dispatch(lagfx_protocol_t *p,
                               const uint8_t    *payload,
                               size_t            len);
 
+/* How many commands of `opcode` (0x12c..0x143) were acknowledged without any effect (op_ack_stub); 0 for an opcode that has a real handler or is out of range. */
+uint64_t lagfx_blit_ack_only_count(uint32_t opcode);
 
 #endif /* LAGFX_HANDLERS_COMPUTE_BLIT_INNER_OPS_H */
