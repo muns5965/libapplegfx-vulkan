@@ -17,9 +17,15 @@
 
 #include "air2spv/constexpr_sampler.h"
 
+/* 0: real bicubic sampling does not exist; a bicubic request (filter 2) is mapped to plain LINEAR and counted (cxs_bicubic_as_linear). Flip only when real
+ * bicubic sampling exists. Tests include this header and use the same macro. */
+#ifndef LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
+#define LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED 0
+#endif
+
 /* Process-wide fidelity counters of the constexpr-sampler mapping (and of the runtime sampler's undefined enum values). Each counter counts sampler-state BUILDS
  * (one per constexpr bind, plus test calls) in which the condition held; the log line is printed once per distinct word. The names say what the host did, not what
- * Metal does: cxs_bicubic_as_linear counts a bicubic request that was sampled with plain LINEAR; real bicubic filtering is NOT implemented. */
+ * Metal does: cxs_bicubic_as_linear counts a bicubic request that was sampled with plain LINEAR; while LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED is 0 real bicubic filtering is not implemented. */
 typedef struct {
     uint64_t cxs_bicubic_as_linear;      /* mag or min filter 2 (bicubic) mapped to VK_FILTER_LINEAR (approximation) */
     uint64_t cxs_clamp_zero_as_border;   /* address 0 (clamp_to_zero) mapped to clamp-to-border + transparent black (approximation) */

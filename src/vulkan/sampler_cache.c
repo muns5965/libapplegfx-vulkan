@@ -148,7 +148,11 @@ static void cxs_note(const lagfx_constexpr_sampler_t *cs, bool unnorm_illegal) {
     if (filt_unsup) NOTE(" filter_unsupported[mag=%u,min=%u]->linear", cs->mag_filter, cs->min_filter);
     if (mip_unsup) NOTE(" mip_unsupported[%u]->nearest", cs->mip_filter);
     if (unnorm_illegal) NOTE(" unnorm_illegal_addr[%u,%u]->kept_normalized", cs->addr[0], cs->addr[1]);
+#if LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
+    if (bic) NOTE(" bicubic_as_linear[mag=%u,min=%u](compat mapping)", cs->mag_filter, cs->min_filter);
+#else
     if (bic) NOTE(" bicubic_as_linear[mag=%u,min=%u](NOT real bicubic)", cs->mag_filter, cs->min_filter);
+#endif
     if (clampz) NOTE(" clamp_zero_as_border");
     if (cmp) NOTE(" compare_ignored[%u]", cs->compare_func);
 #undef NOTE

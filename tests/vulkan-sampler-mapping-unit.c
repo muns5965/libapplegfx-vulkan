@@ -23,9 +23,9 @@ int main(void) { fprintf(stderr, "built without Vulkan; skipping\n"); return 77;
 #include <stdlib.h>
 #include <string.h>
 
-/* 0 = the host maps a bicubic filter request (constexpr filter value 2) to plain LINEAR and counts it (cxs_bicubic_as_linear). Set to 1 only together with a real
- * bicubic implementation; T11 then expects the exact path and the counter to stay 0 (that branch is a placeholder until such code exists). */
-#define LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED 0
+/* LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED comes from vulkan/sampler_cache.h (one definition for product and test). No compat-mode selector exists in the product
+ * yet (the bicubic -> linear mapping is the only mode), so the test assumes compat mode explicitly; when a selector is added, set g_compat_mode from it. */
+static const int g_compat_mode = 1;
 
 static int g_nwarn, g_nlog;
 static char g_last[512];
@@ -174,16 +174,15 @@ int main(void) {
       /* Current compatibility behaviour: a bicubic word (filter 2) gets exactly the state of a plain linear word and is counted as such. */
       lagfx_sampler_state_t lin; { lagfx_constexpr_sampler_t cl = D(W(1, 1, 1, 1, 1, 0, false, 8)); lin = lagfx_sampler_state_from_constexpr_norm(&cl); }
       lagfx_sampler_diag_t d = dg();
-#if !LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
+if (!LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED || g_compat_mode) {
       CHECK(s.mag_filter == VK_FILTER_LINEAR && s.min_filter == VK_FILTER_LINEAR);
       CHECK(seq(&s, &lin));
       CHECK(d.cxs_bicubic_as_linear == 1 && d.cxs_filter_unsupported == 0);
-      CHECK(g_nlog == 1 && g_nwarn == 0 && strstr(g_last, "fidelity=APPROX:") && strstr(g_last, "bicubic_as_linear[mag=2,min=2]"));
-#else
+      CHECK(g_nlog == 1 && g_nwarn == 0 && strstr(g_last, "fidelity=APPROX:") && strstr(g_last, "bicubic_as_linear[mag=2,min=2]")); }
+      else {
       /* Placeholder for future work: the exact path must not be counted as an approximation; its state expectations belong to that implementation. */
       CHECK(d.cxs_bicubic_as_linear == 0 && d.cxs_filter_unsupported == 0);
-      (void)s; (void)lin;
-#endif
+      (void)s; (void)lin; }
     }
     { lagfx_sampler_diag_reset(); lagfx_constexpr_sampler_t cs = D(W(1, 1, 1, 3, 3, 0, false, 8)); lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr_norm(&cs);   /* T11b: filter 3 is undefined, not bicubic */
       CHECK(s.mag_filter == VK_FILTER_LINEAR && s.min_filter == VK_FILTER_LINEAR);
