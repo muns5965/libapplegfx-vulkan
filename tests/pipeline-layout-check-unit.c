@@ -182,12 +182,14 @@ static int selftest(void) {
     /* 2. the shape of pipefail_18d04777d220e041: sampler + input attachment on binding 40 -> one collision in the module; the DERIVED layout (first wins) cannot satisfy both */
     { stage_t s[1] = { { ARR(k_lm_collide_fs), FS, "fs" } };
       memset(&f, 0, sizeof f);
-      int n = derived_layout(s, 1, lay);
-      int c = check_pipeline(s, 1, lay, n, &f);
+      /* since the shared binding allocator (01aa31c) the DERIVED layout of a conflicting module is refused (no layout), not "first wins" */
+      { const uint8_t *b[1] = { (const uint8_t *)s[0].w }; size_t l[1] = { s[0].nw * 4 }; VkDescriptorSetLayoutBinding vb[32]; uint32_t nn = 99; lagfx_layout_info_t info;
+        lagfx_status_t st = lagfx_layout_derive(b, l, 1, vb, 32, &nn, &info);
+        CHECK(st != LAGFX_OK && nn == 0 && info.n_conflict >= 1, "derived layout of the collision module must be refused: status %d n %u conflicts %u", (int)st, nn, info.n_conflict); }
+      int c = check_pipeline(s, 1, NULL, 0, &f);
       dump(&f);
-      CHECK(c == 2, "collision module vs derived layout: %d findings, expected 2 (the intra-module collision + the layout type mismatch on binding 40)", c);
+      CHECK(c == 1, "collision module (module-level check): %d findings, expected 1", c);
       CHECK(strstr(f.msg[0], "binding 40") && strstr(f.msg[0], "sampler") && strstr(f.msg[0], "input-attachment"), "collision finding names binding 40 / sampler / input attachment: %s", f.msg[0]);
-      CHECK(strstr(f.msg[1], "binding 40") && strstr(f.msg[1], "layout"), "layout finding names binding 40: %s", f.msg[1]);
       /* the same, with the layout the bundle recorded (40/41 = input attachments, 39 sampler) */
       lay_t rec[4] = { { 16, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, FS | VS }, { 39, VK_DESCRIPTOR_TYPE_SAMPLER, 1, FS | VS }, { 40, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, FS }, { 41, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, FS } };
       memset(&f, 0, sizeof f);
@@ -211,13 +213,14 @@ static int selftest(void) {
       memset(&f, 0, sizeof f); CHECK(check_pipeline(sa, 1, &one, 1, &f) == 1 && strstr(f.msg[0], "needs 2"), "array count: %d", f.n);
       memset(&f, 0, sizeof f); CHECK(check_pipeline(sa, 1, &two, 1, &f) == 0, "array count 2 accepted");
       puts("PASS: layout defects are found one by one (descriptor type, stage flags, array count, missing binding, set 1); a correct layout passes"); }
-    /* 4. VS and FS declare different kinds on one binding: found; the derived layout (first wins) additionally fails the second stage */
+    /* 4. VS and FS declare different kinds on one binding: found; the derived layout is refused (no layout) */
     { stage_t s[2] = { { ARR(k_lm_buf_vs), VS, "vs" }, { ARR(k_lm_smp_fs), FS, "fs" } };
       memset(&f, 0, sizeof f);
-      int n = derived_layout(s, 2, lay);
-      int c = check_pipeline(s, 2, lay, n, &f);
+      int n = derived_layout(s, 2, lay);   /* refused since the shared allocator: no bindings */
+      CHECK(n == 0, "derived layout of a cross-stage collision must be refused, got %d bindings", n);
+      int c = check_pipeline(s, 2, NULL, 0, &f);
       dump(&f);
-      CHECK(c == 2 && strstr(f.msg[0], "vs vs fs"), "cross-stage collision: %d findings", c);
+      CHECK(c == 1 && strstr(f.msg[0], "vs vs fs"), "cross-stage collision: %d findings", c);
       puts("PASS: VS / FS kind clash on one binding is found"); }
     return 0;
 }
