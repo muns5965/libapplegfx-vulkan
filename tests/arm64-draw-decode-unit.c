@@ -64,19 +64,21 @@ static void samp(uint8_t *b, uint32_t state, float lo, float hi) {
 }
 static void test_sampler(void) {
     uint8_t b[36]; VkSamplerCreateInfo ci; uint32_t f;
-    samp(b, 0x84000000u, 0.f, 3.4028235e38f);                               /* the baseline of the reference: nearest, clamp to edge, not mip mapped, normalized */
+    samp(b, 0x84000000u, 0.f, 3.4028235e38f);                               /* CAPTURED word (also seen in our own dump): nearest, clamp to edge, not mip mapped, normalized */
     f = lagfx_a64_sampler_decode(b, 28, true, 16.f, &ci);
     assert(f == 0 && ci.minFilter == VK_FILTER_NEAREST && ci.magFilter == VK_FILTER_NEAREST && ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
            ci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && ci.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE && ci.maxLod == 0.25f && !ci.anisotropyEnable &&
            ci.borderColor == VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);
     f = lagfx_a64_sampler_decode(b, 28, true, 16.f, &ci); (void)f;
+    /* The words below except 0x84000000 / 0x84000005 / 0x04000000 / 0x04000005 are SYNTHETIC: built from the field layout in arm64_sampler.h to exercise
+     * each field, not captured from a device. */
     samp(b, 0x84000001u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.minFilter == VK_FILTER_LINEAR && ci.magFilter == VK_FILTER_NEAREST);
     samp(b, 0x84000004u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.minFilter == VK_FILTER_NEAREST && ci.magFilter == VK_FILTER_LINEAR);
     samp(b, 0x84000300u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT && ci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
     samp(b, 0x84004000u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER && ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE &&
            ci.borderColor == VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK);       /* clamp to zero: always transparent black */
     samp(b, 0x84020000u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.addressModeW == VK_SAMPLER_ADDRESS_MODE_REPEAT && ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE);
-    samp(b, 0x84255500u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci);   /* the reference's own example: border colour opaque white, S = T = R = clamp to border */
+    samp(b, 0x84255500u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci);   /* SYNTHETIC (built from the INFER field positions, not captured): border colour opaque white, S = T = R = clamp to border */
     assert(ci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER && ci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER && ci.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER &&
            ci.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE);
     samp(b, 0x84155500u, 0, 1e30f);  lagfx_a64_sampler_decode(b, 28, false, 0, &ci); assert(ci.borderColor == VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK);

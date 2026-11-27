@@ -15,7 +15,7 @@ static void p32(uint8_t *b, uint32_t o, uint32_t v) { memcpy(b + o, &v, 4); }
 static void p64(uint8_t *b, uint32_t o, uint64_t v) { memcpy(b + o, &v, 8); }
 
 static uint32_t g_args[5];
-static uint32_t g_samp_state = 0x86000000u;
+static uint32_t g_samp_state = 0x86000000u;   /* SYNTHETIC state word (mip linear, normalized; built from the INFER layout of arm64_sampler.h, not captured) */
 /* one exec: green clear, pipeline, vertex buffer 0, then cmds(); returns the protocol with the pixels readable through img */
 static lagfx_protocol_t *ext_run(void (*cmds)(void), uint8_t *img) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
@@ -155,7 +155,7 @@ static void test_ext_tags(void) {
     assert(R->tag_partial[22] == 1 && R->tag_partial[23] == 1 && R->tag_partial[133] == 1 && R->ext_barrier == 3);    /* barriers are recorded as seen, not applied */
     done(p);
 
-    g_samp_state = 0x860000a0u;   /* mip linear, compare greater (ignored, counted) */
+    g_samp_state = 0x860000a0u;   /* SYNTHETIC: mip linear, compare greater (ignored, counted) */
     p = ext_run(k_lod, img); R = &p->diag2.exec.run;
     assert(red_left(img) && R->tag_done[113] == 3 && R->ext_samp_lod_binds == 3 && R->tag_done[112] == 1 && R->bad_rec == 1 && R->ext_samp_compare == 1 && p->diag2.exec.pipe.samplers == 1);
     done(p);

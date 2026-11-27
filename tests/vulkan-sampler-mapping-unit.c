@@ -23,6 +23,10 @@ int main(void) { fprintf(stderr, "built without Vulkan; skipping\n"); return 77;
 #include <stdlib.h>
 #include <string.h>
 
+/* 0 = the host maps a bicubic filter request (constexpr filter value 2) to plain LINEAR and counts it (cxs_bicubic_as_linear). Set to 1 only together with a real
+ * bicubic implementation; T11 then expects the exact path and the counter to stay 0 (that branch is a placeholder until such code exists). */
+#define LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED 0
+
 static int g_nwarn, g_nlog;
 static char g_last[512];
 void lagfx_log_impl(const char *fmt, ...)   { va_list a; va_start(a, fmt); vsnprintf(g_last, sizeof g_last, fmt, a); va_end(a); g_nlog++; }
@@ -167,13 +171,24 @@ int main(void) {
     /* ---- filters, mip, compare (T9 needs a device and is not covered here; T11..T15) ---- */
     lagfx_sampler_diag_reset(); g_nwarn = g_nlog = 0;
     { lagfx_constexpr_sampler_t cs = D(W(1, 1, 1, 2, 2, 0, false, 8)); lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr_norm(&cs);   /* T11 */
-      /* Pins that bicubic is NOT implemented: the state is exactly plain LINEAR/LINEAR with no cubic / custom-filter field, and the counter says "as linear".
-       * If real bicubic were implemented this state (and the counter semantics) would have to change and this test would FAIL. */
-      CHECK(s.mag_filter == VK_FILTER_LINEAR && s.min_filter == VK_FILTER_LINEAR);
+      /* Current compatibility behaviour: a bicubic word (filter 2) gets exactly the state of a plain linear word and is counted as such. */
       lagfx_sampler_state_t lin; { lagfx_constexpr_sampler_t cl = D(W(1, 1, 1, 1, 1, 0, false, 8)); lin = lagfx_sampler_state_from_constexpr_norm(&cl); }
+      lagfx_sampler_diag_t d = dg();
+#if !LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED
+      CHECK(s.mag_filter == VK_FILTER_LINEAR && s.min_filter == VK_FILTER_LINEAR);
       CHECK(seq(&s, &lin));
-      lagfx_sampler_diag_t d = dg(); CHECK(d.cxs_bicubic_as_linear == 1 && d.cxs_filter_unsupported == 0);
-      CHECK(g_nlog == 1 && g_nwarn == 0 && strstr(g_last, "fidelity=APPROX:") && strstr(g_last, "bicubic_as_linear[mag=2,min=2](NOT real bicubic)")); }
+      CHECK(d.cxs_bicubic_as_linear == 1 && d.cxs_filter_unsupported == 0);
+      CHECK(g_nlog == 1 && g_nwarn == 0 && strstr(g_last, "fidelity=APPROX:") && strstr(g_last, "bicubic_as_linear[mag=2,min=2]"));
+#else
+      /* Placeholder for future work: the exact path must not be counted as an approximation; its state expectations belong to that implementation. */
+      CHECK(d.cxs_bicubic_as_linear == 0 && d.cxs_filter_unsupported == 0);
+      (void)s; (void)lin;
+#endif
+    }
+    { lagfx_sampler_diag_reset(); lagfx_constexpr_sampler_t cs = D(W(1, 1, 1, 3, 3, 0, false, 8)); lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr_norm(&cs);   /* T11b: filter 3 is undefined, not bicubic */
+      CHECK(s.mag_filter == VK_FILTER_LINEAR && s.min_filter == VK_FILTER_LINEAR);
+      lagfx_sampler_diag_t d = dg(); CHECK(d.cxs_filter_unsupported == 1 && d.cxs_bicubic_as_linear == 0); }
+    lagfx_sampler_diag_reset(); g_nwarn = g_nlog = 0;
     { lagfx_constexpr_sampler_t cs = D(W(1, 1, 1, 3, 1, 0, false, 8)); lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr_norm(&cs);   /* T12 */
       CHECK(s.mag_filter == VK_FILTER_LINEAR); CHECK(dg().cxs_filter_unsupported == 1 && g_nwarn == 1); }
     { lagfx_constexpr_sampler_t cs = D(W(1, 1, 1, 0, 0, 1, false, 8)); lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr_norm(&cs);   /* T13 */

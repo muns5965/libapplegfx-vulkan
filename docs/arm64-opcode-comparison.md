@@ -111,10 +111,18 @@ device** (2 of 6), which the previous decoder ignored.
 
 ## Descriptor / sampler / buffer alignment (task 3)
 
-Reference sampler record (`ops/sampler.rs`, total 36 bytes, 28 written; payload offsets): +0 ref, +4 state u32, +8 flags u8 (bit 0 supportArgumentBuffers,
-bits 7:4 and +9..+11 unwritten), +12 f32 lodMin, +16 f32 lodMax, +20..+27 never written. Our `d` buffer includes the 8-byte header so the same fields are at
-+12 / +16 / +20 / +24. State bits: [0] min filter, [2] mag filter, [4] lodAverage, [7:5] compare, [10:8] / [14:12] / [18:16] S / T / R address mode,
-[21:20] border colour, [25:24] mip filter, [30:26] anisotropy (verbatim 1..16), [31] normalized coordinates.
+Serialized sampler record (object tag 3). Our own evidence: six runtime samplers in the dump, all 36 bytes, with state words `0x84000000` (x3), `0x84000005`,
+`0x04000000`, `0x04000005` (see Device evidence). What these words show, and nothing more: bit 31 toggles, bits 0 and 2 occur together, bit 26 is set in all
+six, every other bit is 0. The layout below is therefore **INFER**; the decoder in `arm64_sampler.c` implements it:
+
+* header: u32 tag = 3, u32 size, u32 ref (our buffer `d` includes this 8-byte header, `d + 12` is the state word); lod min / lod max as f32 at `d + 20` /
+  `d + 24`. The decoder reads the first 28 bytes. The 36-byte size is measured (our dump); which of the 36 bytes the guest actually writes, the flags byte
+  and the unused tail are **unverified**.
+* state bits (positions **unverified** against varied captures; they equal the sampler decoder in Henge's `devices/pvg_metal.m`, which uses 4-bit address /
+  border fields): [0] min filter, [2] mag filter (which of the two is which is unproven, the captured words never set them apart), [4] lodAverage,
+  [7:5] compare function, [10:8] / [14:12] / [18:16] S / T / R address mode, [21:20] border colour, [25:24] mip filter, [30:26] anisotropy (1..16
+  verbatim), [31] normalized coordinates (consistent with the captured words, not proven by them).
+* widths: 3-bit address modes and 2-bit border colours are forced by the public Metal enum ranges (six address modes, three border colours).
 
 Gaps found against the previous `make_sampler`, all fixed in `arm64_sampler.c`:
 

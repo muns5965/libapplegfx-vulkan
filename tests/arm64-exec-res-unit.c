@@ -189,7 +189,7 @@ static void test_vertex_textures(void) {
     res_exec(p, k_cmds_vtex, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && px(img, 5, 8) == BLUE);
     done(p);
-    p = res_run(M_VTEX, 0x86000000u);   /* tag 128 binds the sampler (with LOD clamps) for the vertex stage */
+    p = res_run(M_VTEX, 0x86000000u);   /* SYNTHETIC state word (not captured); */ /* tag 128 binds the sampler (with LOD clamps) for the vertex stage */
     fill_tex2(H_RED, H_RED, 16);
     res_exec(p, k_cmds_vtex_lod, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.tag_done[128] == 1 && p->diag2.exec.run.tag_unsup[128] == 0 && px(img, 5, 8) == RED);
@@ -206,14 +206,14 @@ static void test_vertex_textures(void) {
 static void test_unnormalized(void) {
     uint8_t img[RT_W * RT_H * 4];
     g_r.no_alt = 0;
-    lagfx_protocol_t *p = res_run(M_UNORM, 0x06000000u);   /* bit 31 clear = unnormalized coordinates */
+    lagfx_protocol_t *p = res_run(M_UNORM, 0x06000000u);   /* SYNTHETIC word (mip linear + unnormalized; the captured unnormalized words are 0x04000000 / 0x04000005); bit 31 clear = unnormalized coordinates */
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
     assert(R->draws == 1 && R->ext_unnorm_lod0 == 1 && R->ext_samp_unnorm == 1);
     assert(px(img, 5, 8) == RED && px(img, 10, 8) == GREEN);   /* coordinates are texels: left half red, right half green (clamped normalized ones would give one colour) */
     done(p);
-    p = res_run(M_UNORM, 0x86000000u);   /* a normalized sampler keeps the implicit-LOD shader */
+    p = res_run(M_UNORM, 0x86000000u);   /* SYNTHETIC state word (not captured); */ /* a normalized sampler keeps the implicit-LOD shader */
     fill_tex2(H_RED, H_GREEN, 8);
     res_exec(p, k_cmds_unorm, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.ext_unnorm_lod0 == 0 && px(img, 5, 8) == px(img, 10, 8));
@@ -279,7 +279,7 @@ static void test_tex3d(void) {
     assert(drawn >= 60);   /* the triangle covers about 40% of the 16 x 16 target */
     done(p);
     /* linear, z = 0.5: halfway between slice 1 (B = 90) and slice 2 (B = 150) -> B = 120; the texel centres in x / y keep R and G exact */
-    p = res_run(M_TEX3D_MID, 0x84000005u);
+    p = res_run(M_TEX3D_MID, 0x84000005u);   /* CAPTURED word (one of the six runtime samplers in our dump) */
     put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
     res_exec(p, k_cmds_bind, img, NULL);
     assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.ext_tex3d_binds == 1);
