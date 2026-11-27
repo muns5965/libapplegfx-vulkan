@@ -20,6 +20,7 @@
 #include "vulkan/msaa_stats.h"
 #include <math.h>
 #include "air2spv/spv_reflect.h"
+extern int lagfx_spv_msfetch_test_force_sample0;
 static float half_to_float(uint16_t h) { const uint32_t sg = (h >> 15) & 1u, e = (h >> 10) & 31u, m = h & 1023u; float v = e == 0 ? ldexpf((float)m, -24) : ldexpf((float)(m | 1024u), (int)e - 25); return sg ? -v : v; }
 
 #define REF_MS8  30u   /* BGRA8 multisample texture */
@@ -73,7 +74,7 @@ typedef struct {
 } gr_t;
 
 enum { P_PLAIN, P_DEFERRED, P_DEFERRED_NO_TAGS };
-typedef struct { uint32_t ms_ref, ms_fmt, ms_bpp, ms_type, ms_samples; uint16_t store; uint32_t res_ref; int mode; int fs; uint32_t slot1_ref; bool sentinel; bool ms_is_target_1x; } sc_t;
+typedef struct { uint32_t ms_ref, ms_fmt, ms_bpp, ms_type, ms_samples; uint16_t store; uint32_t res_ref; int mode; int fs; uint32_t slot1_ref; bool sentinel; bool ms_is_target_1x; bool two; } sc_t;
 
 static void sentinel_fill(void) { static uint8_t f[RT_W * RT_H * 8]; memset(f, 0x55, sizeof f); va_write((uint64_t)VPN_TEX << 14, f, RT_W * RT_H * 4u); va_write((uint64_t)VPN_TEX2 << 14, f, RT_W * RT_H * 8u); }
 
@@ -85,7 +86,12 @@ static void gr_run(const sc_t *s, gr_t *out) {
     if (s->sentinel) sentinel_fill();
     if (s->ms_ref != REF_TEX && s->ms_ref != REF_TEX2) put_ms_tex(s->ms_ref, s->ms_ref == REF_MS16 ? VPN_MS16 : s->ms_ref == REF_MSX ? VPN_MSX : VPN_MS8, s->ms_fmt, s->ms_bpp, s->ms_type, s->ms_samples);
     g_res_tex2 = true;
-    g_rc.fs = s->fs; g_rc.blend = false;
+    g_rc.fs = s->fs; g_rc.blend = false; g_rc.two = s->two, g_rc.fs2 = FS_F;
+    if (s->two) {   /* two draws in one pass: draw 1 (REF_PIPE, constant 0.5 red / alpha) the partly covering TRI, draw 2 (REF_PIPE2, fetch + 0.25 red) a full-screen triangle */
+        uint8_t pl[16] = {0}; uint32_t ptag = 0xe; memcpy(pl, &ptag, 4);
+        va_write(VA_PAY + 0x520, pl, 16);
+        entry(REF_PIPE2, LAGFX_A64_OBJ_SERIALIZED, 16, VA_PAY + 0x520);
+    }
     lagfx_a64_exec_set_pipeline_resolver(p, rc_resolver, NULL);
     uint64_t v0 = lagfx_vk_validation_msg_count;
     cb_reset();
@@ -94,7 +100,12 @@ static void gr_run(const sc_t *s, gr_t *out) {
         uint32_t a[2] = { 2, 0 }, b[2] = { s->res_ref, 0 }; cb_cmd(102, a, 8); cb_cmd(150, b, 8);
     }
     cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0);
-    v_tris(1); cb_draw_p(3, 0, 3, 1);
+    if (s->two) {
+        float v[12] = { TRI[0], TRI[1], TRI[2], TRI[3], TRI[4], TRI[5], -1.f, -1.f, 3.f, -1.f, -1.f, 3.f };
+        put_vertices(v, 6u);
+        cb_draw_p(3, 0, 3, 1);
+        cb_pipeline(REF_PIPE2); cb_draw_p(3, 3, 3, 1);
+    } else { v_tris(1); cb_draw_p(3, 0, 3, 1); }
     exec(p, 1, cb_finish(), true);
     memset(out, 0, sizeof *out);
     uint32_t w, h;
@@ -106,7 +117,7 @@ static void gr_run(const sc_t *s, gr_t *out) {
     lagfx_msaa_stats_line(&p->diag2.exec.msaa, out->line, sizeof out->line);
     if (out->ms.ms_pass_refused) snprintf(out->rej, sizeof out->rej, "%s", lagfx_a64_msaa_last_reject());
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
-    g_res_tex2 = false;
+    g_res_tex2 = false; g_rc.two = false;
 }
 
 /* compat texture creation, then the mode is switched to exact before the pass that uses it: the mirror object (made in compat) is looked up by the pass of a SECOND exec */
@@ -154,6 +165,20 @@ static bool fetch_matches(const gr_t *g, bool flip, unsigned *partial) {
         if (k > 0 && k < 4) part++;
         const uint32_t v = px(g->bgra, x, y); const double want = 63.75 * k / 4.0;
         if (fabs((double)((v >> 16) & 255) - want) > 2.0 || (v >> 24) != 0 || (v & 255) != 0 || ((v >> 8) & 255) != 0) { if (partial) *partial = part; return false; }
+    }
+    if (partial) *partial = part;
+    return true;
+}
+/* two draws, per-sample DISTINCT start values: draw 1 writes red 0.5 / alpha 0.5 into the samples TRI covers (k of 4 at an edge pixel), draw 2 fetches and adds 0.25 red everywhere.
+ * Per sample: covered 0.75, uncovered 0.25; resolve: red = 63.75 + 31.875 k, alpha = 127.5 k / 4. A fetch that reads ONE sample for all four (sample 0) gives a different resolve at every partly covered pixel. */
+static bool fetch2_matches(const gr_t *g, bool flip, unsigned *partial) {
+    unsigned part = 0;
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
+        int amb = 0; const int k = cov4(flip, x, y, &amb);
+        if (amb) continue;
+        if (k > 0 && k < 4) part++;
+        const uint32_t v = px(g->bgra, x, y);
+        if (fabs((double)((v >> 16) & 255) - (63.75 + 31.875 * k)) > 2.5 || fabs((double)(v >> 24) - 127.5 * k / 4.0) > 2.5 || (v & 255) != 0 || ((v >> 8) & 255) != 0) { if (partial) *partial = part; return false; }
     }
     if (partial) *partial = part;
     return true;
@@ -478,7 +503,14 @@ int main(void) {
       puts("PASS multisampled fetch rewrite: valid SPIR-V (1 / 2 reads), a shader without a SubpassData is untouched"); }
 
     /* 12: framebuffer fetch (input attachment) in a multisampled pass: a multisampled SubpassData read per SAMPLE (SPIR-V rewrite, sample-rate shading); the resolve equals the CPU coverage reference */
-    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F; g_shader_msgs = 0; lagfx_vk_validation_hook = shader_msg_hook; gr_run(&s, &g); lagfx_vk_validation_hook = NULL;
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F;
+      /* default: the device must ADVERTISE local reads of multisampled attachments (Vulkan 1.4 dynamicRenderingLocalReadMultisampledAttachments). lavapipe reports 0, so with the property as the device gave it the draw is refused */
+      const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = false;
+      gr_run(&s, &g);
+      assert(g.ms.fbfetch_ms_refused >= 1 && g.ms.fbfetch_ms_no_local_read_ms >= 1 && g.draws == 0 && g.skipped >= 1 && g.ms.fbfetch_ms_variants == 0);
+      puts("PASS negative: device without multisampled local read -> multisampled fetch refused (fbfetch_ms_no_local_read_ms), draw skipped, no shader variant built");
+      g_dev->vk->have_local_read_ms = true;   /* lavapipe renders it correctly although it does not advertise it (LAGFX_VK_FORCE_MS_LOCAL_READ=1 in production): the rendering checks below run with it forced */
+      g_shader_msgs = 0; lagfx_vk_validation_hook = shader_msg_hook; gr_run(&s, &g); lagfx_vk_validation_hook = NULL;
       unsigned part = 0; assert(g_shader_msgs == 0);
       assert(g.ms.fbfetch_ms_refused == 0 && g.ms.fbfetch_ms_variants >= 1 && g.ms.fbfetch_ms_reads >= 1 && g.draws == 1 && g.skipped == 0);
       assert(fetch_matches(&g, false, &part) || fetch_matches(&g, true, &part));
@@ -488,8 +520,25 @@ int main(void) {
       const bool srs = g_dev->vk->have_sample_rate_shading; g_dev->vk->have_sample_rate_shading = false;
       gr_run(&s, &g);
       g_dev->vk->have_sample_rate_shading = srs;
+      g_dev->vk->have_local_read_ms = lrms;
       assert(g.ms.fbfetch_ms_refused >= 1 && g.ms.sample_shading_refused >= 1 && g.draws == 0 && g.skipped >= 1);
       puts("PASS negative: no sample-rate shading -> multisampled fetch refused (fbfetch_ms_refused, sample_shading_refused), draw skipped"); }
+
+    /* 12c: per-sample distinct start values: the fetch must read ITS OWN sample. Forcing sample 0 (negative control through the rewrite's test seam) must break the result. */
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.two = true;
+      const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = true;
+      unsigned part = 0;
+      gr_run(&s, &g);
+      assert(g.ms.fbfetch_ms_refused == 0 && g.ms.fbfetch_ms_variants >= 1 && g.draws == 2 && g.skipped == 0);
+      assert(fetch2_matches(&g, false, &part) || fetch2_matches(&g, true, &part));
+      assert(part >= 4);
+      puts("PASS per-sample distinct start values (draw 1 covers some samples of an edge pixel, draw 2 fetches): resolve = per-sample sum, so each invocation read its own sample");
+      lagfx_spv_msfetch_test_force_sample0 = 1;
+      gr_run(&s, &g);
+      lagfx_spv_msfetch_test_force_sample0 = 0;
+      assert(g.draws == 2 && !fetch2_matches(&g, false, NULL) && !fetch2_matches(&g, true, NULL));
+      puts("PASS negative control: SampleId forced to 0 in the rewrite -> the same scene no longer matches (the test discriminates the sample choice)");
+      g_dev->vk->have_local_read_ms = lrms; }
 
     /* 13: mixed sample counts in one pass. EXACT: the whole pass is rejected; COMPAT (control): the 1x second attachment is ignored, counted, the pass still draws */
     { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.slot1_ref = REF_TEX2; s.sentinel = true; gr_run(&s, &g);

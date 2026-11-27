@@ -70,6 +70,7 @@ struct lagfx_vk_state {
     bool have_dynamic_rendering;
     bool have_raster_order;        /* rasterizationOrderColorAttachmentAccess enabled: input-attachment reads inside ONE draw see earlier overlapping fragments in primitive order */
     bool have_local_read;          /* VK_KHR_dynamic_rendering_local_read enabled: colour attachments can be read as input attachments (framebuffer fetch) */
+    bool have_local_read_ms;       /* Vulkan 1.4 property dynamicRenderingLocalReadMultisampledAttachments: input-attachment reads of multisampled colour attachments (multisampled framebuffer fetch needs it; false below 1.4) */
     bool have_storage_img_write;   /* shaderStorageImageWriteWithoutFormat + fragmentStoresAndAtomics enabled (OpImageWrite on an unformatted storage image from a fragment shader) */
     bool have_storage_img_rw_nofmt; /* shaderStorageImageReadWithoutFormat AND shaderStorageImageWriteWithoutFormat enabled (unformatted storage images: the tile BGRA8 imageblock) */
     bool have_vertex_stores;       /* vertexPipelineStoresAndAtomics enabled */

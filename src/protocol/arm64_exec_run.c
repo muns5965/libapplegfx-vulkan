@@ -1001,6 +1001,7 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) msfetch = true;
     if (msfetch && !r->vk->have_sample_rate_shading) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.sample_shading_refused++; CNT(p).draws_skipped++; return false; }   /* no per-sample shading on this device: refused, counted */
+    if (msfetch && !r->vk->have_local_read_ms) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.fbfetch_ms_no_local_read_ms++; CNT(p).draws_skipped++; return false; }   /* the device does not offer local reads of multisampled attachments (Vulkan 1.4 property): refused, counted */
     if (!r->vk->have_local_read)   /* a pipeline that reads the attachments cannot run without the device feature */
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }

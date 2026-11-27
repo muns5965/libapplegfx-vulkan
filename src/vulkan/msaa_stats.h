@@ -57,6 +57,7 @@ typedef struct lagfx_msaa_stats {
     uint64_t ms_fetch_refused;         /* ... refused: 1x image, no SAMPLED usage, or vkCreateImageView failed */
     uint64_t a2c_pipes;                /* pipelines built with alphaToCoverageEnable (injected / future decoded flag) */
     uint64_t sample_shading_pipes;     /* pipelines built with sampleShadingEnable (injected / future decoded flag) */
+    uint64_t fbfetch_ms_no_local_read_ms;   /* multisampled fetch refused: dynamicRenderingLocalReadMultisampledAttachments is false / unknown on the device */
     uint64_t sample_shading_refused;   /* sample shading asked for on a device without the sampleRateShading feature: pipeline refused */
     uint64_t ds_resolve_refused;       /* depth / stencil resolve modes refused by lagfx_msaa_dsres_choose (mode not offered, independent modes, unknown filter) */
     /* device info */
@@ -84,11 +85,11 @@ static inline int lagfx_msaa_stats_line(const lagfx_msaa_stats_t *s, char *buf, 
     return snprintf(buf, cap,
         "g7-gpu-msaa: mode=%s images[ms_created=%llu exact_refused=%llu compat_clamped=%llu compat_1x=%llu refused=%llu bad_shape=%llu] passes[ms=%llu attach=%llu resolves=%llu by_copy=%llu store_unknown=%llu "
         "resolve_no_target=%llu resolve_on_1x=%llu deferred_tags=%llu mixed_ignored=%llu ds_mismatch=%llu pass_refused=%llu] draws[pipes_ms=%llu draws_ms=%llu] "
-        "unsupported[ds_resolve=%llu sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu air_ms_ops=%llu air_sample_id_mask=%llu] devinfo_clamped=%llu devinfo_gap=%llu host[a2c=%llu sample_shading=%llu sample_shading_refused=%llu msfetch_views=%llu msfetch_refused=%llu dsres_refused=%llu]",
+        "unsupported[ds_resolve=%llu sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu air_ms_ops=%llu air_sample_id_mask=%llu] devinfo_clamped=%llu devinfo_gap=%llu host[a2c=%llu sample_shading=%llu sample_shading_refused=%llu msfetch_views=%llu msfetch_refused=%llu dsres_refused=%llu] fbfetch_ms[variants=%llu reads=%llu no_local_read_ms=%llu]",
         lagfx_msaa_compat_env() ? "compat" : "exact",
         LU(ms_images_created), LU(ms_exact_refused), LU(ms_compat_clamped), LU(ms_compat_1x), LU(ms_tex_refused), LU(ms_tex_bad_shape), LU(ms_passes), LU(ms_attach), LU(resolves), LU(resolves_by_copy),
         LU(store_unknown), LU(resolve_no_target), LU(resolve_on_1x), LU(deferred_store_tags), LU(attach_mixed_ignored), LU(ds_mismatch_ignored), LU(ms_pass_refused), LU(pipes_ms), LU(draws_ms),
-        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped), LU(devinfo_gap), LU(a2c_pipes), LU(sample_shading_pipes), LU(sample_shading_refused), LU(ms_fetch_views), LU(ms_fetch_refused), LU(ds_resolve_refused));
+        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped), LU(devinfo_gap), LU(a2c_pipes), LU(sample_shading_pipes), LU(sample_shading_refused), LU(ms_fetch_views), LU(ms_fetch_refused), LU(ds_resolve_refused), LU(fbfetch_ms_variants), LU(fbfetch_ms_reads), LU(fbfetch_ms_no_local_read_ms));
 #undef LU
 }
 

@@ -2443,3 +2443,13 @@ if py3_exe.found() and sh.found()
     sh, args : ['-c', 'out=$("$0" -I "$1" --from-log "$2") && echo "$out" | grep -q "B consistent: location 4" && echo "$out" | grep -q "A consistent" && echo "$out" | grep -q "RI8 .*absent"',
                 py3_exe.full_path(), meson.project_source_root() / 'scripts/tier1-runner.py', meson.current_source_dir() / 'fixtures/tier1-sample.log'])
 endif
+
+if fs.is_file(meson.current_source_dir() / 'spv-msfetch-unit.c')
+  spv_msfetch_test = executable('spv-msfetch-unit',
+    'spv-msfetch-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('spv msfetch rewrite (unit, spirv-val)', spv_msfetch_test)
+endif

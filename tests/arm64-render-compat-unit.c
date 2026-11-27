@@ -121,7 +121,7 @@ static void test_val_baseline_helper(void) {
 
 /* ---- scenario state read by the resolver ---- */
 enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF, FS_DISC };
-static struct { int fs; bool blend; } g_rc;
+static struct { int fs; bool blend; int fs2; bool two; } g_rc;   /* two: ref 7 (REF_PIPE2 of arm64-exec-run-unit) takes fs2 instead of fs */
 static VkShaderModule g_rc_fs[6]; static uint8_t *g_disc_spv; static size_t g_disc_bytes;   /* FS_DISC: a fragment shader translated from a fixture by the test */ static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
 
 static VkShaderModule rc_module(struct lagfx_vk_state *vk, const uint32_t *w, size_t bytes) {
@@ -139,7 +139,8 @@ static void rc_layout(struct lagfx_vk_state *vk, int n) {   /* n input attachmen
     assert(vkCreatePipelineLayout(vk->device, &pl, NULL, &g_rc_pl[n - 1]) == VK_SUCCESS);
 }
 static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, uint32_t ref, const uint32_t e[3], lagfx_a64_pipeline_src_t *out) {
-    (void)c; (void)t; (void)ref; (void)e;
+    (void)c; (void)t; (void)e;
+    const int fs_sel = (g_rc.two && ref == 7u) ? g_rc.fs2 : g_rc.fs;
     struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
     if (!g_vs) g_vs = rc_module(vk, k_vs_spv, sizeof k_vs_spv);
     memset(out, 0, sizeof *out);
@@ -149,23 +150,23 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
     out->desc.blend_set = 1, out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
     for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     out->desc.blend_src_rgb = out->desc.blend_src_a = VK_BLEND_FACTOR_ONE, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ZERO;   /* blend off by default */
-    if (g_rc.fs == FS_DISC) {
+    if (fs_sel == FS_DISC) {
         out->desc.fragment_shader = rc_module(vk, (const uint32_t *)(const void *)g_disc_spv, g_disc_bytes);   /* a fresh module per run: the SPIR-V changes with the mode under test */
-    } else if (g_rc.fs == FS_HALF) {
+    } else if (fs_sel == FS_HALF) {
         if (!g_rc_fs[FS_HALF]) g_rc_fs[FS_HALF] = rc_module(vk, k_fs_half_spv, sizeof k_fs_half_spv);
         out->desc.fragment_shader = g_rc_fs[FS_HALF];
         if (g_rc.blend) out->desc.blend_enable = 1, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;   /* premultiplied source-over */
     } else {
         const uint32_t *w[4] = { k_fs_acc_f_spv, k_fs_acc_u_spv, k_fs_acc_face_spv, k_fs_acc_mrt_spv };
         const size_t sz[4] = { sizeof k_fs_acc_f_spv, sizeof k_fs_acc_u_spv, sizeof k_fs_acc_face_spv, sizeof k_fs_acc_mrt_spv };
-        const int n = g_rc.fs == FS_MRT ? 2 : 1;
-        if (!g_rc_fs[g_rc.fs]) g_rc_fs[g_rc.fs] = rc_module(vk, w[g_rc.fs], sz[g_rc.fs]);
+        const int n = fs_sel == FS_MRT ? 2 : 1;
+        if (!g_rc_fs[fs_sel]) g_rc_fs[fs_sel] = rc_module(vk, w[fs_sel], sz[fs_sel]);
         rc_layout(vk, n);
-        out->desc.fragment_shader = g_rc_fs[g_rc.fs], out->desc.layout = g_rc_pl[n - 1], out->dsl = g_rc_dsl[n - 1];
-        out->desc.fragment_spv = w[g_rc.fs], out->desc.fragment_spv_bytes = sz[g_rc.fs];   /* the MS fetch rewrite needs the words, as in production (arm64_pipeline.c) */
+        out->desc.fragment_shader = g_rc_fs[fs_sel], out->desc.layout = g_rc_pl[n - 1], out->dsl = g_rc_dsl[n - 1];
+        out->desc.fragment_spv = w[fs_sel], out->desc.fragment_spv_bytes = sz[fs_sel];   /* the MS fetch rewrite needs the words, as in production (arm64_pipeline.c) */
         out->n_bind = (uint32_t)n;
         for (int i = 0; i < n; i++) out->bind[i].binding = (uint8_t)(24 + i), out->bind[i].kind = LAGFX_A64_BIND_INPUT, out->bind[i].stage = 1, out->bind[i].metal_index = (int16_t)i,
-                                    out->bind[i].ia_class = g_rc.fs == FS_U ? 1u : 0u;
+                                    out->bind[i].ia_class = fs_sel == FS_U ? 1u : 0u;
     }
     out->release = rel;
     return true;

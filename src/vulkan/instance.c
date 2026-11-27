@@ -148,6 +148,7 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
     }
     /* A validation layer older than VK_KHR_dynamic_rendering_local_read (< header 1.3.287) does not know its struct type / layout / extension: that is the layer, not us. */
     if (strstr(pCallbackData->pMessage, "unknown VkStructureType (1000232000)") ||
+        strstr(pCallbackData->pMessage, "VkPhysicalDeviceProperties2-pNext-pNext") && strstr(pCallbackData->pMessage, "unknown VkStructureType (56)") ||   /* VkPhysicalDeviceVulkan14Properties queried below with a layer older than header 1.4.x */
         (strstr(pCallbackData->pMessage, "VK_KHR_dynamic_rendering_local_read is not supported by this layer")) ||
         strstr(pCallbackData->pMessage, "(1000232000) does not fall within the begin..end range of the core VkImageLayout")) return VK_FALSE;
     lagfx_vk_validation_msg_count++;
@@ -722,6 +723,19 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
             s->have_local_read = true;
         }
+        if (s->have_local_read && lr_core) {   /* Vulkan 1.4 reports whether local reads also work on MULTISAMPLED attachments (VkPhysicalDeviceVulkan14Properties::dynamicRenderingLocalReadMultisampledAttachments).
+             * Older headers lack the struct: a zeroed buffer larger than it, sType 56 (PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES), the member read at its offset (sType, pNext, then u32 lineSubPixelPrecisionBits,
+             * maxVertexAttribDivisor, supportsNonZeroFirstInstance, maxPushDescriptors, dynamicRenderingLocalReadDepthStencilAttachments, dynamicRenderingLocalReadMultisampledAttachments). */
+            union { VkBaseOutStructure h; uint64_t align[128]; } v14;
+            memset(&v14, 0, sizeof v14);
+            v14.h.sType = (VkStructureType)56;
+            VkPhysicalDeviceProperties2 pq = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &v14 };
+            vkGetPhysicalDeviceProperties2(s->phys_device, &pq);
+            uint32_t ms_lr; memcpy(&ms_lr, (const uint8_t *)&v14 + sizeof(VkBaseOutStructure) + 5u * sizeof(uint32_t), sizeof ms_lr);
+            s->have_local_read_ms = ms_lr == VK_TRUE;
+        }
+        if (s->have_local_read && !s->have_local_read_ms && getenv("LAGFX_VK_FORCE_MS_LOCAL_READ"))   /* opt-in for a device that renders it correctly without advertising it (lavapipe: property 0, works): outside the spec, at the user's risk */
+            s->have_local_read_ms = true;
         if ((ext_ro_ext || ext_ro_arm) && ro.rasterizationOrderColorAttachmentAccess && !getenv("LAGFX_VK_NO_RASTER_ORDER")) {   /* same-draw ordering of input-attachment reads/writes */
             ro_en.pNext = feat13.pNext; feat13.pNext = &ro_en;
             wanted_dev_exts[wanted_dev_n++] = ext_ro_ext ? "VK_EXT_rasterization_order_attachment_access" : "VK_ARM_rasterization_order_attachment_access";
