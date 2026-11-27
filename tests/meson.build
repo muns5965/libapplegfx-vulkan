@@ -2221,6 +2221,18 @@ if fs.is_file(meson.current_source_dir() / 'arm64-render-compat-unit.c') and vul
   test('arm64 render compat, raster order forced off (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
 endif
 
+# 0x141 FillTextureWithColor: region fill keeps the rest of the image, real layout, level / layer / depth plane, formats, counted refusals; 0x140 counted. Includes the render-compat harness.
+if fs.is_file(meson.current_source_dir() / 'blit-fill-texture-unit.c') and vulkan_dep.found()
+  blit_fill_test = executable('blit-fill-texture-unit',
+    'blit-fill-texture-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('blit fill texture color (0x141) region / layout / level / format (unit, lavapipe + validation)', blit_fill_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # Vulkan multisample colour path (src/vulkan/msaa.c): sample choice, store-action table, 1x/2x/4x render + resolve on lavapipe, injected limited devices. Not wired to the PVG protocol (no capture evidence).
 msaa_test = executable('vulkan-msaa-unit',
   'vulkan-msaa-unit.c',

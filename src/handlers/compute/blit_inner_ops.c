@@ -60,6 +60,14 @@ static int op_ack_stub(lagfx_protocol_t *p, const uint8_t *payload, size_t len) 
     return 0;
 }
 
+/* Commands acknowledged without any effect, per opcode (0x12c..0x143): the census of "applied nothing". 0x140 FillTextureWithBytes (body 76 B) is counted here, NOT implemented:
+ * no payload layout of it exists in this repository (no capture, no reference source, no test; only the size 76 and "2 refs" in the TSV-derived table) [I]. Applying a guess
+ * (which bytes, which row pitch, which region fields) would write wrong texels, so it stays an ACK with a counter and the BLITOP log line (ACK-ONLY, first 24 words). */
+static uint64_t g_ack_only[0x143 - 0x12c + 1];
+uint64_t lagfx_blit_ack_only_count(uint32_t opcode) {
+    return (opcode >= 0x12cu && opcode <= 0x143u) ? g_ack_only[opcode - 0x12cu] : 0;
+}
+
 /* === ARM64 (protocol_mode ARM64_VMAPPLE) handlers ================
  * Same opcode numbers as the wire tags (0x12c == 300 ...), but the payload layout is Apple's (u64 fields, pvg_metal.m blit()), not the x86-era
  * guess the handlers below parse. They only act when the ARM64 exec path (LAGFX_ARM64_EXEC=1) has an exec open; x86 never reaches them. */
@@ -337,6 +345,7 @@ int lagfx_blit_inner_dispatch(lagfx_protocol_t *p,
     if (!d->handler) {
         return 0;
     }
+    if (d->handler == op_ack_stub && d->opcode >= 0x12cu && d->opcode <= 0x143u) g_ack_only[d->opcode - 0x12cu]++;
     return d->handler(p, payload, len);
 }
 

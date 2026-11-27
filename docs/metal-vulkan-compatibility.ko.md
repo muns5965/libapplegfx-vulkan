@@ -114,7 +114,7 @@
 | 기능 | 출처 | 구분 | 상태 | 근거 / 비고 |
 | --- | --- | --- | --- | --- |
 | `CopyFromTextureToTexture`(0x12f) | 원본 구현 | Vulkan | 구현 완료·미검증 | `lagfx_translate_blit_copy_texture_to_texture`가 `vkCmdCopyImage` 기록. 단위 시험은 Vulkan 없이 실행되어 이 경로는 실행되지 않음. |
-| `FillTextureWithColor`(0x141) | 원본 구현 | Vulkan | 구현 완료·미검증 | `lagfx_translate_blit_fill_texture_color`가 `vkCmdClearColorImage` 기록. 단위 시험에서 실행되지 않음. |
+| `FillTextureWithColor`(0x141) | 원본 구현 | Vulkan | 구현 완료·시험됨(lavapipe) | `lagfx_translate_blit_fill_texture_color`: 서브리소스 전체는 `vkCmdClearColorImage`, 일부 영역은 임시 이미지를 채워 해당 영역에 복사(영역 밖 텍셀 불변). 추적 중인 실제 레이아웃을 복원. 범위를 벗어난 영역·level·slice는 거부하고 계수. 페이로드 배치는 x86 시대 추정 [I]. `tests/blit-fill-texture-unit.c`. |
 | `CopyFromBufferToTexture`, `CopyFromBufferToBuffer`, `CopyFromTextureToBuffer`, `FillBuffer`, `FillBufferWithPattern`, `FillTextureWithBytes`, `GenerateMipmaps`, `…WithOptions`, `…NumSliceLevel` | 원본 구현 | Vulkan | 임시 구현 | `op_ack_stub`: 응답만 하고 아무 작업도 하지 않음. |
 | `Optimize*`, `Synchronize*`, `Invalidate*`, Indirect Command Buffer 관련 | 원본 구현 | Vulkan | 임시 구현 | `op_ack_stub`. |
 

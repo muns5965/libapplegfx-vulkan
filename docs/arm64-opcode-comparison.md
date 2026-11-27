@@ -79,7 +79,7 @@ records as the buffer binds (0x7d / 0x6e / 0xa5), the serializer stages the byte
 | 0x13c, 0x13d (316, 317) update / wait fence | **no-op (new)** | |
 | 0x13e (318) copy texture slices / levels (28 total) | missing-known | |
 | **0x13f (319) fillBuffer pattern4** (u32 ref, u64 loc, u64 len, u32 pattern; 32 total) | **implemented (new)** | location must be a multiple of 4; 1..3 byte tail takes the first pattern bytes |
-| 0x140 (320) fill texture with bytes, 0x141 (321) fill texture with colour | missing-known | the reference does not apply them either ("lost work"); layouts 84 / 100 total |
+| 0x140 (320) fill texture with bytes, 0x141 (321) fill texture with colour | missing-known | the reference does not apply them either ("lost work"); layouts 84 / 100 total. Library side (x86 dispatch only, not this ARM64 path): 0x141 is applied by `lagfx_translate_blit_fill_texture_color` (region + layout aware, see docs/spec-audit.md "Blit fill pass"); 0x140 is counted ack-only |
 | 0x142, 0x143 (322, 323) invalidate compressed texture (+ slice/level) | **no-op (new)** | compressed textures are not mirrored; the reference also treats it as a no-op |
 
 ## Compute segment (type 1): the whole segment is not executed (counted `seg_unsupported`)

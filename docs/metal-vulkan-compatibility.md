@@ -114,7 +114,7 @@ Upstream-reported results (for example, live macOS guest rendering on lavapipe) 
 | Feature | Origin | Kind | Status | Evidence / notes |
 | --- | --- | --- | --- | --- |
 | `CopyFromTextureToTexture` (0x12f) | Upstream | Vulkan | Implemented, Untested | `lagfx_translate_blit_copy_texture_to_texture` records `vkCmdCopyImage`. The unit test ran without Vulkan, so this path was not exercised. |
-| `FillTextureWithColor` (0x141) | Upstream | Vulkan | Implemented, Untested | `lagfx_translate_blit_fill_texture_color` records `vkCmdClearColorImage`. Not exercised in the unit run. |
+| `FillTextureWithColor` (0x141) | Upstream | Vulkan | Implemented, Tested (lavapipe) | `lagfx_translate_blit_fill_texture_color`: whole-subresource `vkCmdClearColorImage`, or for a smaller region a cleared temporary image copied into the region (texels outside untouched); real tracked layout restored; out-of-range region / level / slice refused and counted. Payload layout is the x86-era guess [I]. `tests/blit-fill-texture-unit.c`. |
 | `CopyFromBufferToTexture`, `CopyFromBufferToBuffer`, `CopyFromTextureToBuffer`, `FillBuffer`, `FillBufferWithPattern`, `FillTextureWithBytes`, `GenerateMipmaps`, `…WithOptions`, `…NumSliceLevel` | Upstream | Vulkan | Stub / Placeholder | `op_ack_stub`: acknowledged, nothing done. |
 | `Optimize*`, `Synchronize*`, `Invalidate*`, indirect command buffer ops | Upstream | Vulkan | Stub / Placeholder | `op_ack_stub`. |
 
