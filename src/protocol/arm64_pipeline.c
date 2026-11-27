@@ -539,14 +539,17 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     lagfx_spv_vertex_input_t vin[8];
     size_t nvi = lagfx_spv_reflect_vertex_inputs(vspv, vsz, vin, 8);
     if (nvi > 8u) nvi = 8u;
-    for (size_t v = 0; v < nvi; v++) out->desc.vtx_in_loc[v] = (uint8_t)vin[v].location, out->desc.vtx_in_comp[v] = (uint8_t)vin[v].components;
+    for (size_t v = 0; v < nvi; v++) out->desc.vtx_in_loc[v] = (uint8_t)vin[v].location, out->desc.vtx_in_comp[v] = (uint8_t)vin[v].components,
+        out->desc.vtx_in_src_known[v] = vin[v].has_src_offset, out->desc.vtx_in_src_unfed[v] = vin[v].src_unfed, out->desc.vtx_in_src_off[v] = vin[v].src_offset,
+        out->desc.vtx_in_buf_known[v] = vin[v].has_src_buffer, out->desc.vtx_in_buf[v] = vin[v].src_buffer;
     out->desc.n_vtx_inputs = (uint8_t)nvi;
     out->desc.pso_attrs_serialized = nvi ? 1u : 0u;   /* the descriptor is the layout source: a reflected input without a decoded attribute fails the pipeline (lagfx_pipeline_vertex_input) */
     if (nvi && d.nattrs) {
         for (uint32_t a = 1; a < d.nattrs; a++) if (d.attrs[a].bufidx != d.attrs[0].bufidx) { CNTP(p).rf_multi_stream++; goto done; }
         out->vertex_buffer_index = d.attrs[0].bufidx;
         out->desc.n_pso_attrs = (uint8_t)d.nattrs;
-        for (uint32_t a = 0; a < d.nattrs; a++) out->desc.pso_attr_fmt[a] = d.attrs[a].fmt, out->desc.pso_attr_off[a] = d.attrs[a].off;
+        for (uint32_t a = 0; a < d.nattrs; a++) out->desc.pso_attr_fmt[a] = d.attrs[a].fmt, out->desc.pso_attr_off[a] = d.attrs[a].off, out->desc.pso_attr_buf[a] = d.attrs[a].bufidx;
+        out->desc.pso_attr_buf_known = 1u;
         out->desc.vtx_stride = d.stride;
     }
 

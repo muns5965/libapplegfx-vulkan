@@ -8,6 +8,7 @@
 #include "air2spv/spv_reflect.h"
 #include "protocol/arm64_pipeline.h"
 #include "libapplegfx-vulkan.h"
+#include "vulkan/pipeline_build.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,10 +68,25 @@ int main(int argc, char **argv) {
         if (nvi) n_vi++; else n_novi++;
         int cover = nvi && na >= nvi; if (cover) n_cover++;
         printf("pso %-4u vs=%s reflected=%zu decoded=%u stride=%u %s | refl:", pso[i].ref, vf->name, nvi, d.nattrs, d.stride, nvi == 0 ? "no-stage-in" : (na >= nvi ? (na == nvi ? "EQUAL" : "decoded>reflected") : "UNDERCOUNT"));
-        for (size_t v = 0; v < nvi; v++) printf(" loc%u:c%u", vin[v].location, vin[v].components);
+        for (size_t v = 0; v < nvi; v++) { printf(" loc%u:c%u", vin[v].location, vin[v].components); if (vin[v].src_unfed) printf("@undef"); if (vin[v].has_src_offset) printf("@src%u", vin[v].src_offset); if (vin[v].has_src_buffer) printf("/b%u", vin[v].src_buffer); }
         printf(" | decoded:");
         for (uint32_t a = 0; a < na; a++) printf(" fmt%u@%u/buf%u", d.attrs[a].fmt, d.attrs[a].off, d.attrs[a].bufidx);
         printf("\n");
+        if (nvi) {   /* the Vulkan vertex-input pairing: positional (offsets ignored = the pre-offset behaviour) vs the current one (lagfx_pipeline_vertex_input) */
+            lagfx_pipeline_desc_t pd; memset(&pd, 0, sizeof pd);
+            pd.n_vtx_inputs = (uint8_t)nvi; pd.pso_attrs_serialized = 1; pd.n_pso_attrs = (uint8_t)na; pd.vtx_stride = d.stride; pd.pso_attr_buf_known = 1;
+            for (uint32_t a = 0; a < na; a++) pd.pso_attr_fmt[a] = d.attrs[a].fmt, pd.pso_attr_off[a] = d.attrs[a].off, pd.pso_attr_buf[a] = d.attrs[a].bufidx;
+            for (size_t v = 0; v < nvi; v++) pd.vtx_in_loc[v] = (uint8_t)vin[v].location, pd.vtx_in_comp[v] = (uint8_t)vin[v].components;
+            for (int pass = 0; pass < 2; pass++) {
+                if (pass) for (size_t v = 0; v < nvi; v++) pd.vtx_in_src_known[v] = vin[v].has_src_offset, pd.vtx_in_src_unfed[v] = vin[v].src_unfed, pd.vtx_in_src_off[v] = vin[v].src_offset, pd.vtx_in_buf_known[v] = vin[v].has_src_buffer, pd.vtx_in_buf[v] = vin[v].src_buffer;
+                VkVertexInputBindingDescription vb; VkVertexInputAttributeDescription va[8]; uint32_t n = 0, bad = 0; int why = 0;
+                bool ok = lagfx_pipeline_vertex_input_ex(&pd, &vb, va, &n, &bad, &why);
+                printf("    pair-%s: %s stride=%u", pass ? "new" : "old", ok ? "ok" : "FAIL", vb.stride);
+                for (uint32_t a = 0; a < n; a++) printf(" loc%u=fmt%d@%u", va[a].location, (int)va[a].format, va[a].offset);
+                if (!ok) printf(" (input %u, why %d)", bad, why);
+                printf("\n");
+            }
+        }
         for (size_t v = 0; v < nvi; v++) if (vin[v].location >= 8) n_norm++;
         (void)n_fmtmiss;
         free(vspv); free(lib); free(b);
