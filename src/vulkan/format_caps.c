@@ -127,11 +127,11 @@ uint32_t lagfx_fmtcap_max_samples(VkSampleCountFlags mask) {
 
 int lagfx_fmtcap_class(VkFormat f) {
     switch (f) {
-    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_A2B10G10R10_UINT_PACK32:
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_UINT_PACK32:
     case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32A32_UINT:
     case VK_FORMAT_S8_UINT:
         return LAGFX_FMTCAP_CLASS_UINT;
-    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT: case VK_FORMAT_A2B10G10R10_SINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
     case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT: case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32A32_SINT:
         return LAGFX_FMTCAP_CLASS_SINT;
     default: return LAGFX_FMTCAP_CLASS_FLOAT;   /* UNORM / SNORM / SRGB / SFLOAT / UFLOAT / depth: read as float */
@@ -147,8 +147,25 @@ static unsigned int_comp_bits(VkFormat f, int ch) {
     case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT: return 16;
     case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32A32_UINT:
     case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 32;
-    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32: return ch == 3 ? 2u : 10u;
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32: return ch == 3 ? 2u : 10u;   /* the clear value is in R, G, B, A order whatever the packing */
     default: return 0;
+    }
+}
+
+/* THE conversion of a Metal clear colour component to an integer attachment value (every integer clear in this library goes through lagfx_fmtcap_clear_color below):
+ *     NaN -> 0;  otherwise truncate toward zero, then saturate to the component's range  [0, 2^bits - 1] (UINT) / [-2^(bits-1), 2^(bits-1) - 1] (SINT)  (+-inf saturate).
+ * [V] Vulkan only needs the value to be representable (it casts to the component's bits; an unrepresentable signed value is not defined) - so saturating first keeps the cast defined.
+ * [N] That Metal converts a double MTLClearColor component to an integer pixel format by truncation + saturation is NOT documented in any page available here (MTLClearColor is
+ * four doubles, nothing more); rounding to nearest, wrap-around or "undefined" are equally possible. The choice is the least surprising for the values a guest records in practice
+ * (small non-negative integers, where every candidate agrees); it needs a capture of a fractional / out-of-range integer clear on a device to be settled. */
+static void clear_component_int(int cls, unsigned bits, double v, VkClearColorValue *out, int i) {
+    if (cls == LAGFX_FMTCAP_CLASS_UINT) {
+        const double mx = (double)((bits == 32u) ? 0xffffffffull : ((1ull << bits) - 1ull));
+        out->uint32[i] = v != v || v <= 0.0 ? 0u : v >= mx ? (uint32_t)mx : (uint32_t)v;   /* (uint32_t)v truncates toward zero for 0 < v < mx */
+    } else {
+        const double hi = (double)((1ll << (bits - 1u)) - 1ll), lo = -(double)(1ll << (bits - 1u));
+        out->int32[i] = v != v ? 0 : v >= hi ? (int32_t)hi : v <= lo ? (int32_t)lo : (int32_t)v;   /* (int32_t)v truncates toward zero */
     }
 }
 
@@ -156,17 +173,10 @@ void lagfx_fmtcap_clear_color(VkFormat fmt, const double c[4], VkClearColorValue
     memset(out, 0, sizeof *out);
     const int cls = lagfx_fmtcap_class(fmt);
     for (int i = 0; i < 4; i++) {
-        const double v = c[i];
-        if (cls == LAGFX_FMTCAP_CLASS_FLOAT) { out->float32[i] = (float)v; continue; }
+        if (cls == LAGFX_FMTCAP_CLASS_FLOAT) { out->float32[i] = (float)c[i]; continue; }
         unsigned bits = int_comp_bits(fmt, i);
         if (!bits) bits = 32u;   /* S8_UINT and any class-integer format this table does not list: the full 32-bit member */
-        if (cls == LAGFX_FMTCAP_CLASS_UINT) {
-            const double mx = (double)((bits == 32u) ? 0xffffffffull : ((1ull << bits) - 1ull));
-            out->uint32[i] = v != v || v <= 0.0 ? 0u : v >= mx ? (uint32_t)mx : (uint32_t)v;
-        } else {
-            const double hi = (double)((1ll << (bits - 1u)) - 1ll), lo = -(double)(1ll << (bits - 1u));
-            out->int32[i] = v != v ? 0 : v >= hi ? (int32_t)hi : v <= lo ? (int32_t)lo : (int32_t)v;
-        }
+        clear_component_int(cls, bits, c[i], out, i);
     }
 }
 

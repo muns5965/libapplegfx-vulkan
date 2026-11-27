@@ -15,6 +15,7 @@
 #include "command.h"
 #include "common/log.h"
 #include "common/perf.h"
+#include <math.h>
 #include <stdlib.h>
 
 #ifdef LAGFX_HAVE_VULKAN
@@ -58,15 +59,29 @@ void lagfx_vk_cmd_rt_to_color(VkCommandBuffer cb, lagfx_vk_render_target_t *rt) 
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 
-bool lagfx_vk_region_to_vk(const lagfx_draw_region_t *region, uint32_t rt_w, uint32_t rt_h, bool yflip, VkViewport *vp, VkRect2D *sc) {
-    bool ok = true;
+lagfx_vp_status_t lagfx_vk_region_to_vk(const lagfx_draw_region_t *region, uint32_t rt_w, uint32_t rt_h, bool yflip, VkViewport *vp, VkRect2D *sc) {
+    lagfx_vp_status_t st = LAGFX_VP_OK;
+    bool ok;
     double x = 0.0, y = 0.0, w = (double)rt_w, h = (double)rt_h;
     if (region && region->m_vp_set) { x = region->m_vp[0], y = region->m_vp[1], w = region->m_vp[2], h = region->m_vp[3]; }
-    if (!(w > 0.0) || !(h > 0.0) || !(x == x) || !(y == y) || w > 1e30 || h > 1e30 || x > 1e30 || x < -1e30 || y > 1e30 || y < -1e30) ok = false;   /* NaN / infinite / empty */
-    else if (region && region->lim_dim > 0.0f) {
-        const double lo = region->lim_lo, hi = region->lim_hi, md = region->lim_dim;
-        if (w > md || h > md || x < lo || x + w > hi || y < lo || y + h > hi) ok = false;   /* VUID-VkViewport-width-01771 / -01773 / -x-01774 / -x-01232 / -y-01775.. -y-01233 */
+    if (!(w > 0.0) || !(h > 0.0)) st = LAGFX_VP_EMPTY_METAL;   /* zero / negative / NaN size: no pixel is inside the viewport [I] (Metal's behaviour for a negative size is [N]) */
+    else {
+        bool beyond = false;   /* a number Vulkan cannot hold in the VkViewport at all, or a device limit */
+        if (!isfinite(w) || !isfinite(h) || !isfinite(x) || !isfinite(y)) st = LAGFX_VP_INEXPRESSIBLE;   /* NaN / infinite origin, infinite size: no defined Metal meaning either, nothing to be faithful to */
+        else if (fabs(x) > 3e38 || fabs(y) > 3e38 || w > 3e38 || h > 3e38) beyond = true;   /* does not fit a float */
+        else if (region && region->lim_dim > 0.0f) {
+            const double lo = region->lim_lo, hi = region->lim_hi, md = region->lim_dim;
+            if (w > md || h > md || x < lo || x + w > hi || y < lo || y + h > hi) beyond = true;   /* VUID-VkViewport-width-01771 / -01773 / -x-01774 / -x-01232 / -y-01775.. -y-01233 */
+        }
+        if (beyond) {
+            /* Metal accepts this viewport, Vulkan cannot express it. Fragments only exist inside the viewport rectangle, so when that rectangle does not meet the render target nothing would be
+             * drawn in Metal either: the (empty-scissor) skip is then EXACT. When it does meet the target the drawn pixels depend on the viewport TRANSFORM (x + w * (ndc + 1) / 2), and every
+             * Vulkan-expressible viewport / scissor pair maps NDC differently, so no fallback is equivalent (docs/spec-audit.md S05): skipped and counted separately. */
+            const bool meets = x < (double)rt_w && x + w > 0.0 && y < (double)rt_h && y + h > 0.0;
+            st = meets ? LAGFX_VP_INEXPRESSIBLE : LAGFX_VP_EMPTY_METAL;
+        }
     }
+    ok = st == LAGFX_VP_OK;
     const float rx = ok ? (float)x : 0.0f, ry = ok ? (float)y : 0.0f, rw = ok ? (float)w : 1.0f, rh = ok ? (float)h : 1.0f;
     *vp = (VkViewport){ .x = rx, .y = yflip ? ry + rh : ry, .width = rw, .height = yflip ? -rh : rh, .minDepth = region && region->vp_z_set ? region->vp_znear : 0.0f, .maxDepth = region && region->vp_z_set ? region->vp_zfar : 1.0f };
     uint64_t sx = 0, sy = 0, sw = rt_w, sh = rt_h;
@@ -75,15 +90,15 @@ bool lagfx_vk_region_to_vk(const lagfx_draw_region_t *region, uint32_t rt_w, uin
     const uint64_t cx0 = sx < rt_w ? sx : rt_w, cy0 = sy < rt_h ? sy : rt_h, cx1 = x1 < rt_w ? x1 : rt_w, cy1 = y1 < rt_h ? y1 : rt_h;   /* clamp to the target */
     *sc = (VkRect2D){ .offset = { (int32_t)cx0, (int32_t)cy0 }, .extent = { (uint32_t)(cx1 - cx0), (uint32_t)(cy1 - cy0) } };
     if (!ok) *sc = (VkRect2D){ .offset = { 0, 0 }, .extent = { 0, 0 } };
-    return ok;
+    return st;
 }
 
 /* Record dynamic viewport + scissor for rt (Y-flip, region clamp: see body). Extracted unchanged from the one-shot draw path; a `metal` region goes through
- * lagfx_vk_region_to_vk instead. Returns false only for a metal region whose viewport is degenerate (an empty scissor was recorded). */
-bool lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region) {
+ * lagfx_vk_region_to_vk instead. Returns LAGFX_VP_OK except for a metal region whose viewport is not drawable (an empty scissor was recorded; see lagfx_vp_status_t). */
+lagfx_vp_status_t lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region) {
     if (region && region->metal) {
         VkViewport mvp; VkRect2D msc;
-        const bool ok = lagfx_vk_region_to_vk(region, rt->width, rt->height, getenv("LAGFX_DISABLE_YFLIP") == NULL, &mvp, &msc);
+        const lagfx_vp_status_t ok = lagfx_vk_region_to_vk(region, rt->width, rt->height, getenv("LAGFX_DISABLE_YFLIP") == NULL, &mvp, &msc);
         vkCmdSetViewport(cb, 0, 1, &mvp);
         vkCmdSetScissor(cb, 0, 1, &msc);
         return ok;
@@ -128,7 +143,7 @@ bool lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t 
         vkCmdSetViewport(cb, 0, 1, &dvp);
         vkCmdSetScissor(cb, 0, 1, &dsc);
     }
-    return true;
+    return LAGFX_VP_OK;
 }
 
 /* Thin wrapper: the original substitute-path entry (no descriptor set). */

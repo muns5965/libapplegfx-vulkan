@@ -82,11 +82,12 @@ enum { LAGFX_FMTCAP_CLASS_FLOAT = 0, LAGFX_FMTCAP_CLASS_UINT, LAGFX_FMTCAP_CLASS
 int lagfx_fmtcap_class(VkFormat fmt);
 const char *lagfx_fmtcap_class_name(int cls);
 
-/* Metal clear colour (MTLClearColor: 4 doubles r,g,b,a) -> VkClearColorValue for an attachment of `fmt`. VkClearColorValue [V]: float32 is for formats whose numeric type is
- * floating point (UNORM / SNORM / SRGB / SFLOAT ... included), int32 for SINT, uint32 for UINT; "unsigned integer values are converted to the format of the image by casting to
- * the integer type with fewer bits" and a value the format cannot hold is poison (signed). So an integer format gets its member by class, each component converted by truncation
- * toward zero (NaN -> 0) and SATURATED to the component's range (A2B10G10R10: 10/10/10/2 bits). The truncation (vs rounding) is [N]: Metal's conversion of a double clear colour to an
- * integer format is not documented in the pages available here. */
+/* Metal clear colour (MTLClearColor: 4 doubles r,g,b,a) -> VkClearColorValue for an attachment of `fmt`: THE one place that converts it (the arm64 executor's render pass and the
+ * compute-handler FillTextureWithColor both call it). VkClearColorValue [V]: float32 is for formats whose numeric type is floating point (UNORM / SNORM / SRGB / SFLOAT ... included),
+ * int32 for SINT, uint32 for UINT; "unsigned integer values are converted to the format of the image by casting to the integer type with fewer bits" and a value the format cannot hold is
+ * poison (signed). So an integer format gets its member by class and each component converted by the rule documented at clear_component_int (format_caps.c):
+ *   NaN -> 0, truncation toward zero, saturation to the component's range (8 / 16 / 32 bits; A2B10G10R10 / A2R10G10B10: 10 / 10 / 10 / 2 bits in R, G, B, A order).
+ * That rule is [N] for Metal (undocumented here); boundary tests: tests/vulkan-format-caps-unit.c part_clear. */
 void lagfx_fmtcap_clear_color(VkFormat fmt, const double c[4], VkClearColorValue *out);
 
 /* One line per format of `list` (a library format table), then a summary; every emit is <= 400 chars. Counts formats lacking each capability the library needs (all

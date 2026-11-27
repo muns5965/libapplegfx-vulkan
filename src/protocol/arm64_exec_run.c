@@ -1116,7 +1116,16 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
     r->region.metal = true, r->region.lim_dim = (float)(r->vk->phys_props.limits.maxViewportDimensions[0] < r->vk->phys_props.limits.maxViewportDimensions[1] ? r->vk->phys_props.limits.maxViewportDimensions[0] : r->vk->phys_props.limits.maxViewportDimensions[1]),
         r->region.lim_lo = r->vk->phys_props.limits.viewportBoundsRange[0], r->region.lim_hi = r->vk->phys_props.limits.viewportBoundsRange[1];
-    if (!lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region)) CNT(p).viewport_degenerate++;   /* Metal viewport / scissor as recorded (fractional, partly outside the target allowed); a viewport Vulkan cannot express draws nothing (S05) */
+    {   /* Metal viewport / scissor as recorded (fractional, partly outside the target allowed); a viewport that draws nothing in Metal either (viewport_empty_metal) or one Vulkan cannot express (viewport_inexpressible) draws nothing here (S05) */
+        const lagfx_vp_status_t vps = lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region);
+        if (vps != LAGFX_VP_OK) {
+            CNT(p).viewport_degenerate++;
+            const uint64_t n = vps == LAGFX_VP_EMPTY_METAL ? ++CNT(p).viewport_empty_metal : ++CNT(p).viewport_inexpressible;
+            if ((n & (n - 1u)) == 0u)   /* 1, 2, 4, 8 ...: the split is not part of the periodic g7-gpu-ds line (diag.c prints the sum as viewport_degenerate) */
+                LAGFX_LOG("g7-gpu-vp: %s draws skipped=%llu (viewport x=%g y=%g w=%g h=%g, target %ux%u; limits dim=%g bounds=[%g,%g])", vps == LAGFX_VP_EMPTY_METAL ? "viewport_empty_metal" : "viewport_inexpressible", (unsigned long long)n,
+                          r->region.m_vp[0], r->region.m_vp[1], r->region.m_vp[2], r->region.m_vp[3], r->rt_w, r->rt_h, (double)r->region.lim_dim, (double)r->region.lim_lo, (double)r->region.lim_hi);
+        }
+    }
     if (r->pipe->src.desc.n_vtx_inputs) {
         uint32_t s = r->pipe->src.vertex_buffer_index;
         if (s >= A64_MAX_VB || !r->vb[s].b || r->vb[s].off >= r->vb[s].b->length) { CNT(p).no_vertex_buf++; CNT(p).draws_skipped++; return false; }

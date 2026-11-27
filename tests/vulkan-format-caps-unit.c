@@ -184,24 +184,93 @@ static int part_c(void) {
     return 0;
 }
 
-/* S04: Metal clear colour -> VkClearColorValue member by numeric class (no device needed). */
+/* S04: Metal clear colour -> VkClearColorValue member by numeric class (no device needed). The rule under test (lagfx_fmtcap_clear_color, format_caps.c): float formats keep (float)v;
+ * integer formats: NaN -> 0, truncate toward zero, saturate to the component's range. The rule for Metal is [N]; these tests pin what the library does, at every boundary. */
+#include <math.h>
+#include <stdint.h>
+#define CLR_FAIL(...) do { printf("FAIL clear: "); printf(__VA_ARGS__); printf("\n"); return 1; } while (0)
+/* Independent reference (long double / int64, not the library's double compare): the value of v after "truncate toward zero, saturate to [lo, hi]" as a 64-bit integer. */
+static int64_t clr_model(double v, int64_t lo, int64_t hi) {
+    if (isnan(v)) return 0;
+    long double t = truncl((long double)v);
+    if (t >= (long double)hi) return hi;
+    if (t <= (long double)lo) return lo;
+    return (int64_t)t;
+}
 static int part_clear(void) {
-    VkClearColorValue v; const double c[4] = { 7.9, -3.0, 300.0, 5e9 }, nan4[4] = { 0.0 / 0.0, 1, 1, 1 };
-    lagfx_fmtcap_clear_color(VK_FORMAT_R8G8B8A8_UNORM, c, &v);
-    if (v.float32[0] != 7.9f || v.float32[1] != -3.0f) { printf("FAIL clear: UNORM keeps float32\n"); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_R8G8B8A8_UINT, c, &v);   /* 8-bit: truncate toward zero, saturate to [0, 255] */
-    if (v.uint32[0] != 7u || v.uint32[1] != 0u || v.uint32[2] != 255u || v.uint32[3] != 255u) { printf("FAIL clear: R8G8B8A8_UINT %u %u %u %u\n", v.uint32[0], v.uint32[1], v.uint32[2], v.uint32[3]); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_R16G16B16A16_SINT, c, &v);   /* 16-bit signed */
-    if (v.int32[0] != 7 || v.int32[1] != -3 || v.int32[2] != 300 || v.int32[3] != 32767) { printf("FAIL clear: R16 SINT %d %d %d %d\n", v.int32[0], v.int32[1], v.int32[2], v.int32[3]); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_R32G32B32A32_SINT, c, &v);
-    if (v.int32[3] != 2147483647) { printf("FAIL clear: R32 SINT saturation %d\n", v.int32[3]); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_R32_UINT, c, &v);
-    if (v.uint32[3] != 4294967295u) { printf("FAIL clear: R32 UINT saturation\n"); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_A2B10G10R10_UINT_PACK32, c, &v);   /* 10 / 10 / 10 / 2 bits */
-    if (v.uint32[2] != 300u || v.uint32[3] != 3u) { printf("FAIL clear: A2B10G10R10_UINT %u %u\n", v.uint32[2], v.uint32[3]); return 1; }
-    lagfx_fmtcap_clear_color(VK_FORMAT_R8_SINT, nan4, &v);
-    if (v.int32[0] != 0) { printf("FAIL clear: NaN -> 0\n"); return 1; }
-    printf("PASS: clear colour union member by numeric class, truncating + saturating\n");
+    VkClearColorValue v;
+    /* 1. literal tables: input row -> expected member value, per format class and width */
+    static const double in[] = { -INFINITY, -1e30, -4294967297.0, -2147483649.0, -2147483648.0, -32769.0, -32768.0, -129.0, -128.5, -128.0, -1.5, -1.0, -0.9, -0.0, 0.0, 0.4, 0.5, 0.9999999, 1.0, 1.5, 2.5,
+                                  126.9, 127.0, 127.5, 128.0, 254.9, 255.0, 255.5, 256.0, 1022.5, 1023.0, 1024.0, 32767.0, 32767.9, 32768.0, 65535.0, 65535.5, 65536.0, 2147483647.0, 2147483648.0,
+                                  4294967295.0, 4294967295.5, 4294967296.0, 1e30, INFINITY };
+    const int N = (int)(sizeof in / sizeof in[0]);
+    /* literal expectations for the interesting rows of 8-bit unsigned (index by value of `in`): */
+    struct { double x; uint32_t u8, u16, u32, u10, u2; int32_t s8, s16, s32, s10, s2; } lit[] = {
+        /*   x               u8   u16     u32         u10   u2   s8    s16     s32          s10   s2 */
+        { -INFINITY,         0,   0,      0,          0,    0,   -128, -32768, INT32_MIN,   -512, -2 },
+        { -1.5,              0,   0,      0,          0,    0,   -1,   -1,     -1,          -1,   -1 },
+        { -0.9,              0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+        { -0.0,              0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+        { 0.4,               0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+        { 0.5,               0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+        { 0.9999999,         0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+        { 1.5,               1,   1,      1,          1,    1,   1,    1,      1,           1,    1 },
+        { 2.5,               2, 2, 2, 2, 2, 2, 2, 2, 2, 1 },
+        { 127.9,             127, 127, 127, 127, 3, 127, 127, 127, 127, 1 },
+        { 128.5,             128, 128, 128, 128, 3, 127, 128, 128, 128, 1 },
+        { 255.5,             255, 255, 255, 255, 3, 127, 255, 255, 255, 1 },
+        { 1023.5,            255, 1023, 1023, 1023, 3, 127, 1023, 1023, 511, 1 },
+        { 32768.5,           255, 32768, 32768, 1023, 3, 127, 32767, 32768, 511, 1 },
+        { 65536.0,           255, 65535, 65536, 1023, 3, 127, 32767, 65536, 511, 1 },
+        { 2147483648.0,      255, 65535, 2147483648u, 1023, 3, 127, 32767, INT32_MAX, 511, 1 },
+        { 4294967296.0,      255, 65535, 4294967295u, 1023, 3, 127, 32767, INT32_MAX, 511, 1 },
+        { INFINITY,          255, 65535, 4294967295u, 1023, 3, 127, 32767, INT32_MAX, 511, 1 },
+        { NAN,               0,   0,      0,          0,    0,   0,    0,      0,           0,    0 },
+    };
+    const VkFormat f_u8 = VK_FORMAT_R8G8B8A8_UINT, f_s8 = VK_FORMAT_R8G8B8A8_SINT, f_u16 = VK_FORMAT_R16G16B16A16_UINT, f_s16 = VK_FORMAT_R16G16B16A16_SINT, f_u32 = VK_FORMAT_R32G32B32A32_UINT,
+                   f_s32 = VK_FORMAT_R32G32B32A32_SINT, f_u10 = VK_FORMAT_A2B10G10R10_UINT_PACK32, f_s10 = VK_FORMAT_A2B10G10R10_SINT_PACK32;
+    for (size_t i = 0; i < sizeof lit / sizeof lit[0]; i++) {
+        const double c[4] = { lit[i].x, lit[i].x, lit[i].x, lit[i].x };
+        lagfx_fmtcap_clear_color(f_u8, c, &v);  if (v.uint32[0] != lit[i].u8 || v.uint32[3] != lit[i].u8)   CLR_FAIL("u8 %g -> %u want %u", lit[i].x, v.uint32[0], lit[i].u8);
+        lagfx_fmtcap_clear_color(f_u16, c, &v); if (v.uint32[0] != lit[i].u16 || v.uint32[3] != lit[i].u16) CLR_FAIL("u16 %g -> %u want %u", lit[i].x, v.uint32[0], lit[i].u16);
+        lagfx_fmtcap_clear_color(f_u32, c, &v); if (v.uint32[0] != lit[i].u32 || v.uint32[3] != lit[i].u32) CLR_FAIL("u32 %g -> %u want %u", lit[i].x, v.uint32[0], lit[i].u32);
+        lagfx_fmtcap_clear_color(f_u10, c, &v); if (v.uint32[0] != lit[i].u10 || v.uint32[2] != lit[i].u10 || v.uint32[3] != lit[i].u2) CLR_FAIL("u10 %g -> %u %u %u want %u %u", lit[i].x, v.uint32[0], v.uint32[2], v.uint32[3], lit[i].u10, lit[i].u2);
+        lagfx_fmtcap_clear_color(f_s8, c, &v);  if (v.int32[0] != lit[i].s8 || v.int32[3] != lit[i].s8)     CLR_FAIL("s8 %g -> %d want %d", lit[i].x, v.int32[0], lit[i].s8);
+        lagfx_fmtcap_clear_color(f_s16, c, &v); if (v.int32[0] != lit[i].s16 || v.int32[3] != lit[i].s16)   CLR_FAIL("s16 %g -> %d want %d", lit[i].x, v.int32[0], lit[i].s16);
+        lagfx_fmtcap_clear_color(f_s32, c, &v); if (v.int32[0] != lit[i].s32 || v.int32[3] != lit[i].s32)   CLR_FAIL("s32 %g -> %d want %d", lit[i].x, v.int32[0], lit[i].s32);
+        lagfx_fmtcap_clear_color(f_s10, c, &v); if (v.int32[0] != lit[i].s10 || v.int32[2] != lit[i].s10 || v.int32[3] != lit[i].s2) CLR_FAIL("s10 %g -> %d %d %d want %d %d", lit[i].x, v.int32[0], v.int32[2], v.int32[3], lit[i].s10, lit[i].s2);
+    }
+    /* 2. every format of the table x every input against the independent model (also checks the per-component widths: A2 alpha, 10-bit rgb; B8G8R8A8 / A2R10G10B10 keep RGBA order) */
+    static const struct { VkFormat f; unsigned bits[4]; int sgn; } F[] = {
+        { VK_FORMAT_R8_UINT, {8,8,8,8}, 0 }, { VK_FORMAT_R8G8_UINT, {8,8,8,8}, 0 }, { VK_FORMAT_R8G8B8A8_UINT, {8,8,8,8}, 0 }, { VK_FORMAT_B8G8R8A8_UINT, {8,8,8,8}, 0 },
+        { VK_FORMAT_R8_SINT, {8,8,8,8}, 1 }, { VK_FORMAT_R8G8_SINT, {8,8,8,8}, 1 }, { VK_FORMAT_R8G8B8A8_SINT, {8,8,8,8}, 1 }, { VK_FORMAT_B8G8R8A8_SINT, {8,8,8,8}, 1 },
+        { VK_FORMAT_R16_UINT, {16,16,16,16}, 0 }, { VK_FORMAT_R16G16_UINT, {16,16,16,16}, 0 }, { VK_FORMAT_R16G16B16A16_UINT, {16,16,16,16}, 0 },
+        { VK_FORMAT_R16_SINT, {16,16,16,16}, 1 }, { VK_FORMAT_R16G16_SINT, {16,16,16,16}, 1 }, { VK_FORMAT_R16G16B16A16_SINT, {16,16,16,16}, 1 },
+        { VK_FORMAT_R32_UINT, {32,32,32,32}, 0 }, { VK_FORMAT_R32G32_UINT, {32,32,32,32}, 0 }, { VK_FORMAT_R32G32B32A32_UINT, {32,32,32,32}, 0 },
+        { VK_FORMAT_R32_SINT, {32,32,32,32}, 1 }, { VK_FORMAT_R32G32_SINT, {32,32,32,32}, 1 }, { VK_FORMAT_R32G32B32A32_SINT, {32,32,32,32}, 1 },
+        { VK_FORMAT_A2B10G10R10_UINT_PACK32, {10,10,10,2}, 0 }, { VK_FORMAT_A2B10G10R10_SINT_PACK32, {10,10,10,2}, 1 },
+        { VK_FORMAT_A2R10G10B10_UINT_PACK32, {10,10,10,2}, 0 }, { VK_FORMAT_A2R10G10B10_SINT_PACK32, {10,10,10,2}, 1 },
+    };
+    for (size_t k = 0; k < sizeof F / sizeof F[0]; k++)
+        for (int i = 0; i < N; i++) {
+            const double c[4] = { in[i], in[(i + 7) % N], in[(i + 19) % N], in[(i + 31) % N] };
+            lagfx_fmtcap_clear_color(F[k].f, c, &v);
+            if (lagfx_fmtcap_class(F[k].f) != (F[k].sgn ? LAGFX_FMTCAP_CLASS_SINT : LAGFX_FMTCAP_CLASS_UINT)) CLR_FAIL("class of format %d", (int)F[k].f);
+            for (int ch = 0; ch < 4; ch++) {
+                const unsigned b = F[k].bits[ch];
+                const int64_t lo = F[k].sgn ? -((int64_t)1 << (b - 1)) : 0, hi = F[k].sgn ? ((int64_t)1 << (b - 1)) - 1 : (int64_t)(((uint64_t)1 << b) - 1);
+                const int64_t want = clr_model(c[ch], lo, hi), got = F[k].sgn ? (int64_t)v.int32[ch] : (int64_t)v.uint32[ch];
+                if (got != want) CLR_FAIL("format %d comp %d (%u bit %s) %.17g -> %lld want %lld", (int)F[k].f, ch, b, F[k].sgn ? "signed" : "unsigned", c[ch], (long long)got, (long long)want);
+            }
+        }
+    /* 3. float / normalized formats keep float32 and every component (NaN and inf pass through to the driver); the other union members are zero */
+    static const VkFormat FF[] = { VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_B8G8R8A8_SRGB, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT, VK_FORMAT_R8G8B8A8_SNORM, VK_FORMAT_A2B10G10R10_UNORM_PACK32 };
+    const double fc[4] = { 7.9, -3.0, 1e40, 0.0 / 0.0 };
+    for (size_t k = 0; k < sizeof FF / sizeof FF[0]; k++) {
+        lagfx_fmtcap_clear_color(FF[k], fc, &v);
+        if (v.float32[0] != 7.9f || v.float32[1] != -3.0f || !isinf(v.float32[2]) || !isnan(v.float32[3])) CLR_FAIL("float format %d keeps float32 components", (int)FF[k]);
+    }
+    printf("PASS: clear colour union member by numeric class; integer components: NaN -> 0, truncation toward zero, saturation (8/16/32 bit, signed/unsigned, A2B10G10R10 + A2R10G10B10: %zu formats x %d inputs vs an independent model, plus literal boundary tables); float formats unchanged\n", sizeof F / sizeof F[0], N);
     return 0;
 }
 
