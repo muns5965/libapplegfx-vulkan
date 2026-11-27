@@ -254,15 +254,15 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", wl);
             LAGFX_LOG("%s", wl);
         }
-        if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set) {
+        if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set || R->viewport_degenerate) {
             char dl[700];
             snprintf(dl, sizeof dl,
                      "g7-gpu-ds: dss[decoded=%llu bad=%llu bound=%llu unresolved=%llu] passes[ds=%llu depth_only=%llu attach_unsupported=%llu split_ignored=%llu no_device_support=%llu] draws_ds=%llu "
-                     "stencil_ref=%llu cull=%llu winding=%llu bias=%llu bias_clamp_dropped=%llu viewport_depth=%llu",
+                     "stencil_ref=%llu cull=%llu winding=%llu bias=%llu bias_clamp_dropped=%llu viewport_depth=%llu viewport_degenerate=%llu",
                      (unsigned long long)R->dss_decoded, (unsigned long long)R->dss_bad, (unsigned long long)R->dss_bound, (unsigned long long)R->dss_unresolved,
                      (unsigned long long)R->ds_passes, (unsigned long long)R->ds_depth_only_passes, (unsigned long long)R->ds_attach_unsupported, (unsigned long long)R->ds_split_ignored,
                      (unsigned long long)R->ds_no_device_support, (unsigned long long)R->ds_draws, (unsigned long long)R->stencil_ref_set, (unsigned long long)R->cull_set,
-                     (unsigned long long)R->winding_set, (unsigned long long)R->bias_set, (unsigned long long)R->bias_clamp_dropped, (unsigned long long)R->viewport_depth_set);
+                     (unsigned long long)R->winding_set, (unsigned long long)R->bias_set, (unsigned long long)R->bias_clamp_dropped, (unsigned long long)R->viewport_depth_set, (unsigned long long)R->viewport_degenerate);
             fprintf(stderr, "%s\n", dl);
             LAGFX_LOG("%s", dl);
         }
@@ -303,6 +303,10 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             size_t po = strlen(pl);
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT && po + 40 < sizeof pl; c++)
                 if (Q->stub_missing_cap[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " stub_missing_cap_%s=%llu", lagfx_vk_cap_name(c), U(stub_missing_cap[c]));
+        }
+        if (Q->discard_demote || Q->discard_kill || Q->discard_dropped) {
+            size_t po = strlen(pl);
+            if (po + 120 < sizeof pl) snprintf(pl + po, sizeof pl - po, " discard_fragment[demote=%llu kill=%llu dropped=%llu]", U(discard_demote), U(discard_kill), U(discard_dropped));
         }
         {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
             size_t po = strlen(pl);

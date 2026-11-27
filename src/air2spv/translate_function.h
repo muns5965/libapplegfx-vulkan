@@ -108,6 +108,28 @@ typedef struct {
  *   unlinked        FS input the linker could not resolve (left as before) */
 typedef struct { uint64_t mismatch_fixed, missing_zeroed, unlinked; } lagfx_stage_link_totals_t;
 
+/* air.convert integer -> integer calls (process totals): int_int = lowered by the SOURCE signedness (S07); int_int_unhandled = a spelling this lowering does not know
+ * (bool source, widths outside 8/16/32/64): previous destination-kind mapping kept, counted. */
+typedef struct { uint64_t int_int, int_int_unhandled; } lagfx_conv_totals_t;
+void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out);
+
+/* air.discard_fragment (MSL discard_fragment()) lowering. demote = true: OpDemoteToHelperInvocation (needs the device feature shaderDemoteToHelperInvocation; the module then
+ * declares Capability DemoteToHelperInvocation, gated by LAGFX_VK_CAP_DEMOTE) - the fragment stops writing but still takes part in derivatives, like a Metal discarded fragment [I].
+ * demote = false (the default; valid on every device): OpKill, which ends the invocation; it is a block terminator, so the block is split with a constant-true
+ * OpBranchConditional. That also holds inside the two recognised single-loop plans: the only OpPhi parent that can be a block being split is the plan's ENTRY block, and the
+ * split moves that label (S06; an earlier revision dropped the discard there). Kill vs demote [V: SPV_EXT_demote_to_helper_invocation text]: demote
+ * "does not necessarily terminate the invocation", is not a flow-control instruction (control flow stays uniform, derivatives stay valid), stores after it are suppressed;
+ * OpKill terminates the invocation and is a block terminator (SPIR-V 1.6 deprecates it in favour of OpTerminateInvocation / OpDemoteToHelperInvocation [V: changelog]).
+ * Per thread (the resolver translates on one thread); set it before each translation. */
+void lagfx_air2spv_set_discard_demote(bool demote);
+/* Process totals: lowered as demote / as OpKill; `dropped` is kept for the log format and is always 0 since the loop-plan case is lowered. */
+typedef struct { uint64_t demote, kill, dropped; } lagfx_discard_totals_t;
+void lagfx_air2spv_discard_totals(lagfx_discard_totals_t *out);
+
+/* D2 candidate, OPT-IN (default OFF): lower air.fmin / fmax / clamp / fast_* / saturate with GLSL.std.450 NMin / NMax / NClamp instead of FMin / FMax / FClamp (a NaN operand then yields the other
+ * operand). mode 1 = on, 0 = off, -1 = follow the environment variable LAGFX_SPV_NANMAX=1 (the default state). Process-wide. Off leaves every translation byte-identical. */
+void lagfx_air2spv_set_nanmax(int mode);
+
 /* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
  * Locations follow `vs_out` (the paired vertex module's output keys) via
  * `own_in` (this module's per-argument keys). Either may be NULL → legacy
@@ -140,6 +162,15 @@ bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_ins
 
 #ifdef __cplusplus
 } /* extern "C" */
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+/* std430-style size and alignment of an AIR type under the AIR data layout (LLVM alloc size: <3 x float> is 16 bytes, align 16). Exposed for tests. */
+bool lagfx_air2spv_type_layout(const lagfx_air_module_t *m, uint32_t ty, uint32_t *size, uint32_t *align);
+#ifdef __cplusplus
+}
 #endif
 
 #endif /* LIBAPPLEGFX_AIR2SPV_TRANSLATE_FUNCTION_H */

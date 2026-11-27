@@ -231,6 +231,8 @@ static int selected(L_t *l, const char *id) {
     if (l->cfg->from && l->cfg->from[0]) { if (!l->from_seen && !strcmp(l->cfg->from, id)) l->from_seen = 1; return l->from_seen; }
     return 1;
 }
+/* a group that runs ONLY when named in LAGFX_PIPELINE_REDUCE_GROUPS / cfg->groups (not part of the default ladder) */
+static int group_explicit(L_t *l, char g) { const char *s = l->cfg->groups; return s && s[0] && strchr(s, g) != NULL; }
 static int group_on(L_t *l, char g) { const char *s = l->cfg->groups; return !s || !s[0] || strchr(s, g) != NULL; }
 
 static void sanitize(const char *id, char *o, size_t cap) {
@@ -762,6 +764,14 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
                 p = e + 1;
             }
         }
+    }
+    if (group_explicit(l, 'n')) {   /* D2 NaN min/max candidate (opt-in group): the one rewrite alone, and on top of the CH10 reductions; both DIAGNOSTIC, meaning changes for NaN operands only */
+        memset(&r, 0, sizeof r);
+        r.bits = LRD_NANMAX;
+        row_recipe(l, "NANMAX", "D2 candidate: GLSL.std.450 FMin/FMax/FClamp -> NMin/NMax/NClamp (a NaN operand yields the other operand)", &r, NULL, 0, 0);
+        recipe_from_mask(l, 0x3ffu, &r);
+        r.bits |= LRD_NANMAX;
+        row_recipe(l, "NANMAX.CH10", "CH10 (all reductions, inputs live) + the D2 NaN min/max candidate", &r, NULL, 0, 0);
     }
     if (group_on(l, 'x')) {   /* second round: rows that separate "size / structure" from "live input loads" (see docs/ in the Henge repo: reduce-round2). Offline-designed; all diagnostic. */
         static const uint32_t CH10 = 0x3ffu, CH11 = 0x7ffu;   /* the cumulative-chain masks of CH10 / CH11 */

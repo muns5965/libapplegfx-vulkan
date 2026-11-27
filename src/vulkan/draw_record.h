@@ -29,7 +29,28 @@ typedef struct {
     uint32_t sc_x, sc_y, sc_w, sc_h;
     float    vp_znear, vp_zfar;     /* depth range of the viewport, used only when vp_z_set (zero-initialised regions keep 0..1) */
     bool     vp_z_set;
+    /* The arm64 executor path (arm64_exec_run.c): Metal's MTLViewport (doubles) and MTLScissorRect (integers) exactly as the guest recorded them, used INSTEAD of the integer
+     * fields above when `metal` is set (the older compute-handler path keeps the integer behaviour). Unset (guest recorded none) = Metal's default, the whole render target.
+     * A viewport may be fractional, begin at a negative origin and extend past the target (Vulkan allows that inside viewportBoundsRange: VkViewport [V]); the scissor is clamped
+     * to the target. lim_* are the device's maxViewportDimensions[0..1] minimum and viewportBoundsRange (0 = unknown: no limit check). */
+    bool     metal, m_vp_set, m_sc_set;
+    double   m_vp[4];       /* originX, originY, width, height */
+    uint64_t m_sc[4];       /* x, y, width, height */
+    float    lim_dim, lim_lo, lim_hi;
 } lagfx_draw_region_t;
+
+/* Result of translating a `metal` region (see lagfx_vk_region_to_vk). The two non-OK cases are counted separately (viewport_empty_metal / viewport_inexpressible):
+ *   LAGFX_VP_EMPTY_METAL    nothing would be drawn in Metal either: width or height not > 0 (or NaN), or a viewport Vulkan cannot hold whose rectangle does not meet the render target
+ *                           (fragments exist only inside the viewport rectangle, so skipping is EXACT; the empty-size reading itself is [I], Metal's rule for a negative size is [N]).
+ *   LAGFX_VP_INEXPRESSIBLE  a viewport Metal would draw (or one with no defined Metal meaning: NaN / infinite origin, infinite size) that Vulkan cannot express (beyond maxViewportDimensions /
+ *                           viewportBoundsRange, or not a float) and whose rectangle meets the target. No faithful fallback exists: the pixels drawn depend on the viewport transform
+ *                           x + w * (ndc + 1) / 2, and every expressible viewport + scissor pair has a different one (clamping the viewport rescales the NDC mapping; a scissor cannot restore it).
+ *                           It is skipped and counted. Faithful handling needs the clip coordinates compensated in the vertex shader, which this library does not do. */
+typedef enum { LAGFX_VP_OK = 0, LAGFX_VP_EMPTY_METAL, LAGFX_VP_INEXPRESSIBLE } lagfx_vp_status_t;
+
+/* Translate a `metal` region for a render target of rt_w x rt_h to the Vulkan viewport + scissor (Y flip by a negative height unless yflip is false). For a status other than OK the
+ * viewport is 1x1 and the scissor EMPTY, so the draw rasterizes nothing. *vp / *sc are always filled. */
+lagfx_vp_status_t lagfx_vk_region_to_vk(const lagfx_draw_region_t *region, uint32_t rt_w, uint32_t rt_h, bool yflip, VkViewport *vp, VkRect2D *sc);
 
 /* Record and submit a single draw command into a one-shot command buffer.
  *
@@ -91,7 +112,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
  * are the exact code the one-shot path runs. rt_to_color: barrier moving rt->layout to COLOR_ATTACHMENT_OPTIMAL (outside a render pass),
  * updates rt->layout. set_region: vkCmdSetViewport/Scissor for rt, region may be NULL (full target), Y-flipped unless LAGFX_DISABLE_YFLIP. */
 void lagfx_vk_cmd_rt_to_color(VkCommandBuffer cb, lagfx_vk_render_target_t *rt);
-void lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region);
+lagfx_vp_status_t lagfx_vk_cmd_set_region(VkCommandBuffer cb, const lagfx_vk_render_target_t *rt, const lagfx_draw_region_t *region);
 #endif /* LAGFX_HAVE_VULKAN */
 
 #endif /* LIBAPPLEGFX_VULKAN_DRAW_RECORD_H */

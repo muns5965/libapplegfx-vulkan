@@ -129,6 +129,8 @@ static uint32_t pick_queue_family(VkPhysicalDevice phys) {
 /* Debug message callback for validation layers — prints VUIDs and warnings. */
 /* Number of non-verbose validation messages seen (tests assert it stays 0). */
 uint64_t lagfx_vk_validation_msg_count;
+/* Test hook: called with the text of every counted message (not for the filtered ones below). tests/arm64-render-compat-unit.c keeps a per-test list of them and compares it with a baseline file. */
+void (*lagfx_vk_validation_hook)(const char *msg);
 /* Of those, the messages about a shader / descriptor-write DESCRIPTOR TYPE that disagrees with the pipeline layout or the layout binding (VUID-VkGraphicsPipelineCreateInfo-layout-07988 / -07990 /
  * ..., VUID-VkWriteDescriptorSet-descriptorType-*): the class a set+binding holding two descriptor types ends in. Separate so a test can stay strict about it while an older layer reports other things. */
 uint64_t lagfx_vk_validation_layout_msg_count;
@@ -148,6 +150,7 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
         (strstr(pCallbackData->pMessage, "VK_KHR_dynamic_rendering_local_read is not supported by this layer")) ||
         strstr(pCallbackData->pMessage, "(1000232000) does not fall within the begin..end range of the core VkImageLayout")) return VK_FALSE;
     lagfx_vk_validation_msg_count++;
+    if (lagfx_vk_validation_hook) lagfx_vk_validation_hook(pCallbackData->pMessage);
     if (strstr(pCallbackData->pMessage, "VUID-VkGraphicsPipelineCreateInfo-layout-") || strstr(pCallbackData->pMessage, "uses descriptor slot") || strstr(pCallbackData->pMessage, "VUID-VkWriteDescriptorSet-descriptorType-"))
         lagfx_vk_validation_layout_msg_count++;
     if (getenv("LAGFX_VK_VALIDATION_PRINT")) fprintf(stderr, "validation: %s\n", pCallbackData->pMessage);
@@ -576,6 +579,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe11.storageInputOutput16) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16);
     if (have_varptr_storage_buffer) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB);
     if (probe11.variablePointers) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR);
+    if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
     {   /* simd-group (subgroup) operations a compute shader may use: Metal's simd_* intrinsics map to GroupNonUniform*; the device must offer them in the COMPUTE stage */
@@ -608,6 +612,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     feat12.storageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB8)) ? VK_TRUE : VK_FALSE;
     feat12.uniformAndStorageBuffer8BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB8)) ? VK_TRUE : VK_FALSE;
     feat12.storagePushConstant8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC8)) ? VK_TRUE : VK_FALSE;
+    feat13.shaderDemoteToHelperInvocation = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)) ? VK_TRUE : VK_FALSE;
     feat11.storageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SB16)) ? VK_TRUE : VK_FALSE;
     feat11.uniformAndStorageBuffer16BitAccess = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_UB16)) ? VK_TRUE : VK_FALSE;
     feat11.storagePushConstant16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_PC16)) ? VK_TRUE : VK_FALSE;

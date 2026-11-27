@@ -24,6 +24,7 @@
 #include "../device.h"
 #include "../display.h"
 #include "../vulkan/command.h"
+#include "../vulkan/format_caps.h"
 #include "../vulkan/iosurface.h"
 
 #include <stdlib.h>
@@ -193,11 +194,9 @@ lagfx_status_t lagfx_translate_blit_fill_texture_color(void *vk,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
                           0, NULL, 0, NULL, 1, &barrier);
 
-    /* Convert double color to float */
+    /* Convert the double colour by the numeric class of the texture's format (lagfx_fmtcap_clear_color: the one documented conversion; integer formats need the int32 / uint32 member) */
     VkClearColorValue clear_color = {0};
-    for (int i = 0; i < 4; ++i) {
-        clear_color.float32[i] = (float)color[i];
-    }
+    lagfx_fmtcap_clear_color(tex->format, color, &clear_color);
 
     /* Issue clear command */
     VkImageSubresourceRange subres = {

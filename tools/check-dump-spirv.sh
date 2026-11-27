@@ -7,18 +7,7 @@
 set -u
 B=${1:?build dir}; D=${2:?dump dir}; X=${3:-/dev/null}
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
-python3 - "$D/index.txt" "$T/pairs.txt" <<'PY'
-import re,sys
-L=open(sys.argv[1]).read().splitlines(); cur={}
-for l in L:
-    m=re.match(r'fn task=\d+ ref=(\d+) .* hash=(\w+) ',l)
-    if m: cur[m[1]]=m[2]
-o=set()
-for l in L:
-    m=re.match(r'pso task=\d+ ref=\d+ function_refs=\[(\d+),(\d+)\]',l)
-    if m and m[1] in cur and m[2] in cur: o.add((cur[m[1]],cur[m[2]]))
-open(sys.argv[2],'w').write(''.join(f'{a} {b}\n' for a,b in sorted(o)))
-PY
+python3 -I "$(dirname "$0")/dump_pairs.py" "$D/index.txt" > "$T/pairs.txt" || { echo "dump_pairs.py failed"; exit 1; }
 mkdir "$T/spv"
 "$B/examples/dump-translate" "$D" "$T/spv" "$T/pairs.txt" 2> "$T/err.txt"; rc=$?
 fail=0

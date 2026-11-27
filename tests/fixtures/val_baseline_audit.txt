@@ -1,0 +1,10 @@
+# Baseline of Vulkan validation-layer messages seen by the audit tests of tests/arm64-render-compat-unit.c (helper val_begin/val_end).
+# Format: <window label> TAB <max count PER rc_run EXEC in the window> TAB <key = VUID | first 110 chars of the text, handles/digits scrubbed>. Label "*" matches every window.
+# Collected on lavapipe (llvmpipe, Vulkan 1.3) with the khronos validation layer, both runs (default / LAGFX_VK_NO_RASTER_ORDER=1), max of the two; collected at ed75491 (tests unchanged below
+# this line were added with the S04-S06 / D1 tests). All four belong to the PRE-EXISTING framebuffer-fetch / input-attachment harness (the FS_U shader of test_viewport_semantics): they appear
+# identically in the pre-existing tests (test_fetch_class, test_split_*) that this branch did not touch, and none is a viewport, clear, discard or round message.
+# Windows that are NOT listed here (S04 clear, S06 discard*, D1 round, ...) saw NO message and must stay at none. Regenerate: LAGFX_VAL_BASELINE_PRINT=1 LAGFX_VK_VALIDATION=1 build/tests/arm64-render-compat-unit | grep ^VALKEY
+S05 viewport	1	VUID-VkGraphicsPipelineCreateInfo-renderPass-06061 | vkCreateGraphicsPipelines(): pCreateInfos[#].pStages[#] is being created with fragment shader state and render
+S05 viewport	1	VUID-VkWriteDescriptorSet-descriptorType-04151 | vkUpdateDescriptorSets(): pDescriptorWrites[#].pImageInfo[#] Descriptor update with descriptorType VK_DESCRIPT
+S05 viewport	1	VUID-vkCmdPipelineBarrier-None-08719 | vkCmdPipelineBarrier(): pMemoryBarriers[#].dstAccessMask (VK_ACCESS_INPUT_ATTACHMENT_READ_BIT|VK_ACCESS_COLOR_
+S05 viewport	1	VUID-vkCmdPipelineBarrier-shaderTileImageColorReadAccess-08718 | vkCmdPipelineBarrier():  can not be called inside a dynamic rendering instance. This can be fixed by enabling 

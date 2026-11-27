@@ -1080,6 +1080,13 @@ if py3_exe.found() and fs.is_file(meson.project_source_root() / 'tools' / 'test_
     workdir : meson.project_source_root())
 endif
 
+# Dump pair derivation shared by tools/check-dump-spirv.sh and tools/check-stage-interfaces.py (reused function refs: the fn lines AFTER a pso define it).
+if py3_exe.found() and fs.is_file(meson.project_source_root() / 'tools' / 'test_dump_pairs.py')
+  test('dump pso pair derivation (python)', py3_exe,
+    args : ['-W', 'ignore', meson.project_source_root() / 'tools' / 'test_dump_pairs.py'],
+    workdir : meson.project_source_root())
+endif
+
 # air.sample_texture_2d -> real OpImageSampleImplicitLod lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-unit.c')
   air2spv_txs_deps = [libapplegfx_vulkan_dep]
@@ -2127,6 +2134,7 @@ if fs.is_file(meson.current_source_dir() / 'arm64-render-compat-unit.c') and vul
     'arm64-render-compat-unit.c',
     include_directories : [include_dir, internal_include_dir, include_directories('../src')],
     dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
     build_by_default : true,
   )
   test('arm64 render compat (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1'])
@@ -2141,3 +2149,16 @@ msaa_test = executable('vulkan-msaa-unit',
   build_by_default : true,
 )
 test('vulkan msaa colour path (unit, lavapipe + injected devices)', msaa_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+# Spec-audit regressions (docs/spec-audit.md): srem -> OpSRem, <3 x T> member layout (LLVM alloc size), [[instance_id]] -> InstanceIndex.
+if fs.is_file(meson.current_source_dir() / 'air2spv-spec-audit-unit.c')
+  air2spv_specaudit_test = executable('air2spv-spec-audit-unit',
+    'air2spv-spec-audit-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv spec-audit regressions (unit)', air2spv_specaudit_test,
+    workdir : meson.current_source_dir() / '..')
+endif

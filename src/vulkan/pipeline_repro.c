@@ -143,14 +143,15 @@ static void run_matrix(ctx_t *c, const lagfx_pipeline_desc_t *d0, const uint32_t
     variant(c, "d1", "real VERTEX + stub fragment (the VS fails if this fails)", "DIAGNOSTIC: changes meaning (stub stage)", build_once(c, d0, vs, vsn, lagfx_stub_fs_spv, sizeof lagfx_stub_fs_spv, ve, "main"), true, NULL);
     variant(c, "d2", "stub vertex + real FRAGMENT (the FS fails if this fails)", "DIAGNOSTIC: changes meaning (stub stage)", build_once(c, d0, lagfx_stub_vs_spv, sizeof lagfx_stub_vs_spv, fs, fsn, "main", fe), true, NULL);
     /* (e) .. (i): rewrites of both modules */
-    struct { const char *id, *what, *tag; int (*fn)(const uint32_t *, size_t, uint32_t **, size_t *, char *, size_t); } rw[6] = {
+    struct { const char *id, *what, *tag; int (*fn)(const uint32_t *, size_t, uint32_t **, size_t *, char *, size_t); } rw[7] = {
         { "e", "64-bit dynamic vector index -> 32-bit", "DIAGNOSTIC: rewrites instructions, value-preserving for an in-range index", lagfx_spv_variant_index32 },
         { "f", "drop unused Int8/16/Float16/Int64 capability decls", "DIAGNOSTIC: only removes what nothing uses", lagfx_spv_variant_strip_caps },
         { "g", "OpUndef composites -> OpConstantNull", DIAG_MEANING " (undef -> zero)", lagfx_spv_variant_undef_composites },
         { "h", "OpUndef struct / pointer ONLY -> OpConstantNull", DIAG_MEANING " (undef -> zero, struct / pointer typed only)", lagfx_spv_variant_undef_struct_ptr },
         { "i", "drop unreferenced OpUndef", "DIAGNOSTIC: value-preserving (nothing used them)", lagfx_spv_variant_drop_dead_undef },
-        { "j", "OpUndef struct ONLY -> OpConstantNull", DIAG_MEANING " (undef -> zero, struct typed only)", lagfx_spv_variant_undef_struct } };
-    for (int i = 0; i < 6; i++) {
+        { "j", "OpUndef struct ONLY -> OpConstantNull", DIAG_MEANING " (undef -> zero, struct typed only)", lagfx_spv_variant_undef_struct },
+        { "n", "D2 candidate: GLSL FMin/FMax/FClamp -> NMin/NMax/NClamp", DIAG_MEANING " (only for NaN operands: the other operand becomes the result)", lagfx_spv_variant_nanmax } };
+    for (int i = 0; i < 7; i++) {
         uint32_t *vo = NULL, *fo = NULL;
         size_t von = 0, fon = 0;
         char vi[160] = "", fi[160] = "", note[400];
@@ -315,7 +316,7 @@ lagfx_status_t lagfx_pipeline_repro_run(const char *bundle_dir, const lagfx_pipe
             lagfx_pipeline_reduce_run(&cfg, &rr);
         }
         res.variants_ok = c.ok, res.variants_failed = c.fail, res.variants_na = c.na;
-        if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "variant-matrix a..j (the OLD variant rows; includes the d0/d1 stub-stage CONTROLS that build by design, NOT the -13 matrix M0..M10, whose own line is 'pipeline-matrix: summary'): %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
+        if (flags & LAGFX_PIPELINE_REPRO_MATRIX) rp(&rep, "variant-matrix a..j + n (the OLD variant rows, n = the D2 NaN-min/max candidate; includes the d0/d1 stub-stage CONTROLS that build by design, NOT the -13 matrix M0..M10, whose own line is 'pipeline-matrix: summary'): %u built, %u failed, %u not applicable\n", c.ok, c.fail, c.na);
     }
 cleanup:
     if (c.layout && c.layout != vk->empty_layout) vkDestroyPipelineLayout(c.dev, c.layout, NULL);

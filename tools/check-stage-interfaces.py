@@ -2,6 +2,7 @@
 """Checks the VS output / FS input interface of every vertex+fragment pair in an
 arm64 GPU dump (index.txt) against the SPIR-V that dump-translate produced:
 every FS Location input must have a VS output of the same type at that Location.
+Pairs come from tools/dump_pairs.py (the same list check-dump-spirv.sh hands to dump-translate).
 Usage: check-stage-interfaces.py <spv dir> <dump index.txt>   (exit 1 on a type
 mismatch; an FS input with no VS output is reported but only counted, since Metal
 leaves it undefined — point_coord, unused inputs)."""
@@ -27,17 +28,9 @@ def iface(path):
         if v in bi: r[sc]['B:'+bi[v]]=ty
         else: r[sc][loc.get(v,-1)]=ty
     return r
-libs={};pairs=[]
-cur={}
-lines=open(idx).read().splitlines()
-for l in lines:
-    m=re.match(r'fn task=\d+ ref=(\d+) .* hash=(\w+) functions=\[(\w[\w.]*)\(stage=(\d)',l)
-    if m: cur[m[1]]=(m[2],m[3],m[4])
-for l in lines:
-    m=re.match(r'fn task=\d+ ref=(\d+) .* hash=(\w+) functions=\[(\w[\w.]*)\(stage=(\d)',l)
-    if m: cur[m[1]]=(m[2],m[3],m[4])
-    m=re.match(r'pso task=\d+ ref=\d+ function_refs=\[(\d+),(\d+)\]',l)
-    if m and m[1] in cur and m[2] in cur: pairs.append((cur[m[1]],cur[m[2]]))
+sys.path.insert(0,os.path.dirname(os.path.abspath(__file__)))
+import dump_pairs   # the one pair derivation (tools/dump_pairs.py): refs are reused by the guest, the fn lines AFTER a pso define its functions
+pairs=dump_pairs.pairs(open(idx).read().splitlines())
 seen=set();bad=0;n=0;hard=[]
 for vs,fs in pairs:
     k=(vs[0],fs[0])

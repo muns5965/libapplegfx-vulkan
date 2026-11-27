@@ -219,7 +219,8 @@ static void md_iface_key(const lagfx_air_module_t *m, const lagfx_air_metadata_t
         const char *s = md_string(m, node->operands[j] - 1u);
         if (!s) continue;
         if (strcmp(s, "air.position") == 0 || strcmp(s, "air.point_size") == 0 ||
-            strcmp(s, "air.point_coord") == 0) { snprintf(out, cap, "%s", s); return; }
+            strcmp(s, "air.point_coord") == 0 ||
+            strcmp(s, "air.vertex_id") == 0 || strcmp(s, "air.instance_id") == 0) { snprintf(out, cap, "%s", s); return; }
         if (strcmp(s, "air.render_target") == 0) {   /* "air.render_target:<index>": the colour attachment a fragment input (dest_N, framebuffer fetch) or output refers to */
             int64_t idx = (j + 1u < node->num_operands && node->operands[j + 1u]) ? md_value_int(m, md_record(m, node->operands[j + 1u] - 1u)) : -1;
             if (idx >= 0 && idx < 8) snprintf(out, cap, "%s:%d", s, (int)idx); else snprintf(out, cap, "%s", s);
@@ -357,6 +358,7 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
             lagfx_stage_keys_t own;
             bool have_own = (xs == LAGFX_XLATE_STAGE_COMPUTE)
                               ? lagfx_air_stage_keys(m, false, &own)   /* a kernel's builtin arguments are identified by these keys */
+                              : (xs == LAGFX_XLATE_STAGE_VERTEX)   ? lagfx_air_stage_keys(m, false, &own)   /* [[vertex_id]] vs [[instance_id]] are told apart by these keys */
                               : ((xs == LAGFX_XLATE_STAGE_FRAGMENT) && vs_out && lagfx_air_stage_keys(m, false, &own));
             lagfx_status_t bst = lagfx_air2spv_translate_function_ex(m, body_fn, xs,
                                                                     have_own ? &own : NULL,

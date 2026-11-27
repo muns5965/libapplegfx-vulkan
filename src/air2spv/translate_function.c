@@ -30,6 +30,7 @@
 
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 #include <string.h>
 #include <math.h>
 
@@ -425,6 +426,7 @@ typedef struct {
     uint8_t                   cap_int8;          /* OpCapability Int8 emitted */
     uint8_t                   cap_int16;         /* OpCapability Int16 emitted */
     uint8_t                   cap_float16;       /* OpCapability Float16 emitted */
+    bool                      in_entry_block;    /* a recognised loop plan is emitting its ENTRY block: the header / merge OpPhis name c->id_entry_label as that edge's parent, so a block split there (OpKill) must move that label (S06) */
     uint32_t                  id_uint;           /* OpTypeInt 32 0 */
     uint32_t                  id_int32;          /* OpTypeInt 32 1 — currently unused */
     uint32_t                  id_int64;          /* OpTypeInt 64 1 */
@@ -1595,10 +1597,19 @@ static uint32_t lagfx_round_up(uint32_t x, uint32_t a) {
 /* std430 byte size + alignment of an AIR type. Matches Metal's natural C
  * layout (the AIR `e-p:64:64:64-...` datalayout), so computed Offsets line
  * up with the bytes the host uploads. Returns false for unhandled kinds. */
+static bool air_type_size_align_m(const lagfx_air_module_t *m, uint32_t ty,
+                                  uint32_t *size, uint32_t *align);
 static bool air_type_size_align(xlate_ctx_t *c, uint32_t ty,
                                 uint32_t *size, uint32_t *align) {
+    return air_type_size_align_m(c->m, ty, size, align);
+}
+bool lagfx_air2spv_type_layout(const lagfx_air_module_t *m, uint32_t ty, uint32_t *size, uint32_t *align) {
+    return air_type_size_align_m(m, ty, size, align);
+}
+static bool air_type_size_align_m(const lagfx_air_module_t *m, uint32_t ty,
+                                  uint32_t *size, uint32_t *align) {
     uint32_t n = 0;
-    const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
+    const lagfx_air_type_t *ts = lagfx_air_module_types(m, &n);
     if (ty >= n) return false;
     const lagfx_air_type_t *t = &ts[ty];
     switch (t->kind) {
@@ -1613,15 +1624,15 @@ static bool air_type_size_align(xlate_ctx_t *c, uint32_t ty,
         case LAGFX_AIR_TYPE_VECTOR: {
             uint32_t lanes = t->num_op >= 1u ? t->op[0] : 4u;
             uint32_t elem  = t->num_op >= 2u ? t->op[1] : 0u;
-            uint32_t es, ea; if (!air_type_size_align(c, elem, &es, &ea)) return false;
-            *size  = es * lanes;                       /* vec3 = 12 (no pad) */
-            *align = (lanes == 2u) ? es * 2u : es * 4u; /* vec3/4 align 4*elem */
+            uint32_t es, ea; if (!air_type_size_align_m(m, elem, &es, &ea)) return false;
+            *align = (lanes == 2u) ? es * 2u : es * 4u; /* vec3/4 align 4*elem (data layout v96:128:128, v48:64:64) */
+            *size  = lagfx_round_up(es * lanes, *align); /* LLVM alloc size (and MSL float3): <3 x float> occupies 16 bytes, so the NEXT struct member starts at +16 */
             return true;
         }
         case LAGFX_AIR_TYPE_ARRAY: {
             uint32_t len  = t->num_op >= 1u ? t->op[0] : 0u;
             uint32_t elem = t->num_op >= 2u ? t->op[1] : 0u;
-            uint32_t es, ea; if (!air_type_size_align(c, elem, &es, &ea)) return false;
+            uint32_t es, ea; if (!air_type_size_align_m(m, elem, &es, &ea)) return false;
             uint32_t stride = lagfx_round_up(es, ea);
             *size = stride * len; *align = ea; return true;
         }
@@ -1631,7 +1642,7 @@ static bool air_type_size_align(xlate_ctx_t *c, uint32_t ty,
             uint32_t off = 0u, maxa = 1u;
             for (uint32_t i = 0; i < nfields; i++) {
                 uint32_t ms, ma;
-                if (!air_type_size_align(c, t->op[1u + i], &ms, &ma)) return false;
+                if (!air_type_size_align_m(m, t->op[1u + i], &ms, &ma)) return false;
                 off = lagfx_round_up(off, ma) + ms;
                 if (ma > maxa) maxa = ma;
             }
@@ -2536,9 +2547,11 @@ static void emit_prologue(xlate_ctx_t *c) {
         for (uint32_t i = 0; i < n_va; i++) {
             lagfx_varg_kind_t k = vertex_arg_kind(c, i);
             if (k == LAGFX_VARG_VID) {
+                /* every integer scalar argument is classified VID; [[instance_id]] (key "air.instance_id") is Vulkan InstanceIndex (43), not a second VertexIndex */
+                const bool inst = c->iface_own_in && i < c->iface_own_in->n && strcmp(c->iface_own_in->key[i], "air.instance_id") == 0;
                 uint32_t ops[] = { c->arg_input_var_ids[i],
                                     LAGFX_SPV_DECORATION_BUILTIN,
-                                    LAGFX_SPV_BUILTIN_VERTEX_INDEX };
+                                    inst ? 43u /* InstanceIndex */ : LAGFX_SPV_BUILTIN_VERTEX_INDEX };
                 lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, ops, 3);
             } else if (k == LAGFX_VARG_ATTR) {
                 uint32_t ops[] = { c->arg_input_var_ids[i],
@@ -4517,6 +4530,74 @@ static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t
 }
 
 
+/* D2 (docs/spec-audit.md), OPT-IN, default OFF: FMin / FMax / FClamp -> NMin / NMax / NClamp (GLSL.std.450 79 / 80 / 81). [V] spec text: FMin / FMax / FClamp leave the result undefined when an operand is NaN;
+ * NMin / NMax return the other operand when exactly one is NaN (a NaN only when both are), NClamp = min(max(x, lo), hi) with those. MSL fmax / fmin / clamp return the non-NaN operand [I] (the
+ * air.fast_* spellings of the corpus allow any result for a NaN [I]). Enabled by the environment variable LAGFX_SPV_NANMAX=1 (read once) or lagfx_air2spv_set_nanmax(1); the default output is
+ * byte-identical (the A2Xghfc pair: 119 FMax / 45 FMin / 92 FClamp stay as they are). A separate diagnostic rewrite of finished SPIR-V exists for the repro / reduce ladders
+ * (lagfx_spv_variant_nanmax, row LRD_NANMAX). Whether Adreno distinguishes the two is [N]: needs the phone. */
+static _Atomic int g_nanmax_override = -1;   /* -1: environment; 0 / 1: forced (tests) */
+static _Atomic int g_nanmax_env = -1;
+void lagfx_air2spv_set_nanmax(int mode) { atomic_store(&g_nanmax_override, mode < 0 ? -1 : mode ? 1 : 0); }
+static bool nanmax_on(void) {
+    int o = atomic_load(&g_nanmax_override);
+    if (o >= 0) return o != 0;
+    int e = atomic_load(&g_nanmax_env);
+    if (e < 0) { const char *v = getenv("LAGFX_SPV_NANMAX"); e = v && v[0] == '1' && v[1] == '\0'; atomic_store(&g_nanmax_env, e); }
+    return e != 0;
+}
+static uint32_t nanmax_map(uint32_t glsl_inst) {
+    if (!nanmax_on()) return glsl_inst;
+    return glsl_inst == LAGFX_SPV_GLSL_FMIN ? LAGFX_SPV_GLSL_NMIN : glsl_inst == LAGFX_SPV_GLSL_FMAX ? LAGFX_SPV_GLSL_NMAX : glsl_inst == LAGFX_SPV_GLSL_FCLAMP ? LAGFX_SPV_GLSL_NCLAMP : glsl_inst;
+}
+
+static _Thread_local bool g_discard_demote;
+static lagfx_discard_totals_t g_discard_totals;
+void lagfx_air2spv_set_discard_demote(bool demote) { g_discard_demote = demote; }
+void lagfx_air2spv_discard_totals(lagfx_discard_totals_t *out) {
+    if (!out) return;
+    out->demote = __atomic_load_n(&g_discard_totals.demote, __ATOMIC_RELAXED);
+    out->kill = __atomic_load_n(&g_discard_totals.kill, __ATOMIC_RELAXED);
+    out->dropped = __atomic_load_n(&g_discard_totals.dropped, __ATOMIC_RELAXED);
+}
+/* air.discard_fragment (void, no operands) -> OpDemoteToHelperInvocation when the device has the feature, else OpKill in a split block (see lagfx_air2spv_set_discard_demote). */
+static void emit_discard_fragment(xlate_ctx_t *c) {
+    if (g_discard_demote) {
+        lagfx_spv_builder_emit_op(c->b, 5380u /* OpDemoteToHelperInvocation */, NULL, 0);   /* its capability + extension are declared by lagfx_spv_declare_used_caps */
+        __atomic_fetch_add(&g_discard_totals.demote, 1u, __ATOMIC_RELAXED);
+        return;
+    }
+    uint32_t bool_ty = emit_type_bool(c);
+    uint32_t t = lagfx_spv_builder_alloc_id(c->b), kill_l = lagfx_spv_builder_alloc_id(c->b), cont_l = lagfx_spv_builder_alloc_id(c->b);
+    { uint32_t o[] = { bool_ty, t }; lagfx_spv_builder_emit_op(c->b, 41u /* OpConstantTrue */, o, 2); }
+    { uint32_t o[] = { cont_l, 0u /* SelectionControl None */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECTION_MERGE, o, 2); }
+    { uint32_t o[] = { t, kill_l, cont_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_BRANCH_CONDITIONAL, o, 3); }
+    { uint32_t o[] = { kill_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
+    lagfx_spv_builder_emit_op(c->b, 252u /* OpKill */, NULL, 0);
+    { uint32_t o[] = { cont_l }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LABEL, o, 1); }
+    /* The block that flows on is now cont_l. The only OpPhi parent that can be the block being split is the entry block of a recognised loop plan (header phis, and the merge phis of the
+     * guarded loop, name c->id_entry_label for the entry edge): move it. Every other parent (id_continue, id_loop_exit, case blocks of the dispatch lowering) is a block of its own whose
+     * LAST block is the one that branches, and no phi is emitted for the body / merge blocks of the plans. */
+    if (c->in_entry_block) c->id_entry_label = cont_l;
+    __atomic_fetch_add(&g_discard_totals.kill, 1u, __ATOMIC_RELAXED);
+}
+
+/* Bit width of an AIR integer type spelling inside an air.convert name: "i8" / "i16" / "i32" / "i64" or "v<N>i<W>" with W in that set; 0 otherwise (also for "i1"). Reads up to the next '.' or the end. */
+static int conv_int_bits(const char *t) {
+    if (*t == 'v') { t++; if (*t < '0' || *t > '9') return 0; while (*t >= '0' && *t <= '9') t++; }
+    if (*t != 'i') return 0;
+    t++;
+    int w = 0;
+    while (*t >= '0' && *t <= '9') w = w * 10 + (*t++ - '0');
+    if (*t != '\0' && *t != '.') return 0;
+    return (w == 8 || w == 16 || w == 32 || w == 64) ? w : 0;
+}
+static lagfx_conv_totals_t g_conv_totals;
+void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out) {
+    if (!out) return;
+    out->int_int = __atomic_load_n(&g_conv_totals.int_int, __ATOMIC_RELAXED);
+    out->int_int_unhandled = __atomic_load_n(&g_conv_totals.int_int_unhandled, __ATOMIC_RELAXED);
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -4675,8 +4756,21 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         else if (dstkind == 'u' && srckind == 'f') conv_op = LAGFX_SPV_OP_CONVERT_F_TO_U;
         else if (dstkind == 's' && srckind == 'f') conv_op = LAGFX_SPV_OP_CONVERT_F_TO_S;
         else if (dstkind == 'f' && srckind == 'f') conv_op = LAGFX_SPV_OP_F_CONVERT;
-        else if (dstkind == 'u')                   conv_op = LAGFX_SPV_OP_UCONVERT;
-        else if (dstkind == 's')                   conv_op = LAGFX_SPV_OP_SCONVERT;
+        else if (dstkind == 'u' || dstkind == 's') {
+            /* integer -> integer. Widening follows the SOURCE signedness (C / MSL value-preserving conversion = LLVM zext for an unsigned source, sext for a signed one):
+             * OpUConvert zero-extends, OpSConvert sign-extends (SPIR-V; a narrowing is a truncate either way). The destination kind says nothing about the extension (S07).
+             * Same-width (or both widths known and equal) is a reinterpretation: OpUConvert / OpSConvert require different widths (spirv-val), so it is an OpBitcast.
+             * The spelling `air.convert.<d>.<ty>.<s>.<ty>` with integer kinds has no instance in the corpus [N]; it extends the verified float<->int grammar, so only iN / <M x iN>
+             * types with N in {8,16,32,64} are handled here and anything else (bool source, odd width) keeps the previous mapping and is counted. */
+            const int db = conv_int_bits(dsttype), sb = conv_int_bits(srctype);
+            if ((srckind == 'u' || srckind == 's') && db && sb && !src_is_bool) {
+                conv_op = db == sb ? LAGFX_SPV_OP_BITCAST : srckind == 's' ? LAGFX_SPV_OP_SCONVERT : LAGFX_SPV_OP_UCONVERT;
+                __atomic_fetch_add(&g_conv_totals.int_int, 1u, __ATOMIC_RELAXED);
+            } else {
+                conv_op = dstkind == 'u' ? LAGFX_SPV_OP_UCONVERT : LAGFX_SPV_OP_SCONVERT;
+                __atomic_fetch_add(&g_conv_totals.int_int_unhandled, 1u, __ATOMIC_RELAXED);
+            }
+        }
 
         uint32_t cvt_arg_slot = callee_slot_idx + 1u;
         /* bool(i1) → float: SPIR-V bool is not an integer, so OpConvertUToF/
@@ -4829,6 +4923,48 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         }
     }
 
+    /* === air.round / air.fast_round / air.precise_round: MSL round() = nearest integer, HALVES AWAY FROM ZERO (D1) ===
+     * GLSL.std.450 Round leaves halves unspecified (drivers use ties-to-even: lavapipe rounds 2.5 to 2). Emulation, exact in the operand's own float type:
+     *   t = Trunc(x); r = (|x - t| >= 0.5) ? t + FSign(x) : t
+     * (x - t is exact; keeps -0 for -0.0 / -0.3; +-Inf and NaN pass through as t because the ordered compare is false). */
+    if ((strncmp(fn_name, "air.round.", 10u) == 0 || strncmp(fn_name, "air.fast_round.", 15u) == 0 || strncmp(fn_name, "air.precise_round.", 18u) == 0) &&
+        result_value_id != 0u && result_ty_air != LAGFX_AIR_TYPE_NONE && inst->num_ops > callee_slot_idx + 1u) {
+        uint32_t n_types = 0;
+        const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
+        uint32_t elem = result_ty_air, lanes = 1u;
+        if (elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_VECTOR && ts[elem].num_op >= 2u) { lanes = ts[elem].op[0]; elem = ts[elem].op[1]; }
+        const bool is_half = elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_HALF, is_float = elem < n_types && ts[elem].kind == LAGFX_AIR_TYPE_FLOAT;
+        if ((is_half || is_float) && lanes >= 1u && lanes <= 4u) {
+            uint32_t rty = emit_air_type(c, result_ty_air);
+            uint32_t x = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[callee_slot_idx + 1u], next_val_id), rty);
+            uint32_t half_c;
+            if (is_half) { half_c = lagfx_spv_builder_alloc_id(c->b); uint32_t o[] = { emit_type_half(c), half_c, 0x3800u /* 0.5h */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
+            else half_c = emit_const_float32(c, 0.5f);
+            if (lanes > 1u) {
+                uint32_t v[6] = { rty, lagfx_spv_builder_alloc_id(c->b) };
+                for (uint32_t k = 0; k < lanes; k++) v[2 + k] = half_c;
+                lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, v, 2u + lanes);
+                half_c = v[1];
+            }
+            uint32_t bty = lanes > 1u ? emit_type_vec(c, emit_type_bool(c), lanes) : emit_type_bool(c);
+            uint32_t t = lagfx_spv_builder_alloc_id(c->b), d = lagfx_spv_builder_alloc_id(c->b), ad = lagfx_spv_builder_alloc_id(c->b), ge = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t sg = lagfx_spv_builder_alloc_id(c->b), sum = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t res = resolve_value_spv(c, result_value_id);
+            if (!res) res = lagfx_spv_builder_alloc_id(c->b);
+            { uint32_t o[] = { rty, t, c->id_glsl, LAGFX_SPV_GLSL_TRUNC, x }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { rty, d, x, t }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FSUB, o, 4); }
+            { uint32_t o[] = { rty, ad, c->id_glsl, LAGFX_SPV_GLSL_FABS, d }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { bty, ge, ad, half_c }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FORD_GREATER_EQUAL, o, 4); }
+            { uint32_t o[] = { rty, sg, c->id_glsl, LAGFX_SPV_GLSL_FSIGN, x }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 5); }
+            { uint32_t o[] = { rty, sum, t, sg }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FADD, o, 4); }
+            { uint32_t o[] = { rty, res, ge, sum, t }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+            bind_value_spv(c, result_value_id, res);
+            set_result_air_type(c, result_value_id, result_ty_air);
+            set_value_spv_type(c, result_value_id, rty);
+            return;
+        }
+    }
+
     /* === air.fast_saturate.<ty> → OpExtInst FClamp(x, 0, 1) ===
      * saturate(x) clamps to [0,1]. Not a GLSL ext-inst by itself; lower to
      * FClamp with synthesized 0/1. For a vector result, splat the scalar
@@ -4889,7 +5025,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             }
             uint32_t res = resolve_value_spv(c, result_value_id);
             if (!res) res = lagfx_spv_builder_alloc_id(c->b);
-            uint32_t o[] = { rty, res, c->id_glsl, LAGFX_SPV_GLSL_FCLAMP, x, lo, hi };
+            uint32_t o[] = { rty, res, c->id_glsl, nanmax_map(LAGFX_SPV_GLSL_FCLAMP), x, lo, hi };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o, 7);
             bind_value_spv(c, result_value_id, res);
             set_result_air_type(c, result_value_id, result_ty_air);
@@ -5511,6 +5647,12 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         return;
     }
 
+    /* === air.discard_fragment (MSL discard_fragment()) [I: spelling not in the corpus] === */
+    if (!glsl_inst && result_value_id == 0u && c->stage == LAGFX_XLATE_STAGE_FRAGMENT && strcmp(fn_name, "air.discard_fragment") == 0) {
+        emit_discard_fragment(c);
+        return;
+    }
+
     /* Not an air.* GLSL intrinsic we recognize. Two sub-cases:
      *   - Void calls (llvm.lifetime/debug, and anything inst_produces_value
      *     classified non-producing → result_value_id == 0): drop silently;
@@ -5570,7 +5712,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     ops[0] = result_spv_type;
     ops[1] = result_spv;
     ops[2] = c->id_glsl;
-    ops[3] = glsl_inst;
+    ops[3] = nanmax_map(glsl_inst);
     uint32_t n_ops = 4u;
     for (uint8_t a = 0; a < entry_num_args; a++) {
         if (arg_slot_idx + a >= inst->num_ops) break;
@@ -5582,7 +5724,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     if (entry_3way && n_ops == 7u) {
         /* fmax3/fmin3(a,b,c) = op(op(a,b),c): the first ExtInst takes (a,b) into a fresh id, the second folds in c. */
         uint32_t tmp = lagfx_spv_builder_alloc_id(c->b);
-        uint32_t o1[] = { result_spv_type, tmp, c->id_glsl, glsl_inst, ops[4], ops[5] };
+        uint32_t o1[] = { result_spv_type, tmp, c->id_glsl, ops[3], ops[4], ops[5] };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_EXT_INST, o1, 6);
         ops[4] = tmp; ops[5] = ops[6]; n_ops = 6u;
     }
@@ -6437,7 +6579,7 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
         case 3:  /* BINOP_UDIV → UDiv         */ spv_op = LAGFX_SPV_OP_UDIV; break;
         case 4:  /* BINOP_SDIV → FDiv / SDiv  */ spv_op = is_float ? LAGFX_SPV_OP_FDIV : LAGFX_SPV_OP_SDIV; break;
         case 5:  /* BINOP_UREM → UMod         */ spv_op = LAGFX_SPV_OP_UMOD; break;
-        case 6:  /* BINOP_SREM → FRem / SMod  */ spv_op = is_float ? LAGFX_SPV_OP_FREM : LAGFX_SPV_OP_SMOD; break;
+        case 6:  /* BINOP_SREM → FRem / SRem  */ spv_op = is_float ? LAGFX_SPV_OP_FREM : LAGFX_SPV_OP_SREM; break;   /* srem: the result has the sign of the DIVIDEND (OpSRem); OpSMod takes the divisor's */
         case 7:  /* BINOP_SHL  → ShiftLeftLogical */     spv_op = LAGFX_SPV_OP_SHIFT_LEFT_LOGICAL; break;
         case 8:  /* BINOP_LSHR → ShiftRightLogical */    spv_op = LAGFX_SPV_OP_SHIFT_RIGHT_LOGICAL; break;
         case 9:  /* BINOP_ASHR → ShiftRightArithmetic */ spv_op = LAGFX_SPV_OP_SHIFT_RIGHT_ARITHMETIC; break;
@@ -7456,8 +7598,10 @@ static lagfx_status_t translate_body_loop(xlate_ctx_t *c,
     /* --- entry block (already open via emit_module_vars_and_function) --- */
     {
         uint32_t v = c->inst_id_base;
+        c->in_entry_block = true;
         emit_block_body(c, bbs[plan->entry_bb].first_inst,
                         bbs[plan->entry_bb].last_inst, &v);
+        c->in_entry_block = false;
     }
     { uint32_t ops[] = { id_header };
       lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_BRANCH, ops, 1); }
@@ -7697,8 +7841,10 @@ static lagfx_status_t translate_body_guarded_loop(
     /* --- entry block (already open): guard insts + selection guard --- */
     {
         uint32_t v = c->inst_id_base;
+        c->in_entry_block = true;
         emit_block_body(c, bbs[plan->entry_bb].first_inst,
                         bbs[plan->entry_bb].last_inst, &v);
+        c->in_entry_block = false;
     }
     /* The guard's condition is the entry block's terminator's cond operand
      * (ops[2], relative to the value-id AT the terminator). */
