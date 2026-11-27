@@ -195,6 +195,8 @@ lagfx_a64_status_t lagfx_a64_res_end(lagfx_a64_rexec_t *x);   /* x is freed unle
 /* Polls the pending exec of this protocol (waits at most wait_ms; 0 = just check). DONE also when nothing is pending. While pending, begin() returns NULL. */
 lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t wait_ms);
 extern int lagfx_a64_test_hook;   /* tests only (see arm64_resources.c) */
+int  lagfx_a64_test_ms_down_pending(lagfx_protocol_t *p, uint32_t mapping);   /* tests only */
+void lagfx_a64_test_ms_force_pending(lagfx_protocol_t *p, uint32_t mapping);  /* tests only */
 uint32_t          lagfx_a64_res_display_swap(lagfx_protocol_t *p);   /* LAGFX_ARM64_MAPPED_WRITEBACK=swap: pay the owed mapped surfaces (before a display command is forwarded) */
 bool              lagfx_a64_res_is_pending(lagfx_protocol_t *p);
 /* Classifies the surface a display swap names (call after lagfx_a64_res_display_swap, before the command is forwarded). Returns a mask of LAGFX_A64_DSP_*; no side effects. */

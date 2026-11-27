@@ -234,6 +234,13 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->mapped_pages_skipped, (unsigned long long)R->swap_events, (unsigned long long)R->swap_flushed, (unsigned long long)R->swap_deferred, (unsigned long long)R->swap_failed, (unsigned long long)R->swap_dropped, (unsigned long long)R->mapped_remapped, (unsigned long long)R->swap_partial, tg);
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
+        {   /* mapped write-back host-sync counters (read-only): HOST_READ barriers recorded / failed-exec clears / finishes skipped / unreadable descriptors */
+            char wl[300];
+            snprintf(wl, sizeof wl, "g7-wb-sync: wb_host_barriers_recorded=%llu wb_down_pending_cleared_on_fail=%llu wb_down_skipped_not_recorded=%llu wb_finish_desc_unreadable_owed=%llu",
+                     (unsigned long long)R->wb_host_barriers_recorded, (unsigned long long)R->wb_down_pending_cleared_on_fail, (unsigned long long)R->wb_down_skipped_not_recorded, (unsigned long long)R->wb_finish_desc_unreadable_owed);
+            fprintf(stderr, "%s\n", wl);
+            LAGFX_LOG("%s", wl);
+        }
         if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set) {
             char dl[700];
             snprintf(dl, sizeof dl,
