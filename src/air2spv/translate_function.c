@@ -4378,6 +4378,21 @@ static uint32_t sample_const_ivec2(xlate_ctx_t *c, int32_t x, int32_t y) {
     return id;
 }
 
+/* ConstOffset of a Dim3D sample: the operand must have as many components as the coordinate (3). The cache key packs three 10-bit lanes (offsets are in [-8, 7]). */
+static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t z) {
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t vty = emit_type_vec(c, u32, 3u);
+    uint64_t key = ((uint64_t)((uint32_t)x & 0x3ffu) << 20) | ((uint64_t)((uint32_t)y & 0x3ffu) << 10) | ((uint32_t)z & 0x3ffu);
+    uint32_t cached = cache_lookup_const(c, 3, vty, key);
+    if (cached) return cached;
+    uint32_t cx = emit_const_uint32(c, (uint32_t)x), cy = emit_const_uint32(c, (uint32_t)y), cz = emit_const_uint32(c, (uint32_t)z);
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ops[] = { vty, id, cx, cy, cz };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT_COMPOSITE, ops, 5);
+    cache_store_const(c, 3, vty, key, id);
+    return id;
+}
+
 
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
@@ -5034,12 +5049,11 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                         uint32_t lanes = smp_3d ? 3u : 2u;
                         if (!sample_opt_ivec(c, resolve_relative((uint32_t)inst->ops[o0 + 1u], next_val_id), lanes, off)) {
                             LAGFX_WARN("sample_texture: offset is not a compile-time constant -- offset ignored (Offset is valid for gather only; no coordinate fallback)");
-                        } else if (off[0] != 0 || off[1] != 0) {
-                            if (off[0] < -8 || off[0] > 7 || off[1] < -8 || off[1] > 7)
-                                LAGFX_WARN("sample_texture: constant offset (%d,%d) outside [-8,7] -- ignored", off[0], off[1]);
+                        } else if (off[0] != 0 || off[1] != 0 || (smp_3d && off[2] != 0)) {
+                            if (off[0] < -8 || off[0] > 7 || off[1] < -8 || off[1] > 7 || (smp_3d && (off[2] < -8 || off[2] > 7)))
+                                LAGFX_WARN("sample_texture: constant offset (%d,%d,%d) outside [-8,7] -- ignored", off[0], off[1], smp_3d ? off[2] : 0);
                             else use_off = true;
                         }
-                        if (smp_3d && off[2] != 0) LAGFX_LOG("sample_texture_3d: z offset %d dropped (2D slice approximation)", off[2]);
                     }
                     if (!sample_opt_i1(c, resolve_relative((uint32_t)inst->ops[o0 + 2u], next_val_id), &lvl)) {
                         LAGFX_WARN("sample_texture: lod_is_level flag is not a constant -- treated as bias");
@@ -5084,7 +5098,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                     mask = 0x1u /* Bias */;
                     iops[nio++] = lod_spv;
                 }
-                if (use_off) { mask |= 0x8u /* ConstOffset */; iops[nio++] = sample_const_ivec2(c, off[0], off[1]); }
+                if (use_off) { mask |= 0x8u /* ConstOffset */; iops[nio++] = smp_3d ? sample_const_ivec3(c, off[0], off[1], off[2]) : sample_const_ivec2(c, off[0], off[1]); }
                 if (have_opts)
                     LAGFX_LOG("sample_texture opts: kind=%s offset=%d stage=%s", lvl ? "level" : (lod_zero ? "plain" : "bias"), use_off ? 1 : 0,
                               c->stage == LAGFX_XLATE_STAGE_VERTEX ? "vertex" : "fragment");
