@@ -8,6 +8,7 @@
  *  2. A struct { <3 x float>, float } under the AIR data layout (v96:128:128) has the second member at byte 16 (LLVM alloc size of <3 x float> is 16; checked with
  *     opt instcombine on the same data layout): the Block's Offset decorations must say 16, not 12.
  *  3. [[instance_id]] is Vulkan InstanceIndex (BuiltIn 43), not a second VertexIndex (BuiltIn 42).
+ *  4. int -> int air.convert extends by the SOURCE signedness (OpSConvert for a signed source, OpUConvert for an unsigned one); same width is OpBitcast.
  */
 #include "air2spv/translate.h"
 #include "air2spv/translate_function.h"
@@ -91,6 +92,15 @@ int main(void) {
         for (size_t i = 5; i < nw;) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == 71u && wc == 4u && w[i + 2] == 11u) { vid += w[i + 3] == 42u; iid += w[i + 3] == 43u; } i += wc; }
         EXPECT(vid == 1, "instance_id: VertexIndex builtins %d, want 1", vid);
         EXPECT(iid == 1, "instance_id: InstanceIndex builtins %d, want 1", iid);
+        free(w);
+    }
+    w = translate("spec_convert_int_fragment.air.bc", false, &nw);   /* 4. int -> int air.convert: widening follows the SOURCE signedness (S07) */
+    if (w) {
+        lagfx_conv_totals_t ct; lagfx_air2spv_conv_totals(&ct);
+        EXPECT(count_op(w, nw, 114u) == 1, "convert int: OpSConvert count %d, want 1 (signed i16 source sign-extends)", count_op(w, nw, 114u));
+        EXPECT(count_op(w, nw, 113u) == 1, "convert int: OpUConvert count %d, want 1 (unsigned i16 source zero-extends)", count_op(w, nw, 113u));
+        EXPECT(count_op(w, nw, 124u) == 1, "convert int: OpBitcast count %d, want 1 (same-width i32 -> i32)", count_op(w, nw, 124u));
+        EXPECT(ct.int_int >= 3u && ct.int_int_unhandled == 0u, "convert int: lowered %llu unhandled %llu", (unsigned long long)ct.int_int, (unsigned long long)ct.int_int_unhandled);
         free(w);
     }
     if (g_fail) { printf("air2spv-spec-audit-unit: %d failure(s)\n", g_fail); return 1; }

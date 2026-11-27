@@ -108,6 +108,11 @@ typedef struct {
  *   unlinked        FS input the linker could not resolve (left as before) */
 typedef struct { uint64_t mismatch_fixed, missing_zeroed, unlinked; } lagfx_stage_link_totals_t;
 
+/* air.convert integer -> integer calls (process totals): int_int = lowered by the SOURCE signedness (S07); int_int_unhandled = a spelling this lowering does not know
+ * (bool source, widths outside 8/16/32/64): previous destination-kind mapping kept, counted. */
+typedef struct { uint64_t int_int, int_int_unhandled; } lagfx_conv_totals_t;
+void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out);
+
 /* Same as lagfx_air2spv_translate_function; a fragment module's stage-in
  * Locations follow `vs_out` (the paired vertex module's output keys) via
  * `own_in` (this module's per-argument keys). Either may be NULL → legacy

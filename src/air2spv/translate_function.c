@@ -4528,6 +4528,23 @@ static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t
 }
 
 
+/* Bit width of an AIR integer type spelling inside an air.convert name: "i8" / "i16" / "i32" / "i64" or "v<N>i<W>" with W in that set; 0 otherwise (also for "i1"). Reads up to the next '.' or the end. */
+static int conv_int_bits(const char *t) {
+    if (*t == 'v') { t++; if (*t < '0' || *t > '9') return 0; while (*t >= '0' && *t <= '9') t++; }
+    if (*t != 'i') return 0;
+    t++;
+    int w = 0;
+    while (*t >= '0' && *t <= '9') w = w * 10 + (*t++ - '0');
+    if (*t != '\0' && *t != '.') return 0;
+    return (w == 8 || w == 16 || w == 32 || w == 64) ? w : 0;
+}
+static lagfx_conv_totals_t g_conv_totals;
+void lagfx_air2spv_conv_totals(lagfx_conv_totals_t *out) {
+    if (!out) return;
+    out->int_int = __atomic_load_n(&g_conv_totals.int_int, __ATOMIC_RELAXED);
+    out->int_int_unhandled = __atomic_load_n(&g_conv_totals.int_int_unhandled, __ATOMIC_RELAXED);
+}
+
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
                              uint32_t result_value_id, uint32_t next_val_id) {
@@ -4686,8 +4703,21 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         else if (dstkind == 'u' && srckind == 'f') conv_op = LAGFX_SPV_OP_CONVERT_F_TO_U;
         else if (dstkind == 's' && srckind == 'f') conv_op = LAGFX_SPV_OP_CONVERT_F_TO_S;
         else if (dstkind == 'f' && srckind == 'f') conv_op = LAGFX_SPV_OP_F_CONVERT;
-        else if (dstkind == 'u')                   conv_op = LAGFX_SPV_OP_UCONVERT;
-        else if (dstkind == 's')                   conv_op = LAGFX_SPV_OP_SCONVERT;
+        else if (dstkind == 'u' || dstkind == 's') {
+            /* integer -> integer. Widening follows the SOURCE signedness (C / MSL value-preserving conversion = LLVM zext for an unsigned source, sext for a signed one):
+             * OpUConvert zero-extends, OpSConvert sign-extends (SPIR-V; a narrowing is a truncate either way). The destination kind says nothing about the extension (S07).
+             * Same-width (or both widths known and equal) is a reinterpretation: OpUConvert / OpSConvert require different widths (spirv-val), so it is an OpBitcast.
+             * The spelling `air.convert.<d>.<ty>.<s>.<ty>` with integer kinds has no instance in the corpus [N]; it extends the verified float<->int grammar, so only iN / <M x iN>
+             * types with N in {8,16,32,64} are handled here and anything else (bool source, odd width) keeps the previous mapping and is counted. */
+            const int db = conv_int_bits(dsttype), sb = conv_int_bits(srctype);
+            if ((srckind == 'u' || srckind == 's') && db && sb && !src_is_bool) {
+                conv_op = db == sb ? LAGFX_SPV_OP_BITCAST : srckind == 's' ? LAGFX_SPV_OP_SCONVERT : LAGFX_SPV_OP_UCONVERT;
+                __atomic_fetch_add(&g_conv_totals.int_int, 1u, __ATOMIC_RELAXED);
+            } else {
+                conv_op = dstkind == 'u' ? LAGFX_SPV_OP_UCONVERT : LAGFX_SPV_OP_SCONVERT;
+                __atomic_fetch_add(&g_conv_totals.int_int_unhandled, 1u, __ATOMIC_RELAXED);
+            }
+        }
 
         uint32_t cvt_arg_slot = callee_slot_idx + 1u;
         /* bool(i1) → float: SPIR-V bool is not an integer, so OpConvertUToF/
