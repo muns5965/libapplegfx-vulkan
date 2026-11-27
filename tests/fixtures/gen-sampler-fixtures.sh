@@ -45,6 +45,37 @@ cxs() {   # $1 = word (hex), $2 = scale
     echo '!19 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"tex"}'
   } | llvm-as -o "cxs_$1.air.bc" -
 }
+cxsh() {   # $1 = word (hex), $2 = scale: the same fragment as cxs() but the sample is made in an internal HELPER function that receives texture + sampler (+ uv) as parameters
+  w=$(python3 -c "import sys; v=int(sys.argv[1],16); print(v-(1<<64) if v>>63 else v)" "$1")
+  { echo "$HDR"; echo "@__air_sampler_state = internal addrspace(2) constant i64 $w, align 8"
+    cat <<EOT
+define <4 x float> @Smp(<4 x float> %0, ptr addrspace(1) %1) {
+entry:
+  %px = extractelement <4 x float> %0, i64 0
+  %py = extractelement <4 x float> %0, i64 1
+  %tx = fadd float %px, -1.750000e+00
+  %ty = fadd float %py, -1.750000e+00
+  %u = fmul float %tx, $2
+  %v = fmul float %ty, $2
+  %uv0 = insertelement <2 x float> zeroinitializer, float %u, i64 0
+  %uv = insertelement <2 x float> %uv0, float %v, i64 1
+  %c = call <4 x float> @SampH(ptr addrspace(1) %1, ptr addrspace(2) @__air_sampler_state, <2 x float> %uv)
+  ret <4 x float> %c
+}
+define internal <4 x float> @SampH(ptr addrspace(1) %t, ptr addrspace(2) %s, <2 x float> %uv) {
+entry:
+  %r = call { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) %t, ptr addrspace(2) %s, <2 x float> %uv, i1 true, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %c = extractvalue { <4 x float>, i8 } %r, 0
+  ret <4 x float> %c
+}
+declare { <4 x float>, i8 } @air.sample_texture_2d.v4f32(ptr addrspace(1) nocapture readonly, ptr addrspace(2) nocapture readonly, <2 x float>, i1, <2 x i32>, i1, float, float, i32)
+EOT
+    echo "$FTR"; echo '!air.sampler_states = !{!18}'; echo '!air.fragment = !{!15}'
+    echo '!15 = !{ptr @Smp, !12, !13}'; echo '!12 = !{!16}'; echo '!13 = !{!17, !19}'
+    echo '!18 = !{!"air.sampler_state", ptr addrspace(2) @__air_sampler_state}'
+    echo '!19 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture2d<float, sample>", !"air.arg_name", !"tex"}'
+  } | llvm-as -o "cxsh_$1.air.bc" -
+}
 smp() {   # $1 = name, $2 = scale
   { echo "$HDR"; body2d "$2" "%2" ", ptr addrspace(2) %2"; echo "$FTR"; echo '!air.fragment = !{!15}'
     echo '!15 = !{ptr @Smp, !12, !13}'; echo '!12 = !{!16}'; echo '!13 = !{!17, !19, !20}'
@@ -83,6 +114,10 @@ for addr in 0 1 2 3 4; do for filt in 0 1; do cxs "$(mkword $addr $filt 0)" 2.50
 for addr in 0 1 4; do for filt in 0 1; do cxs "$(mkword $addr $filt 1)" 1.000000e+00; done; done
 cxs "$(mkword 2 0 1)" 1.000000e+00
 cxs "$(mkword 3 1 1)" 1.000000e+00
+cxsh "$(mkword 1 1 1)" 1.000000e+00
+cxsh "$(mkword 4 0 1)" 1.000000e+00
+cxsh "$(mkword 2 0 0)" 2.500000e-01
+cxsh "$(mkword 3 1 0)" 2.500000e-01
 smp smp_norm 2.500000e-01
 smp smp_pix 1.000000e+00
 tex3d tex3d_diag %w '  %s = fadd float %px, %py

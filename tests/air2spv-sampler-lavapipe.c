@@ -292,6 +292,7 @@ static void ref2d(const int am[3], int linear, float *want) {
 static uint64_t cxs_word(int addr, int filt, int pixel) {   /* layout of air2spv/constexpr_sampler.h (INFER) */
     return 0x807bff0000080000ull | (uint64_t)(addr | addr << 3 | addr << 6) | (uint64_t)filt << 9 | (uint64_t)filt << 11 | (uint64_t)pixel << 15;
 }
+static int spirv_valid(const uint8_t *spv, size_t sz, const char *what);
 static int test_constexpr(vtex_t *t2d) {
     static const struct { int addr, filt, pixel; } cs[] = {
         { 1, 0, 0 }, { 1, 1, 0 }, { 2, 0, 0 }, { 2, 1, 0 }, { 3, 0, 0 }, { 3, 1, 0 }, { 0, 0, 0 }, { 0, 1, 0 }, { 4, 0, 0 }, { 4, 1, 0 },
@@ -314,6 +315,29 @@ static int test_constexpr(vtex_t *t2d) {
         printf("PASS: %s: all %d pixels match the reference\n", what, W * H);
         free(spv);
     }
+    return 0;
+}
+
+/* The sample is made in an internal HELPER function that receives the constexpr sampler as a parameter (cxsh_<word>.air.bc). A pixel sampler's texel coordinates must still be
+ * divided by the image size (the helper cannot see which sampler it got: the call site passes a hidden "pixel" flag), a normalized one must not. Same reference as the direct case. */
+extern int lagfx_air2spv_test_opaque_helper_ptr;
+static int test_constexpr_helper(vtex_t *t2d) {
+    lagfx_air2spv_test_opaque_helper_ptr = 1;   /* LLVM 18 fixtures have opaque pointers: see the seam in classify_helper_param */
+    static const struct { int addr, filt, pixel; } cs[] = { { 1, 1, 1 }, { 4, 0, 1 }, { 2, 0, 0 }, { 3, 1, 0 } };
+    for (size_t k = 0; k < sizeof cs / sizeof cs[0]; k++) {
+        uint64_t word = cxs_word(cs[k].addr, cs[k].filt, cs[k].pixel);
+        char name[96], what[160]; snprintf(name, sizeof name, "cxsh_%016llx.air.bc", (unsigned long long)word);
+        snprintf(what, sizeof what, "helper constexpr %s addr %d %s", cs[k].pixel ? "PIXEL" : "normalized", cs[k].addr, cs[k].filt ? "linear" : "nearest");
+        uint8_t *spv; size_t sz; if (translate(name, &spv, &sz)) return 1;
+        if (spirv_valid(spv, sz, what)) return 1;
+        int am[3] = { cs[k].addr, cs[k].addr, cs[k].addr };
+        float want[W * H * 4], got[W * H * 4]; ref2d(am, cs[k].filt, want);
+        if (render(spv, sz, t2d->view, NULL, got)) return 1;
+        if (compare(what, got, want, 0.012f)) return 1;
+        printf("PASS: %s: all %d pixels match the reference\n", what, W * H);
+        free(spv);
+    }
+    lagfx_air2spv_test_opaque_helper_ptr = 0;
     return 0;
 }
 
@@ -601,6 +625,7 @@ int main(void) {
     init_tex();
     vtex_t t2d; if (make_tex(&g_T2, 0, &t2d)) return 1;
     int rc = test_constexpr(&t2d);
+    if (!rc) rc = test_constexpr_helper(&t2d);
     if (!rc) rc = test_runtime(&t2d);
     if (!rc) rc = test_3d();
     if (!rc) rc = test_array();

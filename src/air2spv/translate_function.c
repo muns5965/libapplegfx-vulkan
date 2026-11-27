@@ -108,6 +108,7 @@ typedef struct {
     uint32_t ret_air;     /* AIR return type (LAGFX_AIR_TYPE_NONE = void) */
     uint32_t ret_spv;     /* SPIR-V return type (0 = void) */
     uint8_t  n_params;
+    uint8_t  n_samp;      /* number of SAMP params: each is followed (after ALL AIR params) by one hidden u32 parameter, 1 = the sampler passed is a pixel (coord::pixel) constexpr sampler */
     struct {
         uint8_t  kind;         /* LAGFX_HPARAM_* */
         uint32_t air_ty;       /* declared AIR param type */
@@ -316,6 +317,7 @@ typedef struct {
      * air.sample_texture_2d handler can OpLoad image/sampler. The opaque
      * type ids are shared across all resource args. */
     uint32_t                  arg_resource_var[LAGFX_MAX_VERTEX_ARGS];
+    uint32_t                  samp_pix_id[LAGFX_MAX_VERTEX_ARGS];   /* helper ctx only: the hidden u32 parameter that says whether sampler param i is a pixel sampler (0 = none) */
     /* Per-arg resource kind (frag_resource_kind result: 1=tex 2=samp 3=buf
      * 4=storage tex 5=texture3d, 0=none), cached so GEP can tell a buffer var apart for its storage
      * class. */
@@ -3858,6 +3860,7 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
     if ((hf->ret_spv == 0u) != (result_value_id == 0u)) return false;
 
     uint32_t argv[LAGFX_MAX_HELPER_PARAMS];
+    uint32_t pixarg[LAGFX_MAX_HELPER_PARAMS] = { 0 };   /* per SAMP param: id of the u32 "is a pixel sampler" argument (0 = not pixel) */
     struct { uint32_t src, temp, pointee; } cb[LAGFX_MAX_HELPER_PARAMS];
     uint32_t n_cb = 0;
 
@@ -3894,9 +3897,12 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
                     int ck = cxs_find(c, vid);
                     if (ck >= 0) {
                         a = c->id_cxs_var[ck]; ok = true;
-                        if (!c->cxs_dec[ck].normalized)   /* UNSUPPORTED: the helper's sample only sees a sampler parameter, so it cannot divide the texel coordinates by the image size */
-                            LAGFX_WARN("constexpr sampler @%u uses pixel coordinates and is passed to a helper function: UNSUPPORTED, the helper samples with unconverted coordinates (normalized sampler)", c->cxs_dec[ck].global_index);
+                        if (!c->cxs_dec[ck].normalized) pixarg[i] = emit_const_uint32(c, 1u);   /* a pixel sampler: the helper's sample divides the texel coordinates by the image size (hidden parameter, see xlate_helper_fn_t.n_samp) */
                     }
+                }
+                if (want == 2u && ok && !pixarg[i] && c->is_helper) {   /* this function's own sampler parameter handed on: its pixel flag goes with it */
+                    for (uint32_t k = 0; k < c->num_args && k < LAGFX_MAX_VERTEX_ARGS; k++)
+                        if (c->arg_resource_kind[k] == 2u && c->arg_resource_var[k] == a && c->samp_pix_id[k]) pixarg[i] = c->samp_pix_id[k];
                 }
                 if (!ok)
                     a = (want == 2u && c->id_default_sampler_var)
@@ -3971,13 +3977,16 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
     }
 
     uint32_t res = lagfx_spv_builder_alloc_id(c->b);
-    uint32_t ops[3u + LAGFX_MAX_HELPER_PARAMS];
+    uint32_t ops[3u + 2u * LAGFX_MAX_HELPER_PARAMS];
     ops[0] = hf->ret_spv ? hf->ret_spv : emit_type_void(c);
     ops[1] = res;
     ops[2] = hf->func_id;
     for (uint32_t i = 0; i < hf->n_params; i++) ops[3u + i] = argv[i];
+    uint32_t nh = 0;
+    for (uint32_t i = 0; i < hf->n_params; i++)
+        if (hf->param[i].kind == LAGFX_HPARAM_SAMP) ops[3u + hf->n_params + nh++] = pixarg[i] ? pixarg[i] : emit_const_uint32(c, 0u);
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_FUNCTION_CALL, ops,
-                              3u + hf->n_params);
+                              3u + hf->n_params + nh);
 
     /* Copy-back for thread out-params. */
     for (uint32_t i = 0; i < n_cb; i++) {
@@ -5907,6 +5916,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         uint32_t uv_slot   = callee_slot_idx + 3u;
         if (inst->num_ops > uv_slot + (use_arr ? 1u : 0u)) {
             int cxs_k = -1;   /* index of the constexpr sampler this sample uses, or -1 */
+            int samp_arg = -1;   /* the sampler parameter / argument this sample uses (helper: its hidden pixel flag decides the coordinate conversion), or -1 */
             uint32_t tex_var = resolve_value_spv(c,
                 resolve_relative((uint32_t)inst->ops[tex_slot], next_val_id));
             uint32_t samp_var = resolve_value_spv(c,
@@ -5928,7 +5938,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                     if (!v) continue;
                     if (c->arg_resource_kind[a] == 2u) {
                         if (!first_samp) first_samp = v;
-                        if (samp_var == v) samp_ok = 1;
+                        if (samp_var == v) samp_ok = 1, samp_arg = (int)a;
                     } else if (c->arg_resource_kind[a] == want_tex_kind) {
                         if (!first_tex) first_tex = v;
                         if (tex_var == v) tex_ok = 1;
@@ -5936,7 +5946,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 }
                 /* A constexpr sampler declared in the body (or in a helper): its own variable, bound by the host to the decoded state. */
                 cxs_k = cxs_find(c, resolve_relative((uint32_t)inst->ops[samp_slot], next_val_id));
-                if (cxs_k >= 0) { samp_var = c->id_cxs_var[cxs_k]; samp_ok = 1; }
+                if (cxs_k >= 0) { samp_var = c->id_cxs_var[cxs_k]; samp_ok = 1; samp_arg = -1; }
                 if (!samp_ok) {
                     LAGFX_WARN("sample_texture: sampler operand is neither a bound sampler argument nor a decodable constexpr sampler -- %s used (state not applied)",
                                c->id_default_sampler_var ? "the default sampler" : "the first sampler argument");
@@ -5963,7 +5973,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 /* Pixel (unnormalized) constexpr sampler: Metal coord::pixel coordinates are texels of level 0. The host sampler is a NORMALIZED one with the decoded
                  * address modes / filters, so the coordinate is divided by the image size here (OpImageQuerySizeLod, level 0) -- explicit, no Vulkan unnormalized-coordinate
                  * restrictions (which would need explicit-LOD sampling and 1D/2D images, no mips, no anisotropy). The bit-15 meaning is INFER (constexpr_sampler.h). */
-                if (cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) {
+                const uint32_t pix_dyn = (cxs_k < 0 && samp_arg >= 0 && c->is_helper) ? c->samp_pix_id[samp_arg] : 0u;   /* helper: whether the sampler PASSED IN is a pixel sampler is a run-time (call-site) fact */
+                if ((cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) || pix_dyn) {
                     const uint32_t nl = is3d ? 3u : 2u;   /* components of the coordinate that are texel positions */
                     if (!c->cap_imgq) { c->cap_imgq = 1u; uint32_t cap[] = { 50u /* ImageQuery */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1); }
                     uint32_t u32 = emit_type_int_w(c, 32u, 0u), vu = emit_type_vec(c, u32, nl), vf = nl == 3u ? emit_type_vec3_f(c) : emit_type_vec2_f(c);
@@ -5979,8 +5990,16 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                     { uint32_t o[] = { vf, szf, sz }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONVERT_U_TO_F, o, 3); }
                     uint32_t un = lagfx_spv_builder_alloc_id(c->b);
                     { uint32_t o[] = { vf, un, uv_spv, szf }; lagfx_spv_builder_emit_op(c->b, 136u /* OpFDiv */, o, 4); }
+                    if (pix_dyn) {   /* pixel-ness comes in as a hidden u32 parameter: divide only when it is set */
+                        uint32_t bt = emit_type_bool(c), bv = emit_type_vec(c, bt, nl), b1 = lagfx_spv_builder_alloc_id(c->b), bn = lagfx_spv_builder_alloc_id(c->b), sl = lagfx_spv_builder_alloc_id(c->b);
+                        { uint32_t o[] = { bt, b1, pix_dyn, emit_const_uint32(c, 0u) }; lagfx_spv_builder_emit_op(c->b, 171u /* OpINotEqual */, o, 4); }
+                        if (nl == 3u) { uint32_t o[] = { bv, bn, b1, b1, b1 }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 5); }
+                        else { uint32_t o[] = { bv, bn, b1, b1 }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_CONSTRUCT, o, 4); }
+                        { uint32_t o[] = { vf, sl, bn, un, uv_spv }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5); }
+                        un = sl;
+                    }
                     uv_spv = un;
-                    if (c->cxs_dec[cxs_k].mip_filter) LAGFX_WARN("constexpr sampler @%u: pixel coordinates with a mip filter -- the host sampler samples level 0 only", c->cxs_dec[cxs_k].global_index);
+                    if (cxs_k >= 0 && c->cxs_dec[cxs_k].mip_filter) LAGFX_WARN("constexpr sampler @%u: pixel coordinates with a mip filter -- the host sampler samples level 0 only", c->cxs_dec[cxs_k].global_index);
                 }
                 if (use_arr) {   /* coordinate = (u, v, float(array index)) */
                     uint32_t f32t = emit_type_float32(c);
@@ -10217,6 +10236,8 @@ static bool helper_value_type_ok(const xlate_ctx_t *c, uint32_t ty) {
     }
 }
 
+int lagfx_air2spv_test_opaque_helper_ptr;   /* TEST SEAM, see classify_helper_param */
+
 /* Classify a helper param's AIR type. Returns a LAGFX_HPARAM_* kind or 0
  * (unsupported). For THREADPTR, *pointee_out receives the pointee. */
 static int classify_helper_param(const xlate_ctx_t *c, uint32_t air_ty,
@@ -10247,6 +10268,12 @@ static int classify_helper_param(const xlate_ctx_t *c, uint32_t air_ty,
             return LAGFX_HPARAM_STRUCTBUF;
         }
         return 0;
+    }
+    /* TEST SEAM (tests/air2spv-sampler-lavapipe.c): an LLVM 18 `ptr addrspace(N)` helper parameter has no pointee type (Apple's typed-pointer bitcode names the texture / sampler struct); with the seam on,
+     * such a parameter is a texture (addrspace 1) or a sampler (addrspace 2), which is what the typed form says. Off in production. */
+    if (lagfx_air2spv_test_opaque_helper_ptr && pointee >= n) {
+        if (addrspace == 1u) return LAGFX_HPARAM_TEX;
+        if (addrspace == 2u) return LAGFX_HPARAM_SAMP;
     }
     if (pointee < n && ts[pointee].kind == LAGFX_AIR_TYPE_UNKNOWN) {
         /* Opaque resource pointee — texture2d/texture3d (as1) / sampler
@@ -10429,9 +10456,12 @@ static void helpers_register(xlate_ctx_t *c, uint32_t fn_idx) {
     /* OpTypeFunction — dedup against earlier registrations (duplicate
      * non-aggregate type declarations are invalid). */
     uint32_t ret_spv_eff = hf->ret_spv ? hf->ret_spv : emit_type_void(c);
+    hf->n_samp = 0;
+    for (uint32_t i = 0; i < hf->n_params; i++) if (hf->param[i].kind == LAGFX_HPARAM_SAMP) hf->n_samp++;
+    const uint32_t hid_u32 = hf->n_samp ? emit_type_int_w(c, 32u, 0u) : 0u;
     for (uint32_t e = 0; e + 1u < h->n_fns; e++) {
         const xlate_helper_fn_t *o = &h->fns[e];
-        if (!o->func_id || o->n_params != hf->n_params) continue;
+        if (!o->func_id || o->n_params != hf->n_params || o->n_samp != hf->n_samp) continue;
         uint32_t o_ret = o->ret_spv ? o->ret_spv : emit_type_void(c);
         if (o_ret != ret_spv_eff) continue;
         bool same = true;
@@ -10441,13 +10471,14 @@ static void helpers_register(xlate_ctx_t *c, uint32_t fn_idx) {
     }
     if (!hf->fnty_id) {
         hf->fnty_id = lagfx_spv_builder_alloc_id(c->b);
-        uint32_t ops[2u + LAGFX_MAX_HELPER_PARAMS];
+        uint32_t ops[2u + 2u * LAGFX_MAX_HELPER_PARAMS];
         ops[0] = hf->fnty_id;
         ops[1] = ret_spv_eff;
         for (uint32_t i = 0; i < hf->n_params; i++)
             ops[2u + i] = hf->param[i].spv_ty;
+        for (uint32_t k = 0; k < hf->n_samp; k++) ops[2u + hf->n_params + k] = hid_u32;
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_FUNCTION, ops,
-                                  2u + hf->n_params);
+                                  2u + hf->n_params + hf->n_samp);
     }
     hf->func_id = lagfx_spv_builder_alloc_id(c->b);
     {
@@ -10670,6 +10701,16 @@ static void translate_one_helper(xlate_ctx_t *ec, uint32_t slot) {
                 set_value_storage(&hc, vid, LAGFX_SPV_STORAGE_STORAGE_BUFFER);
                 set_value_spv_type(&hc, vid, hf->param[i].spv_ty);
                 break;
+        }
+    }
+    if (n_hp == hf->n_params) {   /* the hidden "is a pixel sampler" parameters, after every AIR parameter (they are part of the registered function type) */
+        const uint32_t hu = emit_type_int_w(&hc, 32u, 0u);
+        for (uint32_t i = 0; i < n_hp; i++) {
+            if (hf->param[i].kind != LAGFX_HPARAM_SAMP) continue;
+            uint32_t pid = lagfx_spv_builder_alloc_id(hc.b);
+            uint32_t ops[] = { hu, pid };
+            lagfx_spv_builder_emit_op(hc.b, LAGFX_SPV_OP_FUNCTION_PARAMETER, ops, 2);
+            hc.samp_pix_id[i] = pid;
         }
     }
     {
