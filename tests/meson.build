@@ -1567,6 +1567,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-ext-unit.c') and vulkan_d
   test('arm64 exec render extensions (unit, lavapipe)', ee_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# sRGB colour target numeric check (format 81 vs 80 control) on lavapipe + validation.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-gamma-unit.c') and vulkan_dep.found()
+  gm_test = executable('arm64-exec-gamma-unit',
+    'arm64-exec-gamma-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    build_by_default : true,
+  )
+  test('arm64 exec sRGB render target numeric (unit, lavapipe)', gm_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # Vertex fetch / index handling against a CPU model (indexed offsets, base vertex, vertex pulling at gathered offsets, real compositor vertex layout) on lavapipe.
 if fs.is_file(meson.current_source_dir() / 'arm64-vertex-index-unit.c') and vulkan_dep.found()
   vi_test = executable('arm64-vertex-index-unit',
@@ -1866,6 +1877,25 @@ pipeline_bundle_test = executable('pipeline-bundle-unit',
   build_by_default : true,
 )
 test('pipeline failure bundle (unit, lavapipe)', pipeline_bundle_test)
+
+# Pipeline-layout-level descriptor check (set / binding vs descriptor type / count / stage) that spirv-val cannot do; no Vulkan device. Self test always; with
+# LAGFX_PIPEFAIL_CHECK_DIR=<dir with pipefail_* bundles> the second test checks real device bundles (they are not in the repo) and FAILS on a binding collision.
+pipeline_layout_check_deps = [libapplegfx_vulkan_dep]
+if vulkan_dep.found()
+  pipeline_layout_check_deps += [vulkan_dep]
+endif
+pipeline_layout_check_test = executable('pipeline-layout-check-unit',
+  'pipeline-layout-check-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_layout_check_deps,
+  build_by_default : true,
+)
+test('pipeline layout vs SPIR-V descriptor check (unit; with LAGFX_PIPEFAIL_CHECK_DIR also real bundles, which FAIL on a collision)', pipeline_layout_check_test)
+sh = find_program('sh', required : false)
+if sh.found()
+  test('pipefail bundles: pipeline creation replay with validation layers (needs LAGFX_PIPEFAIL_CHECK_DIR; skips otherwise)', sh,
+    args : [meson.current_source_dir() / '../tools/replay-pipefail-validate.sh', meson.project_build_root()], timeout : 600)
+endif
 
 # DIAGNOSTIC SPIR-V rewrites of the pipeline repro's variant matrix (pure; validated with spirv-val when installed).
 spv_variants_test = executable('spv-variants-unit',
