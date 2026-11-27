@@ -258,7 +258,7 @@ static void build_objects(void) {
     put_function(REF_FN_FRAG, 0x460, VPN_LIB_FRAG, g_flib, g_flib_n);
     uint32_t tx[2] = { REF_FN_VERT, REF_FN_FRAG };
     put_pipeline(REF_PIPE_TEX, 0x700, tx, 2, 2);
-    const float pos[8] = { -1, -1, 1, -1, -1, 1, 1, 1 }, uv[8] = { 0, 0, 1, 0, 0, 1, 1, 1 };
+    const float pos[8] = { -1, -1, 1, -1, -1, 1, 1, 1 }, uv[8] = { 0, 0, RT_W, 0, 0, RT_H, RT_W, RT_H };   /* texel coordinates: the texture_copy fixture (a real Apple fragment function) samples with a constexpr PIXEL sampler (word 0x...88a49, bit 15 set), the translator divides them by the image size */
     const float mat[16] = { 1, 0, 0, 0,  0, 1, 0, 0,  0, 0, 0, 0,  0, 0, 0, 1 };   /* position = x * row0 + y * row1 + row3 */
     va_write((uint64_t)VPN_POS << 14, pos, sizeof pos); va_write((uint64_t)VPN_UV << 14, uv, sizeof uv); va_write((uint64_t)VPN_MAT << 14, mat, sizeof mat);
     put_buffer_object(REF_BUF_POS, 0x200, 0x4000, VPN_POS);
@@ -1026,6 +1026,7 @@ static void test_linear_unlisted(void) {
             assert(RUNC(p).draws == ++draws && PIPE(p).desc_unbound == 0 && lagfx_a64_res_stats(p)->linear_made == made0 + 1);
             lin_check(p, t, F[f].fmt, 1);
         }
+        assert(RUNC(p).ext_cxs_binds == (uint64_t)draws);   /* the texture_copy fragment's constexpr pixel sampler was bound from its decoded word (not the default sampler) on every draw */
         assert(RUNC(p).ext_tex_prepared == 3u && PIPE(p).desc_linear_stale == 0);   /* each texture was missing from the mirror only at its first pass */
         lagfx_a64_exec_drop_task(p, 1);
         lagfx_a64_exec_free(p);

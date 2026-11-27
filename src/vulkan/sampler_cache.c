@@ -70,10 +70,23 @@ lagfx_sampler_state_t lagfx_sampler_state_from_constexpr(const lagfx_constexpr_s
                 s.unnormalized = true; s.lod_min = 0.0f; s.lod_max = 0.0f;
                 s.mip_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
                 s.addr_w = s.addr_u;
+                s.mag_filter = s.min_filter;   /* Vulkan: the two filters must be equal (the minification one is kept: INFER, as arm64_sampler.c) */
             }
         }
     }
     canon(&s);
+    return s;
+}
+
+lagfx_sampler_state_t lagfx_sampler_state_from_constexpr_norm(const lagfx_constexpr_sampler_t *cs) {
+    if (!cs || !cs->valid) return lagfx_sampler_state_default();
+    lagfx_constexpr_sampler_t t = *cs;
+    t.normalized = true;                    /* never Vulkan unnormalized coordinates: the shader converts them */
+    lagfx_sampler_state_t s = lagfx_sampler_state_from_constexpr(&t);
+    if (!cs->normalized) {
+        s.mip_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST, s.lod_min = 0.0f, s.lod_max = 0.0f, s.max_anisotropy = 1.0f;
+        canon(&s);
+    }
     return s;
 }
 

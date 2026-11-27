@@ -212,7 +212,7 @@ static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_en
     a64_samp_t *sm = calloc(1, sizeof *sm);
     if (!sm) return NULL;
     sm->h.kind = K_SAMP;
-    uint32_t sf = lagfx_a64_sampler_decode(d, size < sizeof d ? size : sizeof d, r->vk->have_sampler_anisotropy, r->vk->phys_props.limits.maxSamplerAnisotropy, &sm->ci);
+    uint32_t sf = lagfx_a64_sampler_decode_ex(d, size < sizeof d ? size : sizeof d, r->vk->have_sampler_anisotropy, r->vk->phys_props.limits.maxSamplerAnisotropy, r->vk->have_sampler_mirror_clamp, &sm->ci);
     sm->mip = (sf & LAGFX_A64_SAMP_MIPMAPPED) != 0;
     if (sf & LAGFX_A64_SAMP_COMPARE_IGNORED) CNT(p).ext_samp_compare++;
     if (sf & LAGFX_A64_SAMP_UNNORM_APPLIED) CNT(p).ext_samp_unnorm++;
@@ -493,6 +493,16 @@ static VkSampler default_sampler(a64_run_t *r) {
     return r->defsamp;
 }
 
+/* The VkSampler of a constexpr sampler (its raw AIR word, named in the shader). Always a normalized sampler: the translator divides the coordinates of a pixel
+ * sampler by the image size in the shader. VK_NULL_HANDLE (counted by the caller as an unbound sampler) when the cache is full or creation failed. */
+static VkSampler cxs_sampler(a64_run_t *r, uint64_t raw) {
+    lagfx_constexpr_sampler_t cs;
+    if (!lagfx_constexpr_sampler_decode(raw, &cs)) return VK_NULL_HANDLE;   /* the translator only names decodable words: a corrupt module */
+    if (r->vk->sampler_cache.device == VK_NULL_HANDLE) lagfx_sampler_cache_init(&r->vk->sampler_cache, r->vk->device, r->vk->have_sampler_anisotropy);
+    lagfx_sampler_state_t st = lagfx_sampler_state_from_constexpr_norm(&cs);
+    return lagfx_sampler_cache_get(&r->vk->sampler_cache, &st);
+}
+
 static bool descriptor_pool(a64_run_t *r) {
     if (r->dpool) return true;
     VkDescriptorPoolSize sz[5] = { { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096 }, { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2048 }, { VK_DESCRIPTOR_TYPE_SAMPLER, 2048 }, { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1024 },
@@ -660,7 +670,10 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             /* A linear texture (a buffer's bytes seen as an image): the mirror image is a copy that begin_pass (outside the pass) re-pulls whenever the backing buffer changed.
              * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
             if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
-            VkImageView v = lagfx_a64_res_sample_view(r->x, t);
+            /* The shader's image dimensionality must be the texture's: a Dim3D descriptor needs a 3D view of a 3D image, a Dim2D one a 2D view (anything else is invalid Vulkan). */
+            VkImageView v = s->bind[i].dim3 ? lagfx_a64_res_sample_view3d(r->x, t) : lagfx_a64_res_sample_view(r->x, t);
+            if (!v && lagfx_a64_res_is_3d(t) != (s->bind[i].dim3 != 0)) { CNT(p).ext_tex_dim_mismatch++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
+            if (v && s->bind[i].dim3) CNT(p).ext_tex3d_binds++;
             if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
@@ -669,6 +682,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? (st ? r->fsamp[mi] : r->vsamp[mi]) : NULL;
             VkSampler *vvt = st ? r->fvar : r->vvar;
             VkSampler vs = sm ? (vvt[mi] ? vvt[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
+            if (s->bind[i].cxs) { vs = cxs_sampler(r, s->bind[i].cxs_raw); if (vs) CNT(p).ext_cxs_binds++; }   /* a constexpr sampler: its own state, not the default */
             if (!vs) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[5]++; DDM(3); return false; }
             ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];

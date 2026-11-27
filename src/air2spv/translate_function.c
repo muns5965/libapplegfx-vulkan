@@ -24,6 +24,7 @@
 #include "spv_builder.h"
 #include "ce_cast.h"
 #include "common/log.h"
+#include "constexpr_sampler.h"
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -78,6 +79,7 @@ enum {
     LAGFX_HPARAM_VALUE = 1,
     LAGFX_HPARAM_TEX,
     LAGFX_HPARAM_SAMP,
+    LAGFX_HPARAM_TEX3D,   /* texture3d<T> (Dim3D sampled image); arg_resource_kind 5 */
     LAGFX_HPARAM_THREADPTR,
     /* constant/device pointer to a VALUE-class element (`constant
      * float4*` colour matrices, `device float*` LUTs): the param is a
@@ -308,8 +310,8 @@ typedef struct {
      * air.sample_texture_2d handler can OpLoad image/sampler. The opaque
      * type ids are shared across all resource args. */
     uint32_t                  arg_resource_var[LAGFX_MAX_VERTEX_ARGS];
-    /* Per-arg resource kind (frag_resource_kind result: 1=tex 2=samp 3=buf,
-     * 0=none), cached so GEP can tell a buffer var apart for its storage
+    /* Per-arg resource kind (frag_resource_kind result: 1=tex 2=samp 3=buf
+     * 4=storage tex 5=texture3d, 0=none), cached so GEP can tell a buffer var apart for its storage
      * class. */
     uint8_t                   arg_resource_kind[LAGFX_MAX_VERTEX_ARGS];
     /* Framebuffer fetch: a fragment input arg keyed "air.render_target:<n>" (Metal `[[color(n)]]` / dest_n) reads the current value of colour attachment n.
@@ -379,9 +381,19 @@ typedef struct {
      * results that alias a buffer arg. Freed with the other side tables. */
     uint8_t                  *arg_alias;
     uint32_t                  id_default_sampler_var; /* constexpr-sampler fallback (0=none) */
+    /* One sampler variable (own descriptor binding) per constexpr sampler of the module (air.sampler_states; fragment stage). The runtime builds the
+     * VkSampler from the decoded word named in the variable's OpName ("lagfx.cxs.<16 hex>", see LAGFX_CXS_NAME_PREFIX). */
+    uint32_t                  n_cxs;
+    uint32_t                  id_cxs_var[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint32_t                  cxs_global[LAGFX_CONSTEXPR_SAMPLER_MAX];   /* module value id of the @global behind the sampler operand */
+    lagfx_constexpr_sampler_t cxs_dec[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint8_t                   cap_imgq;           /* OpCapability ImageQuery emitted (pixel-coordinate conversion) */
     uint32_t                  id_image_t;        /* OpTypeImage 2D float, Sampled=1 */
     uint32_t                  id_sampler_t;      /* OpTypeSampler */
     uint32_t                  id_sampimg_t;      /* OpTypeSampledImage */
+    uint32_t                  id_image3d_t;      /* OpTypeImage 3D float, Sampled=1 */
+    uint32_t                  id_sampimg3d_t;    /* OpTypeSampledImage of the 3D image */
+    uint32_t                  id_ptr_uc_image3d; /* ptr UniformConstant to the 3D image */
     /* Block-decorated struct-type cache (one per [[buffer(n)]] struct). For a
      * non-struct buffer pointee the key is the pointee AIR type. */
     struct { uint32_t air_ty; uint32_t spv_id; } block_cache[LAGFX_MAX_VERTEX_ARGS];
@@ -516,9 +528,17 @@ static void copy_module_state(xlate_ctx_t *dst, const xlate_ctx_t *src) {
     dst->id_image_t     = src->id_image_t;
     dst->id_sampler_t   = src->id_sampler_t;
     dst->id_sampimg_t   = src->id_sampimg_t;
+    dst->id_image3d_t   = src->id_image3d_t;
+    dst->id_sampimg3d_t = src->id_sampimg3d_t;
+    dst->id_ptr_uc_image3d = src->id_ptr_uc_image3d;
     dst->id_ptr_uc_image   = src->id_ptr_uc_image;
     dst->id_ptr_uc_sampler = src->id_ptr_uc_sampler;
     dst->id_default_sampler_var = src->id_default_sampler_var;
+    dst->n_cxs = src->n_cxs;
+    memcpy(dst->id_cxs_var, src->id_cxs_var, sizeof dst->id_cxs_var);
+    memcpy(dst->cxs_global, src->cxs_global, sizeof dst->cxs_global);
+    memcpy(dst->cxs_dec, src->cxs_dec, sizeof dst->cxs_dec);
+    dst->cap_imgq = src->cap_imgq;
     dst->helpers        = src->helpers;
 }
 
@@ -1318,6 +1338,7 @@ static lagfx_varg_kind_t vertex_arg_kind(const xlate_ctx_t *c, uint32_t arg_idx)
 /* Classify a pointer arg as a graphics resource. Returns:
  *   1 = texture   (opaque pointee, addrspace 1)
  *   2 = sampler   (opaque pointee, addrspace 2)
+ *   5 = texture3d (named struct `_texture_3d_t`, sampled)
  *   3 = buffer    (STRUCT pointee — a `[[buffer(n)]]` constant/device block)
  *   0 = neither.
  *
@@ -1344,6 +1365,7 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
             /* Apple's opaque resource structs (strip a "struct." prefix). */
             const char *p = nm;
             if (strncmp(p, "struct.", 7u) == 0) p += 7u;
+            if (strstr(p, "_texture_3d") && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 5;   /* sampled texture3d: Dim3D */
             if (strstr(p, "_texture") || strstr(p, "_depth"))   /* texture; a written one is a storage image */
                 return (strstr(p, "_texture") && lagfx_air_arg_is_written_texture(c->m, arg_idx)) ? 4 : 1;
             if (strstr(p, "_sampler")) return 2;                        /* sampler */
@@ -1373,7 +1395,7 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
         }
     }
     if (addrspace == 1u)             /* texture (opaque) */
-        return lagfx_air_arg_is_written_texture(c->m, arg_idx) ? 4 : 1;
+        return lagfx_air_arg_is_written_texture(c->m, arg_idx) ? 4 : lagfx_air_arg_is_texture3d(c->m, arg_idx) ? 5 : 1;
     if (addrspace == 2u) return 2;   /* sampler (opaque) */
     return 0;
 }
@@ -1390,7 +1412,7 @@ static bool needs_default_sampler(const xlate_ctx_t *c) {
     uint32_t n = c->num_args < LAGFX_MAX_VERTEX_ARGS
                      ? c->num_args : LAGFX_MAX_VERTEX_ARGS;
     for (uint32_t i = 0; i < n; i++) {
-        if (frag_resource_kind(c, i) == 1) return true;
+        if (frag_resource_kind(c, i) == 1 || frag_resource_kind(c, i) == 5) return true;
     }
     return false;
 }
@@ -1404,6 +1426,64 @@ static uint32_t emit_type_image2d_f(xlate_ctx_t *c) {
                        1u /*Sampled=1*/, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, ops, 8);
     c->id_image_t = id;
+    return id;
+}
+
+/* Constexpr samplers (fragment stage): allocate one sampler variable per sampler the module declares in air.sampler_states. Those whose word does not decode
+ * (layout check failed) get no variable: a sample through one degrades to the default sampler and says so (LAGFX_WARN at the sample). */
+static void cxs_alloc(xlate_ctx_t *c) {
+    c->n_cxs = 0;
+    lagfx_constexpr_sampler_t all[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    uint32_t n = lagfx_air_extract_constexpr_samplers(c->m, all, LAGFX_CONSTEXPR_SAMPLER_MAX);
+    for (uint32_t i = 0; i < n; i++) {
+        if (!all[i].valid) { LAGFX_WARN("constexpr sampler @%u: word 0x%016llx does not match the known layout -- samples through it use the default sampler", all[i].global_index, (unsigned long long)all[i].raw); continue; }
+        c->cxs_dec[c->n_cxs] = all[i];
+        c->cxs_global[c->n_cxs] = all[i].global_index;
+        c->id_cxs_var[c->n_cxs] = lagfx_spv_builder_alloc_id(c->b);
+        c->n_cxs++;
+    }
+}
+
+/* Index of the constexpr sampler a sample call's sampler operand (ABSOLUTE value id) names, or -1. */
+static int cxs_find(const xlate_ctx_t *c, uint32_t abs_value_id) {
+    if (!c->n_cxs) return -1;
+    int32_t g = lagfx_air_sampler_operand_global(c->m, c->body, c->arg_id_base + c->num_args, abs_value_id);
+    if (g < 0) return -1;
+    for (uint32_t k = 0; k < c->n_cxs; k++) if (c->cxs_global[k] == (uint32_t)g) return (int)k;
+    return -1;
+}
+
+/* Binding + name of every constexpr sampler variable; `binding` is advanced. Called after the default sampler's decorations. */
+static void cxs_decorate(xlate_ctx_t *c, uint32_t *binding) {
+    for (uint32_t k = 0; k < c->n_cxs; k++) {
+        uint32_t d_set[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_DESCRIPTOR_SET, 0u };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_set, 3);
+        uint32_t d_bind[] = { c->id_cxs_var[k], LAGFX_SPV_DECORATION_BINDING, (*binding)++ };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
+        char nm[48];
+        snprintf(nm, sizeof nm, LAGFX_CXS_NAME_PREFIX "%016llx", (unsigned long long)c->cxs_dec[k].raw);
+        uint32_t pre[] = { c->id_cxs_var[k] };
+        lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, nm, NULL, 0);
+    }
+}
+
+/* Shared OpTypeImage 3D float (Sampled=1): a `texture3d<T, access::sample>` argument. */
+static uint32_t emit_type_image3d_f(xlate_ctx_t *c) {
+    if (c->id_image3d_t) return c->id_image3d_t;
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ops[] = { id, emit_type_float32(c), LAGFX_SPV_DIM_3D, 0u /*Depth*/, 0u /*Arrayed*/, 0u /*MS*/, 1u /*Sampled=1*/, LAGFX_SPV_IMAGE_FORMAT_UNKNOWN };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_IMAGE, ops, 8);
+    c->id_image3d_t = id;
+    return id;
+}
+
+static uint32_t emit_type_sampled_image3d(xlate_ctx_t *c) {
+    if (c->id_sampimg3d_t) return c->id_sampimg3d_t;
+    uint32_t img = emit_type_image3d_f(c);
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ops[] = { id, img };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_SAMPLED_IMAGE, ops, 2);
+    c->id_sampimg3d_t = id;
     return id;
 }
 
@@ -1450,6 +1530,17 @@ static uint32_t emit_type_ptr_uc_image(xlate_ctx_t *c) {
                        emit_type_image2d_f(c) };
     lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, ops, 3);
     c->id_ptr_uc_image = id;
+    return id;
+}
+
+/* Shared ptr-UniformConstant-image3d type: resource variables and helper texture3d params use the same id (OpFunctionCall matches by id). */
+static uint32_t emit_type_ptr_uc_image3d(xlate_ctx_t *c) {
+    if (c->id_ptr_uc_image3d) return c->id_ptr_uc_image3d;
+    uint32_t img = emit_type_image3d_f(c);
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ops[] = { id, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT, img };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, ops, 3);
+    c->id_ptr_uc_image3d = id;
     return id;
 }
 
@@ -2454,10 +2545,11 @@ static void emit_prologue(xlate_ctx_t *c) {
          * sampler to load. */
         if (needs_default_sampler(c))
             c->id_default_sampler_var = lagfx_spv_builder_alloc_id(c->b);
+        if (c->id_default_sampler_var) cxs_alloc(c);   /* textures exist: the module's constexpr samplers get their own bindings */
 
         frag_link_decide(c, n_fa);
         uint32_t prefix[] = { LAGFX_SPV_EXECUTION_MODEL_FRAGMENT, c->id_main };
-        uint32_t suffix[3u * LAGFX_MAX_VERTEX_ARGS + LAGFX_MAX_BYTEBUF_VIEWS];
+        uint32_t suffix[3u * LAGFX_MAX_VERTEX_ARGS + LAGFX_MAX_BYTEBUF_VIEWS + LAGFX_CONSTEXPR_SAMPLER_MAX];
         uint32_t n_iface = 0u;
         for (uint32_t k = 0; k < c->num_color_outputs; k++)
             suffix[n_iface++] = c->id_color_vars[k];
@@ -2468,6 +2560,7 @@ static void emit_prologue(xlate_ctx_t *c) {
             if (c->arg_rt_var[i])        suffix[n_iface++] = c->arg_rt_var[i];
         }
         if (c->id_default_sampler_var) suffix[n_iface++] = c->id_default_sampler_var;
+        for (uint32_t k = 0; k < c->n_cxs; k++) suffix[n_iface++] = c->id_cxs_var[k];
         for (uint32_t v = 0; v < c->n_bytebuf_views; v++)
             suffix[n_iface++] = c->bytebuf_view[v].var_id;
         lagfx_spv_builder_emit_op_string(c->b, LAGFX_SPV_OP_ENTRY_POINT,
@@ -2521,6 +2614,7 @@ static void emit_prologue(xlate_ctx_t *c) {
                                    LAGFX_SPV_DECORATION_BINDING, binding++ };
             lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, d_bind, 3);
         }
+        cxs_decorate(c, &binding);   /* constexpr samplers: one binding each, after the default sampler */
         /* Input attachments (framebuffer fetch): set 0, a fixed binding range above the resources (24 + n), InputAttachmentIndex n. */
         for (uint32_t i = 0; i < n_fa; i++) {
             if (!c->arg_rt_var[i]) continue;
@@ -2637,6 +2731,7 @@ static void emit_arg_resource_vars(xlate_ctx_t *c, uint32_t n_args) {
         }
         /* Shared cached pointer type — helper-fn params must match by ID. */
         uint32_t ptr_id = (rk == 1u) ? emit_type_ptr_uc_image(c)
+                        : (rk == 5u) ? emit_type_ptr_uc_image3d(c)
                         : (rk == 4u) ? emit_type_ptr_uc_simage(c)
                                      : emit_type_ptr_uc_sampler(c);
         uint32_t var_ops[] = { ptr_id, c->arg_resource_var[i],
@@ -2653,7 +2748,12 @@ static void emit_arg_resource_vars(xlate_ctx_t *c, uint32_t n_args) {
                                 LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 3);
     }
+    for (uint32_t k = 0; k < c->n_cxs; k++) {
+        uint32_t var_ops[] = { emit_type_ptr_uc_sampler(c), c->id_cxs_var[k], LAGFX_SPV_STORAGE_UNIFORM_CONSTANT };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, var_ops, 3);
+    }
     if (c->id_image_t) (void)emit_type_sampled_image(c);
+    if (c->id_image3d_t) (void)emit_type_sampled_image3d(c);
 }
 
 /* Pre-emit OpVariable for each ALLOCA at the top of the function's entry
@@ -3576,8 +3676,9 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
                 break;
             }
             case LAGFX_HPARAM_TEX:
+            case LAGFX_HPARAM_TEX3D:
             case LAGFX_HPARAM_SAMP: {
-                uint8_t want = (hf->param[i].kind == LAGFX_HPARAM_TEX) ? 1u : 2u;
+                uint8_t want = (hf->param[i].kind == LAGFX_HPARAM_TEX) ? 1u : (hf->param[i].kind == LAGFX_HPARAM_TEX3D) ? 5u : 2u;
                 uint32_t a = resolve_value_spv(c, vid);
                 bool ok = false;
                 uint32_t first = 0u;
@@ -3589,6 +3690,14 @@ static bool emit_helper_fncall(xlate_ctx_t *c, uint32_t fn_idx,
                     if (a == c->arg_resource_var[k]) ok = true;
                 }
                 if (want == 2u && a && a == c->id_default_sampler_var) ok = true;
+                if (want == 2u && !ok) {   /* a constexpr sampler passed on to the helper: its own variable */
+                    int ck = cxs_find(c, vid);
+                    if (ck >= 0) {
+                        a = c->id_cxs_var[ck]; ok = true;
+                        if (!c->cxs_dec[ck].normalized)   /* UNSUPPORTED: the helper's sample only sees a sampler parameter, so it cannot divide the texel coordinates by the image size */
+                            LAGFX_WARN("constexpr sampler @%u uses pixel coordinates and is passed to a helper function: UNSUPPORTED, the helper samples with unconverted coordinates (normalized sampler)", c->cxs_dec[ck].global_index);
+                    }
+                }
                 if (!ok)
                     a = (want == 2u && c->id_default_sampler_var)
                             ? c->id_default_sampler_var : first;
@@ -4336,6 +4445,21 @@ static uint32_t sample_const_ivec2(xlate_ctx_t *c, int32_t x, int32_t y) {
     return id;
 }
 
+/* ConstOffset of a Dim3D sample: the operand must have as many components as the coordinate (3). The cache key packs three 10-bit lanes (offsets are in [-8, 7]). */
+static uint32_t sample_const_ivec3(xlate_ctx_t *c, int32_t x, int32_t y, int32_t z) {
+    uint32_t u32 = emit_type_int_w(c, 32u, 0u);
+    uint32_t vty = emit_type_vec(c, u32, 3u);
+    uint64_t key = ((uint64_t)((uint32_t)x & 0x3ffu) << 20) | ((uint64_t)((uint32_t)y & 0x3ffu) << 10) | ((uint32_t)z & 0x3ffu);
+    uint32_t cached = cache_lookup_const(c, 3, vty, key);
+    if (cached) return cached;
+    uint32_t cx = emit_const_uint32(c, (uint32_t)x), cy = emit_const_uint32(c, (uint32_t)y), cz = emit_const_uint32(c, (uint32_t)z);
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ops[] = { vty, id, cx, cy, cz };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT_COMPOSITE, ops, 5);
+    cache_store_const(c, 3, vty, key, id);
+    return id;
+}
+
 
 static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                              const lagfx_air_inst_t *inst,
@@ -4910,18 +5034,18 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
      * with OpSampledImage, sample at `uv`, then OpCompositeConstruct the
      * { vec4, i8 } result struct (status byte = undef; only field 0, the
      * colour, is ever extracted). Needs tex + samp + uv operands. */
-    /* air.sample_texture_3d shares this path: our textures all realize as
-     * 2D images (the tex arg is already declared with the 2D image type),
-     * and a Dim2D OpImageSampleImplicitLod accepts a coordinate with
-     * extra components — so the 3D LUT samples read a 2D slice instead of
-     * binding undef. Approximate, but real data of the right type. */
+    /* air.sample_texture_3d shares this path with a Dim3D image (resource kind 5), a float3 coordinate and OpImageSampleImplicitLod, so the
+     * hardware filters in Z too. A texture3d arg that is not a Dim3D resource variable degrades to the typed undef path (no 2D-slice fallback). */
     if ((strncmp(fn_name, "air.sample_texture_2d", 21u) == 0 ||
          strncmp(fn_name, "air.sample_texture_3d", 21u) == 0) &&
         result_value_id != 0u) {
+        const bool is3d = strncmp(fn_name, "air.sample_texture_3d", 21u) == 0;
+        const uint8_t want_tex_kind = is3d ? 5u : 1u;
         uint32_t tex_slot = callee_slot_idx + 1u;
         uint32_t samp_slot = callee_slot_idx + 2u;
         uint32_t uv_slot   = callee_slot_idx + 3u;
         if (inst->num_ops > uv_slot) {
+            int cxs_k = -1;   /* index of the constexpr sampler this sample uses, or -1 */
             uint32_t tex_var = resolve_value_spv(c,
                 resolve_relative((uint32_t)inst->ops[tex_slot], next_val_id));
             uint32_t samp_var = resolve_value_spv(c,
@@ -4944,24 +5068,29 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                     if (c->arg_resource_kind[a] == 2u) {
                         if (!first_samp) first_samp = v;
                         if (samp_var == v) samp_ok = 1;
-                    } else if (c->arg_resource_kind[a] == 1u) {
+                    } else if (c->arg_resource_kind[a] == want_tex_kind) {
                         if (!first_tex) first_tex = v;
                         if (tex_var == v) tex_ok = 1;
                     }
                 }
-                if (!samp_ok)
-                    samp_var = c->id_default_sampler_var ? c->id_default_sampler_var
-                                                         : first_samp;
+                /* A constexpr sampler declared in the body (or in a helper): its own variable, bound by the host to the decoded state. */
+                cxs_k = cxs_find(c, resolve_relative((uint32_t)inst->ops[samp_slot], next_val_id));
+                if (cxs_k >= 0) { samp_var = c->id_cxs_var[cxs_k]; samp_ok = 1; }
+                if (!samp_ok) {
+                    LAGFX_WARN("sample_texture: sampler operand is neither a bound sampler argument nor a decodable constexpr sampler -- %s used (state not applied)",
+                               c->id_default_sampler_var ? "the default sampler" : "the first sampler argument");
+                    samp_var = c->id_default_sampler_var ? c->id_default_sampler_var : first_samp;
+                }
                 if (!tex_ok)
                     tex_var = first_tex;
             }
             uint32_t uv_spv = resolve_or_undef(c,
                 resolve_relative((uint32_t)inst->ops[uv_slot], next_val_id),
-                emit_type_vec2_f(c));
+                is3d ? emit_type_vec3_f(c) : emit_type_vec2_f(c));
             if (tex_var && samp_var) {
-                uint32_t img_t  = emit_type_image2d_f(c);
+                uint32_t img_t  = is3d ? emit_type_image3d_f(c) : emit_type_image2d_f(c);
                 uint32_t samp_t = emit_type_sampler(c);
-                uint32_t simg_t = emit_type_sampled_image(c);
+                uint32_t simg_t = is3d ? emit_type_sampled_image3d(c) : emit_type_sampled_image(c);
                 uint32_t v4f    = emit_type_vec4_f(c);
 
                 uint32_t img_val = lagfx_spv_builder_alloc_id(c->b);
@@ -4970,6 +5099,22 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 uint32_t samp_val = lagfx_spv_builder_alloc_id(c->b);
                 { uint32_t o[] = { samp_t, samp_val, samp_var };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_LOAD, o, 3); }
+                /* Pixel (unnormalized) constexpr sampler: Metal coord::pixel coordinates are texels of level 0. The host sampler is a NORMALIZED one with the decoded
+                 * address modes / filters, so the coordinate is divided by the image size here (OpImageQuerySizeLod, level 0) -- explicit, no Vulkan unnormalized-coordinate
+                 * restrictions (which would need explicit-LOD sampling and 1D/2D images, no mips, no anisotropy). The bit-15 meaning is INFER (constexpr_sampler.h). */
+                if (cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) {
+                    const uint32_t nl = is3d ? 3u : 2u;
+                    if (!c->cap_imgq) { c->cap_imgq = 1u; uint32_t cap[] = { 50u /* ImageQuery */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1); }
+                    uint32_t u32 = emit_type_int_w(c, 32u, 0u), vu = emit_type_vec(c, u32, nl), vf = nl == 3u ? emit_type_vec3_f(c) : emit_type_vec2_f(c);
+                    uint32_t sz = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vu, sz, img_val, emit_const_uint32(c, 0u) }; lagfx_spv_builder_emit_op(c->b, 103u /* OpImageQuerySizeLod */, o, 4); }
+                    uint32_t szf = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vf, szf, sz }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONVERT_U_TO_F, o, 3); }
+                    uint32_t un = lagfx_spv_builder_alloc_id(c->b);
+                    { uint32_t o[] = { vf, un, uv_spv, szf }; lagfx_spv_builder_emit_op(c->b, 136u /* OpFDiv */, o, 4); }
+                    uv_spv = un;
+                    if (c->cxs_dec[cxs_k].mip_filter) LAGFX_WARN("constexpr sampler @%u: pixel coordinates with a mip filter -- the host sampler samples level 0 only", c->cxs_dec[cxs_k].global_index);
+                }
                 uint32_t sampled = lagfx_spv_builder_alloc_id(c->b);
                 { uint32_t o[] = { simg_t, sampled, img_val, samp_val };
                   lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SAMPLED_IMAGE, o, 4); }
@@ -4993,12 +5138,11 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                         uint32_t lanes = smp_3d ? 3u : 2u;
                         if (!sample_opt_ivec(c, resolve_relative((uint32_t)inst->ops[o0 + 1u], next_val_id), lanes, off)) {
                             LAGFX_WARN("sample_texture: offset is not a compile-time constant -- offset ignored (Offset is valid for gather only; no coordinate fallback)");
-                        } else if (off[0] != 0 || off[1] != 0) {
-                            if (off[0] < -8 || off[0] > 7 || off[1] < -8 || off[1] > 7)
-                                LAGFX_WARN("sample_texture: constant offset (%d,%d) outside [-8,7] -- ignored", off[0], off[1]);
+                        } else if (off[0] != 0 || off[1] != 0 || (smp_3d && off[2] != 0)) {
+                            if (off[0] < -8 || off[0] > 7 || off[1] < -8 || off[1] > 7 || (smp_3d && (off[2] < -8 || off[2] > 7)))
+                                LAGFX_WARN("sample_texture: constant offset (%d,%d,%d) outside [-8,7] -- ignored", off[0], off[1], smp_3d ? off[2] : 0);
                             else use_off = true;
                         }
-                        if (smp_3d && off[2] != 0) LAGFX_LOG("sample_texture_3d: z offset %d dropped (2D slice approximation)", off[2]);
                     }
                     if (!sample_opt_i1(c, resolve_relative((uint32_t)inst->ops[o0 + 2u], next_val_id), &lvl)) {
                         LAGFX_WARN("sample_texture: lod_is_level flag is not a constant -- treated as bias");
@@ -5043,7 +5187,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                     mask = 0x1u /* Bias */;
                     iops[nio++] = lod_spv;
                 }
-                if (use_off) { mask |= 0x8u /* ConstOffset */; iops[nio++] = sample_const_ivec2(c, off[0], off[1]); }
+                if (use_off) { mask |= 0x8u /* ConstOffset */; iops[nio++] = smp_3d ? sample_const_ivec3(c, off[0], off[1], off[2]) : sample_const_ivec2(c, off[0], off[1]); }
                 if (have_opts)
                     LAGFX_LOG("sample_texture opts: kind=%s offset=%d stage=%s", lvl ? "level" : (lod_zero ? "plain" : "bias"), use_off ? 1 : 0,
                               c->stage == LAGFX_XLATE_STAGE_VERTEX ? "vertex" : "fragment");
@@ -9155,6 +9299,7 @@ static int classify_helper_param(const xlate_ctx_t *c, uint32_t air_ty,
         if (nm) {
             const char *p = nm;
             if (strncmp(p, "struct.", 7u) == 0) p += 7u;
+            if (strstr(p, "_texture_3d") && !strstr(p, "_write")) return LAGFX_HPARAM_TEX3D;
             if (strstr(p, "_texture") || strstr(p, "_depth"))
                 return LAGFX_HPARAM_TEX;
             if (strstr(p, "_sampler")) return LAGFX_HPARAM_SAMP;
@@ -9234,10 +9379,29 @@ static void helpers_register(xlate_ctx_t *c, uint32_t fn_idx) {
     }
 
     hf->n_params = (uint8_t)n_params;
+    /* Opaque texture params: texture2d or texture3d is only in the mangled name ("...9texture2dI..9texture3dI..." in parameter order). */
+    uint8_t tex_dim3[LAGFX_MAX_HELPER_PARAMS] = { 0 };
+    uint32_t n_tex_tok = 0, n_tex_par = 0;
+    {
+        const char *mn = lagfx_air_module_string(c->m, fns[fn_idx].name_offset);
+        for (const char *q = mn; q && (q = strstr(q, "9texture")) != NULL; q += 8) {
+            if ((q[8] == '2' || q[8] == '3') && q[9] == 'd' && q[10] == 'I' && n_tex_tok < LAGFX_MAX_HELPER_PARAMS) tex_dim3[n_tex_tok++] = (uint8_t)(q[8] == '3');
+        }
+        for (uint32_t i = 0; i < n_params; i++) {
+            uint32_t p0 = 0u;
+            if (classify_helper_param(c, ts[fn_ty].op[2u + i], &p0) == LAGFX_HPARAM_TEX) n_tex_par++;
+        }
+    }
+    uint32_t tex_ord = 0;
     for (uint32_t i = 0; i < n_params; i++) {
         uint32_t air_ty = ts[fn_ty].op[2u + i];
         uint32_t pointee = 0u;
         int kind = classify_helper_param(c, air_ty, &pointee);
+        if (kind == LAGFX_HPARAM_TEX) {
+            /* only trust the name when every opaque texture param has its own explicit token (no Itanium substitutions hid one) */
+            if (n_tex_tok == n_tex_par && tex_dim3[tex_ord]) kind = LAGFX_HPARAM_TEX3D;
+            tex_ord++;
+        }
         if (!kind) {                               /* unsupported param */
             LAGFX_TRACE("air2spv: helper fn[%u] param %u air_ty %u kind %d "
                         "unsupported — not registered", fn_idx, i, air_ty,
@@ -9252,6 +9416,9 @@ static void helpers_register(xlate_ctx_t *c, uint32_t fn_idx) {
                 break;
             case LAGFX_HPARAM_TEX:
                 hf->param[i].spv_ty = emit_type_ptr_uc_image(c);
+                break;
+            case LAGFX_HPARAM_TEX3D:
+                hf->param[i].spv_ty = emit_type_ptr_uc_image3d(c);
                 break;
             case LAGFX_HPARAM_SAMP:
                 hf->param[i].spv_ty = emit_type_ptr_uc_sampler(c);
@@ -9501,6 +9668,11 @@ static void translate_one_helper(xlate_ctx_t *ec, uint32_t slot) {
             case LAGFX_HPARAM_TEX:
                 hc.arg_resource_var[i]  = pid;
                 hc.arg_resource_kind[i] = 1u;
+                set_value_storage(&hc, vid, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT);
+                break;
+            case LAGFX_HPARAM_TEX3D:
+                hc.arg_resource_var[i]  = pid;
+                hc.arg_resource_kind[i] = 5u;
                 set_value_storage(&hc, vid, LAGFX_SPV_STORAGE_UNIFORM_CONSTANT);
                 break;
             case LAGFX_HPARAM_SAMP:

@@ -120,6 +120,9 @@ typedef struct {
  * "air.write" or "air.read_write" (texture2d<T, access::write/read_write>). */
 bool lagfx_air_arg_is_written_texture(const lagfx_air_module_t *m, uint32_t arg_idx);
 
+/* True when entry-point argument `arg_idx` is a texture3d<...> (argument metadata air.arg_type_name). */
+bool lagfx_air_arg_is_texture3d(const lagfx_air_module_t *m, uint32_t arg_idx);
+
 /* Walk the entry point's air.vertex / air.fragment per-arg metadata and
  * return the resource args (buffers/textures/samplers) in arg order.
  * Returns the number of entries written (0 on any parse failure — callers

@@ -8,16 +8,21 @@
 #include "../common/le.h"
 #include <string.h>
 
-static VkSamplerAddressMode vk_addr(uint32_t m) {
+static VkSamplerAddressMode vk_addr(uint32_t m, bool mirror_clamp) {
     switch (m) {
     case 2: return VK_SAMPLER_ADDRESS_MODE_REPEAT;
-    case 1: case 3: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case 1: return mirror_clamp ? VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE : VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
+    case 3: return VK_SAMPLER_ADDRESS_MODE_MIRRORED_REPEAT;
     case 4: case 5: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER;
     default: return VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     }
 }
 
 uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso, float max_aniso, VkSamplerCreateInfo *ci) {
+    return lagfx_a64_sampler_decode_ex(d, n, have_aniso, max_aniso, false, ci);
+}
+
+uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_aniso, float max_aniso, bool have_mirror_clamp, VkSamplerCreateInfo *ci) {
     uint32_t flags = 0;
     uint32_t st = lagfx_le32(d + 12);
     uint32_t lo = n >= 24u ? lagfx_le32(d + 20) : 0, hi = n >= 28u ? lagfx_le32(d + 24) : 0x7f7fffffu;
@@ -31,7 +36,7 @@ uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso,
     *ci = (VkSamplerCreateInfo){ .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
         .minFilter = (st & 1u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST, .magFilter = ((st >> 2) & 1u) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST,
         .mipmapMode = mip == 2u ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST,
-        .addressModeU = vk_addr(am[0]), .addressModeV = vk_addr(am[1]), .addressModeW = vk_addr(am[2]),
+        .addressModeU = vk_addr(am[0], have_mirror_clamp), .addressModeV = vk_addr(am[1], have_mirror_clamp), .addressModeW = vk_addr(am[2], have_mirror_clamp),
         .minLod = mip ? lod_min : 0.f, .maxLod = mip ? lod_max : 0.25f,
         .borderColor = !border ? VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK : bc == 2u ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE : bc == 1u ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
     if (have_aniso && aniso > 1u && max_aniso >= 1.f) {
@@ -40,10 +45,11 @@ uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso,
     }
     if (!(st & 0x80000000u)) {   /* unnormalized coordinates (seen on a real device: two of the six samplers of a capture): Vulkan's restrictions are applied to the state */
         ci->unnormalizedCoordinates = VK_TRUE;
-        ci->magFilter = ci->minFilter;                                  /* the two filters must be equal */
+        ci->magFilter = ci->minFilter;                                  /* the two filters must be equal (the minification one is kept: INFER, real device samplers had equal filters) */
         ci->mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST, ci->minLod = ci->maxLod = 0.f;
-        if (ci->addressModeU != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) ci->addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;   /* only the clamping modes exist */
+        if (ci->addressModeU != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) ci->addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;   /* only the clamping modes exist (Vulkan: U and V must be edge or border) */
         if (ci->addressModeV != VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) ci->addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        ci->addressModeW = ci->addressModeU;                            /* unnormalized images are 1D / 2D: R is unused; keep it a legal value */
         ci->anisotropyEnable = VK_FALSE, ci->maxAnisotropy = 0.f;
         flags &= ~LAGFX_A64_SAMP_ANISO_APPLIED;
         flags |= LAGFX_A64_SAMP_UNNORM_APPLIED;
@@ -51,7 +57,8 @@ uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso,
     }
     if (mip) flags |= LAGFX_A64_SAMP_MIPMAPPED;
     if (cmp) flags |= LAGFX_A64_SAMP_COMPARE_IGNORED;
-    if (am[0] == 1u || am[1] == 1u || am[2] == 1u) flags |= LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX;
+    if (!have_mirror_clamp && (am[0] == 1u || am[1] == 1u || am[2] == 1u)) flags |= LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX;
+    if (st & 0x10u) flags |= LAGFX_A64_SAMP_LODAVG_IGNORED;
     return flags;
 }
 #endif

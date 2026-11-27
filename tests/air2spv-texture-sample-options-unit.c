@@ -7,7 +7,7 @@
  *   plain (level=false, bias 0.0)      -> OpImageSampleImplicitLod, no image operands (vertex stage: ExplicitLod, Lod 0.0)
  *   bias (level=false, bias != 0/var)  -> OpImageSampleImplicitLod Bias (vertex stage: bias ignored, Lod 0.0)
  *   explicit level (level=true)        -> OpImageSampleExplicitLod Lod (value = level; vertex stage too)
- *   constant offset in [-8, 7]         -> ConstOffset (OpConstantComposite of 2 ints); 3D: the first two lanes, z dropped
+ *   constant offset in [-8, 7]         -> ConstOffset (OpConstantComposite of 2 ints; 3 ints for a Dim3D sample, z kept)
  *   non-constant / out-of-range offset -> ignored (logged), no operand
  *   min_lod                            -> ignored (logged); the MinLod capability / shaderResourceMinLod is never enabled
  * half-typed lod/bias operands are converted to float32 (OpFConvert). Fixtures tests/fixtures/tex_*.ll are HAND-WRITTEN IR (not Apple output) assembled with
@@ -33,18 +33,20 @@ static int bad;
 #define MASK_CONSTOFFSET 0x8u
 
 typedef enum { LOD_NONE, LOD_CONST, LOD_VAR } lodk_t;
-typedef struct { uint32_t op, mask; lodk_t lodk; float lod; int has_off; int ox, oy; } want_t;
+typedef struct { uint32_t op, mask; lodk_t lodk; float lod; int has_off; int ox, oy, oz, nl; } want_t;   /* nl = ConstOffset lanes: 2 (Dim2D) or 3 (Dim3D) */
 typedef struct { const char *fixture; const want_t *w; size_t n; } case_t;
 
-#define PLAIN            { OP_SAMPLE_IMPLICIT, 0, LOD_NONE, 0.0f, 0, 0, 0 }
-#define BIAS_C(v)        { OP_SAMPLE_IMPLICIT, MASK_BIAS, LOD_CONST, (v), 0, 0, 0 }
-#define BIAS_V           { OP_SAMPLE_IMPLICIT, MASK_BIAS, LOD_VAR, 0.0f, 0, 0, 0 }
-#define LEVEL_C(v)       { OP_SAMPLE_EXPLICIT, MASK_LOD, LOD_CONST, (v), 0, 0, 0 }
-#define LEVEL_V          { OP_SAMPLE_EXPLICIT, MASK_LOD, LOD_VAR, 0.0f, 0, 0, 0 }
-#define OFF(x, y)        { OP_SAMPLE_IMPLICIT, MASK_CONSTOFFSET, LOD_NONE, 0.0f, 1, (x), (y) }
-#define BIAS_V_OFF(x, y) { OP_SAMPLE_IMPLICIT, MASK_BIAS | MASK_CONSTOFFSET, LOD_VAR, 0.0f, 1, (x), (y) }
-#define BIAS_C_OFF(v, x, y) { OP_SAMPLE_IMPLICIT, MASK_BIAS | MASK_CONSTOFFSET, LOD_CONST, (v), 1, (x), (y) }
-#define LEVEL_C_OFF(v, x, y) { OP_SAMPLE_EXPLICIT, MASK_LOD | MASK_CONSTOFFSET, LOD_CONST, (v), 1, (x), (y) }
+#define PLAIN            { OP_SAMPLE_IMPLICIT, 0, LOD_NONE, 0.0f, 0, 0, 0, 0, 0 }
+#define BIAS_C(v)        { OP_SAMPLE_IMPLICIT, MASK_BIAS, LOD_CONST, (v), 0, 0, 0, 0, 0 }
+#define BIAS_V           { OP_SAMPLE_IMPLICIT, MASK_BIAS, LOD_VAR, 0.0f, 0, 0, 0, 0, 0 }
+#define LEVEL_C(v)       { OP_SAMPLE_EXPLICIT, MASK_LOD, LOD_CONST, (v), 0, 0, 0, 0, 0 }
+#define LEVEL_V          { OP_SAMPLE_EXPLICIT, MASK_LOD, LOD_VAR, 0.0f, 0, 0, 0, 0, 0 }
+#define OFF(x, y)        { OP_SAMPLE_IMPLICIT, MASK_CONSTOFFSET, LOD_NONE, 0.0f, 1, (x), (y), 0, 2 }
+#define BIAS_V_OFF(x, y) { OP_SAMPLE_IMPLICIT, MASK_BIAS | MASK_CONSTOFFSET, LOD_VAR, 0.0f, 1, (x), (y), 0, 2 }
+#define BIAS_C_OFF(v, x, y) { OP_SAMPLE_IMPLICIT, MASK_BIAS | MASK_CONSTOFFSET, LOD_CONST, (v), 1, (x), (y), 0, 2 }
+#define BIAS_V_OFF3(x, y, z) { OP_SAMPLE_IMPLICIT, MASK_BIAS | MASK_CONSTOFFSET, LOD_VAR, 0.0f, 1, (x), (y), (z), 3 }
+#define LEVEL_C_OFF3(v, x, y, z) { OP_SAMPLE_EXPLICIT, MASK_LOD | MASK_CONSTOFFSET, LOD_CONST, (v), 1, (x), (y), (z), 3 }
+#define LEVEL_C_OFF(v, x, y) { OP_SAMPLE_EXPLICIT, MASK_LOD | MASK_CONSTOFFSET, LOD_CONST, (v), 1, (x), (y), 0, 2 }
 
 /* tex_lod_fragment: plain / bias var / bias 0.5 / level 1 / level var / level 0 / has_offset=false / min_lod 0.25 (ignored) / half bias var / half bias 2.0 / half level var */
 static const want_t w_lod[] = { PLAIN, BIAS_V, BIAS_C(0.5f), LEVEL_C(1.0f), LEVEL_V, LEVEL_C(0.0f), PLAIN, PLAIN, BIAS_V, BIAS_C(2.0f), LEVEL_V };
@@ -52,8 +54,8 @@ static const want_t w_lod[] = { PLAIN, BIAS_V, BIAS_C(0.5f), LEVEL_C(1.0f), LEVE
 static const want_t w_vlod[] = { LEVEL_C(0.0f), LEVEL_C(1.0f), LEVEL_V, LEVEL_C(0.0f), LEVEL_C(0.0f) };
 /* tex_offset_fragment: offset (1,-1) / bias var + (1,2) / level 1 + (-2,0) / (7,-8) / (9,0) out of range / non-constant offset / half-result bias 0.25 + (0,-3) */
 static const want_t w_off[] = { OFF(1, -1), BIAS_V_OFF(1, 2), LEVEL_C_OFF(1.0f, -2, 0), OFF(7, -8), PLAIN, PLAIN, BIAS_C_OFF(0.25f, 0, -3) };
-/* tex_offset3d_fragment: plain 3d / bias var + (1,2,3) -> (1,2) / level 1 + (-1,1,0) -> (-1,1) */
-static const want_t w_off3[] = { PLAIN, BIAS_V_OFF(1, 2), LEVEL_C_OFF(1.0f, -1, 1) };
+/* tex_offset3d_fragment: plain 3d / bias var + (1,2,3) / level 1 + (-1,1,0): a Dim3D sample takes a 3-lane ConstOffset (z kept) */
+static const want_t w_off3[] = { PLAIN, BIAS_V_OFF3(1, 2, 3), LEVEL_C_OFF3(1.0f, -1, 1, 0) };
 
 static const case_t cases[] = {
     { "tex_lod_fragment.air.bc", w_lod, sizeof w_lod / sizeof w_lod[0] },
@@ -128,11 +130,11 @@ static void scan(const uint32_t *w, size_t nw, const want_t *exp, size_t nexp, c
                 }
                 if (mask & MASK_CONSTOFFSET) {
                     uint32_t id = wc > pos ? w[i + pos] : 0u;
-                    int ok = id < MAXID && g_k[id].kind == 2 && g_k[id].n == 2;
-                    EXPECT(ok, "%s: sample #%zu ConstOffset is not a 2-lane OpConstantComposite", fixture, seen);
+                    int ok = id < MAXID && g_k[id].kind == 2 && (int)g_k[id].n == e->nl;
+                    EXPECT(ok, "%s: sample #%zu ConstOffset is not a %d-lane OpConstantComposite", fixture, seen, e->nl);
                     if (ok) {
-                        int32_t ox = (int32_t)g_k[g_k[id].lanes[0]].val, oy = (int32_t)g_k[g_k[id].lanes[1]].val;
-                        EXPECT(ox == e->ox && oy == e->oy, "%s: sample #%zu offset (%d,%d), want (%d,%d)", fixture, seen, ox, oy, e->ox, e->oy);
+                        int32_t ox = (int32_t)g_k[g_k[id].lanes[0]].val, oy = (int32_t)g_k[g_k[id].lanes[1]].val, oz = e->nl == 3 ? (int32_t)g_k[g_k[id].lanes[2]].val : 0;
+                        EXPECT(ox == e->ox && oy == e->oy && oz == e->oz, "%s: sample #%zu offset (%d,%d,%d), want (%d,%d,%d)", fixture, seen, ox, oy, oz, e->ox, e->oy, e->oz);
                     }
                 }
             }

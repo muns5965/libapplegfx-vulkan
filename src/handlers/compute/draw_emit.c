@@ -1137,6 +1137,7 @@ void lagfx_emit_pending_draw(lagfx_protocol_t *p, lagfx_task_entry_t *task,
             (VkDescriptorSetLayout)task->pending_pipeline.descriptor_set_layout,
             task->pending_pipeline.spv_binding_no,
             task->pending_pipeline.spv_binding_kind,
+            task->pending_pipeline.spv_cxs_raw,
             task->pending_pipeline.n_spv_bindings,
             tbuf, tmem, &ntr);
         if (ds != VK_NULL_HANDLE) {

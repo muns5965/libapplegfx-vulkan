@@ -66,7 +66,7 @@ lagfx_vk_iosurface_t *lagfx_texture_realize(lagfx_protocol_t *p,
 VkDescriptorSet lagfx_build_draw_descriptor_set(
         lagfx_protocol_t *p, lagfx_task_entry_t *task,
         struct lagfx_vk_state *vk, VkDescriptorSetLayout dsl,
-        const uint8_t *binding_no, const uint8_t *binding_kind, uint32_t n,
+        const uint8_t *binding_no, const uint8_t *binding_kind, const uint64_t *cxs_raw, uint32_t n,
         VkBuffer *out_bufs, VkDeviceMemory *out_mems, uint32_t *out_n);
 
 /* draw_emit.c — pipeline cache, vertex upload, draw emission */

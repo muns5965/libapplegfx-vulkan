@@ -38,7 +38,12 @@ bool lagfx_a64_exec_enabled(const lagfx_protocol_t *p);
  * descriptor is not decoded by this module: the resolver turns it into ready shader modules + layout. desc.color_format is overwritten
  * with the pass's format when the VkPipeline is built. */
 enum { LAGFX_A64_BIND_IMAGE = 1, LAGFX_A64_BIND_SAMPLER = 2, LAGFX_A64_BIND_BUFFER = 3, LAGFX_A64_BIND_INPUT = 4, LAGFX_A64_BIND_STORAGE_IMAGE = 5 };   /* = lagfx_spv_binding_kind_t */
-typedef struct { uint8_t binding, kind, stage; int16_t metal_index; uint8_t writable; } lagfx_a64_bind_t;   /* one set-0 binding of a resolved pipeline */
+typedef struct {
+    uint8_t binding, kind, stage; int16_t metal_index; uint8_t writable;
+    uint8_t dim3;       /* BIND_IMAGE: the shader declares a Dim3D sampled image (texture3d): only a 3D mirror texture (a 3D view) can feed it; a 2D one cannot, and vice versa */
+    uint8_t cxs;        /* BIND_SAMPLER: a constexpr sampler of the shader (no Metal slot): the host builds the VkSampler from cxs_raw */
+    uint64_t cxs_raw;   /* the raw i64 sampler word of the AIR (air2spv/constexpr_sampler.h) */
+} lagfx_a64_bind_t;   /* one set-0 binding of a resolved pipeline */
 typedef struct {
     lagfx_pipeline_desc_t desc;
     /* Resources of set 0 (all zero = the pipeline has none: desc.layout is the empty layout). Each: the Vulkan binding, its kind, the stage whose Metal

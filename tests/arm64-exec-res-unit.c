@@ -11,10 +11,10 @@
 #include "air2spv/spv_reflect.h"
 
 #define REF_SAMP 8u
-enum { M_STORE = 1, M_VTEX, M_UNORM, M_SBUF };
+enum { M_STORE = 1, M_VTEX, M_UNORM, M_SBUF, M_TEX3D, M_TEX3D_MID };
 static struct { int mode, no_alt, writable; VkShaderModule m[8]; } g_r;
-static VkShaderModule g_mods[8];
-static VkDescriptorSetLayout g_dsl[8]; static VkPipelineLayout g_pl[8];
+static VkShaderModule g_mods[12];
+static VkDescriptorSetLayout g_dsl[12]; static VkPipelineLayout g_pl[12];
 static uint8_t *g_alt_spv; static size_t g_alt_bytes;
 
 static VkShaderModule mod(struct lagfx_vk_state *vk, int slot, const uint32_t *code, size_t bytes) {
@@ -82,6 +82,15 @@ static bool res_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t 
         out->bind[0].writable = (uint8_t)g_r.writable;
         break;
     }
+    case M_TEX3D: case M_TEX3D_MID: {   /* texture3D: a Dim3D sampled image (dim3 = 1), explicit-free implicit-LOD sampling of a 4 x 4 x 4 texture */
+        VkDescriptorSetLayoutBinding b[2] = { { .binding = 24, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .descriptorCount = 1, .stageFlags = F },
+                                              { .binding = 25, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .descriptorCount = 1, .stageFlags = F } };
+        out->desc.fragment_shader = g_r.mode == M_TEX3D ? mod(vk, 7, k_fs_3d_0375_spv, sizeof k_fs_3d_0375_spv) : mod(vk, 8, k_fs_3d_05_spv, sizeof k_fs_3d_05_spv);
+        out->desc.layout = layout(vk, 9, b, 2, &out->dsl);
+        out->n_bind = 2, setb(out, 0, 24, LAGFX_A64_BIND_IMAGE, 1, 0), setb(out, 1, 25, LAGFX_A64_BIND_SAMPLER, 1, 0);
+        out->bind[0].dim3 = 1;
+        break;
+    }
     default: break;
     }
     return true;
@@ -105,6 +114,12 @@ static void k_cmds_vtex(void) {
 static void k_cmds_vtex_lod(void) {   /* a LOD-clamp bind of the vertex sampler (tag 128) instead of the plain one */
     uint8_t r[12]; p32(r, 0, 0), p32(r, 4, 1), p32(r, 8, REF_TEX2); cb_cmd(129, r, 12);
     uint8_t q[20]; p32(q, 0, 0), p32(q, 4, 1), p32(q, 8, REF_SAMP); float lo = 0.f, hi = 2.f; memcpy(q + 12, &lo, 4), memcpy(q + 16, &hi, 4); cb_cmd(128, q, 20);
+    cb_draw(0, 3);
+}
+static uint32_t g_bind_ref = REF_TEX2;   /* the texture k_cmds_bind binds to fragment slot 0 */
+static void k_cmds_bind(void) {
+    uint8_t r[12]; p32(r, 0, 0), p32(r, 4, 1), p32(r, 8, g_bind_ref); cb_cmd(114, r, 12);
+    p32(r, 8, REF_SAMP); cb_cmd(112, r, 12);
     cb_draw(0, 3);
 }
 static void k_cmds_unorm(void) {
@@ -223,6 +238,80 @@ static void test_unnormalized(void) {
     puts("PASS: unnormalized sampler: explicit-LOD fragment variant selected per draw (texel coordinates), normalized samplers unchanged, missing variant skipped + counted");
 }
 
+/* The guest's 4 x 4 x 4 BGRA8 3D texture (MTLTextureType 3D = 7): texel (i, j, k) = R 20 + 50 i, G 20 + 50 j, B 30 + 60 k, A 255. Mirror layout as build_objects() writes the 2D ones. */
+static uint32_t tex3d_px(uint32_t i, uint32_t j, uint32_t k) { return 255u << 24 | (20u + 50u * i) << 16 | (20u + 50u * j) << 8 | (30u + 60u * k); }   /* = the raw u32 of bytes B G R A */
+static void put_tex3d(void) {
+    static uint32_t data[64];
+    for (uint32_t k = 0; k < 4; k++) for (uint32_t j = 0; j < 4; j++) for (uint32_t i = 0; i < 4; i++) data[(k * 4 + j) * 4 + i] = tex3d_px(i, j, k);
+    va_write((uint64_t)VPN_TEX3 << 14, data, sizeof data);
+    uint8_t t[220]; memset(t, 0, sizeof t);
+    uint64_t tlen = sizeof data; uint32_t tvp = VPN_TEX3;
+    memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
+    t[12] = 1;
+    { uint8_t *mp = t + 12 + 0x18; uint64_t row = 16; uint32_t mw = 4, mh = 4, md = 4; memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4); }
+    uint32_t rec = 12 + 0x18 + 36, tag = 0x14;
+    memcpy(t + rec, &tag, 4);
+    uint8_t *d = t + rec + 12;
+    d[0] = 7; d[2] = 80;                                   /* MTLTextureType3D, BGRA8Unorm */
+    uint32_t w = 4, h = 4, dep = 4; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &dep, 4);
+    d[16] = 1; d[18] = 1;                                  /* 1 mip, 1 sample */
+    uint32_t tsize = rec + 12 + 28;
+    va_write(VA_PAY + 0x600, t, tsize);
+    entry(REF_TEX3, LAGFX_A64_OBJ_TEXTURE, tsize, VA_PAY + 0x600);
+}
+
+static void test_tex3d(void) {
+    uint8_t img[RT_W * RT_H * 4];
+    /* nearest: every 4 x 4 pixel block shows one texel of slice k = 1 (z = 0.375 = its centre) */
+    g_r.mode = M_TEX3D;
+    lagfx_protocol_t *p = res_run(M_TEX3D, 0x84000000u);
+    put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
+    res_exec(p, k_cmds_bind, img, NULL);
+    __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_dim_mismatch == 0 && p->diag2.exec.pipe.desc_unbound == 0);
+    unsigned drawn = 0;
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
+        uint32_t got = px(img, x, y);
+        if (got == BLUE) continue;   /* outside the triangle: the clear colour */
+        drawn++;
+        if (got != tex3d_px(x / 4, y / 4, 1)) { fprintf(stderr, "3D nearest (%u,%u): got %08x want %08x\n", x, y, got, tex3d_px(x / 4, y / 4, 1)); assert(0); }
+    }
+    assert(drawn >= 60);   /* the triangle covers about 40% of the 16 x 16 target */
+    done(p);
+    /* linear, z = 0.5: halfway between slice 1 (B = 90) and slice 2 (B = 150) -> B = 120; the texel centres in x / y keep R and G exact */
+    p = res_run(M_TEX3D_MID, 0x84000005u);
+    put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
+    res_exec(p, k_cmds_bind, img, NULL);
+    assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.ext_tex3d_binds == 1);
+    drawn = 0;
+    for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) {
+        uint32_t got = px(img, x, y);
+        if (got == BLUE) continue;
+        drawn++;
+        uint32_t want = tex3d_px(x / 4, y / 4, 1), wb = 120u;
+        int db = (int)(got & 0xffu) - (int)wb, dr = (int)(got >> 16 & 0xffu) - (int)(want >> 16 & 0xffu), dg = (int)(got >> 8 & 0xffu) - (int)(want >> 8 & 0xffu);
+        if (abs(db) > 1 || abs(dr) > 1 || abs(dg) > 1 || (got >> 24) != 255u) { fprintf(stderr, "3D trilinear (%u,%u): got %08x want B=%u R/G of %08x\n", x, y, got, wb, want); assert(0); }
+    }
+    assert(drawn >= 60);
+    done(p);
+    /* dimensionality must agree: a 2D shader on a 3D texture and a 3D shader on a 2D texture skip the draw (counted), never an invalid descriptor */
+    g_r.no_alt = 0;
+    p = res_run(M_UNORM, 0x84000000u);   /* texture2D shader (dim3 = 0) */
+    put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
+    fill_tex2(H_RED, H_GREEN, 8);
+    res_exec(p, k_cmds_bind, img, NULL);
+    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_tex_dim_mismatch == 1 && px(img, 5, 8) == BLUE);
+    done(p);
+    p = res_run(M_TEX3D, 0x84000000u);   /* texture3D shader on the 2D texture */
+    put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX2;
+    fill_tex2(H_RED, H_GREEN, 8);
+    res_exec(p, k_cmds_bind, img, NULL);
+    assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_tex_dim_mismatch == 1 && px(img, 5, 8) == BLUE);
+    done(p);
+    g_res_tex3 = false; g_bind_ref = REF_TEX2;
+    puts("PASS: 3D mirror texture (MTLTextureType 3D): VK_IMAGE_VIEW_TYPE_3D sampled by a Dim3D shader (nearest = exact texels of slice 1, linear at z = 0.5 = mean of slices 1 and 2); 2D<->3D mismatch skipped + counted");
+}
+
 static void test_writable_buffer(void) {
     uint8_t img[RT_W * RT_H * 4];
     VkPhysicalDeviceProperties pr;
@@ -258,6 +347,7 @@ int main(void) {
     test_store();
     test_vertex_textures();
     test_unnormalized();
+    test_tex3d();
     test_writable_buffer();
     lagfx_device_free(g_dev);
     free(g_mem);

@@ -11,6 +11,7 @@
 
 #include <stdbool.h>
 #include <stdlib.h>
+#include <string.h>
 
 #define SPV_MAGIC                0x07230203u
 #define OP_DECORATE              71u
@@ -58,7 +59,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     uint32_t *dec_set = NULL, *dec_bind = NULL;
     uint32_t *var_ptr = NULL, *var_sc = NULL;         /* OpVariable: ptr type id, storage class */
     uint32_t *ptr_pointee = NULL;                     /* OpTypePointer: pointee id */
-    uint8_t  *is_image = NULL, *is_sampler = NULL, *is_struct = NULL, *is_sampled_image = NULL;
+    uint8_t  *is_image = NULL, *is_sampler = NULL, *is_struct = NULL, *is_sampled_image = NULL, *image_dim = NULL;
     uint32_t *root = NULL;                            /* id -> the storage-buffer variable a pointer id derives from (0 = none) */
     uint8_t  *var_written = NULL;                     /* per variable: something that may write through it was found */
     bool      overflow_ids = false;
@@ -68,12 +69,12 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     dec_set = calloc(sz, sizeof(uint32_t)); dec_bind = calloc(sz, sizeof(uint32_t));
     var_ptr = calloc(sz, sizeof(uint32_t)); var_sc = calloc(sz, sizeof(uint32_t));
     ptr_pointee = calloc(sz, sizeof(uint32_t));
-    is_image = calloc(sz, 1); is_sampler = calloc(sz, 1); is_struct = calloc(sz, 1);
+    is_image = calloc(sz, 1); image_dim = calloc(sz, 1); is_sampler = calloc(sz, 1); is_struct = calloc(sz, 1);
     is_sampled_image = calloc(sz, 1);
     root = calloc(sz, sizeof(uint32_t)); var_written = calloc(sz, 1);
     if (!root || !var_written) goto done;
     if (!has_set || !has_bind || !is_var || !dec_set || !dec_bind || !var_ptr ||
-        !var_sc || !ptr_pointee || !is_image || !is_sampler || !is_struct ||
+        !var_sc || !ptr_pointee || !is_image || !image_dim || !is_sampler || !is_struct ||
         !is_sampled_image) {
         goto done; /* OOM -> report 0 */
     }
@@ -96,7 +97,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                 }
                 break;
             case OP_TYPE_IMAGE:
-                if (wc >= 4u && W(1) < MAXID) is_image[W(1)] = (W(3) == 6u) ? 2 : (wc >= 8u && W(7) == 2u) ? 3 : 1;   /* Dim SubpassData = input attachment; Sampled=2 = storage image */
+                if (wc >= 4u && W(1) < MAXID) { is_image[W(1)] = (W(3) == 6u) ? 2 : (wc >= 8u && W(7) == 2u) ? 3 : 1; image_dim[W(1)] = (uint8_t)W(3); }   /* Dim SubpassData = input attachment; Sampled=2 = storage image */
                 break;
             case OP_TYPE_SAMPLER:
                 if (wc >= 2u && W(1) < MAXID) is_sampler[W(1)] = 1;
@@ -205,6 +206,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
             out[total].set = dec_set[id];
             out[total].binding = dec_bind[id];
             out[total].kind = kind;
+            out[total].image_dim = (kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) && pointee < MAXID ? image_dim[pointee] : 0u;
             out[total].may_write = kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(var_written[id] || overflow_ids) : 0u;
         }
         total++;
@@ -235,7 +237,7 @@ done:
     free(root); free(var_written);
     free(has_set); free(has_bind); free(is_var);
     free(dec_set); free(dec_bind); free(var_ptr); free(var_sc);
-    free(ptr_pointee); free(is_image); free(is_sampler); free(is_struct);
+    free(ptr_pointee); free(is_image); free(image_dim); free(is_sampler); free(is_struct);
     free(is_sampled_image);
     return total;
 }
@@ -403,5 +405,46 @@ size_t lagfx_spv_reflect_vertex_inputs(const uint8_t *spv, size_t spv_len,
 done:
     free(has_loc); free(dec_loc); free(is_var); free(var_ptr); free(var_sc);
     free(ptr_pointee); free(vec_comp);
+    return total;
+}
+
+/* Constexpr samplers: the translator names each such sampler variable "lagfx.cxs.<16 hex>" (OpName); the binding is the variable's Binding decoration. */
+size_t lagfx_spv_reflect_constexpr_samplers(const uint8_t *spv, size_t spv_len, lagfx_spv_cxs_t *out, size_t cap) {
+    if (!spv || spv_len < 20u || lagfx_le32(spv) != SPV_MAGIC) return 0;
+    size_t nwords = spv_len / 4u, total = 0;
+    uint64_t *raw = calloc(MAXID, sizeof *raw);
+    uint32_t *bind = calloc(MAXID, sizeof *bind);
+    uint8_t *has_raw = calloc(MAXID, 1), *has_bind = calloc(MAXID, 1);
+    if (!raw || !bind || !has_raw || !has_bind) goto done;
+    static const char pre[] = "lagfx.cxs.";
+    for (size_t i = 5u; i < nwords;) {
+        uint32_t hdr = lagfx_le32(spv + i * 4u);
+        uint16_t wc = (uint16_t)(hdr >> 16), op = (uint16_t)(hdr & 0xFFFFu);
+        if (wc == 0u || i + wc > nwords) break;
+        #define W(n) lagfx_le32(spv + (i + (n)) * 4u)
+        if (op == 5u /* OpName */ && wc >= 3u && W(1) < MAXID) {
+            const char *str = (const char *)(spv + (i + 2u) * 4u);
+            size_t maxlen = (size_t)(wc - 2u) * 4u, k = 0;
+            while (k < maxlen && str[k]) k++;
+            if (k == sizeof pre - 1u + 16u && memcmp(str, pre, sizeof pre - 1u) == 0) {
+                uint64_t v = 0; bool ok = true;
+                for (size_t h = 0; h < 16u; h++) {
+                    char ch = str[sizeof pre - 1u + h]; uint32_t d;
+                    if (ch >= '0' && ch <= '9') d = (uint32_t)(ch - '0'); else if (ch >= 'a' && ch <= 'f') d = (uint32_t)(ch - 'a' + 10); else { ok = false; break; }
+                    v = v << 4 | d;
+                }
+                if (ok) { raw[W(1)] = v; has_raw[W(1)] = 1; }
+            }
+        } else if (op == OP_DECORATE && wc >= 4u && W(1) < MAXID && W(2) == DECOR_BINDING) { bind[W(1)] = W(3); has_bind[W(1)] = 1; }
+        #undef W
+        i += wc;
+    }
+    for (uint32_t id = 0; id < MAXID; id++) {
+        if (!has_raw[id] || !has_bind[id]) continue;
+        if (total < cap) out[total].binding = bind[id], out[total].raw = raw[id];
+        total++;
+    }
+done:
+    free(raw); free(bind); free(has_raw); free(has_bind);
     return total;
 }

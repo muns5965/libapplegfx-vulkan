@@ -228,6 +228,7 @@ typedef struct {
      * translator's LAGFX_MAX_VERTEX_ARGS raise to 32. */
     uint8_t    spv_binding_no[32];
     uint8_t    spv_binding_kind[32];
+    uint64_t   spv_cxs_raw[32];       /* sampler bindings that are a constexpr sampler of the shader: the raw AIR sampler word (0 = none); the draw binds the VkSampler decoded from it */
     /* Metal resource index per reflected binding (from the AIR arg metadata's
      * air.location_index — lagfx_air_arg_bindings). THE authoritative
      * binding→guest-slot map: e.g. UberCompositeVertex's mvp_matrix is
@@ -587,6 +588,7 @@ typedef struct lagfx_protocol {
                 uint64_t ext_gather_why[5]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather copy count full (A64_GATHER_CACHE), 3 scratch allocation, 4 per-exec byte budget (A64_GATHER_BUDGET) */
                 uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
+                uint64_t ext_cxs_binds, ext_tex3d_binds, ext_tex_dim_mismatch;   /* constexpr-sampler descriptors bound from the decoded AIR word / Dim3D sampled-image descriptors bound / draws skipped because the texture's dimensionality is not the shader's (2D vs 3D) */
                 uint64_t ext_tex_prepared;   /* textures a pass bound for sampling that the mirror did not hold yet (not in the resource list): created before the pass opened */
             } run;
             /* ARM64 pipeline resolution, binding and capture (src/protocol/arm64_pipeline.c, arm64_dump.c). */

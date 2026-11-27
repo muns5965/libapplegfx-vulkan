@@ -12,6 +12,11 @@
  * captured words decode consistently with it (tests/air2spv-constexpr-
  * sampler-unit.c). Field NAMES applied to our shaders are INFER.
  *
+ * Runtime wiring (fragment stage): the translator gives each decoded constexpr sampler its own sampler binding named "lagfx.cxs.<word>" (LAGFX_CXS_NAME_PREFIX); the
+ * arm64 resolver (lagfx_a64_bind_t.cxs / cxs_raw) and the legacy draw path (pending_pipeline.spv_cxs_raw) bind the cached normalized VkSampler of the word
+ * (sampler_cache.h lagfx_sampler_state_from_constexpr_norm). Pixel samplers: coordinates divided by the image size in the shader. NOT wired: vertex-stage and compute
+ * constexpr samplers (they still fall back to the default sampler), a pixel sampler passed to a helper function (warned UNSUPPORTED).
+ *
  *   - `!air.sampler_states = !{ !{ !"air.sampler_state", ptr @G } ... }`
  *     names one module global per constexpr sampler; each @G is
  *     `addrspace(2) constant i64 <word>`; a sample call's sampler operand
@@ -47,6 +52,11 @@ extern "C" {
 #endif
 
 #define LAGFX_CONSTEXPR_SAMPLER_MAX 16u
+
+/* The translator names the sampler variable of a constexpr sampler "lagfx.cxs.<16 hex digits of the raw i64 word>" (OpName) so that the host can recover the state
+ * from the SPIR-V alone (spv_reflect: lagfx_spv_reflect_constexpr_samplers). Coordinates of a pixel (unnormalized) constexpr sampler are divided by the image size
+ * IN THE SHADER; the host sampler is always a normalized one (see sampler_cache.h lagfx_sampler_state_from_constexpr_norm). */
+#define LAGFX_CXS_NAME_PREFIX "lagfx.cxs."
 
 typedef struct {
     uint32_t global_index;   /* module value id of the @__air_sampler_state global */

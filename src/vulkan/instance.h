@@ -63,6 +63,7 @@ struct lagfx_vk_state {
     bool have_storage_img_write;   /* shaderStorageImageWriteWithoutFormat + fragmentStoresAndAtomics enabled (OpImageWrite on an unformatted storage image from a fragment shader) */
     bool have_vertex_stores;       /* vertexPipelineStoresAndAtomics enabled */
     bool have_sampler_anisotropy;  /* enabled device feature samplerAnisotropy */
+    bool have_sampler_mirror_clamp; /* enabled device feature samplerMirrorClampToEdge (Vulkan 1.2) */
     bool have_independent_blend;   /* enabled device feature: per-attachment blend state / write masks may differ */
     bool have_depth_bias_clamp;    /* enabled device feature depthBiasClamp: vkCmdSetDepthBias may carry a non-zero clamp */
     bool have_synchronization2;

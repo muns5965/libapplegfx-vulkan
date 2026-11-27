@@ -1089,6 +1089,16 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-uni
     workdir : meson.current_source_dir() / '..')
 endif
 
+# air.sample_texture_3d -> Dim3D image sampled with a 3-component coordinate (real device module A2Xghfc).
+air2spv_t3d_test = executable('air2spv-texture3d-translate-unit',
+  'air2spv-texture3d-translate-unit.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : [libapplegfx_vulkan_dep],
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+  build_by_default : true,
+)
+test('air2spv texture3d translate (unit)', air2spv_t3d_test, workdir : meson.current_source_dir() / '..')
+
 # [[buffer(n)]] argument -> StorageBuffer Block (std430) lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-buffer-arg-unit.c')
   air2spv_bua_deps = [libapplegfx_vulkan_dep]
@@ -1782,6 +1792,20 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-lavapipe.c') 
     build_by_default : true,
   )
   test('air2spv texture sample options on lavapipe', air2spv_tso_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
+# Sampler state + texture3d on a Vulkan 1.3 device (lavapipe), compared with an independent CPU reference: constexpr samplers (normalized + pixel coordinates), runtime sampler
+# descriptors (address modes, filters, unnormalized), Dim3D images. Skips (77) without a device. Fixtures: tests/fixtures/gen-sampler-fixtures.sh.
+if fs.is_file(meson.current_source_dir() / 'air2spv-sampler-lavapipe.c') and vulkan_dep.found()
+  air2spv_smp_vk_test = executable('air2spv-sampler-lavapipe',
+    'air2spv-sampler-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv sampler state + texture3d on lavapipe', air2spv_smp_vk_test,
     workdir : meson.current_source_dir() / '..')
 endif
 

@@ -5,6 +5,7 @@
 #include "arm64_objects.h"
 #include "arm64_exec_decode.h"
 #include "arm64_dump.h"
+#include "../air2spv/constexpr_sampler.h"
 #include "../air2spv/spv_reflect.h"
 #include "../air2spv/translate.h"
 #include "../common/le.h"
@@ -314,6 +315,9 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
     if (nt > LAGFX_A64_MAX_REFLECT) return LAGFX_A64_MAP_FAIL;   /* reflect returns the TOTAL: more than the buffer holds must fail, not be truncated */
     for (size_t a = 1; a < nt; a++) { lagfx_spv_binding_t x = tmp[a]; size_t b = a; while (b && tmp[b - 1].binding > x.binding) tmp[b] = tmp[b - 1], b--; tmp[b] = x; }
     uint32_t nth[6] = { 0, 0, 0, 0, 0, 0 };   /* by lagfx_spv_binding_kind_t */
+    lagfx_spv_cxs_t cx[LAGFX_CONSTEXPR_SAMPLER_MAX];
+    size_t ncx = lagfx_spv_reflect_constexpr_samplers(spv, len, cx, LAGFX_CONSTEXPR_SAMPLER_MAX);
+    if (ncx > LAGFX_CONSTEXPR_SAMPLER_MAX) ncx = LAGFX_CONSTEXPR_SAMPLER_MAX;
     for (size_t t = 0; t < nt; t++) {
         if (tmp[t].set != 0u) continue;
         if (t && tmp[t - 1].set == 0u && tmp[t - 1].binding == tmp[t].binding) continue;   /* byte-buffer views of one buffer alias its binding (translator): ONE descriptor and ONE Metal argument, not one per view */
@@ -331,6 +335,16 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
         if (*n_bind >= LAGFX_A64_MAX_BINDINGS || tmp[t].binding > 255u) return LAGFX_A64_MAP_FAIL;
         uint8_t want = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? 1 : (tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? 2 : 3;
         uint8_t want_w = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE;   /* textures split by access: written ones are storage images */
+        if (tmp[t].kind == LAGFX_SPV_BINDING_SAMPLER) {   /* a constexpr sampler of the shader: no Metal slot; the host builds the VkSampler from the decoded AIR word */
+            size_t q = 0;
+            while (q < ncx && cx[q].binding != tmp[t].binding) q++;
+            if (q < ncx) {
+                bind[*n_bind].binding = (uint8_t)tmp[t].binding, bind[*n_bind].kind = (uint8_t)tmp[t].kind, bind[*n_bind].stage = (uint8_t)st, bind[*n_bind].metal_index = -1;
+                bind[*n_bind].writable = 0, bind[*n_bind].cxs = 1, bind[*n_bind].cxs_raw = cx[q].raw;
+                (*n_bind)++;
+                continue;
+            }
+        }
         uint32_t n = nth[tmp[t].kind]++, seen = 0;
         int midx = -1; uint8_t wr = 0;
         for (size_t k = 0; k < nab; k++) if (ab[k].kind == want && (want != 2 || ab[k].written == want_w) && seen++ == n) { midx = ab[k].metal_index; wr = ab[k].written; break; }
@@ -339,6 +353,7 @@ int lagfx_a64_map_stage_bindings(const uint8_t *spv, size_t len, int st, const l
         bind[*n_bind].kind = (uint8_t)tmp[t].kind;
         bind[*n_bind].stage = (uint8_t)st;
         bind[*n_bind].metal_index = (int16_t)midx;
+        bind[*n_bind].cxs = 0, bind[*n_bind].cxs_raw = 0, bind[*n_bind].dim3 = (uint8_t)(tmp[t].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && tmp[t].image_dim == 2u);   /* Dim3D sampled image: needs a 3D view */
         /* writable = the arg metadata allows writes (air.write / air.read_write: every non-const `device T *`) AND the translated module has a use that may write through the
          * binding (reflect may_write). Metadata alone over-reports: VfxXgh's `vertex_buffer` is air.read_write, yet the function is `readonly` and its SPIR-V never stores to it. */
         bind[*n_bind].writable = tmp[t].kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(wr && tmp[t].may_write) : 0u;
