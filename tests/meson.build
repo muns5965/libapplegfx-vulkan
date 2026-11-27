@@ -2112,6 +2112,17 @@ if fs.is_file(meson.current_source_dir() / 'display-diag-gamma-owner-unit.c')
   test('display diagnostics: gamma region read prefers the mapping owner task (unit)', display_diag_gamma_owner_test)
 endif
 
+# g7-pvg-ops clock: its origin is the first command the diagnostics see, not the first tracked op or the first statistics line (links the library, no Vulkan device).
+if fs.is_file(meson.current_source_dir() / 'display-diag-clock-unit.c')
+  display_diag_clock_test = executable('display-diag-clock-unit',
+    'display-diag-clock-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('display diagnostics: the pvg-ops clock starts at the first command (unit)', display_diag_clock_test)
+endif
+
 # Format / usage / blend / sample-count capability queries (vkGetPhysicalDeviceFormatProperties2 / ImageFormatProperties2) with injected less-capable devices; real lavapipe sweep skips (B) without an ICD.
 format_caps_test = executable('vulkan-format-caps-unit',
   'vulkan-format-caps-unit.c',

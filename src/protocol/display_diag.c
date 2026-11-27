@@ -60,6 +60,7 @@ static void op_seen(opseen_t *o, uint32_t op, uint32_t chan) {
 }
 
 void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_t *raw, uint32_t length) {
+    (void)dd_ms();   /* anchor the diagnostics clock at the first command, tracked or not, as the dd_ms() comment promises */
     if (!p || !raw || length < 12u) return;
     uint32_t op = (uint32_t)raw[0] | (uint32_t)raw[1] << 8;
     if (op != 0x37u && op != 0x22u && op != 0x08u && op != 0x0au) return;
