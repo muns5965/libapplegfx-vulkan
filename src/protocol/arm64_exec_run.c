@@ -1114,7 +1114,9 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     apply_encoder_state(r, p);
     if (r->dsobj && (lagfx_a64_dss_depth_test(&r->es.dss) || lagfx_a64_dss_stencil_test(&r->es.dss))) CNT(p).ds_draws++;
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
-    lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region);   /* existing viewport/scissor helper of draw_record.c (Y-flip, clamping) */
+    r->region.metal = true, r->region.lim_dim = (float)(r->vk->phys_props.limits.maxViewportDimensions[0] < r->vk->phys_props.limits.maxViewportDimensions[1] ? r->vk->phys_props.limits.maxViewportDimensions[0] : r->vk->phys_props.limits.maxViewportDimensions[1]),
+        r->region.lim_lo = r->vk->phys_props.limits.viewportBoundsRange[0], r->region.lim_hi = r->vk->phys_props.limits.viewportBoundsRange[1];
+    if (!lagfx_vk_cmd_set_region(lagfx_a64_res_cmdbuf(r->x), &ext, &r->region)) CNT(p).viewport_degenerate++;   /* Metal viewport / scissor as recorded (fractional, partly outside the target allowed); a viewport Vulkan cannot express draws nothing (S05) */
     if (r->pipe->src.desc.n_vtx_inputs) {
         uint32_t s = r->pipe->src.vertex_buffer_index;
         if (s >= A64_MAX_VB || !r->vb[s].b || r->vb[s].off >= r->vb[s].b->length) { CNT(p).no_vertex_buf++; CNT(p).draws_skipped++; return false; }
@@ -1246,8 +1248,8 @@ static void cap_fill(a64_run_t *r, const cap_dinfo_t *di, lagfx_a64_cap_draw_in_
     const lagfx_a64_draw_t *d = &di->d;
     o->tag = 0, o->prim = d->prim, o->indexed = d->indexed, o->count = d->count, o->instances = d->instances, o->first_vertex = d->first_vertex, o->base_instance = d->base_instance, o->base_vertex = d->base_vertex;
     o->index_start = di->index_start, o->index_type = d->index_type, o->index_off = d->index_offset, o->ib = di->ib;
-    o->vp[0] = (float)r->region.vp_x, o->vp[1] = (float)r->region.vp_y, o->vp[2] = (float)r->region.vp_w, o->vp[3] = (float)r->region.vp_h, o->vp[4] = r->region.vp_znear, o->vp[5] = r->region.vp_zfar;
-    o->sc[0] = r->region.sc_x, o->sc[1] = r->region.sc_y, o->sc[2] = r->region.sc_w, o->sc[3] = r->region.sc_h;
+    for (int i = 0; i < 4; i++) o->vp[i] = r->region.m_vp_set ? (float)r->region.m_vp[i] : 0.0f, o->sc[i] = r->region.m_sc_set ? (uint32_t)(r->region.m_sc[i] > 0xffffffffull ? 0xffffffffull : r->region.m_sc[i]) : 0u;
+    o->vp[4] = r->region.vp_znear, o->vp[5] = r->region.vp_zfar;
     o->cull = r->es.cull, o->winding = r->es.winding, memcpy(o->bias, r->es.bias, sizeof o->bias);
     o->depth_test = lagfx_a64_dss_depth_test(&r->es.dss), o->depth_write = r->es.dss.depth_write, o->depth_cmp = r->es.dss.depth_compare, o->stencil_test = lagfx_a64_dss_stencil_test(&r->es.dss);
     o->sref[0] = r->es.sref[0], o->sref[1] = r->es.sref[1];
@@ -1505,15 +1507,14 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
     }
     case 117:                                /* MTLScissorRect: x, y, width, height as u64 */
         if (n < 32u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
-        r->region.sc_x = (uint32_t)lagfx_le64(rec), r->region.sc_y = (uint32_t)lagfx_le64(rec + 8);
-        r->region.sc_w = (uint32_t)lagfx_le64(rec + 16), r->region.sc_h = (uint32_t)lagfx_le64(rec + 24);
+        for (int i = 0; i < 4; i++) r->region.m_sc[i] = lagfx_le64(rec + 8 * i);   /* kept whole: the clamp to the target happens at record time (lagfx_vk_region_to_vk) */
+        r->region.m_sc_set = true;
         tag_done(p, tag);
         break;
     case 130: {                              /* MTLViewport: originX, originY, width, height, znear, zfar as doubles */
         if (n < 48u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         double x = rd_f64(rec), y = rd_f64(rec + 8), w = rd_f64(rec + 16), h = rd_f64(rec + 24);
-        r->region.vp_x = x > 0 ? (uint32_t)x : 0u, r->region.vp_y = y > 0 ? (uint32_t)y : 0u;
-        r->region.vp_w = w > 0 ? (uint32_t)w : 0u, r->region.vp_h = h > 0 ? (uint32_t)h : 0u;
+        r->region.m_vp[0] = x, r->region.m_vp[1] = y, r->region.m_vp[2] = w, r->region.m_vp[3] = h, r->region.m_vp_set = true;   /* as recorded: no truncation, no clamp, no rescale (S05) */
         {   /* znear / zfar: the depth range the clip-space z is mapped to (Vulkan only takes [0, 1]; a value outside it is clamped, a NaN reads as the default) */
             double zn = rd_f64(rec + 32), zf = rd_f64(rec + 40);
             r->region.vp_znear = zn >= 1.0 ? 1.0f : zn > 0.0 ? (float)zn : 0.0f, r->region.vp_zfar = zf >= 1.0 ? 1.0f : zf > 0.0 ? (float)zf : (zf == zf ? 0.0f : 1.0f);

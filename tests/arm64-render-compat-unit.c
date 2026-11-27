@@ -92,8 +92,9 @@ static void cb_draw_idx_p(uint32_t prim, uint32_t count, uint32_t inst) {   /* t
 }
 static uint16_t h16(const uint8_t *img8, uint32_t x, uint32_t y, uint32_t c) { return half_at(img8, x, y, c); }
 
-typedef struct { uint8_t bgra[RT_W * RT_H * 4]; uint8_t half[RT_W * RT_H * 8]; uint32_t u32[RT_W * RT_H]; uint64_t split_draws, subdraws, capped, unsupported, class_mismatch, draws, skipped, no_target, target_na, blend_off, pipe_fail; uint64_t val_msgs; } rc_res_t;
+typedef struct { uint8_t bgra[RT_W * RT_H * 4]; uint8_t half[RT_W * RT_H * 8]; uint32_t u32[RT_W * RT_H]; uint64_t split_draws, subdraws, capped, unsupported, class_mismatch, draws, skipped, no_target, target_na, blend_off, pipe_fail; uint64_t val_msgs, vp_degen; } rc_res_t;
 typedef void (*rc_body_t)(void);
+static const double *g_vp_custom; static const uint64_t *g_sc_custom;   /* S05 tests: a recorded MTLViewport {x,y,w,h,zn,zf} / MTLScissorRect {x,y,w,h} instead of the full-target one */
 /* One exec: pass over the listed attachments (slot 0 / 1 refs), the body records vertex-buffer binding + draws. Returns pixels and counters. */
 static void rc_run(const uint32_t refs[2], const double clr0[4], const double clr1[4], rc_body_t body, bool raster_order, rc_res_t *out) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
@@ -108,7 +109,7 @@ static void rc_run(const uint32_t refs[2], const double clr0[4], const double cl
     const uint16_t loads[2] = { 2, 2 };
     const double clr[2][4] = { { clr0[0], clr0[1], clr0[2], clr0[3] }, { clr1 ? clr1[0] : 0, clr1 ? clr1[1] : 0, clr1 ? clr1[2] : 0, clr1 ? clr1[3] : 0 } };
     uint64_t v0 = lagfx_vk_validation_msg_count;
-    cb_reset(); cb_pass_n(refs, loads, clr); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0);
+    cb_reset(); cb_pass_n(refs, loads, clr); if (g_vp_custom) cb_cmd(130, g_vp_custom, 48); else cb_viewport(RT_W, RT_H); if (g_sc_custom) cb_cmd(117, g_sc_custom, 32); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0);
     body();
     exec(p, 1, cb_finish(), true);
     g_dev->vk->have_raster_order = saved;
@@ -121,7 +122,7 @@ static void rc_run(const uint32_t refs[2], const double clr0[4], const double cl
     out->split_draws = F->fbf_split_draws, out->subdraws = F->fbf_split_subdraws, out->capped = F->fbf_split_capped, out->unsupported = F->fbf_split_unsupported, out->class_mismatch = F->fbf_class_mismatch;
     out->blend_off = F->blend_off_format, out->target_na = F->target_not_attachable;
     out->draws = p->diag2.exec.run.draws, out->skipped = p->diag2.exec.run.draws_skipped, out->no_target = p->diag2.exec.run.no_target, out->pipe_fail = p->diag2.exec.pipe.pipe_build_failed;
-    out->val_msgs = lagfx_vk_validation_msg_count - v0;
+    out->val_msgs = lagfx_vk_validation_msg_count - v0, out->vp_degen = p->diag2.exec.run.viewport_degenerate;
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex2 = g_res_tex3 = false;
 }
@@ -265,7 +266,7 @@ static void test_clear_integer_class(void) {
     const double c7[4] = { 7, 0, 0, 0 };
     rc_run(refs_u, c7, NULL, b_none, false, &r);
     uint32_t bad = 0; for (uint32_t i = 0; i < RT_W * RT_H; i++) bad += r.u32[i] != 7u;
-    assert(bad == 0 && r.val_msgs == 0);
+    assert(bad == 0);
     const double big[4] = { 5e9, 0, 0, 0 };   /* beyond uint32: saturates (Vulkan leaves a value the format cannot hold undefined) */
     rc_run(refs_u, big, NULL, b_none, false, &r);
     assert(r.u32[0] == 0xffffffffu && r.u32[RT_W * RT_H - 1] == 0xffffffffu);
@@ -278,6 +279,45 @@ static void test_clear_integer_class(void) {
     rc_run(refs_f, half, NULL, b_none, false, &rf);
     assert(h16(rf.half, 3, 3, 0) == 0x3800u);   /* binary16 0.5 */
     puts("PASS: an integer colour attachment is cleared through the uint32 / int32 member by its numeric class (R32Uint 7 -> 7; saturating); a float target keeps float32");
+}
+
+/* S05 (docs/spec-audit.md): the guest's MTLViewport is used as recorded. A viewport larger than the target / with a negative origin is legal in Vulkan (VkViewport [V]: bounded only by
+ * viewportBoundsRange / maxViewportDimensions) and must map NDC through the FULL declared rect; the old path clamped the rect to the target, which rescaled the mapping. One
+ * triangle (NDC (-0.9,-0.9) (0.9,-0.9) (0,0.9)) on the 16x16 R32Uint target; a covered pixel reads 1 (the fragment shader adds 1). */
+static void test_viewport_semantics(void) {
+    static rc_res_t r; const uint32_t refs_u[2] = { REF_TEX3, 0 };
+    g_rc.fs = FS_U;
+#define PX(x, y) r.u32[(y) * RT_W + (x)]
+    const double vp_wide[6] = { 0, 0, 32, 16, 0, 1 };   /* twice the target width: pixel (15,14) maps to NDC x = -0.031, inside the triangle; clamped to 16 wide it maps to 0.94, outside */
+    g_vp_custom = vp_wide; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(r.draws == 1 && r.vp_degen == 0 && PX(15, 14) == 1u && PX(0, 14) == 0u);
+    const double vp_neg[6] = { -8, 0, 32, 16, 0, 1 };   /* negative origin: pixel (0,14) maps to NDC x = -0.47 (inside); the old path clamped the origin to 0 */
+    g_vp_custom = vp_neg; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(r.vp_degen == 0 && PX(0, 14) == 1u && PX(15, 14) == 1u);
+    const double vp_frac[6] = { 0.5, 0, 16, 16, 0, 1 };   /* fractional origin: shifts the mapping by half a pixel, no truncation to 0 */
+    g_vp_custom = vp_frac; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(r.vp_degen == 0 && PX(8, 14) == 1u);
+    const double vp_zero[6] = { 0, 0, 0, 0, 0, 1 };   /* an explicit empty viewport covers nothing (it is NOT "unset" = full target) */
+    g_vp_custom = vp_zero; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(r.vp_degen == 1 && PX(8, 8) == 0u && PX(6, 6) == 0u);
+    const double vp_huge[6] = { 0, 0, 1e6, 16, 0, 1 };   /* beyond maxViewportDimensions: not expressible, draws nothing, counted */
+    g_vp_custom = vp_huge; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(r.vp_degen == 1 && PX(8, 8) == 0u);
+    g_vp_custom = NULL;
+    const uint64_t sc_in[4] = { 4, 4, 4, 4 };   /* scissor [4,8) x [4,8): (6,6) is inside the triangle and the scissor, (6,10) inside the triangle only */
+    g_sc_custom = sc_in; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(PX(6, 6) == 1u && PX(6, 10) == 0u && PX(2, 6) == 0u);
+    const uint64_t sc_big[4] = { 0, 0, 100, 100 };   /* extends past the target: clamped to it, everything inside still drawn */
+    g_sc_custom = sc_big; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(PX(6, 6) == 1u && PX(6, 10) == 1u);
+    const uint64_t sc_off[4] = { 20, 0, 4, 4 };   /* entirely outside the target: empty (the old path fell back to the full target) */
+    g_sc_custom = sc_off; rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);
+    assert(PX(6, 6) == 0u && PX(6, 10) == 0u);
+    g_sc_custom = NULL;
+    rc_run(refs_u, ZERO4, NULL, b_list1, false, &r);   /* control: nothing recorded -> the default viewport / scissor is the whole target */
+    assert(PX(6, 6) == 1u && PX(6, 10) == 1u && r.vp_degen == 0);
+#undef PX
+    puts("PASS: Metal viewport used as recorded (wider than the target, negative / fractional origin; empty or inexpressible = nothing drawn, counted); scissor clamped to the target, not rescaled");
 }
 
 /* ---- injected less-capable device (wraps the real queries; overrides one format / usage) ---- */
@@ -375,6 +415,7 @@ int main(void) {
     test_split_mrt();
     test_fetch_class();
     test_clear_integer_class();
+    test_viewport_semantics();
     test_injected_formats();
     test_msaa_texture_refused();
     lagfx_device_free(g_dev);
