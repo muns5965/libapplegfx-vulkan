@@ -28,21 +28,34 @@ static uint32_t find_memory_type(VkPhysicalDevice phys,
     return UINT32_MAX;
 }
 
+/* MTLPixelFormat (public Metal enum; numeric values as in Apple's Metal headers, checked against the objc2-metal generated bindings of MTLPixelFormat.h) -> the
+ * exactly equivalent VkFormat. Every Vulkan equivalent below is the one MoltenVK (Apache-2.0, MVKPixelFormats.mm) pairs with that MTLPixelFormat. The uncompressed
+ * colour rows are the same set as k_fmt[] in src/protocol/arm64_resources.c (the arm64 texture mapper); unmapped on purpose: 253 / 255 / 260 stencil and depth-stencil formats (this
+ * function's depth caller passes a depth attachment format; 255 is also macOS-only in Metal and optional in Vulkan: the arm64 mapper has the fallback), 261/262 stencil views, the 16-bit packed (40-43), 91/94 and
+ * XR formats and every compressed format. Formats that occur in the device dumps (runs 231501 / 230109): 1, 30, 70, 80, 115. An unknown value is reported and
+ * substituted by BGRA8, as before. */
+static const struct { uint32_t mtl; VkFormat vk; } k_mtl_to_vk[] = {
+    {10, VK_FORMAT_R8_UNORM}, {11, VK_FORMAT_R8_SRGB}, {12, VK_FORMAT_R8_SNORM}, {13, VK_FORMAT_R8_UINT}, {14, VK_FORMAT_R8_SINT},
+    {20, VK_FORMAT_R16_UNORM}, {22, VK_FORMAT_R16_SNORM}, {23, VK_FORMAT_R16_UINT}, {24, VK_FORMAT_R16_SINT}, {25, VK_FORMAT_R16_SFLOAT},   /* R16Float is 25; Depth16Unorm is 250 */
+    {30, VK_FORMAT_R8G8_UNORM}, {31, VK_FORMAT_R8G8_SRGB}, {32, VK_FORMAT_R8G8_SNORM}, {33, VK_FORMAT_R8G8_UINT}, {34, VK_FORMAT_R8G8_SINT},
+    {53, VK_FORMAT_R32_UINT}, {54, VK_FORMAT_R32_SINT}, {55, VK_FORMAT_R32_SFLOAT},
+    {60, VK_FORMAT_R16G16_UNORM}, {62, VK_FORMAT_R16G16_SNORM}, {63, VK_FORMAT_R16G16_UINT}, {64, VK_FORMAT_R16G16_SINT}, {65, VK_FORMAT_R16G16_SFLOAT},
+    {70, VK_FORMAT_R8G8B8A8_UNORM}, {71, VK_FORMAT_R8G8B8A8_SRGB}, {72, VK_FORMAT_R8G8B8A8_SNORM}, {73, VK_FORMAT_R8G8B8A8_UINT}, {74, VK_FORMAT_R8G8B8A8_SINT},
+    {80, VK_FORMAT_B8G8R8A8_UNORM}, {81, VK_FORMAT_B8G8R8A8_SRGB},
+    {90, VK_FORMAT_A2B10G10R10_UNORM_PACK32}, {92, VK_FORMAT_B10G11R11_UFLOAT_PACK32}, {93, VK_FORMAT_E5B9G9R9_UFLOAT_PACK32},
+    {103, VK_FORMAT_R32G32_UINT}, {104, VK_FORMAT_R32G32_SINT}, {105, VK_FORMAT_R32G32_SFLOAT},
+    {110, VK_FORMAT_R16G16B16A16_UNORM}, {112, VK_FORMAT_R16G16B16A16_SNORM}, {113, VK_FORMAT_R16G16B16A16_UINT}, {114, VK_FORMAT_R16G16B16A16_SINT}, {115, VK_FORMAT_R16G16B16A16_SFLOAT},
+    {123, VK_FORMAT_R32G32B32A32_UINT}, {124, VK_FORMAT_R32G32B32A32_SINT}, {125, VK_FORMAT_R32G32B32A32_SFLOAT},
+    {250, VK_FORMAT_D16_UNORM}, {252, VK_FORMAT_D32_SFLOAT},
+};
+
 VkFormat lagfx_metal_pixel_format_to_vk(uint32_t pixel_format) {
-    switch (pixel_format) {
-    case 80: return VK_FORMAT_B8G8R8A8_UNORM;      /* MTLPixelFormatBGRA8Unorm */
-    case 70: return VK_FORMAT_R8G8B8A8_UNORM;      /* MTLPixelFormatRGBA8Unorm */
-    case 115: return VK_FORMAT_R16G16B16A16_SFLOAT; /* MTLPixelFormatRGBA16Float */
-    case 1:  /* MTLPixelFormatA8Unorm — glyph-atlas coverage bytes */
-    case 10: return VK_FORMAT_R8_UNORM;            /* MTLPixelFormatR8Unorm */
-    case 252: return VK_FORMAT_D32_SFLOAT;         /* MTLPixelFormatDepth32Float */
-    case 25: return VK_FORMAT_R16_SFLOAT;          /* MTLPixelFormatR16Float (25); Depth16Unorm is 250 */
-    case 250: return VK_FORMAT_D16_UNORM;          /* MTLPixelFormatDepth16Unorm */
-    default:
-        LAGFX_WARN("iosurface: unknown Metal pixel format %u, "
-                    "falling back to BGRA8", (unsigned)pixel_format);
-        return VK_FORMAT_B8G8R8A8_UNORM;
-    }
+    if (pixel_format == 1u) return VK_FORMAT_R8_UNORM;   /* MTLPixelFormatA8Unorm — glyph-atlas coverage bytes (stored as one byte, as before) */
+    for (size_t i = 0; i < sizeof k_mtl_to_vk / sizeof *k_mtl_to_vk; i++)
+        if (k_mtl_to_vk[i].mtl == pixel_format) return k_mtl_to_vk[i].vk;
+    LAGFX_WARN("iosurface: unknown Metal pixel format %u, "
+                "falling back to BGRA8", (unsigned)pixel_format);
+    return VK_FORMAT_B8G8R8A8_UNORM;
 }
 
 static VkFormat metal_pixel_format_to_vk(uint32_t pixel_format) {

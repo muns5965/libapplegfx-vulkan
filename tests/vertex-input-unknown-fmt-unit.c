@@ -24,7 +24,7 @@ static lagfx_pipeline_desc_t base(void) {
     d.pso_attr_fmt[0] = 31; d.pso_attr_off[0] = 0;    /* Float4 */
     d.pso_attr_fmt[1] = 29; d.pso_attr_off[1] = 16;   /* Float2 */
     d.pso_attr_fmt[2] = 9;  d.pso_attr_off[2] = 24;   /* UChar4Normalized */
-    d.n_pso_attrs = 3; d.vtx_stride = 48;
+    d.n_pso_attrs = 3; d.vtx_stride = 48; d.pso_attrs_serialized = 1;
     return d;
 }
 
@@ -49,9 +49,21 @@ int main(void) {
     d = base(); d.pso_attr_fmt[0] = 0; d.pso_attr_fmt[2] = 777; badi = 99;
     CHECK(!lagfx_pipeline_vertex_input(&d, &vb, va, &n, &badi) && badi == 0, "first unknown attribute reported");
 
-    /* PSO attributes not decoded: reflected tight-pack, unchanged */
-    d = base(); d.n_pso_attrs = 0; d.pso_attr_fmt[1] = 999;
+    /* PSO attributes not decoded and not a serialized descriptor (x86 path): reflected tight-pack, unchanged */
+    d = base(); d.pso_attrs_serialized = 0; d.n_pso_attrs = 0; d.pso_attr_fmt[1] = 999;
     CHECK(lagfx_pipeline_vertex_input(&d, &vb, va, &n, &badi) && va[1].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[1].offset == 16, "undecoded PSO keeps the tight float pack");
+
+    /* x86 path (not serialized), fewer attributes than inputs: the original all-or-nothing tight float pack, also with an unknown format among the decoded ones */
+    d = base(); d.pso_attrs_serialized = 0; d.n_pso_attrs = 2; d.pso_attr_fmt[1] = 999;
+    CHECK(lagfx_pipeline_vertex_input(&d, &vb, va, &n, &badi) && va[0].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[1].offset == 16 && va[2].offset == 32, "x86 undercount keeps the tight float pack");
+    /* serialized descriptor: input 2 has no decoded attribute -> only that input fails; the build returns LAGFX_ERR_PROTOCOL */
+    d = base(); d.n_pso_attrs = 2; badi = 99;
+    CHECK(!lagfx_pipeline_vertex_input(&d, &vb, va, &n, &badi) && badi == 2 && va[2].format == VK_FORMAT_UNDEFINED, "serialized undercount: the uncovered input is reported");
+    CHECK(va[0].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[1].format == VK_FORMAT_R32G32_SFLOAT && va[1].offset == 16, "serialized undercount: covered inputs keep their decoded formats");
+    d.vertex_shader = (VkShaderModule)(uintptr_t)1; d.fragment_shader = (VkShaderModule)(uintptr_t)1; d.layout = (VkPipelineLayout)(uintptr_t)1;
+    { VkPipeline q = (VkPipeline)(uintptr_t)7; CHECK(lagfx_pipeline_build((VkDevice)(uintptr_t)1, &d, &q) == LAGFX_ERR_PROTOCOL, "serialized undercount: pipeline build fails with LAGFX_ERR_PROTOCOL"); }
+    d = base(); d.n_pso_attrs = 0; badi = 99;
+    CHECK(!lagfx_pipeline_vertex_input(&d, &vb, va, &n, &badi) && badi == 0, "serialized, 0 decoded: fails at input 0");
 
     /* the builder fails the PSO with a defined status before touching the device (dummy handles: the old code went on to call into Vulkan) */
     d = base(); d.pso_attr_fmt[2] = 999;
