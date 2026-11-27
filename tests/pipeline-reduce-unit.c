@@ -263,6 +263,15 @@ int main(void) {
             char inf[200];
             CHECK(lagfx_red_apply(k_fs, sizeof k_fs / 4, &rc, &o, &on, inf, sizeof inf) == 0 && strstr(inf, "no constexpr-sampler variable"), "CXS_FOLD n/a without a constexpr sampler: %s", inf);
         }
+        CHECK(in2.ncollide == 0, "k_fs2 has no binding collision");
+        {   /* patch the constexpr sampler onto binding 16 (the sampled image's): sampler vs image on one binding is reported */
+            static uint32_t k3[sizeof k_fs2 / 4];
+            memcpy(k3, k_fs2, sizeof k3);
+            unsigned patched = 0;
+            for (size_t p = 5; p < nw; p += k3[p] >> 16) if ((k3[p] & 0xffffu) == 71u && k3[p + 2] == 33u && k3[p + 3] == 18u) k3[p + 3] = 16u, patched++;
+            lagfx_red_info_t i3;
+            CHECK(patched == 1 && lagfx_red_analyze(k3, nw, &i3) && i3.ncollide == 1 && i3.collide[0].binding == 16 && i3.collide[0].ka + i3.collide[0].kb == 3, "binding collision found: patched %u, n=%u", patched, i3.ncollide);
+        }
         /* every ladder row of k_fs2 (DRY): the second-round row set, spirv-val on every file, dedupe */
         static cap_t cb;
         char dir[] = "/tmp/pipereduce-k2rows-XXXXXX";

@@ -244,6 +244,32 @@ int lagfx_red_analyze(const uint32_t *w, size_t words, lagfx_red_info_t *info) {
         const uint32_t *p = m.w + m.off[i];
         if (OPC(p[0]) == 43 && WCN(p[0]) >= 4) { info->k[kclass(&m, p[1])].uses += kuse[p[2]]; info->kuses_total += kuse[p[2]]; }
     }
+    {   /* descriptor kind per (set, binding): two kinds on one binding cannot both be right in a layout */
+        struct { uint32_t set, bnd, kind; } dv[160];
+        uint32_t ndv = 0;
+        for (uint32_t i = 0; i < m.first_fn && ndv < 160; i++) {
+            const uint32_t *p = m.w + m.off[i];
+            if (OPC(p[0]) != 59 || WCN(p[0]) < 4 || (p[3] != 0 && p[3] != 12)) continue;
+            uint32_t set = 0, bnd = ~0u;
+            for (uint32_t j = 0; j < m.first_fn; j++) { const uint32_t *d = m.w + m.off[j]; if (OPC(d[0]) == 71 && d[1] == p[2]) { if (d[2] == 34) set = d[3]; else if (d[2] == 33) bnd = d[3]; } }
+            if (bnd == ~0u) continue;
+            uint32_t pt = p[1] < m.bound && m.op_of[p[1]] == 32 ? m.w[m.defoff[p[1]] + 3] : 0, kind = 5;
+            while (pt && pt < m.bound && m.op_of[pt] == 28) pt = m.w[m.defoff[pt] + 2];   /* arrays of descriptors */
+            if (p[3] == 12) kind = 4;
+            else if (pt && pt < m.bound) {
+                const uint32_t *td = m.w + m.defoff[pt];
+                if (m.op_of[pt] == 26) kind = 1;
+                else if (m.op_of[pt] == 25) kind = td[3] == 6 ? 3 : 2;   /* Dim SubpassData */
+                else if (m.op_of[pt] == 27) kind = 2;
+            }
+            dv[ndv].set = set, dv[ndv].bnd = bnd, dv[ndv].kind = kind, ndv++;
+        }
+        for (uint32_t a2 = 0; a2 < ndv; a2++) for (uint32_t b2 = a2 + 1; b2 < ndv; b2++)
+            if (dv[a2].set == dv[b2].set && dv[a2].bnd == dv[b2].bnd && dv[a2].kind != dv[b2].kind) {
+                if (info->ncollide < 4) { uint32_t q = info->ncollide; info->collide[q].set = dv[a2].set, info->collide[q].binding = dv[a2].bnd, info->collide[q].ka = dv[a2].kind, info->collide[q].kb = dv[b2].kind; }
+                info->ncollide++;
+            }
+    }
     for (uint32_t i = 0; i < m.first_fn; i++) {   /* translator constexpr samplers: OpName "lagfx.cxs.<hex>" */
         const uint32_t *p = m.w + m.off[i];
         if (OPC(p[0]) != 5 || !is_cxs_name(p) || p[1] >= m.bound || m.op_of[p[1]] != 59 || info->ncxs >= 8) continue;

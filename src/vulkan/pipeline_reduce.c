@@ -408,6 +408,14 @@ static void stats(L_t *l) {
     n = 0, ud[0] = 0;
     for (uint32_t u = 0; u < in->nundef && n < 330; u++) n += (size_t)snprintf(ud + n, sizeof ud - n, "#%u(id %u,%s,uses %u) ", u, in->undef[u].id, in->undef[u].cls == 1 ? "numeric" : in->undef[u].cls == 2 ? "struct" : in->undef[u].cls == 4 ? "pointer" : "composite", in->undef[u].nuse);
     emit_line(l, "pipeline-reduce: stats OpUndef (global, declaration order): %s", ud);
+    {
+        static const char *kn[6] = { "?", "sampler", "image", "input-attachment", "buffer", "other" };
+        char cb[300];
+        size_t cn = 0;
+        cb[0] = 0;
+        for (uint32_t q = 0; q < in->ncollide && q < 4; q++) cn += (size_t)snprintf(cb + cn, sizeof cb - cn, "set %u binding %u: %s vs %s; ", in->collide[q].set, in->collide[q].binding, kn[in->collide[q].ka % 6], kn[in->collide[q].kb % 6]);
+        emit_line(l, "pipeline-reduce: stats descriptor-binding collisions (variables of DIFFERENT kinds on one set+binding; the layout derived from the module keeps one kind per binding): %u %s%s", in->ncollide, cb, in->ncxs ? "| the module has translator constexpr samplers (OpName lagfx.cxs.*)" : "");
+    }
 }
 
 /* FS-input / VS-output audit (report only) */

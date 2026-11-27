@@ -79,6 +79,8 @@ typedef struct {
     uint32_t dyn_idx_const, dyn_idx_load, dyn_idx_other;
     struct { uint32_t op, n; } i64_op[10];
     uint32_t i64_total;
+    uint32_t ncollide;         /* (set, binding) pairs shared by variables of DIFFERENT descriptor kinds (buffer views of one buffer share a binding on purpose and are not counted) */
+    struct { uint32_t set, binding, ka, kb; } collide[4];   /* kinds: 1 sampler 2 image 3 input attachment 4 buffer 5 other */
     uint32_t nblt;             /* BuiltIn Input variables (declaration order) */
     struct { uint32_t id, builtin; } blt[8];
     uint32_t ncxs;             /* sampler variables named lagfx.cxs.* (translator constexpr samplers) */
