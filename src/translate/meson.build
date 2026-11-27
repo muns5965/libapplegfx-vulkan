@@ -11,4 +11,5 @@
 lagfx_sources += files(
   'render_encoder.c',
   'blit_encoder.c',
+  'mip_gen.c',
 )

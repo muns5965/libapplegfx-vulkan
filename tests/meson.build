@@ -2424,3 +2424,15 @@ if vulkan_dep.found()
   test('spv ssa promotion (unit + lavapipe equivalence)', spv_ssa_test, timeout : 600,
     workdir : meson.current_source_dir() / '..')
 endif
+
+# Standalone mip-chain recorder (generateMipmaps equivalent, not wired to the protocol): chain vs CPU box filter, layout restored, distinct refusal counters. Includes the render-compat harness.
+if fs.is_file(meson.current_source_dir() / 'blit-mipgen-unit.c') and vulkan_dep.found()
+  blit_mipgen_test = executable('blit-mipgen-unit',
+    'blit-mipgen-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('blit mip-chain generation (standalone recorder) vs CPU box filter + refusals (unit, lavapipe + validation)', blit_mipgen_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
