@@ -75,9 +75,11 @@ static void mkdesc(uint8_t *d, uint32_t list_gpa, uint32_t fourcc, uint64_t row,
     memcpy(d, &l, 4); memcpy(d + 4, &fourcc, 4); memcpy(d + 0x18, &alloc, 8); memcpy(d + 0x20, &w, 8); memcpy(d + 0x28, &h, 8); memcpy(d + 0x30, &row, 8);
     d[0x3e] = 2; memcpy(d + 0x60, &first, 4);
 }
+static int g_desc_fail_n;   /* the next n descriptor lookups fail (fault injection) */
 static uint64_t g_remap_list;   /* nonzero: MAP_OK / MAP_HALF are served with this page list (the guest re-mapped the surface) */
 static bool get_desc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len) {
     (void)o; g_get_calls++;
+    if (g_desc_fail_n > 0) { g_desc_fail_n--; return false; }
     uint8_t d[0x70];
     switch (id) {
     case MAP_OK: case MAP_OK2: mkdesc(d, PFN_LIST << 14, 0x42475241u, SROW, SFIRST); break;
@@ -575,6 +577,44 @@ int main(void) {
       assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_DONE && !lagfx_a64_res_is_pending(p) && *surf_px(32, 40) == 0xff0000ffu); }
     unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
     printf("PASS: MAPPED_WRITEBACK=swap safety: last exec wins, re-mapped surface dropped (not retried), unreadable descriptor keeps the debt, synchronize pays once, RGhA exact\n");
+
+    /* (7) host-read sync (g7-wb-sync): every flag-4 exec records the TRANSFER_WRITE -> HOST_READ barrier and the data is unchanged by it; a failed exec submit
+     * leaves no pending copy that a later exec could write to the guest; an unreadable descriptor at finish keeps the frame owed. */
+    { const uint32_t res[1][2] = { { REF_M1, 4 } };
+      uint64_t hb = CNT(p).wb_host_barriers_recorded, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      run_exec(p, 50, REF_M1, 2, green, false, res, 1, true);
+      assert(cell(1) == 50 && CNT(p).mapped_written_back == wbx + 1 && CNT(p).wb_host_barriers_recorded >= hb + 1);
+      for (uint32_t y = 0; y < SH; y += 13) for (uint32_t x = 0; x < SW; x += 7) assert(*surf_px(x, y) == GREEN);   /* same pixels as without the barrier */
+      uint8_t *img = malloc(SW * SH * 4u); uint32_t w, h;
+      uint64_t hb2 = CNT(p).wb_host_barriers_recorded;
+      assert(lagfx_a64_res_readback(p, 1, REF_M1, img, SW * SH * 4u, &w, &h) && CNT(p).wb_host_barriers_recorded == hb2 + 1);   /* the readback copy has its own */
+      for (uint32_t y = 0; y < SH; y += 13) for (uint32_t x = 0; x < SW; x += 7) { uint32_t c; memcpy(&c, img + ((size_t)y * SW + x) * 4u, 4); assert(c == GREEN); }
+      free(img); }
+    { /* failed submit: the exec still completes, the guest is untouched, the pending copy is cleared; the NEXT exec that records nothing for the surface must not write the dead copy */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      uint64_t cl = CNT(p).wb_down_pending_cleared_on_fail, sk = CNT(p).wb_down_skipped_not_recorded, wbx = CNT(p).mapped_written_back;
+      surf_fill(SENT);
+      lagfx_a64_test_hook = 3;
+      run_exec(p, 51, REF_M1, 2, blue, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 0 && cell(1) == 51 && CNT(p).wb_down_pending_cleared_on_fail == cl + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      invalidate(p, 52, REF_M1, 1, 0, 0, 0);   /* host copy invalid: the next exec re-pulls, and that pull is made to fail (one descriptor lookup), so ms_record_down refuses */
+      g_desc_fail_n = 1;
+      run_exec(p, 53, 0, 0, green, false, res, 1, false);
+      assert(g_desc_fail_n == 0);   /* flag 4, nothing recorded for the surface */
+      assert(cell(1) == 53 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab && CNT(p).wb_down_skipped_not_recorded > sk); }
+    { /* unreadable descriptor at finish: nothing written, counted, the surface is owed again and a display swap (=swap) pays it */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      static const double red4[4] = { 1, 0, 0, 1 };
+      surf_fill(SENT);
+      uint64_t ow = CNT(p).wb_finish_desc_unreadable_owed, wbx = CNT(p).mapped_written_back;
+      lagfx_a64_test_hook = 4;
+      run_exec(p, 54, REF_M1, 2, red4, false, res, 1, true);
+      assert(lagfx_a64_test_hook == 0 && CNT(p).wb_finish_desc_unreadable_owed == ow + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
+      assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == RED);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK"); }
+    printf("PASS: host-read barrier recorded, data unchanged; failed submit clears the pending copy and the stale copy is not written; unreadable descriptor keeps the frame owed\n");
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);

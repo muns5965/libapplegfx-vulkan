@@ -1408,6 +1408,10 @@ lagfx_status_t lagfx_display_submit_rendered_frame(
         vkCmdCopyImageToBuffer(cb, scanout_src,
                                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                slot->buffer, 1, &region);
+        {   /* the host reads this buffer after the fence: transfer writes -> host reads (a fence wait alone is not a memory dependency) */
+            VkMemoryBarrier hb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_HOST_READ_BIT };
+            vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &hb, 0, NULL, 0, NULL);
+        }
     }
 
     {
