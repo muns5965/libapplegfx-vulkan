@@ -21,15 +21,19 @@ extern uint64_t lagfx_vk_validation_msg_count;
  * The Vulkan validation layer reports a handful of messages on this harness that are NOT about the code under test (the framebuffer-fetch / raster-order paths record a barrier inside a
  * dynamic rendering instance, an input attachment is read through a layout the older layer does not know, ...). The audit tests (S04 S05 S06 D1) run with the layer on, so instead of
  * asserting "0 messages" (false failures) or nothing (what a missing check looks like), each window val_begin(); ...; val_end(label) compares the messages it saw with a BASELINE LIST:
- *   - a message whose key (VUID + the first words of its text, handles / numbers scrubbed) is not listed for `label` fails the test,
- *   - a listed message that occurs MORE often than baseline-count x (number of rc_run execs in the window) also fails ("count increase"; the baseline count is per exec, so adding draws to
+ *   - a message whose key (VUID + the first words of its text, handles / numbers scrubbed) is not listed for `label` is an INCREASE from 0,
+ *   - a listed message that occurs MORE often than baseline-count x (number of rc_run execs in the window) is an INCREASE (the baseline count is per exec, so adding draws to
  *     a test does not need a new baseline, a new message or a repeated one per exec does),
  *   - fewer is fine (and printed as a note).
+ * An increase prints an ANALYSIS BLOCK (which test function / window, which VUID, old vs new count, the first full message seen) and FAILS, unless LAGFX_VAL_BASELINE_UPDATE=1 is set: then the
+ * block is printed with the baseline line(s) to add, and the run continues. THE BASELINE IS NOT A PERMANENT ALLOW-LIST: it records what the layer says about the pre-existing harness today
+ * (classified in the header of the baseline file); a new line or a higher count needs that classification (validator false positive vs a real defect) written next to it in the same commit.
  * LAGFX_VAL_BASELINE_PRINT=1 prints "VALKEY\t<label>\t<count>\t<execs>\t<key>" lines instead of checking (how the file is generated; merge the runs of all env variants taking the max).
  * No messages at all (layer absent or silent) always passes. */
 extern void (*lagfx_vk_validation_hook)(const char *msg);
 #define VAL_MAXK 48
-static struct { char key[200]; unsigned n; } g_val_cur[VAL_MAXK]; static int g_val_ncur; static unsigned g_val_overflow, g_val_runs;   /* g_val_runs: rc_run() calls (execs) inside the window */
+static struct { char key[200]; unsigned n; char first[700]; } g_val_cur[VAL_MAXK]; static int g_val_ncur; static unsigned g_val_overflow, g_val_runs;   /* g_val_runs: rc_run() calls (execs) inside the window */
+static const char *g_val_test = "?";   /* the test function that opened the window (val_begin is a macro passing __func__) */
 static void val_key(const char *m, char *out, size_t cap) {   /* "VUID | text after the last '|' " with 0x... and digit runs scrubbed, 110 chars of text */
     const char *v = strstr(m, "VUID-"); char vu[96] = "no-VUID"; size_t k = 0;
     if (v) { while (v[k] && v[k] != ' ' && v[k] != ']' && k < sizeof vu - 1) vu[k] = v[k], k++; vu[k] = 0; }
@@ -45,33 +49,74 @@ static void val_key(const char *m, char *out, size_t cap) {   /* "VUID | text af
 static void val_hook(const char *m) {
     char key[200]; val_key(m, key, sizeof key);
     for (int i = 0; i < g_val_ncur; i++) if (!strcmp(g_val_cur[i].key, key)) { g_val_cur[i].n++; return; }
-    if (g_val_ncur < VAL_MAXK) { memcpy(g_val_cur[g_val_ncur].key, key, sizeof key); g_val_cur[g_val_ncur++].n = 1; } else g_val_overflow++;
+    if (g_val_ncur < VAL_MAXK) { memcpy(g_val_cur[g_val_ncur].key, key, sizeof key); snprintf(g_val_cur[g_val_ncur].first, sizeof g_val_cur[g_val_ncur].first, "%s", m); g_val_cur[g_val_ncur++].n = 1; } else g_val_overflow++;
 }
-static void val_begin(void) { g_val_ncur = 0; g_val_overflow = 0; g_val_runs = 0; lagfx_vk_validation_hook = val_hook; }
-static void val_end(const char *label) {
-    lagfx_vk_validation_hook = NULL;
-    if (getenv("LAGFX_VAL_BASELINE_PRINT")) { for (int i = 0; i < g_val_ncur; i++) printf("VALKEY\t%s\t%u\t%u\t%s\n", label, g_val_cur[i].n, g_val_runs ? g_val_runs : 1u, g_val_cur[i].key); return; }
-    if (!g_val_ncur && !g_val_overflow) return;
-    char path[600]; snprintf(path, sizeof path, "%s/fixtures/val_baseline_audit.txt", SRCDIR);
-    FILE *f = fopen(path, "r"); if (!f) { printf("FAIL val_end(%s): baseline file %s missing\n", label, path); abort(); }
-    char ln[512]; int bad = 0;
-    unsigned seen_base[VAL_MAXK] = {0}; bool found[VAL_MAXK] = {0};
-    while (fgets(ln, sizeof ln, f)) {
-        if (ln[0] == '#' || ln[0] == '\n') continue;
+static void val_begin_(const char *test) { g_val_ncur = 0; g_val_overflow = 0; g_val_runs = 0; g_val_test = test; lagfx_vk_validation_hook = val_hook; }
+#define val_begin() val_begin_(__func__)
+/* The analysis block of one increase (also used by the self-test of the helper). */
+static void val_report_increase(const char *label, const char *test, const char *key, unsigned old_total, unsigned base_per_exec, unsigned execs, unsigned now, const char *first) {
+    char vu[100] = "no-VUID"; size_t k = 0; while (key[k] && key[k] != ' ' && k < sizeof vu - 1) vu[k] = key[k], k++; vu[k] = 0;
+    printf("---- validation baseline INCREASE ----\n  test:    %s\n  window:  %s\n  VUID:    %s\n  count:   old %u (baseline %u per exec x %u execs) -> new %u\n  first message:\n    %.600s\n"
+           "  This is not a harmless drift: classify it (validator-version false positive, like the entries documented in tests/fixtures/val_baseline_audit.txt, or a real defect of the recorded Vulkan)\n"
+           "  and fix it; only a documented false positive may be added to the baseline: LAGFX_VAL_BASELINE_UPDATE=1 re-runs without failing and prints the line to add:\n  %s\t%u\t%s\n----\n",
+           test, label, vu, old_total, base_per_exec, execs, now, first, label, execs ? (now + execs - 1) / execs : now, key);
+}
+/* Compares the window with the baseline text `base` (the file's content). Returns the number of increases (0 = ok); with `update` they are reported but not counted as failures by the caller. */
+static int val_check(const char *label, const char *base, int *printed_notes) {
+    char *copy = strdup(base); int bad = 0; unsigned seen_base[VAL_MAXK] = {0}; bool found[VAL_MAXK] = {0};
+    for (char *ln = strtok(copy, "\n"); ln; ln = strtok(NULL, "\n")) {
+        if (ln[0] == '#') continue;
         char *lab = ln, *t1 = strchr(lab, '\t'); if (!t1) continue; *t1++ = 0;
         char *cnt = t1, *t2 = strchr(cnt, '\t'); if (!t2) continue; *t2++ = 0;
         char *key = t2; key[strcspn(key, "\r\n")] = 0;
         if (strcmp(lab, label) && strcmp(lab, "*")) continue;
         for (int i = 0; i < g_val_ncur; i++) if (!strcmp(key, g_val_cur[i].key)) { found[i] = true; if ((unsigned)atoi(cnt) > seen_base[i]) seen_base[i] = (unsigned)atoi(cnt); }
     }
-    fclose(f);
+    free(copy);
+    const unsigned execs = g_val_runs ? g_val_runs : 1u;
     for (int i = 0; i < g_val_ncur; i++) {
-        if (!found[i]) { printf("FAIL validation message not in the baseline [%s] x%u: %s\n", label, g_val_cur[i].n, g_val_cur[i].key); bad++; }
-        else if (g_val_cur[i].n > seen_base[i] * (g_val_runs ? g_val_runs : 1u)) { printf("FAIL validation message COUNT INCREASE [%s]: %u > baseline %u per exec x %u execs: %s\n", label, g_val_cur[i].n, seen_base[i], g_val_runs ? g_val_runs : 1u, g_val_cur[i].key); bad++; }
-        else if (g_val_cur[i].n < seen_base[i] * (g_val_runs ? g_val_runs : 1u)) printf("note: validation message fewer than the baseline [%s]: %u < %u x %u: %s\n", label, g_val_cur[i].n, seen_base[i], g_val_runs ? g_val_runs : 1u, g_val_cur[i].key);
+        const unsigned old_total = found[i] ? seen_base[i] * execs : 0u;
+        if (g_val_cur[i].n > old_total) { val_report_increase(label, g_val_test, g_val_cur[i].key, old_total, found[i] ? seen_base[i] : 0u, execs, g_val_cur[i].n, g_val_cur[i].first); bad++; }
+        else if (g_val_cur[i].n < old_total) { printf("note: validation message fewer than the baseline [%s]: %u < %u x %u: %s\n", label, g_val_cur[i].n, seen_base[i], execs, g_val_cur[i].key); if (printed_notes) (*printed_notes)++; }
     }
-    if (g_val_overflow) { printf("FAIL validation messages [%s]: %u more than %d distinct keys\n", label, g_val_overflow, VAL_MAXK); bad++; }
-    if (bad) abort();
+    if (g_val_overflow) { printf("---- validation baseline INCREASE ----\n  test: %s  window: %s: %u messages beyond the %d distinct keys the helper tracks\n----\n", g_val_test, label, g_val_overflow, VAL_MAXK); bad++; }
+    return bad;
+}
+static void val_end(const char *label) {
+    lagfx_vk_validation_hook = NULL;
+    if (getenv("LAGFX_VAL_BASELINE_PRINT")) { for (int i = 0; i < g_val_ncur; i++) printf("VALKEY\t%s\t%u\t%u\t%s\n", label, g_val_cur[i].n, g_val_runs ? g_val_runs : 1u, g_val_cur[i].key); return; }
+    if (!g_val_ncur && !g_val_overflow) return;
+    char path[600]; snprintf(path, sizeof path, "%s/fixtures/val_baseline_audit.txt", SRCDIR);
+    FILE *f = fopen(path, "r"); if (!f) { printf("FAIL val_end(%s): baseline file %s missing\n", label, path); abort(); }
+    static char base[1 << 16]; size_t n = fread(base, 1, sizeof base - 1, f); base[n] = 0; fclose(f);
+    int bad = val_check(label, base, NULL);
+    if (!bad) return;
+    const char *u = getenv("LAGFX_VAL_BASELINE_UPDATE");
+    if (u && u[0] == '1') { printf("note: LAGFX_VAL_BASELINE_UPDATE=1: %d increase(s) in [%s] reported above, not failing; add the line(s) to tests/fixtures/val_baseline_audit.txt WITH the classification\n", bad, label); return; }
+    printf("FAIL validation baseline: %d increase(s) in [%s] (analysis above; set LAGFX_VAL_BASELINE_UPDATE=1 only after classifying them)\n", bad, label);
+    abort();
+}
+/* Self-test of the helper (no device needed for the checking part): an unlisted message, a count above baseline x execs, a message within the baseline, and fewer than the baseline. */
+static void test_val_baseline_helper(void) {
+    puts("note: the 'validation baseline INCREASE' blocks printed by this self-test are expected (they exercise the report)");
+    static const char *base = "# comment\nT win\t2\tVUID-A-1 | text a\nT win\t1\tVUID-B-1 | text b\n";
+    lagfx_vk_validation_hook = NULL;
+    g_val_ncur = 0; g_val_overflow = 0; g_val_runs = 2; g_val_test = "selftest";
+    #define ADD(k, c) do { snprintf(g_val_cur[g_val_ncur].key, sizeof g_val_cur[0].key, "%s", k); snprintf(g_val_cur[g_val_ncur].first, sizeof g_val_cur[0].first, "full message of %s", k); g_val_cur[g_val_ncur++].n = (c); } while (0)
+    ADD("VUID-A-1 | text a", 4);          /* 2 per exec x 2 execs = 4: within */
+    ADD("VUID-B-1 | text b", 2);          /* 1 x 2 = 2: within */
+    assert(val_check("T win", base, NULL) == 0 && val_check("other window", base, NULL) == 2);   /* another window: both unlisted = increases from 0 */
+    g_val_ncur = 0; ADD("VUID-A-1 | text a", 5);    /* 5 > 4: count increase */
+    assert(val_check("T win", base, NULL) == 1);
+    g_val_ncur = 0; ADD("VUID-C-1 | text c", 1);    /* unlisted: increase from 0 */
+    assert(val_check("T win", base, NULL) == 1);
+    g_val_ncur = 0; ADD("VUID-A-1 | text a", 1);    /* fewer: a note, no increase */
+    { int notes = 0; assert(val_check("T win", base, &notes) == 0 && notes == 1); }
+    g_val_ncur = 0; g_val_overflow = 3;             /* overflow beyond the tracked keys is an increase */
+    assert(val_check("T win", base, NULL) == 1);
+    g_val_ncur = 0; g_val_overflow = 0; g_val_runs = 0;
+    #undef ADD
+    puts("PASS: validation baseline helper: unlisted message / count above baseline x execs / key overflow are increases with an analysis block (fail unless LAGFX_VAL_BASELINE_UPDATE=1); within or below baseline pass");
 }
 
 /* ---- scenario state read by the resolver ---- */
@@ -715,6 +760,7 @@ int main(void) {
     if (!g_dev->vk || !g_dev->vk->initialized) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     printf("device: local_read=%d raster_order=%d\n", (int)g_dev->vk->have_local_read, (int)g_dev->vk->have_raster_order);
     if (!g_dev->vk->have_local_read) { puts("SKIP: no dynamicRenderingLocalRead on this device (framebuffer fetch tests need it)"); return 77; }
+    test_val_baseline_helper();
     test_split_scenes();
     test_split_strip_and_cap();
     test_split_mrt();
