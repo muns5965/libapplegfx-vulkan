@@ -309,6 +309,7 @@ lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys
     if (id == 0u) return false;
     const lagfx_air_metadata_t *list = md_record(m, id - 1u);
     if (!list || list->kind != LAGFX_AIR_MD_NODE) return false;
+    if (list->num_operands > LAGFX_STAGE_KEYS_MAX) LAGFX_WARN("air2spv: stage-key list has %u entries, only the first %u are keyed", list->num_operands, (unsigned)LAGFX_STAGE_KEYS_MAX);
     for (uint32_t a = 0; a < list->num_operands && out->n < LAGFX_STAGE_KEYS_MAX; a++) {
         const lagfx_air_metadata_t *e = list->operands[a] ? md_record(m, list->operands[a] - 1u) : NULL;
         if (e && e->kind == LAGFX_AIR_MD_NODE) {

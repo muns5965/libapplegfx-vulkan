@@ -35,6 +35,7 @@
 #define OP_TYPE_VECTOR           23u
 #define DECOR_BINDING            33u
 #define DECOR_DESCRIPTOR_SET     34u
+#define DECOR_INPUT_ATTACHMENT_INDEX 43u
 #define DECOR_LOCATION           30u
 #define STORAGE_UNIFORM_CONSTANT 0u
 #define STORAGE_INPUT            1u
@@ -62,6 +63,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     uint8_t  *is_image = NULL, *is_sampler = NULL, *is_struct = NULL, *is_sampled_image = NULL, *image_dim = NULL;
     uint32_t *root = NULL;                            /* id -> the storage-buffer variable a pointer id derives from (0 = none) */
     uint8_t  *var_written = NULL;                     /* per variable: something that may write through it was found */
+    uint32_t *dec_role = NULL;                        /* InputAttachmentIndex / imageblock render target of the variable; LAGFX_SPV_NO_ROLE = none */
     bool      overflow_ids = false;
 
     size_t sz = MAXID;
@@ -72,7 +74,9 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
     is_image = calloc(sz, 1); image_dim = calloc(sz, 1); is_sampler = calloc(sz, 1); is_struct = calloc(sz, 1);
     is_sampled_image = calloc(sz, 1);
     root = calloc(sz, sizeof(uint32_t)); var_written = calloc(sz, 1);
-    if (!root || !var_written) goto done;
+    dec_role = malloc(sz * sizeof(uint32_t));
+    if (!root || !var_written || !dec_role) goto done;
+    memset(dec_role, 0xff, sz * sizeof(uint32_t));
     if (!has_set || !has_bind || !is_var || !dec_set || !dec_bind || !var_ptr ||
         !var_sc || !ptr_pointee || !is_image || !image_dim || !is_sampler || !is_struct ||
         !is_sampled_image) {
@@ -93,6 +97,19 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                     if (id < MAXID) {
                         if (dec == DECOR_DESCRIPTOR_SET) { has_set[id] = 1; dec_set[id] = W(3); }
                         else if (dec == DECOR_BINDING)   { has_bind[id] = 1; dec_bind[id] = W(3); }
+                        else if (dec == DECOR_INPUT_ATTACHMENT_INDEX) dec_role[id] = W(3);
+                    }
+                }
+                break;
+            case 5u /* OpName */:
+                if (wc >= 3u && W(1) < MAXID) {   /* "lagfx.imageblock.<n>": a translator imageblock storage image */
+                    const char *nm = (const char *)(spv + (i + 2u) * 4u);
+                    size_t maxlen = (size_t)(wc - 2u) * 4u, pl = sizeof LAGFX_IMAGEBLOCK_NAME_PREFIX - 1u, k = 0;
+                    while (k < maxlen && nm[k]) k++;
+                    if (k > pl && k < maxlen && memcmp(nm, LAGFX_IMAGEBLOCK_NAME_PREFIX, pl) == 0) {
+                        uint32_t v = 0; bool ok = true;
+                        for (size_t h = pl; h < k; h++) { if (nm[h] < '0' || nm[h] > '9' || v > 1000u) { ok = false; break; } v = v * 10u + (uint32_t)(nm[h] - '0'); }
+                        if (ok) dec_role[W(1)] = v;
                     }
                 }
                 break;
@@ -208,6 +225,7 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
             out[total].kind = kind;
             out[total].image_dim = (kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) && pointee < MAXID ? image_dim[pointee] : 0u;
             out[total].may_write = kind == LAGFX_SPV_BINDING_STORAGE_BUFFER ? (uint8_t)(var_written[id] || overflow_ids) : 0u;
+            out[total].role_index = (kind == LAGFX_SPV_BINDING_INPUT_ATTACHMENT || kind == LAGFX_SPV_BINDING_STORAGE_IMAGE) ? dec_role[id] : LAGFX_SPV_NO_ROLE;
         }
         total++;
     }
@@ -238,8 +256,20 @@ done:
     free(has_set); free(has_bind); free(is_var);
     free(dec_set); free(dec_bind); free(var_ptr); free(var_sc);
     free(ptr_pointee); free(is_image); free(image_dim); free(is_sampler); free(is_struct);
-    free(is_sampled_image);
+    free(is_sampled_image); free(dec_role);
     return total;
+}
+
+uint32_t lagfx_spv_reflect_exec_model(const uint8_t *spv, size_t spv_len) {
+    if (!spv || spv_len < 20u || lagfx_le32(spv) != SPV_MAGIC) return 0xffffffffu;
+    size_t nwords = spv_len / 4u;
+    for (size_t i = 5u; i < nwords;) {
+        uint32_t hdr = lagfx_le32(spv + i * 4u), wc = hdr >> 16, op = hdr & 0xFFFFu;
+        if (wc == 0u || i + wc > nwords) break;
+        if (op == 15u /* OpEntryPoint */ && wc >= 4u) return lagfx_le32(spv + (i + 1u) * 4u);
+        i += wc;
+    }
+    return 0xffffffffu;
 }
 
 void lagfx_spv_offset_bindings(uint8_t *spv, size_t spv_len, uint32_t base) {

@@ -26,14 +26,18 @@
 #define LAGFX_A64_PDESC_MAX_REFS  16u
 #define LAGFX_A64_PDESC_MAX_ATTRS 8u
 #include "arm64_limits.h"
-#define LAGFX_A64_FRAG_BINDING_BASE 16u          /* fragment-stage SPIR-V bindings are offset by this (same as the x86 draw path) */
+#define LAGFX_A64_FRAG_BINDING_BASE 16u          /* the LEAST first binding of the fragment stage: fragment-stage SPIR-V bindings are offset by max(this, first binding after the vertex stage's, see lagfx_a64_frag_base) */
 
-#define LAGFX_A64_FBF_BINDING_BASE 24u           /* the translator's input-attachment bindings: 24 + colour attachment index (before the fragment offset above) */
+/* The offset the fragment module's bindings get: LAGFX_A64_FRAG_BINDING_BASE, or - when the vertex module declares more resources than that - the first binding after
+ * the vertex module's (the stages' ranges never overlap). Pure. */
+uint32_t lagfx_a64_frag_base(const uint8_t *vspv, size_t vsz);
+
+/* The translator numbers an input attachment by position in the module's binding table (no fixed number): its colour attachment is its InputAttachmentIndex. */
 
 /* Why a framebuffer-fetch (input attachment) binding cannot be built; LAGFX_A64_FBF_OK = it can. Pure: shared by the resolver and tools/dump-bindings. */
 enum { LAGFX_A64_FBF_OK = 0, LAGFX_A64_FBF_VERTEX_STAGE, LAGFX_A64_FBF_NO_LOCAL_READ, LAGFX_A64_FBF_BINDING_RANGE, LAGFX_A64_FBF_TOO_MANY, LAGFX_A64_FBF_REASONS };
-/* spv_binding = the binding in the module AS RESOLVED (a fragment module has been offset by LAGFX_A64_FRAG_BINDING_BASE already); n_bind = bindings taken so far. */
-int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t spv_binding, uint32_t n_bind);
+/* attachment = the variable's InputAttachmentIndex (LAGFX_SPV_NO_ROLE when the module has none: refused); n_bind = bindings taken so far. */
+int lagfx_a64_fbfetch_check(int stage, bool have_local_read, uint32_t attachment, uint32_t n_bind);
 const char *lagfx_a64_fbfetch_reason_name(int reason);
 
 typedef struct { uint32_t fmt, off, bufidx; } lagfx_a64_vattr_t;

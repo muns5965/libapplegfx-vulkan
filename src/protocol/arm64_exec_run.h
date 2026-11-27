@@ -50,6 +50,7 @@ typedef struct {
      * table feeds it (0 vertex buffers table = tag 125, 1 fragment tables = tags 110/114/112) and the Metal index into that table. */
     VkDescriptorSetLayout dsl;
     VkShaderModule alt_fragment_shader;   /* optional: desc.fragment_shader with explicit LOD 0 sampling, used instead while an unnormalized-coordinates sampler is bound to a fragment sampler slot */
+    uint64_t layout_key;            /* lagfx_ba_key of the pipeline's set-0 binding table (0 = none: no descriptors / a tile pipeline): part of the VkPipeline cache key */
     uint32_t n_bind;
     lagfx_a64_bind_t bind[LAGFX_A64_MAX_BINDINGS];   /* writable: a buffer the shader may write (air.write / air.read_write) */
     bool no_point_size;             /* the vertex shader does not write PointSize: a point-list draw is invalid in Vulkan (VUID-...-topology-08773) and is skipped */

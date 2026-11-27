@@ -54,6 +54,7 @@
 #include "vulkan/draw_record.h"
 #include "vulkan/descriptor_layout.h"
 #include "air2spv/spv_reflect.h"
+#include "air2spv/binding_alloc.h"
 #include "air2spv/constexpr_sampler.h"
 #include "air/bitcode_reader.h"
 #include "air2spv/translate.h"
@@ -1413,33 +1414,39 @@ static int op_set_render_pipeline_state(lagfx_protocol_t *p,
                 VkPipelineLayout pl = VK_NULL_HANDLE;
                 bool reflect_ok = (lagfx_build_pipeline_layout_from_spv(
                                        vk_device, blobs, lens, 2, &dsl, &pl) == LAGFX_OK);
-                bool has_resources = reflect_ok && (pl != VK_NULL_HANDLE);
+                /* An INVALID binding table (two descriptor types on one binding, no room) is "resource-using but not drawable" -> substitute; it must never fall through
+                 * as resource-free (the empty layout) with descriptors the shaders really use. */
+                bool has_resources = !reflect_ok || (pl != VK_NULL_HANDLE);
+                bool stage_ranges_ok = lagfx_ba_stage_base(spv_keep[0], spv_keep_sz[0], LAGFX_FRAG_BINDING_BASE) <= LAGFX_FRAG_BINDING_BASE;   /* the vertex stage stays below the fragment range the draw site demuxes on */
+                if (!stage_ranges_ok) LAGFX_WARN("op_0x74 P6a: ref=0x%x vertex stage declares more than %u descriptor bindings: ranges of the two stages would overlap, SUBSTITUTE", reference, LAGFX_FRAG_BINDING_BASE);
 
                 /* Recover the merged set-0 binding list (binding + kind) so the
                  * draw site can populate a descriptor set from the guest's
-                 * bound resources. */
+                 * bound resources. Same table as the layout (one derivation); a table
+                 * larger than the draw state's arrays is not drawable. */
                 lagfx_spv_binding_t rb[32]; size_t nrb = 0;
-                if (has_resources) {
-                    for (int s = 0; s < 2; s++) {
-                        if (!spv_keep[s]) continue;
-                        lagfx_spv_binding_t tmp[32];
-                        size_t nt = lagfx_spv_reflect_bindings(spv_keep[s], spv_keep_sz[s], tmp, 32);
-                        if (nt > 32) nt = 32;
-                        for (size_t t = 0; t < nt && nrb < 32; t++) {
-                            if (tmp[t].set != 0u) continue;
-                            bool seen = false;
-                            for (size_t u = 0; u < nrb; u++)
-                                if (rb[u].binding == tmp[t].binding) { seen = true; break; }
-                            if (!seen) rb[nrb++] = tmp[t];
+                bool table_fits = true;
+                if (has_resources && reflect_ok) {
+                    lagfx_ba_t *tab = malloc(sizeof *tab);
+                    if (tab) {
+                        lagfx_ba_init(tab);
+                        lagfx_ba_merge_modules(tab, blobs, lens, 2);
+                        for (uint32_t t = 0; t < tab->n; t++) {
+                            if (tab->e[t].set != 0u) continue;
+                            if (nrb >= 32) { table_fits = false; break; }
+                            rb[nrb].set = 0u, rb[nrb].binding = tab->e[t].binding, rb[nrb].kind = tab->e[t].kind, rb[nrb].image_dim = (uint8_t)tab->e[t].image_dim, rb[nrb].may_write = tab->e[t].may_write, rb[nrb].role_index = tab->e[t].role_index;
+                            nrb++;
                         }
-                    }
+                        free(tab);
+                    } else table_fits = false;
+                    if (!table_fits) LAGFX_WARN("op_0x74 P6a: ref=0x%x more than 32 descriptor bindings: SUBSTITUTE", reference);
                 }
                 /* M1 (c): resource-using pipelines are drawable when every
                  * reflected binding is one the draw site can satisfy — storage
                  * buffers (guest data), sampled images (IOSurface views), or
                  * samplers (shared default). Any other kind → substitute. No
                  * pool → substitute. (Was buffer-only through Stage 85b.) */
-                bool drawable = has_resources && nrb > 0 &&
+                bool drawable = reflect_ok && stage_ranges_ok && table_fits && has_resources && nrb > 0 &&
                                 dev_with_vk->vk->draw_desc_pool != VK_NULL_HANDLE;
                 for (size_t u = 0; drawable && u < nrb; u++)
                     if (rb[u].kind != LAGFX_SPV_BINDING_STORAGE_BUFFER

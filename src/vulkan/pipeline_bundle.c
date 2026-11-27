@@ -123,10 +123,17 @@ bool lagfx_pipeline_bundle_write(const lagfx_pipeline_desc_t *desc, VkResult vr,
         VkDescriptorSetLayoutBinding binds[LAGFX_BUNDLE_MAX_DSL];
         const uint8_t *blobs[2] = { (const uint8_t *)desc->vertex_spv, (const uint8_t *)desc->fragment_spv };
         const size_t lens[2] = { desc->vertex_spv_bytes, desc->fragment_spv_bytes };
-        uint32_t n = lagfx_layout_bindings_from_spv(blobs, lens, 2, binds);
+        uint32_t n = 0;
+        lagfx_layout_info_t li;
+        lagfx_status_t ls = lagfx_layout_derive(blobs, lens, 2, binds, LAGFX_BUNDLE_MAX_DSL, &n, &li);
         sb(&b, "layout.sets %u\n", n ? 1u : 0u);
         for (uint32_t i = 0; i < n; i++) sb(&b, "layout.binding %u %u %u %u\n", binds[i].binding, (unsigned)binds[i].descriptorType, binds[i].descriptorCount, (unsigned)binds[i].stageFlags);
-        sb(&b, "# layout source: derived from the SPIR-V (lagfx_layout_bindings_from_spv); no push constant ranges are ever declared by lagfx_build_pipeline_layout_from_spv\n");
+        sb(&b, "layout.key %016llx\n", (unsigned long long)li.key);   /* the pipeline-cache key of the binding table: any change of a binding / type / stage set / input-attachment index changes it */
+        if (ls != LAGFX_OK) {   /* two descriptor types on one binding (or no room): the table above is empty ON PURPOSE, the layout cannot exist; the report names the bindings */
+            sb(&b, "layout.error %d conflicts=%u overflows=%u\n", (int)ls, li.n_conflict, li.n_overflow);
+            for (const char *p = li.report; *p;) { const char *e = strchr(p, '\n'); size_t l = e ? (size_t)(e - p) : strlen(p); sb(&b, "# layout %.*s\n", (int)l, p); p += l + (e ? 1 : 0); }
+        }
+        sb(&b, "# layout source: derived from the SPIR-V by lagfx_layout_derive (shared binding table); no push constant ranges are ever declared by lagfx_build_pipeline_layout_from_spv\n");
     }
     sb(&b, "spec_constants 0\n");
     if (dg && dg->vk) {
@@ -211,6 +218,8 @@ bool lagfx_bundle_load(const char *dir, lagfx_bundle_t *b, char *err, size_t err
         else if (!strcmp(line, "vs_hash")) b->vs_hash = strtoull(val, NULL, 16);
         else if (!strcmp(line, "fs_hash")) b->fs_hash = strtoull(val, NULL, 16);
         else if (!strcmp(line, "layout.sets")) b->n_sets = (uint32_t)strtoul(val, NULL, 10);
+        else if (!strcmp(line, "layout.key")) b->layout_key = strtoull(val, NULL, 16);
+        else if (!strcmp(line, "layout.error")) b->layout_error = true;
         else if (!strcmp(line, "layout.binding") && b->n_dsl < LAGFX_BUNDLE_MAX_DSL) {
             unsigned bi, ty, ct, sf;
             if (sscanf(val, "%u %u %u %u", &bi, &ty, &ct, &sf) == 4) b->dsl[b->n_dsl++] = (VkDescriptorSetLayoutBinding){ .binding = bi, .descriptorType = (VkDescriptorType)ty, .descriptorCount = ct, .stageFlags = sf };

@@ -7,7 +7,8 @@
  * Translates tests/fixtures/tile_simd_blur_15.air.bc (Apple's horizontal/vertical simd blur: 15-tap filter over a simd_shuffle_and_fill_down of two
  * texture reads, result stored into the [[imageblock]]) and runs it as a compute pipeline:
  *   binding 0 sampled image (in_tex, RGBA16F)   binding 1 SSBO {ushort2 src_offset, ushort2 fill_offset, ushort horizontal, half edr_scale}
- *   binding 2 SSBO half weights[15]             binding 3 sampler (the translator's default sampler; unused)   binding 40 storage image (imageblock rt 0)
+ *   binding 2 SSBO half weights[15]             binding 3 sampler (the translator's default sampler; unused)   storage image of imageblock rt 0 (its binding comes from the translator's allocator:
+ *   found by reflection - the variable is named lagfx.imageblock.0 -, it is NOT a fixed number)
  *   spec constants 0/1/2 = local size (subgroupSize, 4, 1)
  * and compares every pixel with a CPU model of the kernel:
  *   out(x,y).rgb = edr * sum_i w[i] * tex(x+i, y).rgb ;  out.a = sum_i w[i] * tex(x+i, y).a      (i = 0..subgroupSize, weights beyond are 0)
@@ -16,6 +17,7 @@
  * Exit 77 (skip) when there is no Vulkan device, or the device lacks int16/int64/int8/float16/16-bit storage/subgroup shuffle in compute.
  */
 #include "air2spv/translate.h"
+#include "air2spv/spv_reflect.h"
 #include "air/bitcode_reader.h"
 #include "vulkan/caps.h"
 
@@ -173,10 +175,13 @@ int main(void) {
     /* ---- pipeline ---- */
     VkShaderModuleCreateInfo smi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = spv_n, .pCode = (const uint32_t *)(const void *)spv };
     VkShaderModule sm; VK(vkCreateShaderModule(g_dev, &smi, NULL, &sm));
+    uint32_t ibb = ~0u;   /* the imageblock image's binding: reflected (role_index = render target) */
+    { lagfx_spv_binding_t rf[16]; size_t nrf = lagfx_spv_reflect_bindings(spv, spv_n, rf, 16); for (size_t i = 0; i < nrf && i < 16; i++) if (rf[i].kind == LAGFX_SPV_BINDING_STORAGE_IMAGE && rf[i].role_index == 0u) ibb = rf[i].binding; }
+    CHECK(ibb != ~0u && ibb != 0 && ibb != 1 && ibb != 2 && ibb != 3, "the imageblock image has a binding of its own (got %u)", ibb);
     VkDescriptorSetLayoutBinding lb[5] = {
         { 0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL }, { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL },
         { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL }, { 3, VK_DESCRIPTOR_TYPE_SAMPLER, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL },
-        { 40, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL } };
+        { ibb, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1, VK_SHADER_STAGE_COMPUTE_BIT, NULL } };
     VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 5, .pBindings = lb };
     VkDescriptorSetLayout dl; VK(vkCreateDescriptorSetLayout(g_dev, &dli, NULL, &dl));
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dl };
@@ -202,7 +207,7 @@ int main(void) {
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi_u },
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 2, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, .pBufferInfo = &bi_w },
         { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 3, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = &ii_samp },
-        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 40, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii_out } };
+        { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = ibb, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, .pImageInfo = &ii_out } };
     vkUpdateDescriptorSets(g_dev, 5, wr, 0, NULL);
 
     /* ---- run ---- */

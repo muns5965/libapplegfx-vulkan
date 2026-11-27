@@ -488,7 +488,7 @@ void lagfx_pipeline_matrix_on_failure(VkDevice dev, const lagfx_pipeline_desc_t 
         return;
     }
     expanded++;
-    VkDescriptorSetLayoutBinding binds[32];
+    VkDescriptorSetLayoutBinding binds[LAGFX_LAYOUT_MAX_BINDINGS];
     const uint8_t *blobs[2] = { (const uint8_t *)failed->vertex_spv, (const uint8_t *)failed->fragment_spv };
     size_t lens[2] = { failed->vertex_spv_bytes, failed->fragment_spv_bytes };
     uint32_t nb = lagfx_layout_bindings_from_spv(blobs, lens, 2, binds);

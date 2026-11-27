@@ -79,7 +79,7 @@ typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded dept
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; } cache[A64_PIPE_CACHE];   /* topo: topology | 0x10 for the alt (explicit LOD) fragment shader */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | 0x10 for the alt (explicit LOD) fragment shader */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
     uint32_t ncache;
     uint32_t ref;
 } a64_pipe_t;
@@ -443,7 +443,7 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
 /* pl == VK_NULL_HANDLE records a failed build (looked up like a hit, returns NULL). */
 static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm[2], uint32_t topo, VkPipeline pl, a64_run_t *r) {
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo;
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo, pp->cache[pp->ncache].lkey = pp->src.layout_key;
     pp->ncache++;
 }
 
@@ -452,7 +452,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
     const uint32_t key = topo; topo &= 15u;   /* bit 4 of the key: build with the explicit-LOD fragment shader */
     for (uint32_t i = 0; i < pp->ncache; i++)
-        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key) return pp->cache[i].pl;
+        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
     if (key & 16u) d.fragment_shader = pp->src.alt_fragment_shader;
     d.color_format = fmts[0] != VK_FORMAT_UNDEFINED ? fmts[0] : VK_FORMAT_B8G8R8A8_UNORM;
