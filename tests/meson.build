@@ -1072,6 +1072,14 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-stage-link-unit.c')
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Offline VS-output / FS-input interface audit (tools/spv_iface_audit.py): fixtures are assembled in-process, no GPU or spirv-tools needed.
+py3_exe = find_program('python3', required : false)
+if py3_exe.found() and fs.is_file(meson.project_source_root() / 'tools' / 'test_spv_iface_audit.py')
+  test('spv interface audit (python)', py3_exe,
+    args : ['-W', 'ignore', meson.project_source_root() / 'tools' / 'test_spv_iface_audit.py'],
+    workdir : meson.project_source_root())
+endif
+
 # air.sample_texture_2d -> real OpImageSampleImplicitLod lowering.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-translate-unit.c')
   air2spv_txs_deps = [libapplegfx_vulkan_dep]
