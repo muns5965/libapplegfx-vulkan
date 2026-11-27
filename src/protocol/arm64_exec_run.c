@@ -55,6 +55,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "render_pass.h"
 #include "arm64_capture_rec.h"
 #include "arm64_msaa.h"
+#include "../vulkan/msaa_host.h"
 #include <vulkan/vulkan.h>
 
 #define A64_MAX_VB    31u
@@ -542,6 +543,17 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     if (r->vk->have_raster_order) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
     d.topology_plus1 = (uint8_t)(topo + 1u);
     d.raster_samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u);   /* must equal the attachments' count; the pipeline descriptor's own count field is not decoded [N]: taken from the pass (Metal requires them equal) */
+    if (lagfx_msaa_inject) {   /* UNWIRED test / injection hook (msaa_host.h): the pipeline descriptor's alpha-to-coverage and sample-shading bits are not decoded [N] */
+        d.alpha_to_coverage = lagfx_msaa_inject->alpha_to_coverage ? 1u : 0u;
+        if (lagfx_msaa_inject->sample_shading) {
+            if (!r->vk->have_sample_rate_shading) {   /* exact: refused and cached as a failed build, never built without per-sample shading */
+                p->diag2.exec.msaa.sample_shading_refused++;
+                cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r);
+                return VK_NULL_HANDLE;
+            }
+            d.sample_shading = 1u, d.min_sample_shading_permille = lagfx_msaa_inject->min_sample_shading_permille;
+        }
+    }
     VkPipeline pl = VK_NULL_HANDLE;
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
         p->diag2.exec.pipe.pipe_build_failed++;
@@ -551,6 +563,8 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     }
     p->diag2.exec.pipe.pipes_built++;
     if (r->ms.samples > 1u) p->diag2.exec.msaa.pipes_ms++;
+    if (d.alpha_to_coverage) p->diag2.exec.msaa.a2c_pipes++;
+    if (d.sample_shading) p->diag2.exec.msaa.sample_shading_pipes++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
     cache_put(pp, fmts, dfm, key, pl, r);
     return pl;

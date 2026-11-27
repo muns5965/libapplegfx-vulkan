@@ -660,6 +660,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_storage_img_write = feat2.features.shaderStorageImageWriteWithoutFormat && feat2.features.fragmentStoresAndAtomics;
     s->have_vertex_stores = feat2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
+    feat2.features.sampleRateShading = probe2.features.sampleRateShading ? VK_TRUE : VK_FALSE;   /* per-sample shading (sampleShadingEnable / SampleId): src/vulkan/msaa_host.h, unwired from the guest */
+    s->have_sample_rate_shading = feat2.features.sampleRateShading == VK_TRUE;
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
     if (cubic_ext) {
         wanted_dev_exts[wanted_dev_n++] = cubic_ext;

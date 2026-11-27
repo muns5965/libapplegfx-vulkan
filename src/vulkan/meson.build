@@ -12,6 +12,7 @@ lagfx_sources += files(
   'qcom_tile.c',
   'format_caps.c',
   'msaa.c',
+  'msaa_host.c',
   'command.c',
   'pipeline.c',
   'pipeline_build.c',

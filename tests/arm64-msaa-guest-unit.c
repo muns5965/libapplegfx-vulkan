@@ -13,6 +13,7 @@
  * SPDX-License-Identifier: MIT */
 #define LAGFX_COMPAT_NO_MAIN 1
 #include "arm64-render-compat-unit.c"
+#include "vulkan/msaa_host.h"
 
 #ifdef LAGFX_HAVE_VULKAN
 #include "protocol/arm64_msaa.h"
@@ -330,6 +331,22 @@ int main(void) {
       dim_set(1 | 4, 1 | 2);               assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 1u && ms.devinfo_clamped == 1);       /* no common count above 1 */
       lagfx_fmtcap_test_backend = NULL;
       puts("PASS device-info reply (arm64 and x86 table): MSAASamples = largest exact-mode count of the common colour + depth formats, ceiling 4: 1|4 -> 4 (2x gap counted devinfo_gap), 1|2|4 -> 4, 1|2|4|8 -> 4, 1 -> 1, 1|2 -> 2, colour 1|2|4 + depth 1|2 -> 2, colour 1|4 + depth 1|2 -> 1"); }
+
+    /* alpha-to-coverage / sample-shading plumbing from the injectable flag (msaa_host.h; UNWIRED from the guest pipeline descriptor [N]): the exec path's pipeline build carries them and counts them.
+     * The harness shader's alpha is 0.5: with the flag the resolved red can only drop (never rise), unchanged without it; the numeric a2c model is in vulkan-msaa-host-unit. */
+    { static const lagfx_msaa_inject_t a2c = { 1, 0, 0 }, ss = { 0, 1, 1000 }, none = { 0, 0, 0 };
+      static gr_t g0, g1, g2, g3; sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.sentinel = true;
+      gr_run(&s, &g0);
+      assert(g0.ms.a2c_pipes == 0 && g0.ms.sample_shading_pipes == 0 && g0.ms.sample_shading_refused == 0);
+      lagfx_msaa_inject = &a2c; gr_run(&s, &g1); lagfx_msaa_inject = NULL;
+      assert(g1.ms.a2c_pipes == 1 && g1.ms.sample_shading_pipes == 0 && g1.draws == 1 && g1.val == 0);
+      { unsigned lo = 0, hi = 0; for (size_t i = 2; i < sizeof g0.bgra; i += 4) { assert(g1.bgra[i] <= g0.bgra[i]); lo += g1.bgra[i] < g0.bgra[i]; hi += g0.bgra[i]; } assert(lo >= 6 && hi > 0); }   /* the shader's alpha is 0.5: fewer samples written, never more */
+      lagfx_msaa_inject = &none; gr_run(&s, &g2); lagfx_msaa_inject = NULL;
+      assert(g2.ms.a2c_pipes == 0 && g2.ms.sample_shading_pipes == 0 && memcmp(g0.bgra, g2.bgra, sizeof g0.bgra) == 0);
+      lagfx_msaa_inject = &ss; gr_run(&s, &g3); lagfx_msaa_inject = NULL;
+      if (g_dev->vk->have_sample_rate_shading) assert(g3.ms.sample_shading_pipes == 1 && g3.ms.sample_shading_refused == 0 && g3.draws == 1 && g3.val == 0 && memcmp(g0.bgra, g3.bgra, sizeof g0.bgra) == 0);
+      else assert(g3.ms.sample_shading_pipes == 0 && g3.ms.sample_shading_refused == 1 && g3.draws == 0);
+      puts("PASS alpha-to-coverage / sample-shading injection: the exec path's pipelines carry the flags (a2c_pipes / sample_shading_pipes counted, 0 without the hook), alpha 0.5 lowers the resolved red on edge/interior pixels (never raises it), a device without sampleRateShading refuses (sample_shading_refused) instead of building without it"); }
 
     /* 1/2: resolve by store action (2 = MultisampleResolve, 3 = StoreAndMultisampleResolve), both formats */
     test_resolve(false, 2, "store action 2");

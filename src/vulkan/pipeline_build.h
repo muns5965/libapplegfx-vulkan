@@ -101,6 +101,9 @@ typedef struct {
      * slot_blend[i] (i >= 1): that attachment's own blend state when .set, used only with independent_blend; otherwise slot i copies attachment 0. */
     uint8_t          masks_valid;
     uint8_t          raster_samples;        /* VkSampleCountFlagBits value of the pipeline's rasterizationSamples (1, 2, 4, ...); 0 = 1. Must equal the sample count of every attachment it draws to (src/vulkan/msaa.h) */
+    uint8_t          alpha_to_coverage;     /* VkPipelineMultisampleStateCreateInfo::alphaToCoverageEnable. NOT decoded from the guest pipeline descriptor [N]: set only by the injection hook lagfx_msaa_inject (src/vulkan/msaa_host.h) */
+    uint8_t          sample_shading;        /* sampleShadingEnable (needs the sampleRateShading device feature: the caller checks lagfx_vk_state::have_sample_rate_shading); same provenance as above */
+    uint32_t         min_sample_shading_permille;   /* minSampleShading * 1000 (0 = 1.0 when sample_shading is set) */
     uint8_t          raster_order_access;   /* set the colour-blend rasterization-order attachment access flag (framebuffer-fetch pipelines; needs the device feature) */
     struct { uint8_t set, enable; uint32_t src_rgb, dst_rgb, op_rgb, src_a, dst_a, op_a; } slot_blend[4];
     uint32_t         color_formats[4];

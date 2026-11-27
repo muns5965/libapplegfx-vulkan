@@ -76,6 +76,7 @@ struct lagfx_vk_state {
     bool have_filter_cubic;        /* LAGFX_CUBIC=1 AND the device has VK_EXT_filter_cubic (or the older VK_IMG_filter_cubic): the extension was enabled, VK_FILTER_CUBIC_EXT may be used (filter_cubic.h) */
     bool have_sampler_mirror_clamp; /* enabled device feature samplerMirrorClampToEdge (Vulkan 1.2) */
     bool have_independent_blend;   /* enabled device feature: per-attachment blend state / write masks may differ */
+    bool have_sample_rate_shading; /* enabled device feature sampleRateShading: pipelines may set sampleShadingEnable (multisample sample id / per-sample shading) */
     bool have_depth_bias_clamp;    /* enabled device feature depthBiasClamp: vkCmdSetDepthBias may carry a non-zero clamp */
     bool have_synchronization2;
     bool have_timeline_semaphore;
