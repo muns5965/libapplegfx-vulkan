@@ -431,9 +431,13 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
                 } else LAGFX_TRACE("air2spv: undef_used=%u of %u OpUndef, %u store(s) of possibly undefined values, no control flow affected", ur.undef_used, ur.undef_defs, ur.reach_store);
                 return LAGFX_OK;
             }
+            if (*out_blob) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; }
+            if (lagfx_air2spv_last_unlowered_refused()) {   /* refused BY NAME because a call has no lowering: no reference-stub fallback (a stub would silently draw the wrong thing) */
+                LAGFX_WARN("air2spv: translate_function refused (st=%d): an unlowered call; no stub fallback", (int)bst);
+                return LAGFX_ERR_PROTOCOL;
+            }
             LAGFX_WARN("air2spv: translate_function failed (st=%d); falling back",
                        (int)bst);
-            if (*out_blob) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; }
         }
     }
 

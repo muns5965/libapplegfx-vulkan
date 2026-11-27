@@ -192,6 +192,23 @@ const char *lagfx_air2spv_atomic_reason_name(unsigned reason);
 void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out);
 void lagfx_air2spv_set_atomic_lenient(int mode);   /* tests: 1 / 0 force lenient on / off, -1 back to the LAGFX_ATOMIC_LENIENT environment (default off) */
 
+/* Unlowered-call ledger (integ7b). A CALL that no lowering handled does NOT fail the translation by default: a non-void call is bound to a typed OpUndef (so value numbering stays
+ * in sync) and a void call is dropped. Every such call site is counted here by callee name (process-wide, always on, cheap) so that a silent undef is visible:
+ *   lagfx_air2spv_unlowered_calls        copy up to `cap` ledger rows (name, call sites, translations that contained it, void flag); returns the number of rows (may exceed cap)
+ *   lagfx_air2spv_unlowered_reset        clear the ledger (tests / scans)
+ *   lagfx_air2spv_last_unlowered         the calling thread's last translation: number of non-void unlowered calls named air.* / llvm.* (typed undef) and the first one's name
+ * Environment (read at every translation, default OFF, default behaviour unchanged):
+ *   LAGFX_LOG_UNLOWERED=1       one stderr line "g7-xlate-unlowered: <name> (<non-void: typed undef | void: dropped>)" per call site
+ *   LAGFX_STRICT_INTRINSICS=1   a translation containing a non-void unlowered air.* / llvm.* call FAILS (LAGFX_ERR_PROTOCOL) with a warning naming the first such call
+ * Default refusal (integ7b): a non-void unlowered `llvm.*` call (never air.*) fails the translation BY NAME; LAGFX_ALLOW_UNLOWERED_LLVM=1 restores the typed undef (the old behaviour). */
+#define LAGFX_UNLOWERED_NAME_MAX 96
+typedef struct { char name[LAGFX_UNLOWERED_NAME_MAX]; uint64_t sites, modules; uint8_t is_void; } lagfx_unlowered_call_t;
+size_t lagfx_air2spv_unlowered_calls(lagfx_unlowered_call_t *out, size_t cap);
+void lagfx_air2spv_unlowered_reset(void);
+uint32_t lagfx_air2spv_last_unlowered(char *first_name, size_t cap);
+uint64_t lagfx_air2spv_unlowered_refused(void);
+bool lagfx_air2spv_last_unlowered_refused(void);   /* the calling thread's last translation was refused because of an unlowered call (translate.c then must NOT fall back to a reference stub) */   /* process-wide: translations refused because of an unlowered non-void call */
+
 /* Internal (tests): look up an AIR math-intrinsic callee name in the GLSL.std.450 dispatch table. On a hit returns true and fills the GLSL.std.450 instruction
  * number, the operand count and whether it is a chained three-operand form (fmax3/fmin3); any out pointer may be NULL. */
 bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way);

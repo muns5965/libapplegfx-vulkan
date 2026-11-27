@@ -4067,6 +4067,10 @@ static const struct {
     {"air.precise.normalize", LAGFX_SPV_GLSL_NORMALIZE, 1},
     {"air.precise.length", LAGFX_SPV_GLSL_LENGTH,       1},
     /* Multi-operand intrinsics */
+    /* LLVM float intrinsics with an exact GLSL.std.450 row (integ7b). llvm.fma is the fused multiply-add. llvm.fmuladd(a, b, c) is "a * b + c, fused or not, the compiler's choice" (LangRef),
+     * so the fused Fma is a valid lowering (Apple GPUs fuse [I]). The suffix is the LLVM overload type: f32 / f16 / v4f32 ... */
+    {"llvm.fma.",          LAGFX_SPV_GLSL_FMA,          3 | IXF_FLOATSFX},
+    {"llvm.fmuladd.",      LAGFX_SPV_GLSL_FMA,          3 | IXF_FLOATSFX},
     {"air.fast.fmin",      LAGFX_SPV_GLSL_FMIN,         2},
     {"air.fast.fmax",      LAGFX_SPV_GLSL_FMAX,         2},
     {"air.fast.pow",       LAGFX_SPV_GLSL_POW,          2},
@@ -4536,6 +4540,63 @@ static bool ix_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_ins
 }
 
 /* ===================================================================
+ * LLVM integer intrinsics (integ7b)
+ *
+ * Newer Metal front ends leave some integer operations as plain `llvm.*` calls instead of air.* ones (found: `%58 = call i32 @llvm.umax.i32(i32 %54, i32 1)` in a video-encode kernel;
+ * unlowered it became a typed undef that reached the block-dispatch switch and the undef-control guard rejected the module). Names (LLVM LangRef) `llvm.<op>.<ty>`, <ty> = iN or <M x iN>:
+ *   umax umin smax smin (a, b)        -> GLSL.std.450 UMax / UMin / SMax / SMin (exact for every width; the operands are the same type)
+ *   abs (x, i1 is_int_min_poison)      -> select(x <s 0, 0 - x, x); abs(INT_MIN) = INT_MIN (the flag-false result; with the flag true that input is poison, so any value is valid)
+ *   ctlz / cttz (x, i1 is_zero_poison) -> the existing clz / ctz lowering (ix_count_zeros): 0 gives the bit width (the flag-false result; with the flag true a zero input is poison, so it is valid too)
+ *   ctpop (x)  bitreverse (x)          -> OpBitCount / OpBitReverse
+ *   bswap (x)                          -> byte swap by shifts and masks (widths 16 / 32 / 64; 8 is the identity)
+ *   fshl / fshr (a, b, s)              -> funnel shifts, the shift amount taken modulo the width: fshl = (a << m) | ((b >> 1) >> (w-1-m)); fshr = ((a << 1) << (w-1-m)) | (b >> m), m = s & (w-1)
+ *                                         (the double shift keeps every count below the width: m = 0 gives a / b exactly, no select needed)
+ * i1 / odd widths and any shape the code does not understand return false BEFORE anything is emitted and take the (now named) unlowered-call path.
+ * =================================================================== */
+static uint32_t ix_glsl2(xlate_ctx_t *c, uint32_t ty, uint32_t into, uint32_t inst, uint32_t a, uint32_t b) { uint32_t g[] = { c->id_glsl, inst, a, b }; return ix_e(c, LAGFX_SPV_OP_EXT_INST, ty, into, g, 4u); }
+
+static bool llvm_try_emit(xlate_ctx_t *c, const char *fn_name, const lagfx_air_inst_t *inst, uint32_t callee_slot_idx,
+                          uint32_t result_value_id, uint32_t result_ty_air, uint32_t next_val_id) {
+    if (strncmp(fn_name, "llvm.", 5u) != 0 || result_value_id == 0u || result_ty_air == LAGFX_AIR_TYPE_NONE) return false;
+    const char *p = fn_name + 5;
+    const char *dot = strchr(p, '.');
+    if (!dot || (size_t)(dot - p) >= 16u) return false;
+    char op[16]; memcpy(op, p, (size_t)(dot - p)); op[dot - p] = 0;
+    const char *ty = dot + 1;                       /* "i32" / "v4i16": must be exactly an integer overload type, nothing after it */
+    { const char *q = ty; if (*q == 'v') { q++; if (*q < '1' || *q > '9') return false; while (*q >= '0' && *q <= '9') q++; }
+      if (*q != 'i' || q[1] < '1' || q[1] > '9') return false; q++; while (*q >= '0' && *q <= '9') q++; if (*q) return false; }
+    enum { K_NONE, K_UMAX, K_UMIN, K_SMAX, K_SMIN } k = K_NONE;
+    uint32_t nargs = 0;
+    if      (!strcmp(op, "umax"))       { k = K_UMAX;  nargs = 2u; }
+    else if (!strcmp(op, "umin"))       { k = K_UMIN;  nargs = 2u; }
+    else if (!strcmp(op, "smax"))       { k = K_SMAX;  nargs = 2u; }
+    else if (!strcmp(op, "smin"))       { k = K_SMIN;  nargs = 2u; }
+    if (k == K_NONE) return false;
+    ix_t x;
+    if (!ix_shape(c, result_ty_air, &x)) return false;
+    uint32_t a0 = callee_slot_idx + 1u;
+    if (inst->num_ops != a0 + nargs) return false;     /* the exact LangRef operand count: a different arity is not the intrinsic we know */
+    uint32_t arg[3] = { 0 };
+    for (uint32_t i = 0; i < nargs; i++) {
+        arg[i] = resolve_or_undef(c, resolve_relative((uint32_t)inst->ops[a0 + i], next_val_id), x.ty);
+    }
+    uint32_t res = resolve_value_spv(c, result_value_id);
+    if (!res) res = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t ty_ = x.ty, w = x.w;
+    switch (k) {
+    case K_UMAX: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_UMAX, arg[0], arg[1]); break;
+    case K_UMIN: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_UMIN, arg[0], arg[1]); break;
+    case K_SMAX: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_SMAX, arg[0], arg[1]); break;
+    case K_SMIN: ix_glsl2(c, ty_, res, LAGFX_SPV_GLSL_SMIN, arg[0], arg[1]); break;
+    default: return false;
+    }
+    bind_value_spv(c, result_value_id, res);
+    set_result_air_type(c, result_value_id, result_ty_air);
+    LAGFX_TRACE("call: llvm intrinsic '%s' lowered (value-id %u)", fn_name, result_value_id);
+    return true;
+}
+
+/* ===================================================================
  * air.sample_texture_{2d,3d} option operands (X04)
  *
  *   (tex, samp, coord, [i32 array_index,] i1 has_offset, <N x i32> offset,
@@ -4817,6 +4878,60 @@ uint32_t lagfx_air2spv_last_unsupported_atomic(char *first_name, size_t cap) {
     return t_unsup_atomic.n;
 }
 unsigned lagfx_air2spv_last_atomic_reason(void) { return t_unsup_atomic.n ? t_unsup_atomic.first_reason : (unsigned)LAGFX_ATOMIC_R_NONE; }
+
+/* ===================================================================
+ * Unlowered-call ledger (integ7b; see translate_function.h). The single place where a CALL that no lowering handled degrades (typed undef / dropped) reports here.
+ * =================================================================== */
+#define UC_MAX 256u
+static struct { char name[LAGFX_UNLOWERED_NAME_MAX]; uint64_t sites, modules, last_serial; uint8_t is_void; } g_uc[UC_MAX];
+static size_t g_uc_n;           /* rows used */
+static uint64_t g_uc_overflow;  /* call sites that did not fit (ledger full) */
+static atomic_flag g_uc_lock = ATOMIC_FLAG_INIT;
+static _Atomic uint64_t g_xlate_serial;
+static _Thread_local uint64_t t_xlate_serial;
+static _Thread_local struct { uint32_t n, n_llvm; char first[LAGFX_UNLOWERED_NAME_MAX], first_llvm[LAGFX_UNLOWERED_NAME_MAX]; } t_unlowered;   /* non-void air.* / llvm.* (n) and llvm.* only (n_llvm) calls of the current translation */
+static _Thread_local bool t_unlowered_refused;   /* the last translation of this thread was refused because of an unlowered call */
+static _Atomic uint64_t g_uc_refused;                                                                                  /* translations refused because of an unlowered non-void call */
+static bool env_flag1(const char *name) { const char *v = getenv(name); return v && v[0] == '1' && v[1] == '\0'; }
+
+static void note_unlowered_call(const char *fn_name, bool is_void) {
+    while (atomic_flag_test_and_set_explicit(&g_uc_lock, memory_order_acquire)) { }
+    size_t i = 0;
+    for (; i < g_uc_n; i++) if (g_uc[i].is_void == (uint8_t)is_void && !strncmp(g_uc[i].name, fn_name, LAGFX_UNLOWERED_NAME_MAX - 1u)) break;
+    if (i == g_uc_n) {
+        if (g_uc_n < UC_MAX) { snprintf(g_uc[i].name, sizeof g_uc[i].name, "%s", fn_name); g_uc[i].is_void = (uint8_t)is_void; g_uc[i].sites = g_uc[i].modules = g_uc[i].last_serial = 0; g_uc_n++; }
+        else { g_uc_overflow++; i = (size_t)-1; }
+    }
+    if (i != (size_t)-1) {
+        g_uc[i].sites++;
+        if (g_uc[i].last_serial != t_xlate_serial) { g_uc[i].last_serial = t_xlate_serial; g_uc[i].modules++; }
+    }
+    atomic_flag_clear_explicit(&g_uc_lock, memory_order_release);
+    if (!is_void && (!strncmp(fn_name, "air.", 4u) || !strncmp(fn_name, "llvm.", 5u))) {
+        if (!t_unlowered.n) snprintf(t_unlowered.first, sizeof t_unlowered.first, "%s", fn_name);
+        t_unlowered.n++;
+        if (!strncmp(fn_name, "llvm.", 5u)) { if (!t_unlowered.n_llvm) snprintf(t_unlowered.first_llvm, sizeof t_unlowered.first_llvm, "%s", fn_name); t_unlowered.n_llvm++; }
+    }
+    if (env_flag1("LAGFX_LOG_UNLOWERED")) fprintf(stderr, "g7-xlate-unlowered: %s (%s)\n", fn_name, is_void ? "void: dropped" : "non-void: typed undef");
+}
+size_t lagfx_air2spv_unlowered_calls(lagfx_unlowered_call_t *out, size_t cap) {
+    while (atomic_flag_test_and_set_explicit(&g_uc_lock, memory_order_acquire)) { }
+    size_t n = g_uc_n;
+    for (size_t i = 0; out && i < n && i < cap; i++) { snprintf(out[i].name, sizeof out[i].name, "%s", g_uc[i].name); out[i].sites = g_uc[i].sites; out[i].modules = g_uc[i].modules; out[i].is_void = g_uc[i].is_void; }
+    atomic_flag_clear_explicit(&g_uc_lock, memory_order_release);
+    return n;
+}
+void lagfx_air2spv_unlowered_reset(void) {
+    while (atomic_flag_test_and_set_explicit(&g_uc_lock, memory_order_acquire)) { }
+    g_uc_n = 0; g_uc_overflow = 0;
+    atomic_flag_clear_explicit(&g_uc_lock, memory_order_release);
+}
+uint64_t lagfx_air2spv_unlowered_refused(void) { return atomic_load(&g_uc_refused); }
+bool lagfx_air2spv_last_unlowered_refused(void) { return t_unlowered_refused; }
+uint32_t lagfx_air2spv_last_unlowered(char *first_name, size_t cap) {
+    if (first_name && cap) snprintf(first_name, cap, "%s", t_unlowered.n ? t_unlowered.first : "");
+    return t_unlowered.n;
+}
 
 static uint32_t gep_base_storage_class(const xlate_ctx_t *c, uint32_t ptr_value_id);
 static uint32_t buffer_arg_runtimearray_elem(xlate_ctx_t *c, uint32_t ptr_value_id);
@@ -6093,6 +6208,9 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     /* === integer intrinsics without a GLSL.std.450 row (clz / ctz / popcount / reverse_bits / ...): see ix_try_emit === */
     if (!glsl_inst && ix_try_emit(c, fn_name, inst, callee_slot_idx, result_value_id, result_ty_air, next_val_id))
         return;
+    /* === integer LLVM intrinsics (llvm.umax / smin / abs / ctlz / fshl ...): see llvm_try_emit === */
+    if (!glsl_inst && llvm_try_emit(c, fn_name, inst, callee_slot_idx, result_value_id, result_ty_air, next_val_id))
+        return;
 
     /* === Registered UberShader helper → OpFunctionCall ===============
      * The callee is a real (non-proto) function in the SAME metallib that
@@ -6127,6 +6245,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
      *     structurally + type correct, which is what downstream BINOP/etc.
      *     type resolution needs. Real image-op lowering is separate. */
     if (!glsl_inst) {
+        note_unlowered_call(fn_name, !(result_value_id != 0u && !air_type_is_void(c, result_ty_air)));
         if (result_value_id != 0u && !air_type_is_void(c, result_ty_air)) {
             uint32_t ph_ty = (result_ty_air != LAGFX_AIR_TYPE_NONE)
                                 ? emit_air_type(c, result_ty_air)
@@ -10493,6 +10612,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     xlate_ctx_t c = {0};
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
     t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;
+    t_unlowered_refused = false; t_unlowered.n = t_unlowered.n_llvm = 0; t_unlowered.first[0] = t_unlowered.first_llvm[0] = 0; t_xlate_serial = atomic_fetch_add(&g_xlate_serial, 1u) + 1u;
     c.b = lagfx_spv_builder_create(256u);
     if (!c.b) return LAGFX_ERR_OUT_OF_MEMORY;
     c.m = m;
@@ -10586,6 +10706,17 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
         __atomic_add_fetch(&g_atomic_tot.refused, t_unsup_atomic.n, __ATOMIC_RELAXED);
         __atomic_add_fetch(&g_atomic_tot.modules_rejected, 1u, __ATOMIC_RELAXED);
         LAGFX_WARN("air2spv: module not translated: %u atomic operation(s) not implemented (first: %s, reason: %s)", t_unsup_atomic.n, t_unsup_atomic.first, lagfx_air2spv_atomic_reason_name(t_unsup_atomic.first_reason));
+        st = LAGFX_ERR_PROTOCOL;
+        goto fail;
+    }
+    /* A NON-VOID `llvm.*` call that no lowering handled has no defined result here: a typed undef would silently stand in for a value the shader computes (found: llvm.umax.i32 steering a
+     * switch). It is refused BY NAME (default; none of the captured device modules contains one: docs/spec-audit.md "Unlowered calls"). LAGFX_ALLOW_UNLOWERED_LLVM=1 restores the typed undef.
+     * LAGFX_STRICT_INTRINSICS=1 (opt-in, default OFF) extends the refusal to non-void air.* calls (never done by default: translated modules in the repo's own fixtures rely on them degrading). */
+    if ((t_unlowered.n_llvm && !env_flag1("LAGFX_ALLOW_UNLOWERED_LLVM")) || (t_unlowered.n && env_flag1("LAGFX_STRICT_INTRINSICS"))) {
+        const bool llvm_first = t_unlowered.n_llvm && !env_flag1("LAGFX_ALLOW_UNLOWERED_LLVM");
+        LAGFX_WARN("air2spv: module not translated: %u call(s) have no lowering and would be undefined values (first: %s)", llvm_first ? t_unlowered.n_llvm : t_unlowered.n, llvm_first ? t_unlowered.first_llvm : t_unlowered.first);
+        __atomic_add_fetch(&g_uc_refused, 1u, __ATOMIC_RELAXED);
+        t_unlowered_refused = true;
         st = LAGFX_ERR_PROTOCOL;
         goto fail;
     }

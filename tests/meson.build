@@ -1871,6 +1871,19 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-unit.c')
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Unlowered-call ledger + named refusal of unlowered llvm.* calls (integ7b).
+if fs.is_file(meson.current_source_dir() / 'air2spv-llvm-unlowered-unit.c')
+  air2spv_llvm_unl_test = executable('air2spv-llvm-unlowered-unit',
+    'air2spv-llvm-unlowered-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv unlowered calls (unit)', air2spv_llvm_unl_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # air.sample_texture_{2d,3d} option operands (census X04): bias / explicit level / constant offset / min_lod, checked per call at the SPIR-V level + spirv-val.
 if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-options-unit.c')
   air2spv_tso_test = executable('air2spv-texture-sample-options-unit',

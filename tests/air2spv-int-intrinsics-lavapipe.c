@@ -10,6 +10,7 @@
 #include "air/bitcode_reader.h"
 
 #include <vulkan/vulkan.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -223,7 +224,67 @@ static void ref_conv_c(int x, int y, float o[4]) { int d = x - 32; (void)y; o[0]
 static void ref_nan_a(int x, int y, float o[4]) { float v = 0.25f * (float)x; (void)y; o[0] = o[1] = o[2] = o[3] = v; }
 static void ref_nan_b(int x, int y, float o[4]) { float v = 0.25f * (float)x; (void)y; o[0] = 0.5f; o[1] = v < 4.0f ? v : 4.0f; o[2] = v > 0.5f ? v : 0.5f; o[3] = 0.0f; }
 
-typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); int nanmax; } case_t;   /* nanmax: 0 = default translation; 1 = D2 NMin/NMax/NClamp forced on; 2 = default translation, REPORT only (what FMin/FMax/FClamp do with a NaN on this device is unspecified) */
+
+/* ---- integ7b: LLVM integer / fma intrinsics (fixtures rt_llvm_*; gen-llvm-int-fixtures.sh). References follow the LLVM LangRef; each has a negative control = a plausible WRONG model. ---- */
+static uint64_t smaxw(uint64_t a, uint64_t b, unsigned w) { return sx(a, w) > sx(b, w) ? a : b; }
+static uint64_t sminw(uint64_t a, uint64_t b, unsigned w) { return sx(a, w) < sx(b, w) ? a : b; }
+static uint64_t umaxw(uint64_t a, uint64_t b) { return a > b ? a : b; }
+static uint64_t uminw(uint64_t a, uint64_t b) { return a < b ? a : b; }
+static void hilo(uint64_t r, float *hi, float *lo) { *hi = (float)(r >> 16 & 0xffffu); *lo = (float)(r & 0xffffu); }
+static void ref_l_umax(int x, int y, float o[4]) { o[0] = (float)umaxw(gen_in(x, 8), gen_in(y, 8)); o[1] = (float)umaxw(gen_in(x, 16), gen_in(y, 16)); hilo(umaxw(gen_in(x, 32), gen_in(y, 32)), &o[2], &o[3]); }
+static void neg_l_umax(int x, int y, float o[4]) { o[0] = (float)uminw(gen_in(x, 8), gen_in(y, 8)); o[1] = (float)uminw(gen_in(x, 16), gen_in(y, 16)); hilo(uminw(gen_in(x, 32), gen_in(y, 32)), &o[2], &o[3]); }   /* umin instead of umax */
+static void ref_l_uminsmin(int x, int y, float o[4]) { o[0] = (float)uminw(gen_in(x, 8), gen_in(y, 8)); o[1] = (float)sminw(gen_in(x, 16), gen_in(y, 16), 16); hilo(sminw(gen_in(x, 32), gen_in(y, 32), 32), &o[2], &o[3]); }
+static void neg_l_uminsmin(int x, int y, float o[4]) { ref_l_uminsmin(x, y, o); hilo(uminw(gen_in(x, 32), gen_in(y, 32)), &o[2], &o[3]); o[1] = (float)uminw(gen_in(x, 16), gen_in(y, 16)); }   /* the unsigned min for the signed ones */
+static void ref_l_minmax64(int x, int y, float o[4]) {
+    uint64_t a = gen_in(x, 64), b = gen_in(y, 64);
+    o[0] = (float)smaxw(gen_in(x, 8), gen_in(y, 8), 8); o[1] = fold64(umaxw(a, b)); o[2] = fold64(sminw(a, b, 64)); o[3] = fold64(smaxw(a, b, 64));
+}
+static void neg_l_minmax64(int x, int y, float o[4]) { uint64_t a = gen_in(x, 64), b = gen_in(y, 64); ref_l_minmax64(x, y, o); o[2] = fold64(uminw(a, b)); o[3] = fold64(umaxw(a, b)); o[0] = (float)umaxw(gen_in(x, 8), gen_in(y, 8)); }
+static void ref_l_minmaxvec(int x, int y, float o[4]) {
+    uint64_t a8 = gen_in(x, 8) ^ 170u, b8 = wmask(gen_in(y, 8) + 2u, 8), a16 = gen_in(x, 16) ^ 0x1111u, b16 = wmask(gen_in(y, 16) + 1u, 16);
+    uint64_t a32 = wmask(gen_in(x, 32) ^ 0xffffffffu, 32), b32 = wmask(gen_in(y, 32) + 3u, 32), a64 = gen_in(x, 64) ^ 0x5555555555555555ull, b64 = gen_in(y, 64);
+    uint64_t r2 = umaxw(a32, b32);
+    o[0] = (float)smaxw(a8, b8, 8); o[1] = (float)uminw(a16, b16); o[2] = (float)((r2 >> 16) ^ (r2 & 0xffffu)); o[3] = fold64(sminw(a64, b64, 64));
+}
+static void neg_l_minmaxvec(int x, int y, float o[4]) {   /* lane 0 of the vectors instead of the lanes the fixture extracts */
+    uint64_t a8 = gen_in(x, 8), b8 = gen_in(y, 8), a16 = gen_in(x, 16), b16 = gen_in(y, 16), a32 = gen_in(x, 32), b32 = gen_in(y, 32), a64 = gen_in(x, 64), b64 = gen_in(y, 64), r2 = umaxw(a32, b32);
+    o[0] = (float)smaxw(a8, b8, 8); o[1] = (float)uminw(a16, b16); o[2] = (float)((r2 >> 16) ^ (r2 & 0xffffu)); o[3] = fold64(sminw(a64, b64, 64));
+}
+static uint64_t absw(uint64_t v, unsigned w) { return sx(v, w) < 0 ? wmask(0u - v, w) : v; }   /* abs(MIN) = MIN (is_int_min_poison = false) */
+static void ref_l_abs(int x, int y, float o[4]) { o[0] = (float)absw(gen_in(y, 8), 8); o[1] = (float)absw(gen_in(x, 16), 16); hilo(absw(gen_in(x, 32), 32), &o[2], &o[3]); }
+static void neg_l_abs(int x, int y, float o[4]) { ref_l_abs(x, y, o); uint64_t v = gen_in(x, 32); hilo(v == 0x80000000u ? 0x7fffffffu : absw(v, 32), &o[2], &o[3]); o[0] = (float)gen_in(y, 8); }   /* abs(MIN) saturated / abs missing */
+static void neg_l_bits32(int x, int y, float o[4]) { ref_bits32(x, y, o); if (x == 0) o[0] = o[1] = 0.0f; }               /* clz(0) = ctz(0) = 0 instead of the width */
+static void ref_l_bitsnw(int x, int y, float o[4]) { uint32_t a = inA(x); uint64_t l = inL(x); (void)y; o[0] = (float)clzw(a & 0xffffu, 16); o[1] = (float)ctzw(a & 0xffu, 8); o[2] = (float)clzw(l, 64); o[3] = (float)ctzw(l, 64); }
+static void neg_l_bitsnw(int x, int y, float o[4]) { ref_l_bitsnw(x, y, o); uint32_t a = inA(x); o[0] = (float)clzw(a, 32); o[1] = (float)ctzw(a & 0xffu, 32); }   /* the 32-bit counts for the narrow operands */
+static void ref_l_bitsflag(int x, int y, float o[4]) { uint32_t a = inA(x), n = a | 2048u; (void)y; o[0] = (float)clzw(n, 32); o[1] = (float)ctzw(n, 32); o[2] = (float)popc(a | 256u); o[3] = (float)bitrev(a & 0xffffu, 16); }
+static void neg_l_bitsflag(int x, int y, float o[4]) { uint32_t a = inA(x); ref_l_bitsflag(x, y, o); o[3] = (float)bitrev(a, 32); o[2] = (float)popc(a); }
+static void ref_l_bswap(int x, int y, float o[4]) {
+    uint64_t a16 = gen_in(x, 16), a32 = gen_in(y, 32), a64 = gen_in(x, 64);
+    o[0] = (float)(((a16 & 0xffu) << 8) | (a16 >> 8)); uint32_t s32 = __builtin_bswap32((uint32_t)a32); o[1] = (float)(s32 >> 16); o[2] = (float)(s32 & 0xffffu); o[3] = fold64(__builtin_bswap64(a64));
+}
+static void neg_l_bswap(int x, int y, float o[4]) { uint64_t a16 = gen_in(x, 16), a32 = gen_in(y, 32), a64 = gen_in(x, 64); o[0] = (float)a16; o[1] = (float)(a32 >> 16); o[2] = (float)(a32 & 0xffffu); o[3] = fold64(a64); }   /* no swap */
+static uint64_t fshlw(uint64_t a, uint64_t b, unsigned s, unsigned w) { unsigned m = s % w; return m ? wmask((a << m) | (b >> (w - m)), w) : a; }
+static uint64_t fshrw(uint64_t a, uint64_t b, unsigned s, unsigned w) { unsigned m = s % w; return m ? wmask((a << (w - m)) | (b >> m), w) : b; }
+static void ref_l_funnel(int x, int y, float o[4]) {
+    unsigned s = (unsigned)x + 3u * (unsigned)y;
+    o[0] = (float)fshlw(gen_in(x, 8), gen_in(y, 8), s, 8); o[1] = (float)fshrw(gen_in(y, 16), gen_in(x, 16), s, 16); hilo(fshlw(gen_in(x, 32), gen_in(y, 32), s, 32), &o[2], &o[3]);
+}
+static void neg_l_funnel(int x, int y, float o[4]) {   /* shift amount clamped to the width instead of taken modulo it; fshr for fshl */
+    unsigned s = (unsigned)x + 3u * (unsigned)y; unsigned s8 = s > 8 ? 8 : s, s16 = s > 16 ? 16 : s, s32 = s > 32 ? 32 : s;
+    o[0] = (float)(s8 == 8 ? gen_in(y, 8) : fshlw(gen_in(x, 8), gen_in(y, 8), s8, 8)); o[1] = (float)(s16 == 16 ? gen_in(x, 16) : fshrw(gen_in(y, 16), gen_in(x, 16), s16, 16)); hilo(fshrw(gen_in(x, 32), gen_in(y, 32), s32, 32), &o[2], &o[3]);
+}
+static void ref_l_funnel2(int x, int y, float o[4]) {
+    unsigned s = (unsigned)x + 3u * (unsigned)y; uint64_t a32 = gen_in(x, 32), b32 = gen_in(y, 32);
+    hilo(fshrw(a32, b32, s, 32), &o[0], &o[1]); o[2] = fold64(fshlw(gen_in(y, 64), gen_in(x, 64), s, 64)); uint64_t rot = fshlw(a32, a32, s, 32); o[3] = (float)((rot >> 16) ^ (rot & 0xffffu));
+}
+static void neg_l_funnel2(int x, int y, float o[4]) { unsigned s = (unsigned)x + 3u * (unsigned)y; uint64_t a32 = gen_in(x, 32), b32 = gen_in(y, 32); ref_l_funnel2(x, y, o); hilo(fshlw(a32, b32, s, 32), &o[0], &o[1]); uint64_t rot = fshrw(a32, a32, s, 32); o[3] = (float)((rot >> 16) ^ (rot & 0xffffu)); }
+static void ref_l_fma(int x, int y, float o[4]) {
+    float e = (float)x * 0x1p-8f, a = e + 1.0f, c = -((e * 2.0f) + 1.0f), d = (float)y * 0x1p-8f;   /* every value exact: see gen-llvm-int-fixtures.sh */
+    o[0] = fmaf(a, a, c); o[1] = o[0]; o[2] = o[0]; o[3] = fmaf(d, 3.0f, a);
+}
+static void neg_l_fma(int x, int y, float o[4]) { float e = (float)x * 0x1p-8f, a = e + 1.0f, c = -((e * 2.0f) + 1.0f); ref_l_fma(x, y, o); o[0] = o[1] = o[2] = a * a - c; }   /* wrong sign of the addend */
+
+typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); int nanmax; void (*neg)(int x, int y, float o[4]); } case_t;   /* neg: negative control (integ7b): a deliberately WRONG model that the pixels must NOT match, so the comparison is shown to discriminate */   /* nanmax: 0 = default translation; 1 = D2 NMin/NMax/NClamp forced on; 2 = default translation, REPORT only (what FMin/FMax/FClamp do with a NaN on this device is unspecified) */
 static const case_t cases[] = {
     { "rt_bits32_fragment.air.bc",     65, 65, ref_bits32 },
     { "rt_bitsnarrow_fragment.air.bc", 65, 65, ref_narrow },
@@ -252,6 +313,12 @@ static const case_t cases[] = {
     { "rt_nanmax_b_fragment.air.bc",   65, 65, ref_nan_b, 1 },
     { "rt_nanmax_a_fragment.air.bc",   65, 65, ref_nan_a, 2 },
     { "rt_nanmax_b_fragment.air.bc",   65, 65, ref_nan_b, 2 },
+    /* integ7b: LLVM intrinsics (llvm.umax / umin / smax / smin / abs / ctlz / cttz / ctpop / bitreverse / bswap / fshl / fshr / fma / fmuladd), each with a negative control */
+    { "rt_llvm_umax_fragment.air.bc",     65, 65, ref_l_umax,     0, neg_l_umax },
+    { "rt_llvm_uminsmin_fragment.air.bc", 65, 65, ref_l_uminsmin, 0, neg_l_uminsmin },
+    { "rt_llvm_minmax64_fragment.air.bc", 65, 65, ref_l_minmax64, 0, neg_l_minmax64 },
+    { "rt_llvm_minmaxvec_fragment.air.bc", 65, 65, ref_l_minmaxvec, 0, neg_l_minmaxvec },
+    { "rt_llvm_fma_fragment.air.bc",      65, 65, ref_l_fma,      0, neg_l_fma },
 };
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;
@@ -337,6 +404,13 @@ static int run_case(const case_t *cs) {
                 bad++;
             }
         }
+    if (cs->neg) {   /* negative control: the same pixels compared with a deliberately wrong model must differ (shows the comparison above can fail) */
+        int nbad = 0;
+        for (int y = 0; y < H; y++)
+            for (int x = 0; x < W; x++) { float wrong[4]; cs->neg(x, y, wrong); if (memcmp(px + ((size_t)y * W + x) * 4, wrong, sizeof wrong) != 0) nbad++; }
+        CHECK(nbad > 0, "%s: negative control: every pixel also matches the wrong model (the reference cannot tell)", cs->fixture);
+        printf("negative control %s: %d of %d pixels differ from the wrong model\n", cs->fixture, nbad, W * H);
+    }
     if (cs->nanmax == 2) {   /* FMin / FMax / FClamp: undefined for a NaN; say what this device does, assert nothing */
         printf("NOTE: %s with FMin/FMax/FClamp (default translation): %d of %d pixels equal the NaN-aware (NMin/NMax/NClamp) reference%s\n", cs->fixture, W * H - bad, W * H,
                bad ? " -> the opt-in candidate DOES change the result on this device" : " -> lavapipe's FMin/FMax/FClamp already return the non-NaN operand: no observable difference here, only the phone can tell for Adreno");

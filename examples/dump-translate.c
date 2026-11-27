@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
                 const lagfx_stage_keys_t *vk = NULL;
                 if (nvs) vk = find_vsk(vsl[vi]);
                 if (nvs && !vk) { fprintf(stderr, "%s %s: translate failed (paired vertex shader %s not in the dump)\n", e->d_name, fn[k].name, vsl[vi]); bad++; continue; }
+                if (getenv("LAGFX_LOG_UNLOWERED")) fprintf(stderr, "g7-xlate-module: %s %s\n", libh, fn[k].name);   /* attributes the g7-xlate-unlowered lines that follow */
                 lagfx_status_t s = lagfx_air2spv_translate_module_ex(m, vk, &spv, &sz);
                 if (s != LAGFX_OK || !spv) { fprintf(stderr, "%s %s: translate failed\n", e->d_name, fn[k].name); bad++; continue; }
                 char out[1400]; snprintf(out, sizeof out, "%s/%.*s_%s_%s", argv[2], (int)(strlen(e->d_name) - 8), e->d_name + 4, fn[k].name, st);
