@@ -4,6 +4,7 @@
 #include "../common/log.h"
 
 #ifdef LAGFX_HAVE_VULKAN
+#include <stdio.h>
 #include <string.h>
 
 #define MS(p) ((p)->diag2.exec.msaa)
@@ -86,6 +87,19 @@ static bool same_shape(const lagfx_a64_obj_t *t, const lagfx_a64_obj_t *r) {
     return r->kind == LAGFX_A64_TEXTURE && !r->ds_aspects && r->img_type == VK_IMAGE_TYPE_2D && r->samples_req <= 1u && r != t && r->format == t->format && r->width == t->width && r->height == t->height;
 }
 
+/* Why the resolve texture `rref` cannot be the resolve target of multisampled attachment `t` (NULL = it can; *out = the object). Shared by the pass gate and lagfx_a64_msaa_color. */
+static const char *resolve_why(lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *t, uint32_t rref, bool sub_nonzero, const lagfx_a64_obj_t *const attached[4], lagfx_a64_obj_t **out) {
+    lagfx_a64_obj_t *r = rref ? lagfx_a64_res_object(x, rref) : NULL;
+    *out = r;
+    if (!rref) return "resolve_texture_none";
+    if (!r) return "resolve_texture_missing";
+    if (sub_nonzero) return "resolve_subresource";
+    if (!same_shape(t, r)) return "resolve_shape_mismatch";
+    if (!(r->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return "resolve_not_attachable";
+    for (uint32_t q = 0; q < 4u; q++) if (attached[q] == r) return "resolve_is_attachment";
+    return NULL;
+}
+
 bool lagfx_a64_msaa_color(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms, uint32_t slot, uint32_t cidx, lagfx_a64_obj_t *t, uint32_t store_action, uint32_t resolve_ref,
                           bool resolve_sub_nonzero, const lagfx_a64_obj_t *const attached[4], VkRenderingAttachmentInfo *ca) {
     const bool fallback = t->samples <= 1u && t->samples_req > 1u;   /* the guest texture is multisampled, the host image is not */
@@ -104,11 +118,9 @@ bool lagfx_a64_msaa_color(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_m
     const bool wants_resolve = store_action == 2u || store_action == 3u;
     lagfx_a64_obj_t *r = NULL;
     if (wants_resolve) {
-        r = resolve_ref ? lagfx_a64_res_object(x, resolve_ref) : NULL;
-        bool ok = r && !resolve_sub_nonzero && same_shape(t, r) && (r->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT);
-        for (uint32_t q = 0; ok && q < 4u; q++) if (attached[q] == r) ok = false;
-        if (ok && fallback) ok = (t->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && (r->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT);   /* the 1x copy needs the transfer usages */
-        if (!ok) r = NULL;
+        const char *why = resolve_why(x, t, resolve_ref, resolve_sub_nonzero, attached, &r);
+        if (!why && fallback && !((t->usage & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) && (r->usage & VK_IMAGE_USAGE_TRANSFER_DST_BIT))) why = "copy_usage";   /* the 1x copy needs the transfer usages */
+        if (why) r = NULL, ms->fail = why;
     }
     VkAttachmentStoreOp so; bool res;
     const bool known = lagfx_msaa_store_map(store_action, r != NULL, &so, &res);
@@ -125,10 +137,109 @@ bool lagfx_a64_msaa_color(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_m
         return false;
     }
     VkImageView rv; uint32_t w, h;
-    if (slot >= 4u || !lagfx_a64_res_target_begin(x, r, &rv, &w, &h)) { MS(p).resolve_no_target++; ca->storeOp = VK_ATTACHMENT_STORE_OP_STORE; return false; }
+    if (slot >= 4u || !lagfx_a64_res_target_begin(x, r, &rv, &w, &h)) { MS(p).resolve_no_target++; ca->storeOp = VK_ATTACHMENT_STORE_OP_STORE; ms->fail = "resolve_target_begin"; return false; }
     ca->resolveMode = lagfx_msaa_resolve_mode(t->format), ca->resolveImageView = rv, ca->resolveImageLayout = ca->imageLayout;
     ms->res[slot] = r, ms->nres++;
     MS(p).resolves++;
+    return true;
+}
+
+
+/* ---- exact-mode whole-pass rejection ---- */
+static char g_last_reject[96];
+const char *lagfx_a64_msaa_last_reject(void) { return g_last_reject; }
+
+void lagfx_a64_msaa_reject(lagfx_protocol_t *p, const lagfx_a64_msaa_veto_t *v) {
+    static unsigned logged;
+    MS(p).ms_pass_refused++;
+    snprintf(g_last_reject, sizeof g_last_reject, "%s: %s", v->what, v->why);
+    if (logged++ < 16u) LAGFX_WARN("g7-gpu-msaa: mode=exact whole pass REJECTED (no draw, no partial rendering): %s ref=%u (LAGFX_MSAA_COMPAT=1 would skip just that attachment, NOT exact MSAA)", g_last_reject, (unsigned)v->ref);
+}
+
+static bool veto_set(lagfx_a64_msaa_veto_t *v, const char *what, int idx, const char *why, uint32_t ref) {
+    if (idx >= 0) snprintf(v->what, sizeof v->what, "%s%d", what, idx); else snprintf(v->what, sizeof v->what, "%s", what);
+    v->why = why, v->ref = ref;
+    return false;
+}
+
+static bool attach_ok_quiet(const lagfx_a64_obj_t *t) { return !t || t->samples_req <= 1u || t->samples == t->samples_req; }
+
+/* The object a pass names for `ref`, with the reason it cannot be an attachment of an exact multisample pass (NULL = usable). */
+static const char *named_why(lagfx_a64_rexec_t *x, uint32_t ref, lagfx_a64_obj_t *o) {
+    if (!o) return lagfx_a64_res_fail_why(x, ref) == TEXWHY_C_MSAA ? "multisample_texture_refused" : "texture_missing";
+    if (o->kind != LAGFX_A64_TEXTURE) return "not_a_texture";
+    if (!attach_ok_quiet(o)) return "host_sample_count_differs";
+    return NULL;
+}
+
+bool lagfx_a64_msaa_pass_gate(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, const lagfx_a64_msaa_pass_t *ms, const lagfx_render_pass_full_desc_t *d, bool ds_ok, lagfx_a64_msaa_look_t *look, bool *strict, lagfx_a64_msaa_veto_t *v) {
+    lagfx_a64_obj_t **co = look->c, *dobj = NULL;
+    const uint32_t nc = d->color_attachment_count < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS ? d->color_attachment_count : LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS;
+    const uint32_t dref = d->has_depth ? d->depth_texture_ref : 0u, sref = d->has_stencil ? d->stencil_texture_ref : 0u, dsref = dref ? dref : sref;
+    memset(v, 0, sizeof *v), memset(look, 0, sizeof *look);
+    *strict = false;
+    bool involved = false;
+    for (uint32_t k = 0; k < nc; k++) {   /* the one lookup of the colour objects (the caller reuses look->c) */
+        const uint64_t u0 = lagfx_a64_res_stats(p)->linear_unsupported;
+        co[k] = lagfx_a64_res_object(x, d->colors[k].texture_ref);
+        look->lin[k] = lagfx_a64_res_stats(p)->linear_unsupported != u0;
+        involved |= co[k] ? co[k]->samples_req > 1u : lagfx_a64_res_fail_why(x, d->colors[k].texture_ref) == TEXWHY_C_MSAA;
+    }
+    if (dsref && ds_ok) {
+        dobj = look->ds = lagfx_a64_res_object(x, dsref), look->ds_looked = true;
+        involved |= dobj ? dobj->samples_req > 1u : lagfx_a64_res_fail_why(x, dsref) == TEXWHY_C_MSAA;
+    }
+    if (lagfx_msaa_mode() == LAGFX_MSAA_MODE_COMPAT) return true;
+    if (!involved) return true;   /* no multisampled attachment named: the pass is not subject to the whole-pass rule */
+    *strict = true;
+    uint32_t samples = 0, w0 = 0, h0 = 0;
+    const lagfx_a64_obj_t *attached[4] = { 0 };
+    for (uint32_t k = 0; k < nc; k++) {
+        const uint32_t slot = d->colors[k].slot, ref = d->colors[k].texture_ref;
+        const char *why;
+        if (slot >= 4u) return veto_set(v, "colour", (int)slot, "slot_out_of_range", ref);
+        why = named_why(x, ref, co[k]);
+        if (why) return veto_set(v, "colour", (int)slot, why, ref);
+        if (!(co[k]->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return veto_set(v, "colour", (int)slot, "not_attachable", ref);
+        if (co[k]->img_type != VK_IMAGE_TYPE_2D) return veto_set(v, "colour", (int)slot, "not_2d", ref);
+        for (uint32_t q = 0; q < 4u; q++) if (attached[q] == co[k]) return veto_set(v, "colour", (int)slot, "duplicate_attachment", ref);
+        attached[slot] = co[k];
+        const uint32_t ns = lagfx_a64_msaa_obj_samples(co[k]);
+        if (!samples) samples = ns, w0 = co[k]->width, h0 = co[k]->height;
+        else if (ns != samples) return veto_set(v, "colour", (int)slot, "mixed_sample_counts", ref);
+        else if (co[k]->width != w0 || co[k]->height != h0) return veto_set(v, "colour", (int)slot, "extent_mismatch", ref);
+    }
+    if (dsref) {
+        if (!ds_ok) return veto_set(v, "depth", -1, "no_depth_stencil_support", dsref);
+        const char *why = named_why(x, dsref, dobj);
+        if (why) return veto_set(v, dref ? "depth" : "stencil", -1, why, dsref);
+        const char *what = dref ? "depth" : "stencil";
+        if (!dobj->ds_aspects || (dref && !(dobj->ds_aspects & 1u)) || (!dref && !(dobj->ds_aspects & 2u))) return veto_set(v, what, -1, "not_depth_stencil_texture", dsref);
+        if (dref && sref && sref != dref) return veto_set(v, "stencil", -1, "stencil_in_other_texture", sref);
+        if (dref && d->depth_level) return veto_set(v, what, -1, "depth_level", dsref);
+        for (uint32_t q = 0; q < 4u; q++) if (attached[q] == dobj) return veto_set(v, what, -1, "duplicate_attachment", dsref);
+        const uint32_t ns = lagfx_a64_msaa_obj_samples(dobj);
+        if (samples && ns != samples) return veto_set(v, what, -1, "mixed_sample_counts", dsref);
+        if (samples && (dobj->width < w0 || dobj->height < h0)) return veto_set(v, what, -1, "extent_smaller_than_colour", dsref);
+        samples = ns;
+        if (ns > 1u && (d->depth_resolve_texture_ref || d->stencil_resolve_texture_ref || d->depth_store_action >= 2u || d->stencil_store_action >= 2u)) {
+            MS(p).ds_resolve_unsupported++;   /* not wired into the pass path (see vulkan/msaa_ds.h): exact mode does not store-only instead */
+            return veto_set(v, what, -1, "depth_stencil_resolve_unsupported", dsref);
+        }
+    }
+    /* resolve targets the store actions require (deferred tags 0x66 / 0x96 override the descriptor, as lagfx_a64_msaa_color does) */
+    for (uint32_t k = 0; k < nc; k++) {
+        const uint32_t slot = d->colors[k].slot;
+        if (lagfx_a64_msaa_obj_samples(co[k]) <= 1u) continue;
+        uint32_t act = d->colors[k].store_action, rref = d->colors[k].resolve_texture_ref;
+        bool sub = d->colors[k].resolve_level || d->colors[k].resolve_slice;
+        if (slot < 8u && ms->st_set[slot]) act = ms->st_act[slot];
+        if (slot < 8u && ms->res_set[slot]) rref = ms->res_ref[slot], sub = false;
+        if (act != 2u && act != 3u) continue;
+        lagfx_a64_obj_t *r;
+        const char *why = resolve_why(x, co[k], rref, sub, attached, &r);
+        if (why) { MS(p).resolve_no_target++; return veto_set(v, "resolve", (int)slot, why, rref); }
+    }
     return true;
 }
 

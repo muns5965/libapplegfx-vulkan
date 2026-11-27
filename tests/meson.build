@@ -2275,6 +2275,18 @@ if fs.is_file(meson.current_source_dir() / 'arm64-msaa-guest-unit.c') and vulkan
   test('arm64 msaa guest path (unit, lavapipe + validation)', msaa_guest_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# Host-side multisample machinery (MS texel fetch, SampleId / SampleMask, alpha-to-coverage, depth resolve) vs CPU references. Includes the render-compat harness (validation baseline).
+if fs.is_file(meson.current_source_dir() / 'vulkan-msaa-host-unit.c') and vulkan_dep.found()
+  msaa_host_test = executable('vulkan-msaa-host-unit',
+    'vulkan-msaa-host-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('vulkan msaa host machinery vs CPU reference (lavapipe + validation)', msaa_host_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # VK_QCOM_tile_shading device probe (tools/qcom-tile-probe): CPU selftest, SPIR-V generation + spirv-val of the validatable modules (the tile ones through their
 # twin without tile tokens), and a full run. On lavapipe E1-E5 must be UNSUPPORTED, E5's split reference and E6's plain part must equal the CPU model, exit 0.
 if vulkan_dep.found()

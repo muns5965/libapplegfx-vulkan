@@ -375,6 +375,9 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     VkPipelineMultisampleStateCreateInfo ms = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
         .rasterizationSamples = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT,   /* must equal the attachments' sample count (vkCmdDraw valid usage) */
+        .alphaToCoverageEnable = desc->alpha_to_coverage ? VK_TRUE : VK_FALSE,
+        .sampleShadingEnable = desc->sample_shading ? VK_TRUE : VK_FALSE,
+        .minSampleShading = desc->sample_shading ? (desc->min_sample_shading_permille ? (float)desc->min_sample_shading_permille / 1000.0f : 1.0f) : 0.0f,
     };
 
     /* Color blend attachment — PREMULTIPLIED src-over (CoreAnimation's

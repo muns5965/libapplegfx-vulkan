@@ -346,7 +346,14 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
         bool clamped = false;
         for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) if (pairs[i].key == 0x01u) pairs[i].value = lagfx_msaa_devinfo_max(be, pairs[i].value, &clamped);
         for (size_t i = 0; i < sizeof arm64_pairs / sizeof arm64_pairs[0]; i++) if (arm64_pairs[i].key == 0x01u) arm64_pairs[i].value = lagfx_msaa_devinfo_max(be, arm64_pairs[i].value, &clamped);
-        if (clamped) { p->diag2.exec.fmt.devinfo_msaa_clamped++; p->diag2.exec.msaa.devinfo_clamped++; LAGFX_WARN("CmdGetDeviceInfo2: MSAASamples lowered to the host maximum (host cannot rasterize the advertised count)"); }
+        if (clamped) { p->diag2.exec.fmt.devinfo_msaa_clamped++; p->diag2.exec.msaa.devinfo_clamped++; LAGFX_WARN("CmdGetDeviceInfo2: MSAASamples lowered to the largest count exact mode grants for the common colour + depth formats"); }
+        {   /* the host's real per-format masks and what the single max value cannot say (a gap such as 2x on lavapipe's 1|4); the guest's reader is (value >= N), so a gap stays advertised and exact mode refuses it */
+            lagfx_msaa_caps_t caps; char ln[600];
+            lagfx_msaa_host_caps(be, 4u, &caps);
+            if (caps.gaps) p->diag2.exec.msaa.devinfo_gap++;
+            lagfx_msaa_caps_line(&caps, ln, sizeof ln);
+            LAGFX_WARN("%s", ln);
+        }
     }
 #endif
     const size_t n_pairs = arm64 ? sizeof(arm64_pairs) / sizeof(arm64_pairs[0]) : sizeof(pairs) / sizeof(pairs[0]);

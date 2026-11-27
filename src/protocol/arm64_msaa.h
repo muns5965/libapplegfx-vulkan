@@ -21,6 +21,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "state.h"
+#include "render_pass.h"
 
 #ifdef LAGFX_HAVE_VULKAN
 #include <vulkan/vulkan.h>
@@ -61,6 +62,7 @@ typedef struct {
     lagfx_a64_obj_t *res[4];                   /* resolve targets begun for this pass, by attachment slot (ended at the end of the pass) */
     lagfx_a64_obj_t *copy_src[4];              /* slot's 1x-fallback attachment whose "resolve" is a copy into res[slot] at the end of the pass */
     uint32_t nres;
+    const char *fail;                          /* EXACT mode: set by lagfx_a64_msaa_color when a resolve the store action requires could not be set up (static string; NULL = fine) */
 } lagfx_a64_msaa_pass_t;
 
 void lagfx_a64_msaa_pass_reset(lagfx_a64_msaa_pass_t *ms);
@@ -78,6 +80,27 @@ static inline uint32_t lagfx_a64_msaa_obj_samples(const lagfx_a64_obj_t *o) { re
  * the end of the pass instead of a resolve. Every refusal is counted and leaves the safe default (STORE, nothing resolved). Returns true when a resolve will happen. */
 bool lagfx_a64_msaa_color(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms, uint32_t slot, uint32_t cidx, lagfx_a64_obj_t *t, uint32_t store_action, uint32_t resolve_ref,
                           bool resolve_sub_nonzero, const lagfx_a64_obj_t *const attached[4], VkRenderingAttachmentInfo *ca);
+
+/* ---- EXACT-mode whole-pass rejection ----
+ * In exact mode a pass that names ANY multisampled attachment (colour, depth, stencil; or one whose creation the multisample plan refused) is all-or-nothing: if ANY attachment the pass
+ * names (colour 0..3, depth, stencil) or any resolve target its store action requires is refused or inconsistent (missing / refused texture, host sample count != guest's, mixed sample
+ * counts, extent mismatch, duplicate image, depth / stencil split or level, depth / stencil resolve (not wired), resolve target missing / wrong shape / part of the pass), the WHOLE pass is
+ * rejected: nothing is begun (no layout change, no clear / load op), no draw of the pass is recorded, no attachment is written. Counted ms_pass_refused (once per pass) and logged with the
+ * slot and the reason. A pass naming no multisampled attachment, and COMPAT mode (clamp / 1x copy, per-attachment skipping), keep their behaviour. */
+typedef struct { const char *why; char what[16]; uint32_t ref; } lagfx_a64_msaa_veto_t;   /* what: "colour0".."colour3", "depth", "stencil", "resolve0".. (resolve target of colour slot n) */
+/* The objects the pass descriptor names, resolved ONCE by lagfx_a64_msaa_pass_gate (lagfx_a64_res_object may create the mirror texture, a failed creation is counted: never ask twice). */
+typedef struct {
+    lagfx_a64_obj_t *c[LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS];   /* colour attachment k of the descriptor (NULL: not mirrored) */
+    bool lin[LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS];             /* the lookup raised stats->linear_unsupported (a type 8/9 render target the mirror could not build) */
+    lagfx_a64_obj_t *ds; bool ds_looked;                           /* depth / stencil texture (looked up only when the device can render depth / stencil) */
+} lagfx_a64_msaa_look_t;
+/* Validates the pass descriptor `d` BEFORE any attachment is begun. *strict = the pass is subject to whole-pass rejection (exact mode and at least one multisampled / msaa-refused
+ * attachment). Returns false only when *strict and a veto was found (*v filled). `ds_ok` = the device can render depth / stencil (core 1.3 dynamic rendering). */
+bool lagfx_a64_msaa_pass_gate(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, const lagfx_a64_msaa_pass_t *ms, const lagfx_render_pass_full_desc_t *d, bool ds_ok, lagfx_a64_msaa_look_t *look, bool *strict, lagfx_a64_msaa_veto_t *v);
+/* Counts ms_pass_refused and logs the reason (rate limited). */
+void lagfx_a64_msaa_reject(lagfx_protocol_t *p, const lagfx_a64_msaa_veto_t *v);
+/* Tests only: the reason of the newest rejection ("<what>: <why>", "" when none). */
+const char *lagfx_a64_msaa_last_reject(void);
 
 /* After vkCmdEndRendering and the attachments' target_end: ends the resolve targets (layout back to GENERAL) and records the copies of the 1x fallback. */
 void lagfx_a64_msaa_pass_end(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms);
