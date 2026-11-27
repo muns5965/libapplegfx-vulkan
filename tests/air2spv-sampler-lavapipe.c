@@ -11,6 +11,11 @@
  *   C  texture3d (X05): air.sample_texture_3d -> Dim3D image + vec3 coordinate, sampled from a real 3D VkImage / 3D view: nearest at texel centres (exact texels) and
  *      trilinear along a diagonal (z interpolation, which a 2D slice cannot produce).
  *
+ *   D  texture2d_array (mip/layer views): air.sample_texture_2d_array -> arrayed Dim2D image + (u, v, layer) coordinate, sampled from a real 2D_ARRAY VkImage with 4 layers x
+ *      4 mip levels (every texel encodes layer, level, x, y): explicit level = column, layer = row; the constexpr PIXEL sampler variant; negative controls: the module that
+ *      does not mark its texture argument as an array (layer 0 of a plain 2D view, the index dropped), a one-layer array view (indices clamp to layer 0), a level-0-only view
+ *      (LOD clamps to the view). The translated modules also go through spirv-val when it is installed. The AIR spelling is INFER: no fixture / capture holds an array sample.
+ *
  * Meaning of the constexpr word fields is the external, device-UNVERIFIED layout of air2spv/constexpr_sampler.h (INFER); this test checks the pipeline is
  * consistent with it, not that Apple's hardware agrees. Exit 77 (skip) without a Vulkan 1.3 device.
  * SPDX-License-Identifier: MIT */
@@ -420,6 +425,151 @@ static int test_3d(void) {
     return 0;
 }
 
+
+/* ---------------------------------------------------------------- D: texture2d_array */
+#define AL 4   /* layers */
+#define AM 4   /* mip levels of the 8 x 8 texture */
+static float g_arr[AL][AM][8 * 8 * 4];   /* [layer][level] texels (s = 8 >> level): R = (1 + x) / 16, G = (1 + y) / 16, B = (1 + level) / 8, A = (1 + layer) / 8 */
+static void init_arr(void) {
+    for (int l = 0; l < AL; l++) for (int m = 0; m < AM; m++) {
+        int s = 8 >> m;
+        for (int y = 0; y < s; y++) for (int x = 0; x < s; x++) { float *t = g_arr[l][m] + (y * s + x) * 4; t[0] = (1 + x) / 16.0f; t[1] = (1 + y) / 16.0f; t[2] = (1 + m) / 8.0f; t[3] = (1 + l) / 8.0f; }
+    }
+}
+typedef struct { VkImage img; VkDeviceMemory mem; VkImageView varr, v2d; } atex_t;
+static int make_arr_tex(atex_t *out) {
+    VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .extent = { 8, 8, 1 }, .mipLevels = AM, .arrayLayers = AL,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VK(vkCreateImage(g_dev, &ici, NULL, &out->img));
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, out->img, &mr);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    VK(vkAllocateMemory(g_dev, &mai, NULL, &out->mem)); VK(vkBindImageMemory(g_dev, out->img, out->mem, 0));
+    VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = out->img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, AM, 0, AL } };
+    VK(vkCreateImageView(g_dev, &vci, NULL, &out->varr));
+    vci.viewType = VK_IMAGE_VIEW_TYPE_2D; vci.subresourceRange.layerCount = 1;
+    VK(vkCreateImageView(g_dev, &vci, NULL, &out->v2d));
+    size_t per_layer = 0, offs[AM];
+    for (int m = 0; m < AM; m++) { offs[m] = per_layer; per_layer += (size_t)(8 >> m) * (8 >> m) * 16; }
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = per_layer * AL, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+    VkBuffer sb; VK(vkCreateBuffer(g_dev, &bci, NULL, &sb)); vkGetBufferMemoryRequirements(g_dev, sb, &mr);
+    mai.allocationSize = mr.size; mai.memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory smem; VK(vkAllocateMemory(g_dev, &mai, NULL, &smem)); VK(vkBindBufferMemory(g_dev, sb, smem, 0));
+    uint8_t *p; VK(vkMapMemory(g_dev, smem, 0, VK_WHOLE_SIZE, 0, (void **)&p));
+    for (int l = 0; l < AL; l++) for (int m = 0; m < AM; m++) memcpy(p + per_layer * l + offs[m], g_arr[l][m], (size_t)(8 >> m) * (8 >> m) * 16);
+    vkUnmapMemory(g_dev, smem);
+    VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    VkCommandPool pool; VK(vkCreateCommandPool(g_dev, &cpi, NULL, &pool));
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBuffer cmd; VK(vkAllocateCommandBuffers(g_dev, &cai, &cmd));
+    VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VK(vkBeginCommandBuffer(cmd, &cbi));
+    VkImageMemoryBarrier b1 = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = out->img,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, AM, 0, AL } };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
+    for (int l = 0; l < AL; l++) for (int m = 0; m < AM; m++) {
+        VkBufferImageCopy bic = { .bufferOffset = per_layer * l + offs[m], .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)m, (uint32_t)l, 1 }, .imageExtent = { (uint32_t)(8 >> m), (uint32_t)(8 >> m), 1 } };
+        vkCmdCopyBufferToImage(cmd, sb, out->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    }
+    VkImageMemoryBarrier b2 = b1; b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b2);
+    VK(vkEndCommandBuffer(cmd));
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+    VK(vkQueueSubmit(g_q, 1, &si, VK_NULL_HANDLE)); VK(vkQueueWaitIdle(g_q));
+    vkDestroyCommandPool(g_dev, pool, NULL); vkDestroyBuffer(g_dev, sb, NULL); vkFreeMemory(g_dev, smem, NULL);
+    return 0;
+}
+
+/* CPU model: pixel (x, y) reads level x / 2 of layer y / 2 (explicit LOD = column, array index = row), nearest, clamp to edge; `layer_of` / `level_of` pick what the module is expected to
+ * select (a control may drop the layer). The texel is looked up with the independent reference sampler on that level's own texture. */
+static void ref_arr(int level_fixed, int layer_fixed, float *want) {
+    int am[3] = { AM_EDGE, AM_EDGE, AM_EDGE };
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) {
+        int lvl = level_fixed >= 0 ? level_fixed : x >> 1, lay = layer_fixed >= 0 ? layer_fixed : y >> 1;
+        int s = 8 >> lvl; tex_t T = { { s, s, 1 }, g_arr[lay][lvl] };
+        ref_sample(&T, am, 0, (x + 0.5f) / 8.0f * (float)s, (y + 0.5f) / 8.0f * (float)s, 0.0f, want + (y * W + x) * 4);
+    }
+}
+static int spirv_valid(const uint8_t *spv, size_t sz, const char *what) {
+    if (system("spirv-val --version >/dev/null 2>&1") != 0) return 0;   /* tool absent: the validation layer at pipeline creation is the check */
+    char path[64] = "/tmp/lagfx-arr-XXXXXX"; int fd = mkstemp(path); CHECK(fd >= 0, "mkstemp");
+    FILE *f = fdopen(fd, "wb"); fwrite(spv, 1, sz, f); fclose(f);
+    char cmd[160]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s >/dev/null 2>&1", path);
+    int rc = system(cmd); remove(path);
+    CHECK(rc == 0, "%s: spirv-val rejects the translated module", what);
+    return 0;
+}
+static int test_array(void) {
+    atex_t at; init_arr(); if (make_arr_tex(&at)) return 1;
+    VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .maxLod = (float)(AM - 1) };
+    VkSampler s; VK(vkCreateSampler(g_dev, &sci, NULL, &s));
+    float want[W * H * 4], got[W * H * 4];
+    uint8_t *spv; size_t sz;
+    /* 1. explicit level = column, array index = row: sixteen (layer, level) pairs, each read exactly */
+    if (translate("arr_lod.air.bc", &spv, &sz)) return 1;
+    {
+        lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spv, sz, rb, 8);
+        int dim = -1, arrd = -1; for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE) dim = rb[i].image_dim, arrd = rb[i].image_arrayed;
+        CHECK(dim == 1 && arrd == 1, "arr_lod: the texture2d_array binding reflects Dim %d arrayed %d, want 1 / 1", dim, arrd);
+    }
+    if (spirv_valid(spv, sz, "arr_lod")) return 1;
+    ref_arr(-1, -1, want);
+    if (render(spv, sz, at.varr, s, got) || compare("texture2d_array: level = column, layer = row", got, want, 1e-6f)) return 1;
+    {   /* the sixteen cells really are sixteen different texels */
+        int distinct = 0; for (int a = 0; a < 16; a++) { int dup = 0; for (int b = 0; b < a; b++) if (!memcmp(got + ((a / 4 * 2) * W + a % 4 * 2) * 4, got + ((b / 4 * 2) * W + b % 4 * 2) * 4, 16)) dup = 1; distinct += !dup; }
+        CHECK(distinct == 16, "the (layer, level) cells are not all distinct (%d)", distinct);
+    }
+    printf("PASS: texture2d_array explicit level = column, layer = row: all %d pixels match (16 distinct (layer, level) texels)\n", W * H);
+    /* negative control: a layer-0 view of the same image does not give the array result -- the array shader on a layer-0 2D_ARRAY view of one layer clamps every row to layer 0 */
+    {
+        VkImageView one; VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = at.img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, AM, 0, 1 } };
+        VK(vkCreateImageView(g_dev, &vci, NULL, &one));
+        float w0[W * H * 4]; ref_arr(-1, 0, w0);
+        if (render(spv, sz, one, s, got) || compare("texture2d_array on a one-layer array view (layer index clamped to 0)", got, w0, 1e-6f)) return 1;
+        float diff = 0; for (int i = 0; i < W * H * 4; i++) diff = fmaxf(diff, fabsf(w0[i] - want[i]));
+        CHECK(diff > 0.1f, "negative control does not differ from the full array (diff %g)", diff);
+        vkDestroyImageView(g_dev, one, NULL);
+        printf("PASS: negative control: a one-layer array view clamps every row to layer 0 (differs from the 4-layer result by %.2f)\n", diff);
+    }
+    /* negative control: the same image through a view with ONE level: LOD clamped to level 0 for every column */
+    {
+        VkImageView lv0; VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = at.img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, AL } };
+        VK(vkCreateImageView(g_dev, &vci, NULL, &lv0));
+        float w1[W * H * 4]; ref_arr(0, -1, w1);
+        if (render(spv, sz, lv0, s, got) || compare("texture2d_array on a level-0-only view (LOD clamped to the view)", got, w1, 1e-6f)) return 1;
+        vkDestroyImageView(g_dev, lv0, NULL);
+        printf("PASS: negative control: a level-0-only view reads level 0 in every column\n");
+    }
+    free(spv);
+    /* 2. constexpr PIXEL sampler on an array texture: coordinate texels / size of level 0 (the size query of an arrayed image has 3 components) */
+    if (translate("arr_cxs_pix.air.bc", &spv, &sz)) return 1;
+    CHECK(spv_has_op(spv, sz, OP_IMAGE_QUERY_SIZE_LOD), "arr_cxs_pix: no OpImageQuerySizeLod");
+    if (spirv_valid(spv, sz, "arr_cxs_pix")) return 1;
+    ref_arr(0, -1, want);
+    if (render(spv, sz, at.varr, s, got) || compare("texture2d_array constexpr PIXEL sampler, level 0, layer = row", got, want, 1e-6f)) return 1;
+    printf("PASS: texture2d_array with a constexpr pixel sampler: size query shuffled to (w, h), layer = row, all %d pixels match\n", W * H);
+    free(spv);
+    /* 3. control: the module whose texture argument is NOT marked as an array: the index is dropped (layer 0), a plain 2D view of layer 0 is what it needs */
+    if (translate("arr_plainarg.air.bc", &spv, &sz)) return 1;
+    {
+        lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spv, sz, rb, 8);
+        int arrd = -1; for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE) arrd = rb[i].image_arrayed;
+        CHECK(arrd == 0, "arr_plainarg: binding reflects arrayed %d, want 0 (the metadata does not name an array texture)", arrd);
+    }
+    if (spirv_valid(spv, sz, "arr_plainarg")) return 1;
+    ref_arr(-1, 0, want);
+    if (render(spv, sz, at.v2d, s, got) || compare("array call on a texture2d argument: layer index dropped, layer 0", got, want, 1e-6f)) return 1;
+    printf("PASS: array call without array argument metadata falls back to layer 0 of a plain 2D image (the translator logs a warning)\n");
+    free(spv);
+    vkDestroySampler(g_dev, s, NULL);
+    return 0;
+}
+
 int main(void) {
     VkApplicationInfo ai = { .sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "sampler-lavapipe", .apiVersion = VK_API_VERSION_1_3 };
     VkInstanceCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai };
@@ -453,6 +603,7 @@ int main(void) {
     int rc = test_constexpr(&t2d);
     if (!rc) rc = test_runtime(&t2d);
     if (!rc) rc = test_3d();
+    if (!rc) rc = test_array();
     if (rc) return rc;
     printf("PASS air2spv-sampler-lavapipe on %s (mirror clamp to edge %s)\n", pp.deviceName, g_have_mirror_clamp ? "exact" : "not available");
     return 0;

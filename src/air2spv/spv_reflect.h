@@ -38,6 +38,7 @@ typedef struct {
     uint32_t                 set;
     uint32_t                 binding;
     lagfx_spv_binding_kind_t kind;
+    uint8_t                  image_arrayed;   /* SAMPLED_IMAGE / STORAGE_IMAGE only: the OpTypeImage Arrayed operand (1 = array of layers) */
     uint8_t                  image_dim;  /* SAMPLED_IMAGE / STORAGE_IMAGE only: the OpTypeImage Dim operand (1 = Dim2D, 2 = Dim3D, 3 = Cube; 0 = not an image) */
     uint8_t                  may_write;  /* STORAGE_BUFFER only: 0 = the module PROVABLY never writes through it (every use of the variable / its access chains is a load or an
                                           * array length), 1 = a store / atomic / copy / call / phi / pointer escape was found (or the module is too large to analyse).

@@ -270,6 +270,8 @@ static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
     if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
     if (o->view3) vkDestroyImageView(vk->device, o->view3, NULL);
+    if (o->mview) vkDestroyImageView(vk->device, o->mview, NULL);
+    if (o->aview) vkDestroyImageView(vk->device, o->aview, NULL);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);
@@ -1479,20 +1481,26 @@ static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsa
 
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o) { return o && o->kind == LAGFX_A64_TEXTURE && is_tex3d(o); }
 
-/* The whole level 0 of a 3D mirror texture as a 3D view. Level 0 only, as the 2D view: the sampler's LOD range is clamped to it by the exec (a sampler with a mip
- * filter samples the base level). The A8Unorm component swizzle of the 2D path applies here too. */
-VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
-    if (!x || !o || o->kind != LAGFX_A64_TEXTURE || !is_tex3d(o) || o->ds_aspects || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
-    if (!o->view3) {
-        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_3D, .format = o->format,
-            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
-        if (o->mtl_format == 1u) vi.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
-        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view3) != VK_SUCCESS) { o->view3 = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
-    }
-    return o->view3;
+/* Sampled views. The image is created with the descriptor's real mip count and array length (create_image) and the guest's bytes of every level / slice are uploaded
+ * (tex_record), so a sampled view covers the whole chain: levels [0, mips), and for a 2D_ARRAY view layers [0, layers). The view's level range is what bounds the sampler's LOD
+ * (Vulkan clamps the LOD to the view's levels); the sampler's own min / max LOD (decoded from the guest's sampler) apply on top, and a sampler that is not mip mapped still reads
+ * level 0 only (arm64_sampler.c: maxLod 0.25). Render-target / storage views stay level 0 / layer 0 (tex_view). A8Unorm (Metal format 1) reads as (0, 0, 0, a): a component swizzle. */
+static VkImageView mk_sampled_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *slot, VkImageViewType type, uint32_t layers) {
+    if (*slot) return *slot;
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = type, .format = o->format,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, o->mips ? o->mips : 1u, 0, layers } };
+    if (o->mtl_format == 1u && !o->ms) vi.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+    if (vkCreateImageView(x->vk->device, &vi, NULL, slot) != VK_SUCCESS) { *slot = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    return *slot;
 }
 
-VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o || o->kind != LAGFX_A64_TEXTURE || !is_tex3d(o) || o->ds_aspects || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) return VK_NULL_HANDLE;
+    return mk_sampled_view(x, o, &o->view3, VK_IMAGE_VIEW_TYPE_3D, 1u);
+}
+
+/* Level 0 / layer 0 sampled view (the render-target view; the A8Unorm component swizzle variant for format 1). */
+static VkImageView base_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     VkImageView v = tex_view(x, o, VK_IMAGE_USAGE_SAMPLED_BIT);
     if (!v || o->mtl_format != 1u || o->ms) return v;
     /* MTLPixelFormatA8Unorm (1) samples as (0, 0, 0, a) (Metal's documented read of an alpha-only format); the image is R8_UNORM, so the view moves red into alpha.
@@ -1503,6 +1511,42 @@ VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) 
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->sview) != VK_SUCCESS) { o->sview = VK_NULL_HANDLE; return v; }
     }
     return o->sview;
+}
+
+VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    VkImageView v = base_sample_view(x, o);
+    if (!v) return v;
+    if (o->mips > 1u && !o->ms) {   /* the whole chain of layer 0; the level-0-only view is the counted fallback (lagfx_a64_res_sample_view_for reports it) */
+        VkImageView m = mk_sampled_view(x, o, &o->mview, VK_IMAGE_VIEW_TYPE_2D, 1u);
+        if (m) return m;
+    }
+    return v;
+}
+
+VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool dim3, bool arr, bool base_only, uint32_t *flags) {
+    uint32_t f = 0;
+    VkImageView v = VK_NULL_HANDLE;
+    if (x && o && o->kind == LAGFX_A64_TEXTURE && !o->ds_aspects) {
+        if (dim3 && !arr) {
+            v = lagfx_a64_res_sample_view3d(x, o);
+            if (v && o->mips > 1u) f |= LAGFX_A64_SV_MIP_VIEW;
+        } else if (arr && !dim3) {   /* texture2d_array: a texture without layers (type 2) is a one-layer array */
+            if (!is_tex3d(o) && (o->usage & VK_IMAGE_USAGE_SAMPLED_BIT) && !o->ms) {
+                v = mk_sampled_view(x, o, &o->aview, VK_IMAGE_VIEW_TYPE_2D_ARRAY, o->layers ? o->layers : 1u);
+                if (v) f |= LAGFX_A64_SV_ARRAY_VIEW | (o->mips > 1u ? LAGFX_A64_SV_MIP_VIEW : 0u);
+            }
+        } else if (!dim3 && base_only) {   /* a sampler of the draw uses unnormalized coordinates: Vulkan wants a view of ONE level and ONE layer for it (counted) */
+            v = base_sample_view(x, o);
+            if (v && o->mips > 1u) f |= LAGFX_A64_SV_MIPS_DROPPED;
+            if (v && o->layers > 1u) f |= LAGFX_A64_SV_LAYERS_DROPPED;
+        } else if (!dim3) {
+            v = lagfx_a64_res_sample_view(x, o);
+            if (v && o->mips > 1u) f |= (o->mview && v == o->mview) ? LAGFX_A64_SV_MIP_VIEW : LAGFX_A64_SV_MIPS_DROPPED;
+            if (v && o->layers > 1u) f |= LAGFX_A64_SV_LAYERS_DROPPED;
+        }
+    }
+    if (flags) *flags = f;
+    return v;
 }
 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */

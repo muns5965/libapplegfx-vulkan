@@ -54,6 +54,7 @@
 #include "command.h"
 #include "pipeline.h"
 #include "composite.h"
+#include "filter_cubic.h"
 #include "common/log.h"
 
 #include <stdio.h>
@@ -404,7 +405,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
 
     /* Required (core-1.3 promoted but still enumerated as extensions
      * on some ICDs; ask explicitly for widest compatibility). */
-    const char *wanted_dev_exts[14];
+    const char *wanted_dev_exts[16];
     uint32_t    wanted_dev_n = 0;
     bool want_dyn_rendering =
         has_ext(dext, dext_n, "VK_KHR_dynamic_rendering");
@@ -433,6 +434,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
+    /* Opt-in cubic filtering (filter_cubic.h): only requested with LAGFX_CUBIC=1; the extension has no feature struct. The EXT form is preferred, the IMG alias is used on a device that lacks it. */
+    const char *cubic_ext = !lagfx_cubic_optin() ? NULL : has_ext(dext, dext_n, "VK_EXT_filter_cubic") ? "VK_EXT_filter_cubic" : has_ext(dext, dext_n, "VK_IMG_filter_cubic") ? "VK_IMG_filter_cubic" : NULL;
     typedef struct { VkStructureType sType; void *pNext; VkBool32 dynamicRenderingLocalRead; } local_read_feat_t;   /* older headers lack the type */
     const bool ext_ro_ext = has_ext(dext, dext_n, "VK_EXT_rasterization_order_attachment_access");
     const bool ext_ro_arm = has_ext(dext, dext_n, "VK_ARM_rasterization_order_attachment_access");
@@ -657,6 +660,11 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_vertex_stores = feat2.features.vertexPipelineStoresAndAtomics == VK_TRUE;
     s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
+    if (cubic_ext) {
+        wanted_dev_exts[wanted_dev_n++] = cubic_ext;
+        dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+        s->have_filter_cubic = true;
+    }
     {   /* Framebuffer-fetch / blend diagnostics, queried only (never enabled here): printed once as the g7-gpu-feat line. Own struct for local read: older headers lack it. */
         const bool lr_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 4u);
         local_read_feat_t lr = { .sType = (VkStructureType)1000232000 };   /* VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES */

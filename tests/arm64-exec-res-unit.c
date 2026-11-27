@@ -309,13 +309,14 @@ static void test_tex3d(void) {
     assert(p->diag2.exec.run.draws == 0 && p->diag2.exec.run.ext_tex_dim_mismatch == 1 && px(img, 5, 8) == BLUE);
     done(p);
     g_res_tex3 = false; g_bind_ref = REF_TEX2;
-    /* a 3D texture with a second mip level: the view is level 0 only (APPROX), the draw is NOT refused, the base level is what is sampled, and the omission is counted */
+    /* a 3D texture with a second mip level: the view covers both levels (counted as a mip view, nothing dropped); the sampler word 0x84000000 has no mip filter, so the
+     * sampler still reads level 0 only and the output is the base level's texels (numeric test with a mip filter: arm64-exec-texview-unit.c) */
     g_tex3_mips = 2; g_r.mode = M_TEX3D;
     p = res_run(M_TEX3D, 0x84000000u);
     put_tex3d(); g_res_tex3 = true; g_bind_ref = REF_TEX3;
     res_exec(p, k_cmds_bind, img, NULL);
     R = &p->diag2.exec.run;
-    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_mips_base_only == 1 && R->ext_tex_layers_base_only == 0);
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex3d_binds == 1 && R->ext_tex_mips_base_only == 0 && R->ext_tex_mip_views == 1 && R->ext_tex_layers_base_only == 0);
     { unsigned base = 0, drawn2 = 0; for (uint32_t y = 0; y < RT_H; y++) for (uint32_t x = 0; x < RT_W; x++) { uint32_t got = px(img, x, y); if (got == BLUE) continue; drawn2++; if (got != 0xff808080u) base++; } assert(drawn2 > 0 && base == drawn2); }
     done(p);
     g_tex3_mips = 1;

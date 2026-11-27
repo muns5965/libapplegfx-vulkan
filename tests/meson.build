@@ -1760,6 +1760,25 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-res-unit.c') and vulkan_d
   test('arm64 exec storage images + vertex textures + unnormalized samplers (unit, lavapipe)', ex_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# ARM64 render exec: sampled views over the descriptor's mip chain and array layers (lavapipe + validation, numeric comparison with a CPU model, negative controls).
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-texview-unit.c') and vulkan_dep.found()
+  tv_test = executable('arm64-exec-texview-unit',
+    'arm64-exec-texview-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('arm64 exec sampled views: mip chain + array layers (unit, lavapipe)', tv_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
+if fs.is_file(meson.current_source_dir() / 'filter-cubic-unit.c') and vulkan_dep.found()
+  fcub_test = executable('filter-cubic-unit', 'filter-cubic-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true)
+  test('opt-in cubic filter: decision table + sampler mapping (unit)', fcub_test)
+endif
+
 # Pure regression test: framebuffer-fetch binding range (fragment offset) and the shared binding limits.
 if fs.is_file(meson.current_source_dir() / 'arm64-fbfetch-check-unit.c')
   fbf_check_test = executable('arm64-fbfetch-check-unit', 'arm64-fbfetch-check-unit.c',

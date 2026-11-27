@@ -41,6 +41,7 @@ enum { LAGFX_A64_BIND_IMAGE = 1, LAGFX_A64_BIND_SAMPLER = 2, LAGFX_A64_BIND_BUFF
 typedef struct {
     uint8_t binding, kind, stage; int16_t metal_index; uint8_t writable;
     uint8_t dim3;       /* BIND_IMAGE: the shader declares a Dim3D sampled image (texture3d): only a 3D mirror texture (a 3D view) can feed it; a 2D one cannot, and vice versa */
+    uint8_t arr;        /* BIND_IMAGE: the shader declares a Dim2D ARRAYED sampled image (texture2d_array): fed by a 2D_ARRAY view of all layers; 0 = a plain 2D image (layer 0 of a layered texture) */
     uint8_t cxs;        /* BIND_SAMPLER: a constexpr sampler of the shader (no Metal slot): the host builds the VkSampler from cxs_raw */
     uint64_t cxs_raw;   /* the raw i64 sampler word of the AIR (air2spv/constexpr_sampler.h) */
     uint8_t ia_class;   /* BIND_INPUT: numeric class the shader reads the attachment as (lagfx_spv_binding_t::sampled_class: 0 float, 1 uint, 2 sint) */

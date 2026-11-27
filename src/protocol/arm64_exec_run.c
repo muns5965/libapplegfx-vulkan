@@ -48,6 +48,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../vulkan/command.h"
 #include "../vulkan/draw_record.h"
 #include "../vulkan/format_caps.h"
+#include "../vulkan/filter_cubic.h"
 #include "../translate/render_encoder.h"
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
@@ -77,6 +78,8 @@ typedef struct {
     objhdr_t h; VkSampler s;
     VkSamplerCreateInfo ci; bool mip;                                        /* what s was made from; mip = the descriptor is mip mapped (clamps apply) */
     struct { float lo, hi; VkSampler s; } var[A64_SAMP_VARIANTS]; uint32_t nvar;
+    uint32_t cflags;                                                         /* LAGFX_A64_SAMP_CUBIC_MIN / _MAG: the guest's filter field was 2 (opt-in cubic path, filter_cubic.h) */
+    struct { VkSampler base, s; } cub[A64_SAMP_VARIANTS + 1u]; uint32_t ncub;   /* cubic twins of s / var[i].s, made on first use (only with LAGFX_CUBIC=1 and the extension enabled); owned by this object */
 } a64_samp_t;
 typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded depth/stencil state object (tag 4) */
 typedef struct {
@@ -180,6 +183,7 @@ static void destroy_obj_now(a64_run_t *r, void *obj) {
         a64_samp_t *sm = obj;
         if (r->vk && sm->s) vkDestroySampler(r->vk->device, sm->s, NULL);
         for (uint32_t i = 0; r->vk && i < sm->nvar; i++) if (sm->var[i].s) vkDestroySampler(r->vk->device, sm->var[i].s, NULL);
+        for (uint32_t i = 0; r->vk && i < sm->ncub; i++) if (sm->cub[i].s) vkDestroySampler(r->vk->device, sm->cub[i].s, NULL);
         free(sm);
     } else free(obj);
 }
@@ -221,6 +225,7 @@ static void *make_sampler(a64_run_t *r, lagfx_protocol_t *p, const lagfx_task_en
     sm->h.kind = K_SAMP;
     uint32_t sf = lagfx_a64_sampler_decode_ex(d, size < sizeof d ? size : sizeof d, r->vk->have_sampler_anisotropy, r->vk->phys_props.limits.maxSamplerAnisotropy, r->vk->have_sampler_mirror_clamp, &sm->ci);
     sm->mip = (sf & LAGFX_A64_SAMP_MIPMAPPED) != 0;
+    sm->cflags = sf & (LAGFX_A64_SAMP_CUBIC_MIN | LAGFX_A64_SAMP_CUBIC_MAG);
     if (sf & LAGFX_A64_SAMP_COMPARE_IGNORED) CNT(p).ext_samp_compare++;
     if (sf & LAGFX_A64_SAMP_UNNORM_APPLIED) CNT(p).ext_samp_unnorm++;
     if (sf & LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX) CNT(p).ext_samp_mirror_clamp++;
@@ -557,12 +562,66 @@ static VkSampler default_sampler(a64_run_t *r) {
 
 /* The VkSampler of a constexpr sampler (its raw AIR word, named in the shader). Always a normalized sampler: the translator divides the coordinates of a pixel
  * sampler by the image size in the shader. VK_NULL_HANDLE (counted by the caller as an unbound sampler) when the cache is full or creation failed. */
-static VkSampler cxs_sampler(a64_run_t *r, uint64_t raw) {
+static lagfx_cubic_why_t cubic_stage_why(a64_run_t *r, const a64_pipe_t *pp, uint32_t st, bool combo_ok);
+static void cubic_count(a64_run_t *r, lagfx_cubic_why_t w);
+static VkSampler cxs_sampler(a64_run_t *r, const a64_pipe_t *pp, uint32_t stage, uint64_t raw) {
     lagfx_constexpr_sampler_t cs;
     if (!lagfx_constexpr_sampler_decode(raw, &cs)) return VK_NULL_HANDLE;   /* the translator only names decodable words: a corrupt module */
     if (r->vk->sampler_cache.device == VK_NULL_HANDLE) lagfx_sampler_cache_init(&r->vk->sampler_cache, r->vk->device, r->vk->have_sampler_anisotropy);
     lagfx_sampler_state_t st = lagfx_sampler_state_from_constexpr_norm(&cs);
+    if (pp && lagfx_cubic_optin() && (cs.mag_filter == 2u || cs.min_filter == 2u)) {   /* the would-be bicubic code: the opt-in path (the default stays LINEAR, counted by the cache) */
+        lagfx_cubic_why_t w = cubic_stage_why(r, pp, stage, st.max_anisotropy <= 1.0f && !st.unnormalized);
+        cubic_count(r, w);
+        if (w == LAGFX_CUBIC_USE) {
+            if (cs.mag_filter == 2u) st.mag_filter = LAGFX_FILTER_CUBIC;
+            if (cs.min_filter == 2u) st.min_filter = LAGFX_FILTER_CUBIC;
+        }
+    }
     return lagfx_sampler_cache_get(&r->vk->sampler_cache, &st);
+}
+
+/* ---- opt-in cubic filtering (LAGFX_CUBIC=1, filter_cubic.h) ---- */
+
+/* The decision for one stage: every sampled texture of the stage must be cubic-capable (the pairing of image and sampler is the shader's business). `combo_ok` = the sampler is
+ * normalized and has no anisotropy. The first failing reason is returned; LAGFX_CUBIC_USE when the stage has no sampled texture at all. */
+static lagfx_cubic_why_t cubic_stage_why(a64_run_t *r, const a64_pipe_t *pp, uint32_t st, bool combo_ok) {
+    lagfx_cubic_ctx_t cx = { .optin = lagfx_cubic_optin(), .ext_enabled = r->vk->have_filter_cubic };
+    lagfx_fmtcap_backend_t store;
+    const lagfx_fmtcap_backend_t *be = lagfx_fmtcap_active(r->vk->phys_device, &store);
+    lagfx_cubic_why_t w = lagfx_cubic_decide(&cx, LAGFX_FMT_FEATURE_FILTER_CUBIC, true, combo_ok);   /* the stage-independent part first */
+    if (w != LAGFX_CUBIC_USE) return w;
+    for (uint32_t i = 0; i < pp->src.n_bind; i++) {
+        const lagfx_a64_bind_t *b = &pp->src.bind[i];
+        if (b->stage != st || b->kind != LAGFX_A64_BIND_IMAGE || b->metal_index < 0 || (uint32_t)b->metal_index >= A64_MAX_FB) continue;
+        const lagfx_a64_obj_t *t = st ? r->ftex[b->metal_index] : r->vtex[b->metal_index];
+        if (!t) continue;   /* an unbound texture fails the draw on its own */
+        w = lagfx_cubic_decide(&cx, lagfx_fmtcap_features(be, t->format), !b->dim3, combo_ok);
+        if (w != LAGFX_CUBIC_USE) return w;
+    }
+    return LAGFX_CUBIC_USE;
+}
+
+/* The cubic twin of `vs` (sm->s or one of its LOD variants): same state, VK_FILTER_CUBIC_EXT for the filter(s) whose guest field was 2. NULL = not possible (variant table full / unknown base). */
+static VkSampler cubic_twin(a64_run_t *r, a64_samp_t *sm, VkSampler vs) {
+    for (uint32_t i = 0; i < sm->ncub; i++) if (sm->cub[i].base == vs) return sm->cub[i].s;
+    if (sm->ncub >= A64_SAMP_VARIANTS + 1u) return VK_NULL_HANDLE;
+    VkSamplerCreateInfo ci = sm->ci;
+    if (vs != sm->s) {
+        uint32_t k = 0;
+        while (k < sm->nvar && sm->var[k].s != vs) k++;
+        if (k == sm->nvar) return VK_NULL_HANDLE;
+        ci.minLod = sm->var[k].lo, ci.maxLod = sm->var[k].hi;
+    }
+    lagfx_cubic_apply(&ci, (sm->cflags & LAGFX_A64_SAMP_CUBIC_MIN) != 0, (sm->cflags & LAGFX_A64_SAMP_CUBIC_MAG) != 0);
+    VkSampler c = VK_NULL_HANDLE;
+    if (vkCreateSampler(r->vk->device, &ci, NULL, &c) != VK_SUCCESS) return VK_NULL_HANDLE;
+    sm->cub[sm->ncub].base = vs, sm->cub[sm->ncub].s = c, sm->ncub++;
+    return c;
+}
+
+static void cubic_count(a64_run_t *r, lagfx_cubic_why_t w) {
+    CNT(r->p).ext_cubic_requested++;
+    if (w == LAGFX_CUBIC_USE) CNT(r->p).ext_cubic_used++; else CNT(r->p).ext_cubic_fallback[w]++;
 }
 
 static bool descriptor_pool(a64_run_t *r) {
@@ -674,6 +733,7 @@ static void buf_miss(a64_run_t *r, lagfx_protocol_t *p, const a64_pipe_t *pp, ui
  * a feedback loop skips the draw (counted): Metal leaves those undefined. The key (pipeline gen, then per binding the object gen and offset) lets consecutive
  * draws share one set; a replaced object has a new gen, so a stale set is never reused. Mirror textures stay in GENERAL layout (valid for sampling), so no
  * layout change is recorded inside the pass. A set is parked in the deferred list and freed only once no recorded / running work can use it. */
+static uint32_t unnorm_mask(const a64_run_t *r, const a64_pipe_t *pp, uint32_t stage);
 static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) {
     const lagfx_a64_pipeline_src_t *s = &pp->src;
     if (!s->n_bind) return true;
@@ -682,6 +742,9 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
     VkDescriptorImageInfo ii[LAGFX_A64_MAX_BINDINGS];
     VkWriteDescriptorSet w[LAGFX_A64_MAX_BINDINGS];
     uint64_t key = 1469598103934665603ull ^ pp->h.gen;
+    /* A draw with an unnormalized-coordinates sampler in a stage: Vulkan only lets such a sampler read a view of ONE level and ONE layer, and which image a sampler is paired with is the
+     * shader's business (known only to the SPIR-V rewrite), so every plain 2D sampled texture of that stage gets its level 0 / layer 0 view (a texture with more is counted as dropped). */
+    const bool unn[2] = { unnorm_mask(r, pp, 0) != 0, unnorm_mask(r, pp, 1) != 0 };
 #define DDM(k) (r->ddm.bkind = (k), r->ddm.stage = (uint8_t)st, r->ddm.slot = mi_s, r->ddm.vkb = s->bind[i].binding, r->ddm.ref = 0)
 #define MIX(v) key = (key ^ (uint64_t)(v)) * 1099511628211ull
     for (uint32_t i = 0; i < s->n_bind; i++) {
@@ -733,11 +796,16 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
              * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
             if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
             /* The shader's image dimensionality must be the texture's: a Dim3D descriptor needs a 3D view of a 3D image, a Dim2D one a 2D view (anything else is invalid Vulkan). */
-            VkImageView v = s->bind[i].dim3 ? lagfx_a64_res_sample_view3d(r->x, t) : lagfx_a64_res_sample_view(r->x, t);
+            uint32_t svf = 0;
+            VkImageView v = lagfx_a64_res_sample_view_for(r->x, t, s->bind[i].dim3 != 0, s->bind[i].arr != 0, !s->bind[i].dim3 && !s->bind[i].arr && unn[st], &svf);
             if (!v && lagfx_a64_res_is_3d(t) != (s->bind[i].dim3 != 0)) { CNT(p).ext_tex_dim_mismatch++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             if (v && s->bind[i].dim3) CNT(p).ext_tex3d_binds++;
-            if (v && t->mips > 1u) CNT(p).ext_tex_mips_base_only++;       /* the view is level 0 only: levels >= 1 are never sampled (APPROX), counted per bound descriptor per draw */
-            if (v && t->layers > 1u) CNT(p).ext_tex_layers_base_only++;   /* the view is layer 0 only (2D, not 2D-array): layers >= 1 are never sampled (APPROX) */
+            /* The view covers the texture's whole mip chain (and, for a texture2d_array shader, every layer). What it still leaves out is counted per bound descriptor per draw: levels
+             * the whole-chain view could not be made for (fallback to level 0), and array layers a non-array (texture2d) shader cannot address (layer 0). */
+            if (v && (svf & LAGFX_A64_SV_MIPS_DROPPED)) CNT(p).ext_tex_mips_base_only++;
+            if (v && (svf & LAGFX_A64_SV_LAYERS_DROPPED)) CNT(p).ext_tex_layers_base_only++;
+            if (v && (svf & LAGFX_A64_SV_MIP_VIEW)) CNT(p).ext_tex_mip_views++;
+            if (v && (svf & LAGFX_A64_SV_ARRAY_VIEW)) CNT(p).ext_tex_array_views++;
             if (!v) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, w[i].pImageInfo = &ii[i];
@@ -746,7 +814,14 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             a64_samp_t *sm = mi_s >= 0 && mi < A64_MAX_FSAMP ? (st ? r->fsamp[mi] : r->vsamp[mi]) : NULL;
             VkSampler *vvt = st ? r->fvar : r->vvar;
             VkSampler vs = sm ? (vvt[mi] ? vvt[mi] : sm->s) : (mi_s < 0 ? default_sampler(r) : VK_NULL_HANDLE);   /* -1: an inline sampler of the shader: the default one; fvar: LOD clamps of tag 0x71 */
-            if (s->bind[i].cxs) { vs = cxs_sampler(r, s->bind[i].cxs_raw); if (vs) CNT(p).ext_cxs_binds++; }   /* a constexpr sampler: its own state, not the default */
+            if (sm && !s->bind[i].cxs && sm->cflags && lagfx_cubic_optin()) {   /* a runtime sampler whose filter field was 2: cubic only when every condition holds, else LINEAR (as without the opt-in) + a counted reason */
+                lagfx_cubic_why_t cw = cubic_stage_why(r, pp, st, !sm->ci.unnormalizedCoordinates && !sm->ci.anisotropyEnable);
+                VkSampler cv = cw == LAGFX_CUBIC_USE ? cubic_twin(r, sm, vs) : VK_NULL_HANDLE;
+                if (cw == LAGFX_CUBIC_USE && !cv) cw = LAGFX_CUBIC_NO_COMBO;
+                cubic_count(r, cw);
+                if (cv) vs = cv;
+            }
+            if (s->bind[i].cxs) { vs = cxs_sampler(r, pp, st, s->bind[i].cxs_raw); if (vs) CNT(p).ext_cxs_binds++; }   /* a constexpr sampler: its own state, not the default */
             if (!vs) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[5]++; DDM(3); return false; }
             ii[i] = (VkDescriptorImageInfo){ vs, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, w[i].pImageInfo = &ii[i];

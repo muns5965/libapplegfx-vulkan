@@ -1,6 +1,7 @@
 /*
  * libapplegfx-vulkan — command diagnostics. See diag.h. Logging and counters only.
  */
+#include "../vulkan/filter_cubic.h"
 #include "diag.h"
 #include "draw_diag.h"
 #include "state.h"
@@ -212,14 +213,22 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         LAGFX_LOG("%s", el);
         snprintf(el, sizeof el,
                  "g7-gpu-unnorm: draws[rewritten=%llu unused_not_skipped=%llu skipped=%llu] variants[built=%llu failed=%llu] uses[implicit_to_lod0=%llu bias_dropped=%llu offset_folded=%llu explicit_kept=%llu grad_kept=%llu gather_kept=%llu unresolved=%llu] "
-                 "unsupported[dref=%llu proj=%llu sparse=%llu image_dim=%llu other=%llu] samp_filter_unknown=%llu tex_view_base_only[mips=%llu layers=%llu]",
+                 "unsupported[dref=%llu proj=%llu sparse=%llu image_dim=%llu other=%llu] samp_filter_unknown=%llu tex_view_base_only[mips=%llu layers=%llu] tex_views[mip_chain=%llu array=%llu]",
                  (unsigned long long)R->ext_unnorm_lod0, (unsigned long long)R->ext_unnorm_unused, (unsigned long long)R->ext_unnorm_skipped, (unsigned long long)R->ext_unnorm_variants, (unsigned long long)R->ext_unnorm_variant_fail,
                  (unsigned long long)R->ext_unnorm_use_implicit0, (unsigned long long)R->ext_unnorm_use_bias_dropped, (unsigned long long)R->ext_unnorm_use_offset_folded, (unsigned long long)R->ext_unnorm_use_explicit_kept,
                  (unsigned long long)R->ext_unnorm_use_grad_kept, (unsigned long long)R->ext_unnorm_use_gather_kept, (unsigned long long)R->ext_unnorm_use_unresolved,
                  (unsigned long long)R->ext_unnorm_unsup[0], (unsigned long long)R->ext_unnorm_unsup[1], (unsigned long long)R->ext_unnorm_unsup[2], (unsigned long long)R->ext_unnorm_unsup[3], (unsigned long long)R->ext_unnorm_unsup[4],
-                 (unsigned long long)R->ext_samp_filter_unknown, (unsigned long long)R->ext_tex_mips_base_only, (unsigned long long)R->ext_tex_layers_base_only);
+                 (unsigned long long)R->ext_samp_filter_unknown, (unsigned long long)R->ext_tex_mips_base_only, (unsigned long long)R->ext_tex_layers_base_only,
+                 (unsigned long long)R->ext_tex_mip_views, (unsigned long long)R->ext_tex_array_views);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);
+        if (lagfx_cubic_optin() || R->ext_cubic_requested) {   /* the opt-in cubic path (LAGFX_CUBIC=1); silent without it */
+            snprintf(el, sizeof el, "g7-gpu-cubic: optin=%d requested=%llu used=%llu fallback_linear[no_ext=%llu no_format=%llu no_viewtype=%llu no_combo=%llu] (value 2 = bicubic is INFER; the kernel / Adreno result are NOT verified)",
+                     lagfx_cubic_optin() ? 1 : 0, (unsigned long long)R->ext_cubic_requested, (unsigned long long)R->ext_cubic_used, (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_EXT],
+                     (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_FORMAT], (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_VIEWTYPE], (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_COMBO]);
+            fprintf(stderr, "%s\n", el);
+            LAGFX_LOG("%s", el);
+        }
     }
     if (X->run.execs) {   /* ARM64 render execution (LAGFX_ARM64_EXEC=1): totals, then the per-tag outcome of every tag seen */
         const __typeof__(X->run) *R = &X->run;
