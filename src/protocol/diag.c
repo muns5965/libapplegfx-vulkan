@@ -284,9 +284,9 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
         {   /* mapped write-back host-sync counters (read-only): HOST_READ barriers recorded / failed-exec clears / finishes skipped / unreadable descriptors */
-            char wl[300];
-            snprintf(wl, sizeof wl, "g7-wb-sync: wb_host_barriers_recorded=%llu wb_down_pending_cleared_on_fail=%llu wb_down_skipped_not_recorded=%llu wb_finish_desc_unreadable_owed=%llu",
-                     (unsigned long long)R->wb_host_barriers_recorded, (unsigned long long)R->wb_down_pending_cleared_on_fail, (unsigned long long)R->wb_down_skipped_not_recorded, (unsigned long long)R->wb_finish_desc_unreadable_owed);
+            char wl[420];
+            snprintf(wl, sizeof wl, "g7-wb-sync: wb_host_barriers_recorded=%llu wb_down_pending_cleared_on_fail=%llu wb_down_skipped_not_recorded=%llu wb_finish_desc_unreadable_owed=%llu wb_retry_owed=%llu wb_retry_exhausted=%llu",
+                     (unsigned long long)R->wb_host_barriers_recorded, (unsigned long long)R->wb_down_pending_cleared_on_fail, (unsigned long long)R->wb_down_skipped_not_recorded, (unsigned long long)R->wb_finish_desc_unreadable_owed, (unsigned long long)R->wb_retry_owed, (unsigned long long)R->wb_retry_exhausted);
             fprintf(stderr, "%s\n", wl);
             LAGFX_LOG("%s", wl);
         }

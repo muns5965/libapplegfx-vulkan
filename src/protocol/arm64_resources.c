@@ -108,6 +108,7 @@ typedef struct lagfx_a64_msurf {
     VkImage img; VkDeviceMemory img_mem;
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
     bool host_valid, guest_stale, down_pending, owed, id_set;
+    uint8_t wb_retries;   /* consecutive failed write-backs of this surface (re-owed each time, up to WB_RETRY_MAX); reset by a successful one */
     uint64_t up_epoch, down_epoch, down_gen;   /* down_gen: the exec / sync / swap copy that recorded the pending image -> staging copy (0 = none) */
     struct lagfx_rb_slot *rb;   /* LAGFX_GPU_READBACK=1 only (LAGFX_WB_VERIFY alone does not allocate it): the independent GPU copy of the image (gpu_readback.h); NULL while off */
     uint64_t id_pl, id_alloc, id_row, id_hash; uint32_t id_first, id_np;   /* which guest pages the mirror was last taken from (the descriptor has no generation): a different page list = the guest re-mapped it */
@@ -527,6 +528,16 @@ static uint64_t ms_ident(const msurf_t *ms) {
     return ms->id_pl * 0x9e3779b97f4a7c15ull ^ ms->id_alloc * 0xc2b2ae3d27d4eb4full ^ ms->id_hash ^ ((uint64_t)ms->id_first << 32 | ms->id_np) ^ ms->id_row << 17;
 }
 
+#define WB_RETRY_MAX 8u
+/* A write-back of this surface failed (descriptor unreadable, transfer failed, sync copy not done): the GPU image is still the newer one, so the surface is owed again
+ * in EVERY mode and the next display command pays it (lagfx_a64_res_display_swap). Bounded so a surface the guest never maps again cannot cost a copy per display command forever. */
+static void ms_owe(lagfx_protocol_t *p, msurf_t *ms) {
+    if (!ms->host_valid) return;
+    if (ms->wb_retries >= WB_RETRY_MAX) { ms->owed = false; MRUN(p).wb_retry_exhausted++; return; }
+    ms->wb_retries++, ms->owed = true; 
+    MRUN(p).wb_retry_owed++;
+}
+
 /* image -> staging buffer (recorded); only a surface that holds meaningful pixels (host_valid). Once per epoch. */
 static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms, uint64_t gen) {
     if (!ms->host_valid) return false;
@@ -569,17 +580,18 @@ static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms, uint64_t gen) {
     if (!ms->down_pending || ms->down_gen != gen) { if (ms->down_gen != gen) MRUN(p).wb_down_skipped_not_recorded++; return 0; }   /* (same generation, already finished: a second ref of the same surface in one exec, not counted) */   /* this exec / sync / swap copy did not record the copy for this surface: its staging bytes are not ours to write (a pending recording of another generation is left alone) */
     ms->down_pending = false;
     lagfx_guest_surface_t gs;
-    if (lagfx_a64_test_hook == 4 ? (lagfx_a64_test_hook = 0, true) : !ms_desc(p, ms->mapping, &gs)) { if (mapped_wb_on_swap()) ms->owed = true; MRUN(p).wb_finish_desc_unreadable_owed++; return 0; }   /* descriptor unreadable: counted. Swap mode only: the surface is owed again and paid by the next display swap. Immediate mode: diagnostic only, NOT recovered (display_swap does nothing outside =swap), so the flag is not set there */
+    if (lagfx_a64_test_hook == 4 ? (lagfx_a64_test_hook = 0, true) : !ms_desc(p, ms->mapping, &gs)) { ms_owe(p, ms); MRUN(p).wb_finish_desc_unreadable_owed++; return 0; }   /* descriptor unreadable: counted. Swap mode only: the surface is owed again and paid by the next display swap. Immediate mode: diagnostic only, NOT recovered (display_swap does nothing outside =swap), so the flag is not set there */
     if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return -1; }
     if (ms->id_set && (gs.page_list_gpa != ms->id_pl || gs.alloc != ms->id_alloc || gs.first_offset != ms->id_first || gs.npages != ms->id_np || gs.row_bytes != ms->id_row ||
                       (ms->id_hash && ms_list_hash(p, &gs) != ms->id_hash))) { MRUN(p).mapped_remapped++; return -1; }
     lagfx_guest_surface_xfer_stats_t st;
     memset(&st, 0, sizeof st);
-    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return 0; }
+    if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, true, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; ms_owe(p, ms); return 0; }
     MRUN(p).mapped_written_back++, MRUN(p).mapped_bytes_down += st.bytes, MRUN(p).mapped_pages_skipped += st.pages_skipped;
     if (lagfx_wbv_enabled()) ms_wb_verify(p, ms, &gs);
     if (ms->rb && lagfx_rb_enabled()) lagfx_rb_finish(vk_of(p), &ms->rb, ms_shell(p), &gs, ms->stage_map, ms->img, ms->mapping, ms_ident(ms), gen, (uint64_t)p->diag2.disp.op_swap);
     ms->guest_stale = false;
+    ms->wb_retries = 0;
     ms->owed = false;   /* whoever paid it (flag 4, synchronize, swap): the guest is current */
     return 1;
 }
@@ -1434,7 +1446,7 @@ uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const u
     else if (lagfx_a64_test_hook == 9) lagfx_a64_test_hook = 0, ok = false;
     if (cb) lagfx_vk_cmdbuf_free(vk, cb);
     if (!ok) {   /* the recorded copies will not be read: not pending (a timed-out one is parked by submit_wait only for the fence, its staging bytes are never written) */
-        for (uint32_t i = 0; i < ns; i++) if (sel[i]->ms && sel[i]->ms->down_pending && sel[i]->ms->down_gen == gen) { sel[i]->ms->down_pending = false; MRUN(p).wb_down_pending_cleared_on_fail++; }
+        for (uint32_t i = 0; i < ns; i++) if (sel[i]->ms && sel[i]->ms->down_pending && sel[i]->ms->down_gen == gen) { sel[i]->ms->down_pending = false; MRUN(p).wb_down_pending_cleared_on_fail++; ms_owe(p, sel[i]->ms); }
         return 0;
     }
     for (uint32_t i = 0; i < ns; i++) { if (sel[i]->ms) ms_finish_down(p, sel[i]->ms, gen); else guest_download(p, m, t, sel[i]), sel[i]->guest_stale = false; }
@@ -1473,7 +1485,8 @@ static lagfx_a64_status_t swap_poll(lagfx_protocol_t *p, mgr2_t *m, uint32_t wai
  * that times out is parked in the manager (sw_*) like a pending exec: nothing it touches is freed or reused until its fence signalled. */
 uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) {
     mgr2_t *m = p ? p->a64_res : NULL;
-    if (!m || !mapped_wb_on_swap()) return 0;
+    if (!m) return 0;
+    if (!mapped_wb_on_swap()) { bool any = false; for (uint32_t i = 0; i < m->nms && !any; i++) any = m->ms[i] && m->ms[i]->owed; if (!any) return 0; }   /* immediate mode owes nothing unless a write-back failed: then this pays the retry */
     MRUN(p).swap_events++;
     struct lagfx_vk_state *vk = vk_of(p);
     if (!vk || m->cur) { for (uint32_t i = 0; i < m->nms; i++) if (m->ms[i] && m->ms[i]->owed) MRUN(p).swap_deferred++; return 0; }

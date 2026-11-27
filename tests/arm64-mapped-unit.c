@@ -565,6 +565,7 @@ int main(void) {
       g_remap_list = 0;
       assert(*surf_px(32, 40) == 0xabababab && CNT(p).swap_dropped == dr + 1 && CNT(p).mapped_remapped == rm + 1 && CNT(p).mapped_written_back == wbx + 1);
       assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab); }   /* dropped, not retried */
+    lagfx_a64_res_display_swap(p);   /* pay whatever an earlier case left owed: a failed write-back is owed in every mode now */
     { const uint32_t res[1][2] = { { REF_M1, 2 } };
       uint64_t fa = CNT(p).swap_failed;
       surf_fill(SENT);
@@ -635,18 +636,17 @@ int main(void) {
       run_exec(p, 53, 0, 0, green, false, res, 1, false);
       assert(g_desc_fail_n == 0);   /* flag 4, nothing recorded for the surface */
       assert(cell(1) == 53 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab && CNT(p).wb_down_skipped_not_recorded > sk); }
-    { /* unreadable descriptor at finish, IMMEDIATE mode (default): counted only; owed is NOT set (nothing would pay it), so a later =swap display swap writes nothing */
+    { /* unreadable descriptor at finish, IMMEDIATE mode (default): counted AND owed again; the next display command pays it (recovery, not silent loss) */
       const uint32_t res[1][2] = { { REF_M1, 4 } };
       static const double red4[4] = { 1, 0, 0, 1 };
       surf_fill(SENT);
-      uint64_t ow = CNT(p).wb_finish_desc_unreadable_owed, wbx = CNT(p).mapped_written_back;
+      uint64_t ow = CNT(p).wb_finish_desc_unreadable_owed, wbx = CNT(p).mapped_written_back, ro = CNT(p).wb_retry_owed;
       lagfx_a64_test_hook = 4;
       run_exec(p, 54, REF_M1, 2, red4, false, res, 1, true);
-      assert(lagfx_a64_test_hook == 0 && CNT(p).wb_finish_desc_unreadable_owed == ow + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_test_hook == 0 && CNT(p).wb_finish_desc_unreadable_owed == ow + 1 && CNT(p).wb_retry_owed == ro + 1 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
       assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0);
-      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "swap", 1);
-      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab);   /* not owed: immediate mode does not recover */
-      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK"); }
+      assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == RED && CNT(p).mapped_written_back == wbx + 1);   /* immediate mode now recovers at the next display command */
+      assert(lagfx_a64_res_display_swap(p) == 0); }   /* paid: nothing owed any more */
     { /* the same in =swap mode: owed again, the next display swap pays it */
       const uint32_t res[1][2] = { { REF_M1, 4 } };
       static const double red4[4] = { 1, 0, 0, 1 };
@@ -680,6 +680,7 @@ int main(void) {
           lagfx_a64_test_hook = hk;
           synchronize(p, 70 + hk, REF_M1);
           assert(lagfx_a64_test_hook == 0 && CNT(p).wb_down_pending_cleared_on_fail == cl + 1 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab);
+          assert(lagfx_a64_res_display_swap(p) == 1 && *surf_px(32, 40) == BLUE);   /* the failed sync left the frame owed: the next display command recovers it */
       }
       synchronize(p, 80, REF_M1);
       assert(lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && *surf_px(32, 40) == BLUE); }
@@ -707,6 +708,16 @@ int main(void) {
       lagfx_a64_test_hook = 6;
       assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_FAILED && lagfx_a64_test_hook == 0 && !lagfx_a64_res_is_pending(p));
       assert(CNT(p).wb_down_pending_cleared_on_fail == cl + 2 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab); }
+    { /* retry is bounded: a surface whose descriptor never reads again stops being owed after WB_RETRY_MAX (8) failures */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      static const double red4[4] = { 1, 0, 0, 1 };
+      surf_fill(SENT);
+      uint64_t ex = CNT(p).wb_retry_exhausted;
+      for (int k = 0; k < 9 && CNT(p).wb_retry_exhausted == ex; k++) { lagfx_a64_test_hook = 4; run_exec(p, 90 + k, REF_M1, 2, red4, false, res, 1, true); }
+      assert(CNT(p).wb_retry_exhausted == ex + 1 && *surf_px(32, 40) == 0xabababab);
+      assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab);   /* given up: no copy per display command */
+      { static const double g4[4] = { 0, 1, 0, 1 }; run_exec(p, 99, REF_M1, 2, g4, false, res, 1, true); assert(*surf_px(32, 40) == GREEN); } }   /* a later flag-4 exec writes again and resets the counter */
+    printf("PASS: failed write-back is owed again in every mode (immediate recovers at the next display command), bounded at WB_RETRY_MAX\n");
     printf("PASS: host-read barrier recorded, data unchanged; failed submit / sync failure / device lost clear the pending copy, timeout keeps it, foreign generation refused; unreadable descriptor counted (owed in swap mode only)\n");
 
     /* (8) validation control: a deliberate read-after-write hazard (fill, then copy from the filled buffer, no barrier) must be flagged by synchronization validation.
