@@ -44,7 +44,7 @@ static bool resolver_v(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t
     if (g_v.mode == M_ATTR) {   /* one Float2 attribute at offset 8 of a 24 byte vertex, through the PSO layout fields of the builder */
         out->desc.vertex_shader = mod(vk, 0, k_vs_spv, sizeof k_vs_spv);
         out->desc.n_vtx_inputs = 1, out->desc.vtx_in_loc[0] = 0, out->desc.vtx_in_comp[0] = 2, out->desc.vtx_stride = 24;
-        out->desc.n_pso_attrs = 1, out->desc.pso_attr_fmt[0] = 29, out->desc.pso_attr_off[0] = 8;
+        out->desc.pso_attrs_serialized = 1, out->desc.n_pso_attrs = 1, out->desc.pso_attr_fmt[0] = 29, out->desc.pso_attr_off[0] = 8;
         out->vertex_buffer_index = 0;
     } else if (g_v.mode == M_PULL) {
         out->desc.vertex_shader = mod(vk, 2, k_vs_pull_spv, sizeof k_vs_pull_spv);
@@ -65,6 +65,7 @@ static bool resolver_v(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t
         for (uint32_t i = 0; i < 4; i++) out->desc.vtx_in_loc[i] = (uint8_t)i, out->desc.vtx_in_comp[i] = comp[i];
         assert(d->nattrs);
         out->vertex_buffer_index = d->attrs[0].bufidx;
+        out->desc.pso_attrs_serialized = 1;
         out->desc.n_pso_attrs = (uint8_t)d->nattrs;
         for (uint32_t a = 0; a < d->nattrs; a++) out->desc.pso_attr_fmt[a] = d->attrs[a].fmt, out->desc.pso_attr_off[a] = d->attrs[a].off;
         out->desc.vtx_stride = d->stride;

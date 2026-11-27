@@ -49,6 +49,7 @@ static lagfx_pipeline_desc_t to_desc(const lagfx_a64_pdesc_t *d, uint32_t nvi, c
     lagfx_pipeline_desc_t p; memset(&p, 0, sizeof p);
     p.n_vtx_inputs = (uint8_t)nvi;
     for (uint32_t i = 0; i < nvi; i++) p.vtx_in_loc[i] = (uint8_t)i, p.vtx_in_comp[i] = comp[i];
+    p.pso_attrs_serialized = 1;   /* arm64_pipeline.c sets it whenever the vertex shader reflects stage-in inputs */
     p.n_pso_attrs = (uint8_t)d->nattrs;
     for (uint32_t a = 0; a < d->nattrs; a++) p.pso_attr_fmt[a] = d->attrs[a].fmt, p.pso_attr_off[a] = d->attrs[a].off;
     p.vtx_stride = d->stride;
@@ -88,13 +89,34 @@ int main(void) {
         CHECK(vb.stride == 32, "pso 78 stride 32");
     }
 
-    /* Synthetic: fewer decoded PSO attributes than reflected inputs. CURRENT behaviour (documented, not endorsed): use_pso_attrs is all-or-nothing, so the
-     * valid decoded attributes are IGNORED and ALL inputs get the reflected float tight-pack (offsets 0/16, formats from the reflected component counts). */
+    /* Synthetic: fewer decoded PSO attributes than reflected inputs (real PSO 78 decodes Float4@0 + Float2@16; 3 inputs are reflected). No dump of the current decoder
+     * has this shape; this is what the builder does if it ever occurs. Serialized descriptor: the two decoded attributes are used for the Locations they cover, the
+     * uncovered Location 2 is an error (VK_FORMAT_UNDEFINED, reported index 2), nothing is float-packed. */
     if (load(78, &d)) {
-        lagfx_pipeline_desc_t p = to_desc(&d, 3, (const uint8_t[]){4,4,4});   /* 2 decoded attributes, 3 reflected inputs */
-        CHECK(lagfx_pipeline_vertex_input(&p, &vb, va, &n, &badi) && n == 3, "undercount: succeeds");
-        CHECK(va[1].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[1].offset == 16, "undercount (current behaviour): attribute 1 is float-packed from the reflection, its decoded Float2@16 is ignored");
-        CHECK(va[2].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[2].offset == 32, "undercount (current behaviour): attribute 2 float-packed @32");
+        lagfx_pipeline_desc_t p = to_desc(&d, 3, (const uint8_t[]){4,4,4});
+        badi = 99;
+        CHECK(!lagfx_pipeline_vertex_input(&p, &vb, va, &n, &badi) && n == 3, "undercount (serialized): fails");
+        CHECK(badi == 2, "undercount (serialized): the first uncovered input (index 2) is reported");
+        CHECK(va[0].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[0].offset == 0, "undercount (serialized): attribute 0 keeps its decoded Float4@0");
+        CHECK(va[1].format == VK_FORMAT_R32G32_SFLOAT && va[1].offset == 16, "undercount (serialized): attribute 1 keeps its decoded Float2@16 (old code float4-packed it)");
+        CHECK(va[2].format == VK_FORMAT_UNDEFINED && va[2].location == 2, "undercount (serialized): the uncovered Location 2 is not given a guessed format");
+        p.vertex_shader = (VkShaderModule)(uintptr_t)1; p.fragment_shader = (VkShaderModule)(uintptr_t)1; p.layout = (VkPipelineLayout)(uintptr_t)1;
+        VkPipeline pl = (VkPipeline)(uintptr_t)7;
+        CHECK(lagfx_pipeline_build((VkDevice)(uintptr_t)1, &p, &pl) == LAGFX_ERR_PROTOCOL, "undercount (serialized): pipeline build fails with LAGFX_ERR_PROTOCOL");
+        /* nothing decoded at all but the shader reads stage-in: also an error for a serialized descriptor */
+        p = to_desc(&d, 3, (const uint8_t[]){4,4,4}); p.n_pso_attrs = 0; badi = 99;
+        CHECK(!lagfx_pipeline_vertex_input(&p, &vb, va, &n, &badi) && badi == 0 && va[0].format == VK_FORMAT_UNDEFINED, "no decoded attribute (serialized): fails at input 0");
+        /* NOT serialized (x86 draw path): behaviour unchanged - the reflected float tight-pack for all inputs */
+        p = to_desc(&d, 3, (const uint8_t[]){4,4,4}); p.pso_attrs_serialized = 0;
+        CHECK(lagfx_pipeline_vertex_input(&p, &vb, va, &n, &badi) && n == 3, "undercount (x86, not serialized): succeeds as before");
+        CHECK(va[1].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[1].offset == 16, "undercount (x86): attribute 1 float-packed from the reflection, as before");
+        CHECK(va[2].format == VK_FORMAT_R32G32B32A32_SFLOAT && va[2].offset == 32, "undercount (x86): attribute 2 float-packed @32, as before");
+    }
+    /* decoded > reflected (real: reflected 0:4,1:2,2:4 with 4 decoded attributes, PSO 136 of run 231501, not drawn in the dump) is positional and unchanged:
+     * reflected input a uses decoded attribute a, so input 2 (4 components) is read as the decoded Float2@24, not the Half4@32 - recorded here as a fact, not endorsed. */
+    if (load(12, &d)) {
+        lagfx_pipeline_desc_t p = to_desc(&d, 3, (const uint8_t[]){4,2,4});
+        CHECK(lagfx_pipeline_vertex_input(&p, &vb, va, &n, &badi) && n == 3 && va[2].format == VK_FORMAT_R32G32_SFLOAT && va[2].offset == 24, "decoded>reflected (serialized): positional pairing, unchanged");
     }
 
     printf("%s arm64-vertex-desc-real-unit\n", bad ? "FAIL" : "PASS");

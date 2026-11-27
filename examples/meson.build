@@ -146,3 +146,11 @@ executable('reduce-rows',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# dump-vtxattrs — per PSO of an arm64 dump: decoded MTLVertexDescriptor attributes vs the vertex shader's reflected stage-in Locations.
+executable('dump-vtxattrs',
+  'dump-vtxattrs.c',
+  include_directories : [include_dir, internal_include_dir],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

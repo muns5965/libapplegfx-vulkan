@@ -526,6 +526,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     if (nvi > 8u) nvi = 8u;
     for (size_t v = 0; v < nvi; v++) out->desc.vtx_in_loc[v] = (uint8_t)vin[v].location, out->desc.vtx_in_comp[v] = (uint8_t)vin[v].components;
     out->desc.n_vtx_inputs = (uint8_t)nvi;
+    out->desc.pso_attrs_serialized = nvi ? 1u : 0u;   /* the descriptor is the layout source: a reflected input without a decoded attribute fails the pipeline (lagfx_pipeline_vertex_input) */
     if (nvi && d.nattrs) {
         for (uint32_t a = 1; a < d.nattrs; a++) if (d.attrs[a].bufidx != d.attrs[0].bufidx) { CNTP(p).rf_multi_stream++; goto done; }
         out->vertex_buffer_index = d.attrs[0].bufidx;

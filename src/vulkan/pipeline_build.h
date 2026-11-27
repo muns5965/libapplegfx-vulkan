@@ -66,6 +66,11 @@ typedef struct {
     uint32_t         pso_attr_fmt[8];
     uint32_t         pso_attr_off[8];
     uint8_t          n_pso_attrs;
+    /* 1 = the attributes come from a serialized MTLVertexDescriptor (arm64 PSO resolve): pso_attr_* are the only source of vertex layout for this pipeline, so a
+     * reflected Location with no decoded attribute (n_pso_attrs < n_vtx_inputs, including 0) fails the pipeline (LAGFX_ERR_PROTOCOL, one warning with the counts)
+     * instead of being float-packed from the reflection. 0 (every other caller, notably the x86 draw path, whose attribute list is parsed heuristically) keeps the
+     * original rule: all decoded attributes when n_pso_attrs >= n_vtx_inputs, otherwise the reflected float tight-pack for all of them. */
+    uint8_t          pso_attrs_serialized;
     /* Primitive topology as VkPrimitiveTopology + 1; 0 = default (TRIANGLE_LIST), so every existing caller is unchanged. */
     uint8_t          topology_plus1;
     /* OPTIONAL diagnostics (zero = unknown): the SPIR-V the two modules were made from and the enabled device-capability mask. Only read when vkCreateGraphicsPipelines

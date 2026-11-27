@@ -149,16 +149,23 @@ VkFormat lagfx_pso_vertex_format_to_vk(uint32_t f) {
     }
 }
 
-/* Vertex-input state for desc (n_vtx_inputs > 0). Returns false and sets *bad_attr when the PSO descriptor was decoded for every reflected attribute
- * (n_pso_attrs >= the attribute count) but attribute *bad_attr has a Metal vertex format lagfx_pso_vertex_format_to_vk does not know: that attribute gets
- * VK_FORMAT_UNDEFINED in vattr[] and is NOT given a guessed format; every other attribute keeps its own PSO format and offset. With no decoded PSO
- * attributes (n_pso_attrs < count) the reflected float tight-pack is used for all of them, as before. */
+/* Vertex-input state for desc (n_vtx_inputs > 0). Returns false and sets *bad_attr (the first offending reflected input, by index) when
+ *  - an attribute was decoded for it but its Metal vertex format is not known to lagfx_pso_vertex_format_to_vk, or
+ *  - desc->pso_attrs_serialized is set and no attribute was decoded for it (bad_attr >= n_pso_attrs).
+ * The offending entry gets VK_FORMAT_UNDEFINED in vattr[] and is NOT given a guessed format; every other entry keeps its own PSO format and offset.
+ * Rules by source of the layout:
+ *  - serialized descriptor (pso_attrs_serialized): reflected input a uses decoded attribute a. Inputs beyond the decoded attributes are an error, never
+ *    float-packed (no dumped arm64 PSO has fewer decoded attributes than reflected inputs with the current decoder: tools dump-vtxattrs over the 231501/230109 dumps;
+ *    the only dumped undercounts came from the pre-ea60375 decoder that dropped attribute 0).
+ *  - otherwise (x86 draw path, hand-built descriptors): n_pso_attrs >= count uses the decoded attributes; fewer (incl. 0) = reflected float tight-pack for all. */
 bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInputBindingDescription *vbind,
                                  VkVertexInputAttributeDescription vattr[8], uint32_t *out_n, uint32_t *bad_attr) {
     uint32_t nvi = desc->n_vtx_inputs > 8u ? 8u : desc->n_vtx_inputs;
     uint32_t off = 0u;
     bool ok = true;
-    bool use_pso_attrs = desc->n_pso_attrs >= nvi;
+    bool serialized = desc->pso_attrs_serialized != 0u;
+    uint32_t npa = desc->n_pso_attrs > 8u ? 8u : desc->n_pso_attrs;
+    bool use_pso_attrs = serialized || desc->n_pso_attrs >= nvi;
     for (uint32_t a = 0; a < nvi; a++) {
         uint32_t c = desc->vtx_in_comp[a]; if (c < 1u) c = 1u; if (c > 4u) c = 4u;
         VkFormat fmt = (c == 1u) ? VK_FORMAT_R32_SFLOAT :
@@ -167,8 +174,13 @@ bool lagfx_pipeline_vertex_input(const lagfx_pipeline_desc_t *desc, VkVertexInpu
                                    VK_FORMAT_R32G32B32A32_SFLOAT;
         uint32_t aoff = off;
         if (use_pso_attrs) {
-            aoff = desc->pso_attr_off[a];
-            fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);
+            if (a < npa) {
+                aoff = desc->pso_attr_off[a];
+                fmt = lagfx_pso_vertex_format_to_vk(desc->pso_attr_fmt[a]);
+            } else {   /* serialized descriptor with fewer attributes than reflected inputs: no layout evidence for this Location */
+                aoff = 0u;
+                fmt = VK_FORMAT_UNDEFINED;
+            }
             if (fmt == VK_FORMAT_UNDEFINED && ok) { ok = false; if (bad_attr) *bad_attr = a; }
         }
         vattr[a] = (VkVertexInputAttributeDescription){
@@ -237,10 +249,17 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     if (desc->n_vtx_inputs > 0u) {
         uint32_t bad_attr = 0u;
         if (!lagfx_pipeline_vertex_input(desc, &vbind, vattr, &nvi_out, &bad_attr)) {
-            /* Hardening (P06): an attribute whose MTLVertexFormat is not in the table is an explicit error for THIS pipeline. It is not re-interpreted
-             * (no guess at the Apple GPU's reading of the format) and the other attributes are not re-packed as float either. Callers already treat a
-             * non-OK status as "this PSO is unusable": the arm64 path caches the failure and skips its draws, the x86 path skips the draw. */
-            if (!g_quiet) LAGFX_WARN("pipeline-build: vertex attribute %u has unsupported Metal vertex format %u; pipeline not built", bad_attr, (unsigned)desc->pso_attr_fmt[bad_attr]);
+            /* Hardening (P06): an attribute whose MTLVertexFormat is not in the table, or (serialized descriptor) a reflected input with no decoded attribute, is an
+             * explicit error for THIS pipeline. Neither is re-interpreted (no guess at the Apple GPU's reading of the format or at a layout) and the other
+             * attributes are not re-packed as float either. Callers already treat a non-OK status as "this PSO is unusable": the arm64 path caches the failure and
+             * skips its draws, the x86 path skips the draw. One warning per failing build (the callers cache the result per pipeline). */
+            if (!g_quiet) {
+                if (bad_attr >= desc->n_pso_attrs)
+                    LAGFX_WARN("pipeline-build: vertex input location %u (reflected input %u of %u) has no decoded attribute (the serialized descriptor decoded %u); pipeline not built",
+                               (unsigned)desc->vtx_in_loc[bad_attr], bad_attr, (unsigned)desc->n_vtx_inputs, (unsigned)desc->n_pso_attrs);
+                else
+                    LAGFX_WARN("pipeline-build: vertex attribute %u has unsupported Metal vertex format %u; pipeline not built", bad_attr, (unsigned)desc->pso_attr_fmt[bad_attr]);
+            }
             return LAGFX_ERR_PROTOCOL;
         }
         vin.vertexBindingDescriptionCount   = 1u;
