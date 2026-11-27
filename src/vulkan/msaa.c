@@ -2,6 +2,7 @@
 #include "msaa.h"
 #include "instance.h"
 
+#include <stdio.h>
 #include <string.h>
 
 lagfx_msaa_mode_t lagfx_msaa_mode(void) { return lagfx_msaa_compat_env() ? LAGFX_MSAA_MODE_COMPAT : LAGFX_MSAA_MODE_EXACT; }
@@ -111,17 +112,58 @@ bool lagfx_msaa_color_attachment(const lagfx_msaa_target_t *t, VkAttachmentLoadO
     return ok;
 }
 
-uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t advertised, bool *clamped) {
-    static const VkFormat k[2] = { VK_FORMAT_B8G8R8A8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT };
-    uint32_t host = 16;
-    for (int i = 0; i < 2; i++) {
-        uint32_t m = (lagfx_fmtcap_features(be, k[i]) & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) ? lagfx_fmtcap_max_samples(lagfx_fmtcap_sample_counts(be, k[i], VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) : 1u;
-        if (m < 1) m = 1;
-        if (m < host) host = m;
+/* the usage mask EXACT mode asks for per count (lagfx_a64_msaa_plan_image): required attachment usage, SAMPLED optional (colour only) */
+static VkSampleCountFlags exact_mask(const lagfx_fmtcap_backend_t *be, VkFormat fmt, bool depth, bool *attachable) {
+    const VkImageUsageFlags req = depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, opt = depth ? 0u : VK_IMAGE_USAGE_SAMPLED_BIT;
+    const VkFormatFeatureFlags want = depth ? VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
+    VkSampleCountFlags m = 0;
+    *attachable = (lagfx_fmtcap_features(be, fmt) & want) != 0;
+    if (!*attachable) return 0;
+    for (uint32_t n = 1; n <= 16u; n <<= 1) {
+        lagfx_fmtcap_usage_t u;
+        if (lagfx_fmtcap_image_usage(be, fmt, VK_IMAGE_TYPE_2D, 64, 64, 1, 1, 1, (VkSampleCountFlagBits)n, req, opt, &u)) m |= n;
     }
-    if (advertised <= host) return advertised;
+    return m;
+}
+
+void lagfx_msaa_host_caps(const lagfx_fmtcap_backend_t *be, uint32_t ceiling, lagfx_msaa_caps_t *out) {
+    static const struct { VkFormat f; bool depth, gating; } tab[] = {
+        { VK_FORMAT_B8G8R8A8_UNORM, false, true }, { VK_FORMAT_R16G16B16A16_SFLOAT, false, true }, { VK_FORMAT_D32_SFLOAT, true, true }, { VK_FORMAT_D32_SFLOAT_S8_UINT, true, true },
+        { VK_FORMAT_R8G8B8A8_UNORM, false, false }, { VK_FORMAT_A2B10G10R10_UNORM_PACK32, false, false }, { VK_FORMAT_D16_UNORM, true, false }, { VK_FORMAT_D24_UNORM_S8_UINT, true, false } };
+    memset(out, 0, sizeof *out);
+    out->ceiling = ceiling < 1u ? 1u : ceiling;
+    out->common = 0x1fu;   /* counts 1 .. 16, narrowed by every gating format below */
+    bool colour_missing = false;
+    for (size_t i = 0; i < sizeof tab / sizeof *tab && out->n < LAGFX_MSAA_CAPS_MAX_FMT; i++) {
+        lagfx_msaa_fmt_caps_t *c = &out->f[out->n++];
+        c->fmt = tab[i].f, c->depth = tab[i].depth, c->gating = tab[i].gating;
+        c->mask = exact_mask(be, c->fmt, c->depth, &c->attachable);
+        if (!c->gating) continue;
+        if (!c->attachable) { if (!c->depth) colour_missing = true; continue; }   /* a depth format the device cannot attach is not used by the mirror either (create_image falls back / refuses) */
+        out->common &= c->mask | VK_SAMPLE_COUNT_1_BIT;
+    }
+    if (colour_missing) out->common = VK_SAMPLE_COUNT_1_BIT;   /* no usable gating colour format: only the N = 1 gate stays open */
+    uint32_t top = 1;
+    for (uint32_t n = 2; n <= 16u && n <= out->ceiling; n <<= 1) if (out->common & n) top = n;
+    out->advertised = top;
+    for (uint32_t n = 2; n <= top; n <<= 1) if (!(out->common & n)) out->gaps |= n;
+}
+
+int lagfx_msaa_caps_line(const lagfx_msaa_caps_t *c, char *buf, size_t cap) {
+    int n = snprintf(buf, cap, "g7-gpu-msaa-caps: value=MSAASamples(max count, not a bitmask) advertised=%u ceiling=%u common=0x%x gaps=0x%x(%s)", c->advertised, c->ceiling, (unsigned)c->common, (unsigned)c->gaps,
+                     c->gaps ? "counts the single value cannot express: refused exactly" : "none");
+    for (uint32_t i = 0; i < c->n && n > 0 && (size_t)n < cap; i++)
+        n += snprintf(buf + n, cap - (size_t)n, " [vk=%d %s %s mask=0x%x]", (int)c->f[i].fmt, c->f[i].depth ? "ds" : "colour", !c->f[i].attachable ? "unattachable" : c->f[i].gating ? "gating" : "info", (unsigned)c->f[i].mask);
+    return n;
+}
+
+uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t advertised, bool *clamped) {
+    if (advertised <= 1u) return advertised;
+    lagfx_msaa_caps_t c;
+    lagfx_msaa_host_caps(be, advertised, &c);
+    if (c.advertised >= advertised) return advertised;
     if (clamped) *clamped = true;
-    return host;
+    return c.advertised;
 }
 
 int lagfx_msaa_plan(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,

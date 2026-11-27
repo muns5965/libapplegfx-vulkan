@@ -274,6 +274,37 @@ static void test_resolve(bool f16, uint16_t store, const char *name) {
     printf("PASS %s 4x %s: resolved image == CPU coverage reference (orientation %s, %u partial pixels), images=1 attach=1 resolves=1 pipes_ms=1 draws_ms=1, validation 0\n", f16 ? "RGBA16F" : "BGRA8", name, a ? "y-down" : "y-flipped", part);
 }
 
+/* ---- device-info reply (CmdGetDeviceInfo2, key 0x01 MSAASamples) with injected host sample-count masks ---- */
+typedef struct { VkSampleCountFlags colour, depth; } dim_t;
+static dim_t g_dim; static lagfx_fmtcap_backend_t g_dim_be;
+static void dim_fp(void *c, VkFormat f, VkFormatProperties2 *o) {
+    (void)c; const bool d = f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D24_UNORM_S8_UINT;
+    memset(&o->formatProperties, 0, sizeof o->formatProperties);
+    o->formatProperties.optimalTilingFeatures = d ? (VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT)
+        : (VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT);
+}
+static VkResult dim_ifp(void *c, const VkPhysicalDeviceImageFormatInfo2 *in, VkImageFormatProperties2 *o) {
+    const dim_t *m = c; const bool d = in->format == VK_FORMAT_D32_SFLOAT || in->format == VK_FORMAT_D32_SFLOAT_S8_UINT || in->format == VK_FORMAT_D16_UNORM || in->format == VK_FORMAT_D24_UNORM_S8_UINT;
+    memset(&o->imageFormatProperties, 0, sizeof o->imageFormatProperties);
+    o->imageFormatProperties.maxExtent = (VkExtent3D){ 16384, 16384, 1 }, o->imageFormatProperties.maxMipLevels = 15, o->imageFormatProperties.maxArrayLayers = 256, o->imageFormatProperties.sampleCounts = d ? m->depth : m->colour;
+    return VK_SUCCESS;
+}
+static void dim_set(VkSampleCountFlags colour, VkSampleCountFlags depth) { g_dim.colour = colour, g_dim.depth = depth; g_dim_be = (lagfx_fmtcap_backend_t){ &g_dim, dim_fp, dim_ifp }; lagfx_fmtcap_test_backend = &g_dim_be; }
+/* runs the real handler; returns the MSAASamples value of the TLV reply (key 0x01) and the msaa counters after it; 0xffffffff = not found */
+static uint32_t devinfo_msaa(uint32_t mode, lagfx_msaa_stats_t *ms) {
+    lagfx_protocol_t *p = mk(mode);
+    const uint32_t resp_pfn = 40;   /* inside the 2 MiB harness memory, away from the ring / table pages */
+    uint8_t pay[12]; const uint32_t kind = 0x2a, qw = 0x200; memcpy(pay, &kind, 4); memcpy(pay + 4, &qw, 4); memcpy(pay + 8, &resp_pfn, 4);
+    lagfx_cmd_header_t h; memset(&h, 0, sizeof h); h.payload = pay, h.payload_size = sizeof pay;
+    const uint64_t gpa = lagfx_pfn_to_gpa(p, resp_pfn); memset(g_mem + gpa, 0xab, 1024);
+    assert(lagfx_op_get_device_info_2(p, &h) == LAGFX_HANDLER_OK);
+    uint32_t v = 0xffffffffu;
+    for (uint32_t i = 0; i < 64u; i++) { uint32_t k, val; memcpy(&k, g_mem + gpa + i * 8u, 4); memcpy(&val, g_mem + gpa + i * 8u + 4, 4); if (k == 0u) break; if (k == 1u) { v = val; break; } }
+    if (ms) *ms = p->diag2.exec.msaa;
+    free(p);
+    return v;
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -282,6 +313,23 @@ int main(void) {
     VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(g_dev->vk->phys_device, &pr);
     if (!(pr.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) || !pr.limits.standardSampleLocations) { puts("SKIP: needs 4x and standard sample locations"); return 77; }
     static gr_t g;
+
+
+    /* ===== guest capability advertisement: the MSAASamples value of the real CmdGetDeviceInfo2 reply follows the host's exact-mode grants (ceiling 4, the library table value) ===== */
+    { lagfx_msaa_stats_t ms;
+      /* the real device (lavapipe 1|4): 4, with the 2x gap counted */
+      assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 4u && ms.devinfo_gap == 1 && ms.devinfo_clamped == 0);
+      assert(devinfo_msaa(LAGFX_PROTO_X86, &ms) == 4u && ms.devinfo_gap == 1 && ms.devinfo_clamped == 0);
+      dim_set(1 | 4, 1 | 4);               assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 4u && ms.devinfo_gap == 1 && ms.devinfo_clamped == 0);
+      dim_set(1 | 2 | 4, 1 | 2 | 4);       assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 4u && ms.devinfo_gap == 0 && ms.devinfo_clamped == 0);
+      dim_set(1 | 2 | 4 | 8, 1 | 2 | 4 | 8); assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 4u && ms.devinfo_gap == 0 && ms.devinfo_clamped == 0);   /* 8 is offered by the host; the library table's 4 is the ceiling */
+      dim_set(1, 1);                       assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 1u && ms.devinfo_clamped == 1 && ms.devinfo_gap == 0);
+      assert(devinfo_msaa(LAGFX_PROTO_X86, &ms) == 1u && ms.devinfo_clamped == 1);
+      dim_set(1 | 2, 1 | 2);               assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 2u && ms.devinfo_clamped == 1);
+      dim_set(1 | 2 | 4, 1 | 2);           assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 2u && ms.devinfo_clamped == 1);       /* depth lacks 4x: the pass colour + depth pair would be refused */
+      dim_set(1 | 4, 1 | 2);               assert(devinfo_msaa(LAGFX_PROTO_ARM64_VMAPPLE, &ms) == 1u && ms.devinfo_clamped == 1);       /* no common count above 1 */
+      lagfx_fmtcap_test_backend = NULL;
+      puts("PASS device-info reply (arm64 and x86 table): MSAASamples = largest exact-mode count of the common colour + depth formats, ceiling 4: 1|4 -> 4 (2x gap counted devinfo_gap), 1|2|4 -> 4, 1|2|4|8 -> 4, 1 -> 1, 1|2 -> 2, colour 1|2|4 + depth 1|2 -> 2, colour 1|4 + depth 1|2 -> 1"); }
 
     /* 1/2: resolve by store action (2 = MultisampleResolve, 3 = StoreAndMultisampleResolve), both formats */
     test_resolve(false, 2, "store action 2");

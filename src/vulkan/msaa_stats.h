@@ -52,7 +52,8 @@ typedef struct lagfx_msaa_stats {
     uint64_t air_ms_ops;               /* AIR texture-multisample reads / sample-count queries seen in a translated module (NOT translated) */
     uint64_t air_sample_builtins;      /* AIR [[sample_id]] / [[sample_mask]] / sample position builtins seen in a translated module (NOT translated) */
     /* device info */
-    uint64_t devinfo_clamped;          /* MSAASamples lowered to the host maximum */
+    uint64_t devinfo_clamped;          /* MSAASamples lowered to the largest count exact mode grants for the common colour + depth formats */
+    uint64_t devinfo_gap;              /* device-info replies whose advertised range has a count the host lacks (e.g. 2x on 1|4): the max-count field cannot express it, exact mode refuses it */
 } lagfx_msaa_stats_t;
 
 static inline uint64_t lagfx_msaa_stats_any(const lagfx_msaa_stats_t *s) {
@@ -75,11 +76,11 @@ static inline int lagfx_msaa_stats_line(const lagfx_msaa_stats_t *s, char *buf, 
     return snprintf(buf, cap,
         "g7-gpu-msaa: mode=%s images[ms_created=%llu exact_refused=%llu compat_clamped=%llu compat_1x=%llu refused=%llu bad_shape=%llu] passes[ms=%llu attach=%llu resolves=%llu by_copy=%llu store_unknown=%llu "
         "resolve_no_target=%llu resolve_on_1x=%llu deferred_tags=%llu mixed_ignored=%llu ds_mismatch=%llu pass_refused=%llu] draws[pipes_ms=%llu draws_ms=%llu] "
-        "unsupported[ds_resolve=%llu sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu air_ms_ops=%llu air_sample_id_mask=%llu] devinfo_clamped=%llu",
+        "unsupported[ds_resolve=%llu sampled_ms=%llu fbfetch_ms=%llu tile_ms=%llu blit_ms=%llu capture_ms=%llu air_ms_ops=%llu air_sample_id_mask=%llu] devinfo_clamped=%llu devinfo_gap=%llu",
         lagfx_msaa_compat_env() ? "compat" : "exact",
         LU(ms_images_created), LU(ms_exact_refused), LU(ms_compat_clamped), LU(ms_compat_1x), LU(ms_tex_refused), LU(ms_tex_bad_shape), LU(ms_passes), LU(ms_attach), LU(resolves), LU(resolves_by_copy),
         LU(store_unknown), LU(resolve_no_target), LU(resolve_on_1x), LU(deferred_store_tags), LU(attach_mixed_ignored), LU(ds_mismatch_ignored), LU(ms_pass_refused), LU(pipes_ms), LU(draws_ms),
-        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped));
+        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped), LU(devinfo_gap));
 #undef LU
 }
 

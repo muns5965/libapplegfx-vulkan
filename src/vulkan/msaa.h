@@ -19,6 +19,7 @@
 #define LAGFX_VULKAN_MSAA_H
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <vulkan/vulkan.h>
 
@@ -75,10 +76,39 @@ void lagfx_msaa_target_destroy(struct lagfx_vk_state *vk, lagfx_msaa_target_t *t
  * default STORE without resolve was used). */
 bool lagfx_msaa_color_attachment(const lagfx_msaa_target_t *t, VkAttachmentLoadOp load, const VkClearColorValue *clear, uint32_t mtl_store_action, VkRenderingAttachmentInfo *out);
 
-/* The device-info MSAASamples value (guest supportsRasterSampleCount:N = value >= N): `advertised` lowered to the largest count the backend reports for the colour formats of the
- * mirror (B8G8R8A8_UNORM and R16G16B16A16_SFLOAT as colour attachments; the smaller of the two maxima), never below 1. *clamped |= the value changed. */
-uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t advertised, bool *clamped);
+/* ---- guest capability advertisement: device-info key 0x01 "MSAASamples" ----
+ * Wire semantics (from source; no guest capture exists): the field is ONE u32 in the CmdGetDeviceInfo2 TLV reply (src/protocol/ops_misc.c). Its documented reader is
+ * -[MTLDevice supportsRasterSampleCount:N] = (MSAASamples >= N) after the 0x10116 gate (comment block of ops_misc.c, from the kext disassembly the maintainer's x86 notes cite; the ARM64
+ * table of devices/pvg_lite.c carries the same key with the value 4 [I]). So it is a plain MAXIMUM count, NOT a bitmask of supported counts. Consequences stated plainly:
+ *   - a gap in the host's masks (2x absent on lavapipe: 1|4) CANNOT be expressed: advertising 4 also says "2 is supported" to a guest that tests >= 2;
+ *   - a guest texture / pass that then asks for the missing count is handled by the EXACT-mode refusal (ms_exact_refused / ms_pass_refused), never approximated;
+ *   - 0 aborts SkyLight (the value never goes below 1: the N = 1 gate stays open).
+ * The host keeps the real per-format mask (lagfx_msaa_host_caps) so the line "g7-gpu-msaa-caps" states which counts are gaps. */
+typedef struct {
+    VkFormat fmt;
+    bool depth;                  /* depth / stencil attachment (required usage DEPTH_STENCIL_ATTACHMENT), else colour attachment */
+    bool gating;                 /* part of the common mask / the advertised value (the formats the guest uses for colour + depth); the others are reported only */
+    bool attachable;             /* the format can be an attachment at all (feature bit): an unattachable depth format is ignored, an unattachable gating colour format limits the value to 1 */
+    VkSampleCountFlags mask;     /* counts EXACT mode grants for the required usage (+ SAMPLED where offered); bit 0 (1x) set when attachable */
+} lagfx_msaa_fmt_caps_t;
+#define LAGFX_MSAA_CAPS_MAX_FMT 10
+typedef struct {
+    lagfx_msaa_fmt_caps_t f[LAGFX_MSAA_CAPS_MAX_FMT];
+    uint32_t n;
+    VkSampleCountFlags common;   /* intersection of the gating formats' masks (bit 0 always set) */
+    uint32_t ceiling;            /* the highest count the caller is willing to advertise (the library table value: 4) */
+    uint32_t advertised;         /* the largest power of two <= ceiling (and <= 16, what lagfx_msaa_plan_mode can implement) whose bit is in `common`; at least 1 */
+    VkSampleCountFlags gaps;     /* counts 2 .. advertised that are NOT in `common`: the single value cannot express them (exact mode refuses them) */
+} lagfx_msaa_caps_t;
+/* Per-format exact masks for B8G8R8A8_UNORM, R16G16B16A16_SFLOAT (gating colour), D32_SFLOAT, D32_SFLOAT_S8_UINT (gating depth, ignored when the device cannot attach them) and
+ * R8G8B8A8_UNORM, A2B10G10R10_UNORM_PACK32, D16_UNORM, D24_UNORM_S8_UINT (reported only), then the advertised value. */
+void lagfx_msaa_host_caps(const lagfx_fmtcap_backend_t *be, uint32_t ceiling, lagfx_msaa_caps_t *out);
+/* One line (<= 400 chars): "g7-gpu-msaa-caps: advertised=N ceiling=C common=0x.. gaps=0x.. fmt[vk=.. colour|depth gating|info mask=0x..] ...". Returns the length. */
+int lagfx_msaa_caps_line(const lagfx_msaa_caps_t *c, char *buf, size_t cap);
 
+/* The device-info MSAASamples value (guest supportsRasterSampleCount:N = value >= N): `advertised` lowered to the largest count EXACT mode would grant for the common colour +
+ * depth formats (lagfx_msaa_host_caps), never below 1 and never above `advertised`. *clamped |= the value changed. */
+uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t advertised, bool *clamped);
 
 /* ---- guest-visible textures (src/protocol/arm64_msaa.c) ---------------------------------------------------------------------------------------------------------------- */
 

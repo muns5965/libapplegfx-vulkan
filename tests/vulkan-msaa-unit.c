@@ -248,9 +248,74 @@ static int part_c(struct lagfx_vk_state *vk) {
     return 0;
 }
 
+/* ---- part D: guest capability advertisement (device-info "MSAASamples") from the host's per-format masks, injected caps ---- */
+typedef struct { VkFormatFeatureFlags cfeat, dfeat; VkSampleCountFlags bgra, f16, rgba8, rgb10, d32, d32s8, d16, d24s8; } fm_model_t;
+static bool fm_is_depth(VkFormat f) { return f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_D24_UNORM_S8_UINT; }
+static void fm_fp(void *c, VkFormat f, VkFormatProperties2 *o) { const fm_model_t *m = c; memset(&o->formatProperties, 0, sizeof o->formatProperties); o->formatProperties.optimalTilingFeatures = fm_is_depth(f) ? m->dfeat : m->cfeat; }
+static VkResult fm_ifp(void *c, const VkPhysicalDeviceImageFormatInfo2 *in, VkImageFormatProperties2 *o) {
+    const fm_model_t *m = c; VkSampleCountFlags s = 0;
+    switch (in->format) {
+    case VK_FORMAT_B8G8R8A8_UNORM: s = m->bgra; break; case VK_FORMAT_R16G16B16A16_SFLOAT: s = m->f16; break; case VK_FORMAT_R8G8B8A8_UNORM: s = m->rgba8; break;
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: s = m->rgb10; break; case VK_FORMAT_D32_SFLOAT: s = m->d32; break; case VK_FORMAT_D32_SFLOAT_S8_UINT: s = m->d32s8; break;
+    case VK_FORMAT_D16_UNORM: s = m->d16; break; case VK_FORMAT_D24_UNORM_S8_UINT: s = m->d24s8; break; default: return VK_ERROR_FORMAT_NOT_SUPPORTED; }
+    memset(&o->imageFormatProperties, 0, sizeof o->imageFormatProperties);
+    o->imageFormatProperties.maxExtent = (VkExtent3D){ 16384, 16384, 1 }, o->imageFormatProperties.maxMipLevels = 15, o->imageFormatProperties.maxArrayLayers = 256, o->imageFormatProperties.sampleCounts = s;
+    return VK_SUCCESS;
+}
+static const VkFormatFeatureFlags FM_CF = VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BLEND_BIT;
+static const VkFormatFeatureFlags FM_DF = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+static fm_model_t fm_all(VkSampleCountFlags s) { return (fm_model_t){ FM_CF, FM_DF, s, s, s, s, s, s, s, s }; }
+
+/* EXACT-mode cross-check: lagfx_msaa_plan_mode grants N for the format iff N is in the mask the caps report (the advertised value is built from the very same grants) */
+static int fm_exact_agrees(const lagfx_fmtcap_backend_t *be, const lagfx_msaa_caps_t *c) {
+    for (uint32_t i = 0; i < c->n; i++) {
+        if (!c->f[i].attachable) continue;
+        for (uint32_t n = 2; n <= 8; n <<= 1) {
+            lagfx_msaa_plan_t pl;
+            const int rc = lagfx_msaa_plan_mode(be, c->f[i].fmt, 64, 64, n, c->f[i].depth ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, c->f[i].depth ? 0u : VK_IMAGE_USAGE_SAMPLED_BIT, 0, LAGFX_MSAA_MODE_EXACT, &pl);
+            CHECK((rc == LAGFX_MSAA_OK) == ((c->f[i].mask & n) != 0), "fmt %d count %u: exact plan %d vs caps mask 0x%x", (int)c->f[i].fmt, n, rc, (unsigned)c->f[i].mask);
+        }
+    }
+    return 0;
+}
+#define ADV(model, ceil_, want_adv, want_gaps, what) do { lagfx_fmtcap_backend_t be_ = { &(model), fm_fp, fm_ifp }; lagfx_msaa_caps_t c_; lagfx_msaa_host_caps(&be_, (ceil_), &c_); \
+    CHECK(c_.advertised == (want_adv) && c_.gaps == (VkSampleCountFlags)(want_gaps), "%s: advertised %u (want %u) gaps 0x%x (want 0x%x) common 0x%x", what, c_.advertised, (unsigned)(want_adv), (unsigned)c_.gaps, (unsigned)(want_gaps), (unsigned)c_.common); \
+    if (fm_exact_agrees(&be_, &c_)) return 1; \
+    { bool cl_ = false; const uint32_t dv_ = lagfx_msaa_devinfo_max(&be_, (ceil_), &cl_); CHECK(dv_ == (want_adv) && cl_ == ((want_adv) < (ceil_)), "%s: devinfo_max %u clamped %d", what, dv_, (int)cl_); } \
+    if (c_.advertised > 1u) { /* the advertised count IS granted by exact mode for every gating format */ \
+        for (uint32_t i_ = 0; i_ < c_.n; i_++) if (c_.f[i_].gating && c_.f[i_].attachable) CHECK(c_.f[i_].mask & c_.advertised, "%s: advertised count granted for fmt %d", what, (int)c_.f[i_].fmt); } } while (0)
+static int part_d(void) {
+    fm_model_t m;
+    m = fm_all(1 | 4); ADV(m, 4, 4u, 2u, "1|4 (lavapipe): value 4, 2x is a gap");
+    m = fm_all(1 | 2 | 4); ADV(m, 4, 4u, 0u, "1|2|4: 4, no gap");
+    m = fm_all(1 | 2 | 4 | 8); ADV(m, 4, 4u, 0u, "1|2|4|8 with the library ceiling 4: 4");
+    ADV(m, 8, 8u, 0u, "1|2|4|8 with ceiling 8: 8");
+    ADV(m, 16, 8u, 0u, "1|2|4|8 with ceiling 16: 8 (16 not offered)");
+    m = fm_all(1); ADV(m, 4, 1u, 0u, "1 only: 1 (the N = 1 gate stays open, never 0)");
+    m = fm_all(1 | 2); ADV(m, 4, 2u, 0u, "1|2: 2");
+    m = fm_all(1 | 2 | 8); ADV(m, 8, 8u, 4u, "1|2|8, ceiling 8: 8, 4x is a gap");
+    m = fm_all(1 | 2 | 4); m.f16 = 1 | 2; ADV(m, 4, 2u, 0u, "BGRA8 1|2|4 but RGBA16F 1|2: the common count is 2");
+    m = fm_all(1 | 4); m.bgra = m.f16 = 1 | 2 | 4; m.d32 = m.d32s8 = 1 | 2; ADV(m, 4, 2u, 0u, "colour 1|2|4, depth 1|2: 2 (4 would be refused for depth)");
+    m = fm_all(1 | 4); m.d32 = m.d32s8 = 1 | 2; ADV(m, 4, 1u, 0u, "colour 1|4, depth 1|2: no common count > 1: 1");
+    m = fm_all(1 | 4); m.dfeat = 0; ADV(m, 4, 4u, 2u, "no depth attachment feature: depth ignored, colour 1|4: 4");
+    m = fm_all(1 | 4); m.cfeat &= ~(VkFormatFeatureFlags)VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT; ADV(m, 4, 1u, 0u, "no colour attachment feature: 1, never 0");
+    m = fm_all(1 | 4); m.d16 = m.d24s8 = m.rgba8 = m.rgb10 = 1;   /* formats that are only reported, not gating */
+    { ADV(m, 4, 4u, 2u, "info-only formats with 1x only do not lower the value");
+      lagfx_fmtcap_backend_t be = { &m, fm_fp, fm_ifp }; lagfx_msaa_caps_t c; lagfx_msaa_host_caps(&be, 4, &c);
+      unsigned info = 0; for (uint32_t i = 0; i < c.n; i++) if (!c.f[i].gating) { info++; CHECK(c.f[i].mask == 1u, "info format %d mask 0x%x", (int)c.f[i].fmt, (unsigned)c.f[i].mask); }
+      CHECK(info == 4, "four info-only formats");
+      char ln[600]; const int n = lagfx_msaa_caps_line(&c, ln, sizeof ln);
+      CHECK(n > 0 && n < 560 && strstr(ln, "advertised=4") && strstr(ln, "ceiling=4") && strstr(ln, "common=0x5") && strstr(ln, "gaps=0x2") && strstr(ln, "not a bitmask") && strstr(ln, "mask=0x5"), "caps line: %s", ln);
+      CHECK(lagfx_msaa_devinfo_max(&be, 1, NULL) == 1 && lagfx_msaa_devinfo_max(&be, 0, NULL) == 0, "an advertised 1 (or 0) is returned unchanged"); }
+    puts("PASS (D): MSAASamples advertisement from injected per-format masks: 1|4 -> 4 (gap 2), 1|2|4 -> 4, 1|2|4|8 -> 4 (ceiling 4) / 8 (ceiling 8) / 8 (ceiling 16), 1 -> 1, mixed colour / depth masks -> common count, "
+         "unattachable depth ignored, unattachable colour -> 1, info-only formats do not gate; every mask equals what lagfx_msaa_plan_mode(EXACT) grants");
+    return 0;
+}
+
 int main(void) {
     int rc = part_a();
     if (rc) return rc;
+    if ((rc = part_d())) return rc;
     struct lagfx_vk_state *vk = NULL;
     lagfx_device_descriptor_t dd; memset(&dd, 0, sizeof dd);
     if (lagfx_vk_init(&vk, &dd) != LAGFX_OK || !vk || !vk->initialized) { puts("no usable Vulkan device: skip (B, C)"); return 77; }
