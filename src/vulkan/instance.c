@@ -130,6 +130,7 @@ static uint32_t pick_queue_family(VkPhysicalDevice phys) {
 /* Debug message callback for validation layers — prints VUIDs and warnings. */
 /* Number of non-verbose validation messages seen (tests assert it stays 0). */
 uint64_t lagfx_vk_validation_msg_count;
+static int lagfx_env_is_one(const char *n) { const char *v = getenv(n); return v && v[0] == '1' && !v[1]; }   /* only the string "1" turns an opt-in on */
 /* Test hook: called with the text of every counted message (not for the filtered ones below). tests/arm64-render-compat-unit.c keeps a per-test list of them and compares it with a baseline file. */
 void (*lagfx_vk_validation_hook)(const char *msg);
 /* Of those, the messages about a shader / descriptor-write DESCRIPTOR TYPE that disagrees with the pipeline layout or the layout binding (VUID-VkGraphicsPipelineCreateInfo-layout-07988 / -07990 /
@@ -734,7 +735,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             uint32_t ms_lr; memcpy(&ms_lr, (const uint8_t *)&v14 + sizeof(VkBaseOutStructure) + 5u * sizeof(uint32_t), sizeof ms_lr);
             s->have_local_read_ms = ms_lr == VK_TRUE;
         }
-        if (s->have_local_read && !s->have_local_read_ms && getenv("LAGFX_VK_FORCE_MS_LOCAL_READ"))   /* opt-in for a device that renders it correctly without advertising it (lavapipe: property 0, works): outside the spec, at the user's risk */
+        if (s->have_local_read && !s->have_local_read_ms && lagfx_env_is_one("LAGFX_VK_FORCE_MS_LOCAL_READ"))   /* opt-in for a device that renders it correctly without advertising it (lavapipe: property 0, works): outside the spec, at the user's risk */
             s->have_local_read_ms = true;
         if ((ext_ro_ext || ext_ro_arm) && ro.rasterizationOrderColorAttachmentAccess && !getenv("LAGFX_VK_NO_RASTER_ORDER")) {   /* same-draw ordering of input-attachment reads/writes */
             ro_en.pNext = feat13.pNext; feat13.pNext = &ro_en;
