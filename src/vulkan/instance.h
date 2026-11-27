@@ -14,6 +14,8 @@
 
 #ifndef LIBAPPLEGFX_VULKAN_INSTANCE_H
 #define LIBAPPLEGFX_VULKAN_INSTANCE_H
+
+#include "qcom_tile.h"
 #include <stddef.h>
 #include <stdint.h>
 #include "caps.h"
@@ -39,6 +41,14 @@ struct lagfx_vk_state {
     /* Subgroup properties (device creation): size and the VK_EXT_subgroup_size_control range; sg_control = the feature is ENABLED and COMPUTE may carry a required size */
     uint32_t sg_size, sg_min, sg_max, sg_required_stages;
     bool sg_control, sg_full;
+    /* VK_QCOM_tile_shading opt-in (LAGFX_QCOM_TILE=1), see qcom_tile.h: what the device was asked for and what came of it. Read-only after init. */
+    struct {
+        bool flag, injected, enabled;                 /* enabled: the device WAS created with VK_QCOM_tile_properties + VK_QCOM_tile_shading + the features of enable_mask */
+        lagfx_qcomtile_reason_t reason; lagfx_qcomtile_fallback_t fallback;
+        uint32_t enable_mask; int create_result;      /* create_result: the first vkCreateDevice's VkResult */
+        lagfx_qcomtile_caps_t caps;
+        char line[768];                               /* the g7-gpu-qcomtile base line (printed once at init, repeated with counters by the diag dump) */
+    } qcomtile;
 #ifdef LAGFX_HAVE_VULKAN
     VkInstance       instance;
     VkPhysicalDevice phys_device;

@@ -631,12 +631,16 @@ typedef struct lagfx_protocol {
                 uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override, sg_emulated;
                 uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
                 uint64_t skip_no_pass, skip_no_pipe, skip_bad_rec, skip_local, skip_no_sg32, skip_rt, skip_unbound, skip_unaligned, skip_feedback, skip_desc, skip_pipe_build, resume_failed;
+                uint64_t skip_rt_why[4];                                /* skip_rt by cause: 0 no such colour attachment, 1 format is not R16G16B16A16_SFLOAT, 2 no STORAGE usage, 3 no view / linear (diagnostic: why an imageblock attachment was refused) */
+                struct { uint32_t format, usage; uint8_t linear, valid; } skip_rt_first;   /* the first refused attachment: VkFormat, VkImageUsageFlags */
                 uint64_t gathered, gather_failed, unaligned_written;    /* read-only buffers bound through an aligned copy / copy impossible / unaligned buffers the kernel may write (skipped) */
 #define LAGFX_TILE_SEEN_MAX 8u
                 /* the first 8 distinct dispatch geometries and unaligned buffer binds (for the log) */
                 struct lagfx_tile_geom { bool region; uint32_t ox, oy, rw, rh, tw, th, td, tgt_w, tgt_h; } geom[LAGFX_TILE_SEEN_MAX]; uint32_t n_geom;
                 struct lagfx_tile_unal { uint32_t metal_index; bool written; uint64_t off, len, align; } unal[LAGFX_TILE_SEEN_MAX]; uint32_t n_unal;
             } tile;
+            /* VK_QCOM_tile_shading opt-in (src/vulkan/qcom_tile.h): the tile dispatches that ran as compute emulation, and how many of them ran on a device that WAS created with the extension (the native path is not implemented: this stays the only path) */
+            struct { uint64_t emul_dispatches, emul_while_enabled; } qcomtile;
             /* Format / usage / blend / MSAA / framebuffer-fetch ordering compat (src/vulkan/format_caps.c, arm64_resources.c, arm64_exec_run.c); printed as g7-gpu-fmt when any is non-zero. */
             struct {
                 uint64_t img_created, img_trimmed;     /* mirror images created / of those, created with fewer usages than the mirror asked for (the device refused the combined mask or lacks a feature bit) */

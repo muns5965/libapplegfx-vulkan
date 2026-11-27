@@ -9,6 +9,7 @@ lagfx_sources += files(
   'instance.c',
   'caps.c',
   'devinfo.c',
+  'qcom_tile.c',
   'format_caps.c',
   'msaa.c',
   'command.c',

@@ -1985,6 +1985,17 @@ pipeline_matrix_test = executable('pipeline-matrix-unit',
 )
 test('pipeline -13 matrix (unit, lavapipe)', pipeline_matrix_test)
 
+# VK_QCOM_tile_shading opt-in (LAGFX_QCOM_TILE): decision / mask / diagnostic line on injected capability records; lavapipe init: flag off, fail-closed, injected vkCreateDevice refusal -> fallback.
+qcom_tile_test = executable('qcom-tile-unit',
+  'qcom-tile-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-D_GNU_SOURCE'],
+  build_by_default : true,
+)
+test('VK_QCOM_tile_shading opt-in probe / decision / fallback (unit, lavapipe + injected records)', qcom_tile_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+
 # The fragment-module reduction ladder (opt-in diagnostics): rows + spirv-val, crash isolation (fork per row), in-process on lavapipe, the LAGFX_PIPELINE_REDUCE hook.
 pipeline_reduce_test = executable('pipeline-reduce-unit',
   'pipeline-reduce-unit.c',

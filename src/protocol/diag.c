@@ -6,6 +6,8 @@
 #include "state.h"
 #include "arm64_completion.h"
 #include "arm64_resources.h"
+#include "../device.h"
+#include "../vulkan/instance.h"
 #include "../vulkan/command.h"
 #include "../vulkan/caps.h"
 #include "../vulkan/sampler_cache.h"
@@ -342,6 +344,23 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
 #undef U
         fprintf(stderr, "%s\n", tl);
         LAGFX_LOG("%s", tl);
+        {   /* VK_QCOM_tile_shading opt-in: the base line of lagfx_vk_init + what the tile dispatches actually used (always the compute emulation today) */
+            lagfx_device_t *qd = (lagfx_device_t *)p->dev;
+            struct lagfx_vk_state *qv = qd ? qd->vk : NULL;
+            char ql[1100];
+            snprintf(ql, sizeof ql, "%s use[emul_dispatches=%llu emul_while_qcom_enabled=%llu qcom_native_dispatches=0]", qv && qv->qcomtile.line[0] ? qv->qcomtile.line : "g7-gpu-qcomtile: not-recorded",
+                     (unsigned long long)X->qcomtile.emul_dispatches, (unsigned long long)X->qcomtile.emul_while_enabled);
+            fprintf(stderr, "%s\n", ql);
+            LAGFX_LOG("%s", ql);
+        }
+        if (T->skip_rt) {   /* why imageblock attachments were refused (the g7-gpu-tile line only counts skipped[rt=N]) */
+            char rl[300];
+            snprintf(rl, sizeof rl, "g7-gpu-tile-rt: skip_rt=%llu why[no_attachment=%llu format_not_rgba16f=%llu no_storage_usage=%llu no_view_or_linear=%llu] first_refused{vkformat=%u usage=0x%x linear=%d}",
+                     (unsigned long long)T->skip_rt, (unsigned long long)T->skip_rt_why[0], (unsigned long long)T->skip_rt_why[1], (unsigned long long)T->skip_rt_why[2], (unsigned long long)T->skip_rt_why[3],
+                     T->skip_rt_first.valid ? T->skip_rt_first.format : 0u, T->skip_rt_first.valid ? T->skip_rt_first.usage : 0u, (int)T->skip_rt_first.linear);
+            fprintf(stderr, "%s\n", rl);
+            LAGFX_LOG("%s", rl);
+        }
         char gl[900]; int gn = snprintf(gl, sizeof gl, "g7-gpu-tile-detail: gathered=%llu gather_failed=%llu unaligned_written=%llu geom[", (unsigned long long)T->gathered, (unsigned long long)T->gather_failed, (unsigned long long)T->unaligned_written);
         for (uint32_t i = 0; i < T->n_geom && gn > 0 && (size_t)gn < sizeof gl; i++)
             gn += snprintf(gl + gn, sizeof gl - (size_t)gn, "%s{%s o=%u,%u r=%ux%u tg=%ux%ux%u tgt=%ux%u}", i ? " " : "", T->geom[i].region ? "region" : "whole", T->geom[i].ox, T->geom[i].oy, T->geom[i].rw, T->geom[i].rh, T->geom[i].tw, T->geom[i].th, T->geom[i].td, T->geom[i].tgt_w, T->geom[i].tgt_h);

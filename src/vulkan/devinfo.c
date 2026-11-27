@@ -5,6 +5,7 @@
  */
 #ifdef LAGFX_HAVE_VULKAN
 #include "devinfo.h"
+#include "qcom_tile.h"
 #include "common/log.h"
 
 #include <pthread.h>
@@ -14,13 +15,10 @@
 #include <string.h>
 
 /* Structs newer than the oldest header we build against are declared here (layouts from the Vulkan registry, vk.xml). */
-#define ST_TILE_SHADING_FEATURES_QCOM 1000309000
-#define ST_TILE_SHADING_PROPERTIES_QCOM 1000309001
-typedef struct { VkStructureType sType; void *pNext;
-    VkBool32 tileShading, tileShadingFragmentStage, tileShadingColorAttachments, tileShadingDepthAttachments, tileShadingStencilAttachments, tileShadingInputAttachments,
-             tileShadingSampledAttachments, tileShadingPerTileDraw, tileShadingPerTileDispatch, tileShadingDispatchTile, tileShadingApron, tileShadingAnisotropicApron,
-             tileShadingAtomicOps, tileShadingImageProcessing; } tile_shading_feat_t;
-typedef struct { VkStructureType sType; void *pNext; uint32_t maxApronSize; VkBool32 preferNonCoherent; VkExtent2D tileGranularity, maxTileShadingRate; } tile_shading_prop_t;
+#define ST_TILE_SHADING_FEATURES_QCOM LAGFX_QCT_ST_TILE_SHADING_FEATURES
+#define ST_TILE_SHADING_PROPERTIES_QCOM LAGFX_QCT_ST_TILE_SHADING_PROPERTIES
+typedef lagfx_qct_feat_t tile_shading_feat_t;   /* shared raw layouts (qcom_tile.h) */
+typedef lagfx_qct_prop_t tile_shading_prop_t;
 #define ST_SHADER_TILE_IMAGE_FEATURES 1000395000
 #define ST_SHADER_TILE_IMAGE_PROPERTIES 1000395001
 typedef struct { VkStructureType sType; void *pNext; VkBool32 shaderTileImageColorReadAccess, shaderTileImageDepthReadAccess, shaderTileImageStencilReadAccess; } tile_image_feat_t;
@@ -413,7 +411,7 @@ size_t lagfx_vk_devinfo_collect_ex(VkPhysicalDevice pd, const lagfx_vkdev_enable
         put(&s, "qcom_tile_shading ext=1 tileShading=%d fragmentStage=%d colorAtt=%d depthAtt=%d stencilAtt=%d inputAtt=%d sampledAtt=%d perTileDraw=%d perTileDispatch=%d dispatchTile=%d apron=%d anisoApron=%d atomicOps=%d imageProcessing=%d maxApronSize=%u preferNonCoherent=%d tileGranularity=%ux%u maxTileShadingRate=%ux%u",
             (int)f.tileShading, (int)f.tileShadingFragmentStage, (int)f.tileShadingColorAttachments, (int)f.tileShadingDepthAttachments, (int)f.tileShadingStencilAttachments, (int)f.tileShadingInputAttachments,
             (int)f.tileShadingSampledAttachments, (int)f.tileShadingPerTileDraw, (int)f.tileShadingPerTileDispatch, (int)f.tileShadingDispatchTile, (int)f.tileShadingApron, (int)f.tileShadingAnisotropicApron,
-            (int)f.tileShadingAtomicOps, (int)f.tileShadingImageProcessing, pr.maxApronSize, (int)pr.preferNonCoherent, pr.tileGranularity.width, pr.tileGranularity.height, pr.maxTileShadingRate.width, pr.maxTileShadingRate.height);
+            (int)f.tileShadingAtomicOps, (int)f.tileShadingImageProcessing, pr.maxApronSize, (int)pr.preferNonCoherent, pr.tileGranularityW, pr.tileGranularityH, pr.maxTileShadingRateW, pr.maxTileShadingRateH);
     } else put(&s, "qcom_tile_shading ext=0");
 
     /* filter cubic: extension presence (the per-format part is in the fmt lines) */

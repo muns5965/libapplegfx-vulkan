@@ -433,6 +433,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     typedef struct { VkStructureType sType; void *pNext; VkBool32 dynamicRenderingLocalRead; } local_read_feat_t;   /* older headers lack the type */
     const bool ext_ro_ext = has_ext(dext, dext_n, "VK_EXT_rasterization_order_attachment_access");
     const bool ext_ro_arm = has_ext(dext, dext_n, "VK_ARM_rasterization_order_attachment_access");
+    const bool ext_qct_ts = has_ext(dext, dext_n, "VK_QCOM_tile_shading"), ext_qct_tp = has_ext(dext, dext_n, "VK_QCOM_tile_properties"), ext_qct_heap = has_ext(dext, dext_n, "VK_QCOM_tile_memory_heap");
     free(dext);
 
     /* === Device features =========================================
@@ -687,7 +688,47 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             LAGFX_LOG("%s", fl);
         }
     }
+    /* VK_QCOM_tile_shading (opt-in, LAGFX_QCOM_TILE=1; src/vulkan/qcom_tile.h). Enabling it does not change what any pipeline does: no tile-shading command is recorded anywhere (the Metal tile path stays the
+     * compute emulation). It only lets on-device experiments (docs/qcom-tile-shading.md) run against a device that was created with the extension. Fail-closed: any missing piece -> not requested;
+     * vkCreateDevice refusing the chain -> retried once without it (fallback recorded). */
+    lagfx_qcomtile_caps_t qct;
+    lagfx_qcomtile_probe(s->phys_device, ext_qct_ts, ext_qct_tp, ext_qct_heap, &qct);
+    const bool qct_flag = lagfx_qcomtile_flag(getenv("LAGFX_QCOM_TILE"));
+    bool qct_inject = false;
+    if (qct_flag) {   /* test seam, only with the flag on: pretend the device is the Adreno 840 of the device log (lavapipe then refuses the extension, which exercises the fallback) */
+        const char *inj = getenv("LAGFX_QCOM_TILE_INJECT");
+        if (inj && !strcmp(inj, "adreno840")) lagfx_qcomtile_caps_adreno840(&qct), qct_inject = true;
+    }
+    lagfx_qcomtile_reason_t qct_reason = lagfx_qcomtile_decide(qct_flag, feat13.dynamicRendering == VK_TRUE, &qct);
+    uint32_t qct_mask = 0;
+    bool qct_enabled = false;
+    lagfx_qct_feat_t qct_feat; lagfx_qct_bool_feat_t qct_tpf;
+    void *qct_saved_chain = feat13.pNext; const uint32_t qct_saved_n = wanted_dev_n;
+    if (qct_reason == LAGFX_QCT_ENABLE && wanted_dev_n + 2u <= (uint32_t)(sizeof wanted_dev_exts / sizeof wanted_dev_exts[0])) {
+        qct_mask = lagfx_qcomtile_enable_mask(&qct);
+        lagfx_qcomtile_fill_features(&qct, &qct_feat, &qct_tpf);
+        qct_feat.pNext = feat13.pNext; qct_tpf.pNext = &qct_feat; feat13.pNext = &qct_tpf;
+        wanted_dev_exts[wanted_dev_n++] = "VK_QCOM_tile_properties";
+        wanted_dev_exts[wanted_dev_n++] = "VK_QCOM_tile_shading";
+        dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+        qct_enabled = true;
+    }
     vr = vkCreateDevice(s->phys_device, &dci, NULL, &s->device);
+    lagfx_qcomtile_fallback_t qct_fb = LAGFX_QCT_FB_NONE;
+    int qct_create = (int)vr;
+    if (vr != VK_SUCCESS && qct_enabled) {   /* the driver refused the extension chain: back to exactly what the default path sends */
+        feat13.pNext = qct_saved_chain, wanted_dev_n = qct_saved_n;
+        dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_n ? wanted_dev_exts : NULL;
+        qct_enabled = false, qct_mask = 0, qct_fb = LAGFX_QCT_FB_DEVICE_CREATE_FAILED;
+        vr = vkCreateDevice(s->phys_device, &dci, NULL, &s->device);
+    }
+    s->qcomtile.flag = qct_flag, s->qcomtile.injected = qct_inject, s->qcomtile.reason = qct_reason, s->qcomtile.enabled = qct_enabled, s->qcomtile.fallback = qct_fb;
+    s->qcomtile.enable_mask = qct_mask, s->qcomtile.create_result = qct_create, s->qcomtile.caps = qct;
+    lagfx_qcomtile_format_line(s->qcomtile.line, sizeof s->qcomtile.line, qct_flag, qct_inject, &qct, qct_reason, qct_mask, qct_enabled, qct_fb, qct_create);
+    {   /* once per process */
+        static bool qct_printed;
+        if (!qct_printed) { qct_printed = true; fprintf(stderr, "%s\n", s->qcomtile.line); LAGFX_LOG("%s", s->qcomtile.line); }
+    }
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("vk_init: vkCreateDevice failed (VkResult=%d)", (int)vr);
         vkDestroyInstance(s->instance, NULL);
