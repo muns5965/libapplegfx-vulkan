@@ -129,6 +129,8 @@ static uint32_t pick_queue_family(VkPhysicalDevice phys) {
 /* Debug message callback for validation layers — prints VUIDs and warnings. */
 /* Number of non-verbose validation messages seen (tests assert it stays 0). */
 uint64_t lagfx_vk_validation_msg_count;
+/* Test hook: called with the text of every counted message (not for the filtered ones below). tests/arm64-render-compat-unit.c keeps a per-test list of them and compares it with a baseline file. */
+void (*lagfx_vk_validation_hook)(const char *msg);
 /* Of those, the messages about a shader / descriptor-write DESCRIPTOR TYPE that disagrees with the pipeline layout or the layout binding (VUID-VkGraphicsPipelineCreateInfo-layout-07988 / -07990 /
  * ..., VUID-VkWriteDescriptorSet-descriptorType-*): the class a set+binding holding two descriptor types ends in. Separate so a test can stay strict about it while an older layer reports other things. */
 uint64_t lagfx_vk_validation_layout_msg_count;
@@ -148,6 +150,7 @@ static VkBool32 VKAPI_PTR lagfx_debug_callback(
         (strstr(pCallbackData->pMessage, "VK_KHR_dynamic_rendering_local_read is not supported by this layer")) ||
         strstr(pCallbackData->pMessage, "(1000232000) does not fall within the begin..end range of the core VkImageLayout")) return VK_FALSE;
     lagfx_vk_validation_msg_count++;
+    if (lagfx_vk_validation_hook) lagfx_vk_validation_hook(pCallbackData->pMessage);
     if (strstr(pCallbackData->pMessage, "VUID-VkGraphicsPipelineCreateInfo-layout-") || strstr(pCallbackData->pMessage, "uses descriptor slot") || strstr(pCallbackData->pMessage, "VUID-VkWriteDescriptorSet-descriptorType-"))
         lagfx_vk_validation_layout_msg_count++;
     if (getenv("LAGFX_VK_VALIDATION_PRINT")) fprintf(stderr, "validation: %s\n", pCallbackData->pMessage);
