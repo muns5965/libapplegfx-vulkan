@@ -8,6 +8,7 @@
 lagfx_sources += files(
   'instance.c',
   'caps.c',
+  'devinfo.c',
   'command.c',
   'pipeline.c',
   'pipeline_build.c',

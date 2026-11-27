@@ -49,6 +49,7 @@
  */
 
 #include "instance.h"
+#include "devinfo.h"
 #include "pipeline_matrix.h"
 #include "command.h"
 #include "pipeline.h"
@@ -690,6 +691,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
 
     s->caps_enabled = caps_en, s->caps_missing = LAGFX_VK_CAP_ALL & ~caps_en;
+    lagfx_vk_devinfo_log_once(s->phys_device);   /* read-only g7-vkdev: identity / extension list / feature summary, WARN, once per process */
     lagfx_pipeline_matrix_set_device(s->have_local_read, s->have_raster_order, s->phys_props.limits.maxColorAttachments, s->phys_props.limits.maxPerStageDescriptorInputAttachments);   /* only read by the opt-in LAGFX_PIPELINE_MATRIX diagnostics */
     {   /* record what the device was created with (read back by the pipeline failure bundle) */
         size_t eo = 0;
