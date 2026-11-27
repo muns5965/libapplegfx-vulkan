@@ -46,6 +46,8 @@ enum {
     LAGFX_A64_SAMP_ADDR_UNKNOWN       = 64u,  /* an address mode field (read as 3 bits: `& 7`) was 6 or 7: outside the public MTLSamplerAddressMode range 0..5 as we read it (INFER); mapped to clamp-to-edge (compat fallback, counted). Bits 11/15/19 are ignored and never counted; if the hardware field is 4 bits wide (the older Henge decoder used 4) a set bit there is silently dropped (width unverified) */
     LAGFX_A64_SAMP_FILTER_UNKNOWN     = 256u, /* the min or mag field (2 bits [1:0] / [3:2], INFER) was 2 or 3: outside MTLSamplerMinMagFilter 0..1; mapped to LINEAR (the old decoder read bit 0 only: 2 became NEAREST), counted. Real bicubic sampling is not implemented (see sampler_cache.h) */
     LAGFX_A64_SAMP_MIP_UNKNOWN        = 128u, /* the mip filter field was 3: outside the public MTLSamplerMipFilter range 0..2 (INFER); treated as nearest-with-LOD (compat fallback, counted) */
+    LAGFX_A64_SAMP_CUBIC_MIN          = 512u,  /* the min field was exactly 2 (a would-be bicubic code, INFER; also sets FILTER_UNKNOWN): the opt-in cubic path (LAGFX_CUBIC=1, filter_cubic.h) may create the sampler with VK_FILTER_CUBIC_EXT for minFilter. The ci from the decoder always stays LINEAR */
+    LAGFX_A64_SAMP_CUBIC_MAG          = 1024u, /* the same for the mag field */
 };
 
 /* d = the first n >= 20 bytes of the payload (a record that ends before the LOD clamps gets the descriptor defaults 0 / FLT_MAX). Pure: no Vulkan calls.

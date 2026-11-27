@@ -1,6 +1,7 @@
 /*
  * libapplegfx-vulkan — command diagnostics. See diag.h. Logging and counters only.
  */
+#include "../vulkan/filter_cubic.h"
 #include "diag.h"
 #include "draw_diag.h"
 #include "state.h"
@@ -221,6 +222,13 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->ext_tex_mip_views, (unsigned long long)R->ext_tex_array_views);
         fprintf(stderr, "%s\n", el);
         LAGFX_LOG("%s", el);
+        if (lagfx_cubic_optin() || R->ext_cubic_requested) {   /* the opt-in cubic path (LAGFX_CUBIC=1); silent without it */
+            snprintf(el, sizeof el, "g7-gpu-cubic: optin=%d requested=%llu used=%llu fallback_linear[no_ext=%llu no_format=%llu no_viewtype=%llu no_combo=%llu] (value 2 = bicubic is INFER; the kernel / Adreno result are NOT verified)",
+                     lagfx_cubic_optin() ? 1 : 0, (unsigned long long)R->ext_cubic_requested, (unsigned long long)R->ext_cubic_used, (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_EXT],
+                     (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_FORMAT], (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_VIEWTYPE], (unsigned long long)R->ext_cubic_fallback[LAGFX_CUBIC_NO_COMBO]);
+            fprintf(stderr, "%s\n", el);
+            LAGFX_LOG("%s", el);
+        }
     }
     if (X->run.execs) {   /* ARM64 render execution (LAGFX_ARM64_EXEC=1): totals, then the per-tag outcome of every tag seen */
         const __typeof__(X->run) *R = &X->run;

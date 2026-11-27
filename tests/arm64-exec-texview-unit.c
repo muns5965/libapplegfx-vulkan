@@ -10,6 +10,8 @@
 #undef main
 
 #ifdef LAGFX_HAVE_VULKAN
+#include "vulkan/format_caps.h"
+#include "vulkan/filter_cubic.h"
 #include "arm64-exec-texview-shaders.h"
 #include "arm64-exec-res-shaders.h"   /* k_fs_unorm_spv: texture(sampler2D(tex@24, smp@25), gl_FragCoord.xy), implicit LOD */
 
@@ -242,6 +244,70 @@ static void test_unnorm_mips(void) {
     puts("PASS: unnormalized sampler variant + multi-mip texture: level 0 view (Vulkan: one level / one layer), counted; the normalized control reads the last level of the same chain");
 }
 
+
+/* ---- opt-in cubic filtering (filter_cubic.h): lavapipe has no VK_EXT_filter_cubic, so the USE branch is covered by the pure decision / create-info tests and every exec path that
+ * would CREATE a cubic sampler is not run here; what runs: the default (no env) unchanged, the extension absent, and (extension "present" by flag, caps injected) the format / combination refusals. ---- */
+typedef struct { const lagfx_fmtcap_backend_t *real; bool set_bit; } cub_be_t;
+static void cub_fp2(void *ctx, VkFormat f, VkFormatProperties2 *out) {
+    const cub_be_t *c = ctx;
+    c->real->format_props2(c->real->ctx, f, out);
+    if (c->set_bit) out->formatProperties.optimalTilingFeatures |= LAGFX_FMT_FEATURE_FILTER_CUBIC; else out->formatProperties.optimalTilingFeatures &= ~LAGFX_FMT_FEATURE_FILTER_CUBIC;
+}
+static VkResult cub_ifp2(void *ctx, const VkPhysicalDeviceImageFormatInfo2 *info, VkImageFormatProperties2 *out) { const cub_be_t *c = ctx; return c->real->image_format_props2(c->real->ctx, info, out); }
+
+static void test_cubic(void) {
+    uint8_t lin[RT_W * RT_H * 4], img[RT_W * RT_H * 4];
+    struct lagfx_vk_state *vk = g_dev->vk;
+    g_clamp_lo = -1.f;
+    assert(!vk->have_filter_cubic);   /* lavapipe: the extension is not there (and the env was not set at device creation) */
+    unsetenv("LAGFX_CUBIC");
+    lagfx_protocol_t *p = tv_run(2, 0x86000005u, 2, 4, 1);   /* min / mag = 1 (linear): the reference */
+    tv_exec(p, lin);
+    done(p);
+    /* 1. the default: a filter field of 2 is LINEAR, counted as unknown, and no cubic counter moves */
+    p = tv_run(2, 0x8600000Au, 2, 4, 1);
+    tv_exec(p, img);
+    __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_samp_filter_unknown == 1 && R->ext_cubic_requested == 0 && R->ext_cubic_used == 0);
+    assert(memcmp(lin, img, sizeof img) == 0);
+    done(p);
+    /* 2. opt-in, extension absent: LINEAR (same pixels), counted as NO_EXT, nothing cubic is created */
+    setenv("LAGFX_CUBIC", "1", 1);
+    p = tv_run(2, 0x8600000Au, 2, 4, 1);
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_cubic_requested >= 1 && R->ext_cubic_used == 0 && R->ext_cubic_fallback[LAGFX_CUBIC_NO_EXT] == R->ext_cubic_requested);
+    assert(memcmp(lin, img, sizeof img) == 0);
+    done(p);
+    /* 3. opt-in, a plain linear sampler (field 1) is not a cubic request at all */
+    p = tv_run(2, 0x86000005u, 2, 4, 1);
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->ext_cubic_requested == 0);
+    done(p);
+    /* 4. extension "enabled" by flag + injected format caps. The BGRA8 format without the cubic feature bit: NO_FORMAT, LINEAR. With the bit but an unnormalized sampler: NO_COMBO, LINEAR. */
+    lagfx_fmtcap_backend_t store; const lagfx_fmtcap_backend_t *real = lagfx_fmtcap_device_backend(vk->phys_device, &store);
+    cub_be_t cb = { real, false };
+    lagfx_fmtcap_backend_t inj = { .ctx = &cb, .format_props2 = cub_fp2, .image_format_props2 = cub_ifp2 };
+    lagfx_fmtcap_test_backend = &inj;
+    vk->have_filter_cubic = true;
+    p = tv_run(2, 0x8600000Au, 2, 4, 1);
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_cubic_requested >= 1 && R->ext_cubic_used == 0 && R->ext_cubic_fallback[LAGFX_CUBIC_NO_FORMAT] == R->ext_cubic_requested);
+    assert(memcmp(lin, img, sizeof img) == 0);
+    done(p);
+    cb.set_bit = true;
+    p = tv_run(2, 0x0600000Au, 2, 4, 1);   /* unnormalized (bit 31 clear), filter fields 2 */
+    tv_exec(p, img);
+    R = &p->diag2.exec.run;
+    assert(R->draws == 1 && R->ext_cubic_used == 0 && R->ext_cubic_fallback[LAGFX_CUBIC_NO_COMBO] >= 1 && R->ext_cubic_fallback[LAGFX_CUBIC_NO_COMBO] == R->ext_cubic_requested);
+    done(p);
+    vk->have_filter_cubic = false;
+    lagfx_fmtcap_test_backend = NULL;
+    unsetenv("LAGFX_CUBIC");
+    puts("PASS: cubic opt-in: default unchanged; extension absent -> LINEAR + NO_EXT; absent format feature -> NO_FORMAT; unnormalized -> NO_COMBO (no cubic sampler created on lavapipe)");
+}
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -250,6 +316,7 @@ int main(void) {
     test_mip_chain();
     test_array();
     test_unnorm_mips();
+    test_cubic();
     assert(lagfx_vk_validation_msg_count == 0);   /* checked before the test's own shader modules / layouts are destroyed */
     struct lagfx_vk_state *vk = g_dev->vk;
     for (int i = 0; i < 3; i++) { if (i < 2 && g_t.m[i]) vkDestroyShaderModule(vk->device, g_t.m[i], NULL); if (g_t.fsm[i]) vkDestroyShaderModule(vk->device, g_t.fsm[i], NULL); }

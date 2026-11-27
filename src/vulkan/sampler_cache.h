@@ -17,6 +17,8 @@
 
 #include "air2spv/constexpr_sampler.h"
 
+/* (An opt-in, capability-gated VK_FILTER_CUBIC_EXT path exists for the runtime sampler objects and constexpr samplers with LAGFX_CUBIC=1: src/vulkan/filter_cubic.h. It is NOT
+ * this macro: the default build and behaviour are unchanged, and the cache here still maps filter 2 to LINEAR unless that path substitutes the state.) */
 /* 0: real bicubic sampling does not exist; a bicubic request (filter 2) is mapped to plain LINEAR and counted (cxs_state_builds_bicubic_as_linear). Flip only when real
  * bicubic sampling exists. Tests include this header and use the same macro. */
 #ifndef LAGFX_CXS_EXACT_BICUBIC_IMPLEMENTED

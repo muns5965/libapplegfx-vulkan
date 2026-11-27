@@ -65,6 +65,8 @@ uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_ani
     if (am[0] > 5u || am[1] > 5u || am[2] > 5u) flags |= LAGFX_A64_SAMP_ADDR_UNKNOWN;   /* the mapping above is unchanged: 6 / 7 stay clamp-to-edge */
     if ((st >> 24 & 3u) == 3u) flags |= LAGFX_A64_SAMP_MIP_UNKNOWN;
     if (fmin > 1u || fmag > 1u) flags |= LAGFX_A64_SAMP_FILTER_UNKNOWN;   /* 2 or 3: not nearest / linear; mapped to linear (the closest of the two public values for a would-be bicubic code, INFER) */
+    if (fmin == 2u) flags |= LAGFX_A64_SAMP_CUBIC_MIN;   /* exactly 2: the would-be bicubic code (INFER); 3 stays an unknown linear */
+    if (fmag == 2u) flags |= LAGFX_A64_SAMP_CUBIC_MAG;
     return flags;
 }
 #endif

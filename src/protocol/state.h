@@ -598,6 +598,7 @@ typedef struct lagfx_protocol {
                 uint64_t ext_unnorm_variants, ext_unnorm_variant_fail;   /* rewritten fragment / vertex modules built / module creation or allocation failed (draw skipped, counted in ext_unnorm_skipped) */
                 uint64_t ext_unnorm_use_implicit0, ext_unnorm_use_bias_dropped, ext_unnorm_use_offset_folded, ext_unnorm_use_explicit_kept, ext_unnorm_use_grad_kept, ext_unnorm_use_gather_kept, ext_unnorm_use_unresolved;   /* per sample instruction, counted when a variant is built */
                 uint64_t ext_unnorm_unsup[5];                     /* sample uses Vulkan forbids with an unnormalized sampler (draw skipped): 0 Dref, 1 Proj, 2 sparse, 3 image 3D / cube / arrayed / multisampled, 4 other (QueryLod, ConstOffsets, no SPIR-V to analyse) */
+                uint64_t ext_cubic_requested, ext_cubic_used, ext_cubic_fallback[6];   /* LAGFX_CUBIC=1 only: sampler descriptors bound per draw whose guest filter field was 2 / of those given VK_FILTER_CUBIC_EXT / fallbacks to LINEAR by lagfx_cubic_why_t (index; 0 and NO_OPTIN stay 0) */
                 uint64_t ext_samp_filter_unknown;                 /* sampler object creations whose min / mag filter field has its upper bit set (value 2/3: outside MTLSamplerMinMagFilter 0..1; INFER: could be a bicubic code): mapped to LINEAR, counted */
                 uint64_t ext_tex_prepared;   /* textures a pass bound for sampling that the mirror did not hold yet (not in the resource list): created before the pass opened */
             } run;

@@ -30,4 +30,5 @@ lagfx_sources += files(
   'draw_record.c',
   'surface_writeback.c',
   'sampler_cache.c',
+  'filter_cubic.c',
 )
