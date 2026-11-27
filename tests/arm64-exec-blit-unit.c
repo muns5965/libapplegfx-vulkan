@@ -219,6 +219,32 @@ static void test_buffer_copy_and_fill(void) {
     CHECK(S()->blit_rejected == rej0 + 2 && S()->blit_noop == noop0 + 4 && S()->blit_unsupported == uns0, "319: misaligned / out-of-range rejected, fences + invalidate-compressed no-ops");
 }
 
+/* A fill rejected for lack of a temporary staging slot (MAX_TMP == 64 per exec) must record nothing: before the fix the aligned middle of the rejected
+ * fill was already in the command buffer. Then the same fill in a fresh exec is accepted and writes exactly head + middle + tail. */
+static void test_fill_reject_records_nothing(void) {
+    build_objects();
+    uint8_t got[2 * PG], exp[2 * PG];
+    va_fill((uint64_t)VPN_B << 14, 0x11, 2 * PG);
+    uint32_t rf[2] = { R_B, 1 | 4 };
+    cmds_t c = {0};
+    memset(exp, 0x11, sizeof exp);
+    for (uint32_t i = 0; i < 64; i++) { c306(&c, R_B, 0x1001 + 16u * i, 1, 0x70); exp[0x1001 + 16u * i] = 0x70; }   /* each takes one staging slot */
+    c306(&c, R_B, 0x2001, 0x41, 0xEE);                       /* head 3, aligned middle 0x3c, tail 2: needs a 65th slot */
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x2800); w64(q + 12, 0x1b); q[20] = 0xAA; }   /* 319: middle 0x18 + tail 3, also no slot */
+    uint64_t rej0 = S()->blit_rejected, done0 = S()->blit_done;
+    run(rf, 1, &c);
+    va_read((uint64_t)VPN_B << 14, got, sizeof got);
+    CHECK(S()->blit_done == done0 + 64 && S()->blit_rejected == rej0 + 2, "64 fills accepted, the 65th (306) and the 319 rejected for want of a staging slot");
+    CHECK(!memcmp(got, exp, sizeof got), "rejected 306 / 319 fills recorded nothing (aligned middle untouched), accepted ones exact");
+    c.n = 0; c306(&c, R_B, 0x2001, 0x41, 0xEE);
+    { uint8_t *q = add(&c, 319, 24); w32(q, R_B); w64(q + 4, 0x2800); w64(q + 12, 0x1b); q[20] = 0xAA; q[21] = 0xBB; q[22] = 0xCC; q[23] = 0xDD; }
+    run(rf, 1, &c);
+    memset(exp + 0x2001, 0xEE, 0x41);
+    for (uint32_t i = 0; i < 0x1b; i++) exp[0x2800 + i] = (uint8_t)(0xDDCCBBAAu >> (8 * (i & 3)));
+    va_read((uint64_t)VPN_B << 14, got, sizeof got);
+    CHECK(!memcmp(got, exp, sizeof got), "accepted unaligned 306 (head 3 + middle + tail 2) and 319 (middle + tail 3) fills write exact bytes");
+}
+
 static void test_texture_roundtrip(void) {
     build_objects();
     uint8_t a[2 * PG], got[2 * PG];
@@ -475,6 +501,7 @@ int main(void) {
     test_buffer_copy_and_fill();
     setup_guest(); def_task(1); test_texture_roundtrip();
     setup_guest(); def_task(1); test_tall_texture_straddle();
+    setup_guest(); def_task(1); test_fill_reject_records_nothing();
     setup_guest(); def_task(1); test_flag_semantics();
     setup_guest(); def_task(1); test_bad_inputs();
     setup_guest(); def_task(1); test_sync_invalidate();

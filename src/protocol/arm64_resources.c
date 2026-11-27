@@ -1064,17 +1064,18 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
     uint64_t end = loc + n, a0 = (loc + 3) & ~3ull, a1 = end & ~3ull;
     if (a0 >= a1) a0 = a1 = end;   /* no aligned middle: everything goes through the staging copy (n < 8 then) */
     uint64_t head = a0 - loc, tail = end - a1;
-    b->wgen++, b->gpu_dirty = true;
-    if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
+    /* reserve everything first: a rejected fill records nothing (no partial middle part) */
+    uint8_t *mp = NULL; VkBuffer sb = VK_NULL_HANDLE; VkDeviceMemory sm = VK_NULL_HANDLE;
     if (head || tail) {
         if (x->ntmp >= MAX_TMP) return false;
-        uint8_t *mp; VkBuffer sb; VkDeviceMemory sm;
         if (!make_buf(x->vk, 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &sb, &sm, &mp)) return false;
         memset(mp, v, 8);
         x->tmp_b[x->ntmp] = sb, x->tmp_m[x->ntmp] = sm, x->ntmp++;
-        if (head) { VkBufferCopy c = { 0, loc, head }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
-        if (tail) { VkBufferCopy c = { 0, a1, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
     }
+    b->wgen++, b->gpu_dirty = true;
+    if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
+    if (head) { VkBufferCopy c = { 0, loc, head }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
+    if (tail) { VkBufferCopy c = { 0, a1, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
     return true;
 }
 
@@ -1088,17 +1089,17 @@ static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (!b || b->kind != LAGFX_A64_BUFFER || loc % 4u || loc > b->length || n > b->length - loc) return false;
     if (!n) return true;
     uint64_t mid = n & ~3ull, tail = n & 3ull;
-    b->wgen++, b->gpu_dirty = true;
-    if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
+    /* reserve everything first: a rejected fill records nothing */
+    uint8_t *mp = NULL; VkBuffer sb = VK_NULL_HANDLE; VkDeviceMemory sm = VK_NULL_HANDLE;
     if (tail) {
         if (x->ntmp >= MAX_TMP) return false;
-        uint8_t *mp; VkBuffer sb; VkDeviceMemory sm;
         if (!make_buf(x->vk, 8, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, &sb, &sm, &mp)) return false;
         for (int i = 0; i < 4; i++) mp[i] = (uint8_t)(pat >> (8 * i));
         x->tmp_b[x->ntmp] = sb, x->tmp_m[x->ntmp] = sm, x->ntmp++;
-        VkBufferCopy c = { 0, loc + mid, tail };
-        lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c);
     }
+    b->wgen++, b->gpu_dirty = true;
+    if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
+    if (tail) { VkBufferCopy c = { 0, loc + mid, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
     return true;
 }
 

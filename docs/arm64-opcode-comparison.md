@@ -73,7 +73,7 @@ records as the buffer binds (0x7d / 0x6e / 0xa5), the serializer stages the byte
 | 0x130 (304) texture to texture with options (100 total) | missing-known | |
 | 0x131 (305) copyIndirectCommandBuffer | missing-known | ICB |
 | 0x132 (306) fillBuffer (u32 ref, u64 loc, u64 len, u8 value) | implemented | |
-| 0x133 (307) generateMipmaps | missing-known | |
+| 0x133 (307) generateMipmaps | missing-known | payload layout NOT established in this repo, see docs/g7-blit-mip.md; still counted unsupported |
 | 0x134..0x137 (308..311) optimize for CPU/GPU (+ slice/level), 0x13a (314) synchronizeResource, 0x13b (315) synchronizeTexture | no-op (existing) | hints; Apple does nothing either |
 | 0x138, 0x139 (312, 313) optimize / reset ICB | missing-known | ICB; counted unsupported |
 | 0x13c, 0x13d (316, 317) update / wait fence | **no-op (new)** | |
