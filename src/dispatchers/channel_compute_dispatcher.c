@@ -35,6 +35,7 @@
 #include "protocol/arm64_completion.h"
 #include "protocol/arm64_resources.h"
 #include "protocol/object_resolver.h"
+#include "protocol/xlate_guard.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
 
@@ -131,8 +132,15 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
             }
             break;
 
-        case LAGFX_OP_CHANNEL_EVENT_37:  /* 0x37 — see comment above */
-            lagfx_compute_exec_cmdbuf(p, hdr);
+        case LAGFX_OP_CHANNEL_EVENT_37:  /* 0x37 — x86 per-channel CmdExecIndirect2 */
+            if (lagfx_proto_arm64(p)) {
+                /* ARM64: the reference decoder (Apple pvg_lite.c channel_command) names only 0x38 / 0x44 / 0x43 / display ops 1,2,8 and ignores every
+                 * other op; the arm64 exec carrier is 0x43/0x45 ({task, nres, nbuf}, 16 KiB task VAs). 0x37's arm64 layout is not known, so it is
+                 * neither run through the legacy 4 KiB walker nor guessed at: counted + logged (first payload bytes), stamp completed by the drain. */
+                lagfx_xg_reject(p, LAGFX_XG_REJ_COMPUTE_37, hdr);
+            } else {
+                lagfx_compute_exec_cmdbuf(p, hdr);
+            }
             break;
 
         /* Channel-event / immediate-vchan opcodes fired by the kext
@@ -458,6 +466,7 @@ static size_t drain_impl(lagfx_protocol_t *p, uint32_t chan_id) {
     if (!lagfx_protocol_is_valid(p)) {
         return 0;
     }
+    lagfx_xg_tick(p);   /* g7-gpu-xlate statistics line (arm64 only, throttled) */
     /* ARM64 deferred completion (LAGFX_ARM64_EXEC=1): retire what the GPU finished since the last drain. No-op when off. */
     if (p->a64cq || lagfx_arm64_cq_ensure(p)) lagfx_arm64_poll_completions(p);
 

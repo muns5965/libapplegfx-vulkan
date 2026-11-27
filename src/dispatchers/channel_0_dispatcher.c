@@ -29,6 +29,7 @@
 #include "protocol/opcodes.h"
 #include "protocol/state.h"
 #include "protocol/diag.h"
+#include "protocol/xlate_guard.h"
 #include "handlers/handlers.h"
 #include "handlers/iosurface/iosurface.h"
 
@@ -168,7 +169,14 @@ static void dispatch_command(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
          * guide.md §1.1. Stage 20 inner walker lives in the compute
          * exec handler — reuse it. */
         case LAGFX_OP_EXEC_INDIRECT2:  /* 0x20 */
-            lagfx_compute_exec_cmdbuf(p, hdr);
+            if (lagfx_proto_arm64(p)) {
+                /* ARM64: the reference root decoder (Apple pvg_lite.c do_root) handles only 0x38 and 0x3a and skips every other command, still
+                 * completing its stamp; 0x20 on a compute channel is the task-cache drop. A root 0x20 has no known arm64 layout: counted and
+                 * logged, never run through the legacy 4 KiB walker; the drain below completes the stamp. */
+                lagfx_xg_reject(p, LAGFX_XG_REJ_ROOT_20, hdr);
+            } else {
+                lagfx_compute_exec_cmdbuf(p, hdr);
+            }
             break;
 
         /* === IOSurface family (0x26-0x2a) ============================

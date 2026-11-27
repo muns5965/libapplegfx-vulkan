@@ -1477,6 +1477,20 @@ if fs.is_file(meson.current_source_dir() / 'protocol-mode-unit.c')
   test('protocol mode x86/arm64 compute semantics (unit)', pm_test)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'xlate-guard-unit.c')
+  xg_deps = [libapplegfx_vulkan_dep]
+  if vulkan_dep.found()
+    xg_deps += [vulkan_dep]
+  endif
+  xg_test = executable('xlate-guard-unit',
+    'xlate-guard-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : xg_deps,
+    build_by_default : true,
+  )
+  test('arm64 legacy translator guard: op 0x37 / root 0x20 rejected, no identity access (unit)', xg_test)
+endif
+
 if fs.is_file(meson.current_source_dir() / 'arm64-exec-decode-unit.c')
   ed_deps = [libapplegfx_vulkan_dep]
   if vulkan_dep.found()

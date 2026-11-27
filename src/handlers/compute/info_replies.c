@@ -64,6 +64,7 @@
 #include "info_replies.h"
 #include "common/le.h"
 #include "common/log.h"
+#include "protocol/xlate_guard.h"
 
 #include <string.h>
 
@@ -362,6 +363,9 @@ void lagfx_info_dispatch(lagfx_protocol_t *p,
         translated = translate(p, task, target_dev_addr, &target_gpa);
     }
     if (!translated) {
+        if (lagfx_xg_legacy_entered(p, "info_reply_identity", NULL)) {
+            return;   /* ARM64 mode: never write a reply to an untranslated address used as a GPA */
+        }
         target_gpa = target_dev_addr;
         LAGFX_TRACE("info_reply: %s translate failed — using identity gpa=0x%llx",
                     opname, (unsigned long long)target_gpa);

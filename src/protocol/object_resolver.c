@@ -16,6 +16,8 @@
 #include "device.h"
 #include "common/log.h"
 #include "common/le.h"
+#include "arm64_exec_decode.h"
+#include "xlate_guard.h"
 
 /* Compute slot VA for a given object ID: heap_va + objectId * 12.
  * Cites: phase_b_step5_v2_4_MTLB_CONFIRMED.md line 13. */
@@ -202,6 +204,12 @@ lagfx_task_read_virtual(lagfx_protocol_t *p,
                         uint32_t len,
                         uint8_t *buf) {
     if (!p || !task || !buf) return false;
+    /* ARM64 mode: the 4 KiB walk below is wrong for a 16 KiB task page table; serve the read through the arm64 reader (no identity access either
+     * way). Counted as a legacy entry (the only known arm64 caller is the gamma-region diagnostic, diag.c dd_read_region). */
+    if (lagfx_proto_arm64(p)) {
+        lagfx_xg_note_redirect(p, "task_read_virtual", __builtin_return_address(0));
+        return lagfx_arm64_task_read(p, task, va, buf, len);
+    }
     lagfx_device_t *dev = (lagfx_device_t *)p->dev;
     const uint64_t PAGE = 4096u;
     uint32_t done = 0u;

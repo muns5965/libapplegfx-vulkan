@@ -32,6 +32,7 @@
 #include "compute_inner_ops.h"
 #include "common/le.h"
 #include "common/log.h"
+#include "protocol/xlate_guard.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -58,6 +59,11 @@ bool lagfx_task_translate(lagfx_protocol_t *p,
                           const lagfx_task_entry_t *task,
                           uint64_t dev_addr,
                           uint64_t *out_gpa) {
+    /* ARM64 mode: this is the x86 4 KiB radix walk (root_page_pfn << 12, 10 bits per level). An ARM64 task's tables are 16 KiB / 12 bits per
+     * level (lagfx_arm64_task_translate), so this walk would read the wrong pages. Never run it there: count, refuse. */
+    if (LAGFX_XG_LEGACY(p, "task_translate")) {
+        return false;
+    }
     if (!task || task->root_page_pfn == 0u) {
         return false;
     }
@@ -371,7 +377,10 @@ static void exec_walk_resource(lagfx_protocol_t *p,
             translated = lagfx_task_translate(p, task, cur_va, &cur_gpa);
         }
         if (!translated) {
-            cur_gpa = cur_va;  /* fallback: VA == GPA */
+            if (lagfx_xg_legacy_entered(p, "exec_walk_identity", NULL)) {
+                return;   /* ARM64 mode: no identity-GPA read of a guest address that did not translate */
+            }
+            cur_gpa = cur_va;  /* fallback: VA == GPA (x86 mode only) */
             if (bytes_read == 0u) {
                 LAGFX_TRACE("exec_walk_resource: task translate unavailable; "
                             "using identity gpa=0x%llx",
@@ -480,6 +489,13 @@ static void exec_walk_resource(lagfx_protocol_t *p,
 lagfx_handler_status_t lagfx_compute_exec_cmdbuf(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
     if (!p || !hdr) {
         return LAGFX_HANDLER_ERR_INTERNAL;
+    }
+
+    /* ARM64 mode never runs this walker: its outer layout, 4 KiB translation and inner decoders are the x86 protocol's. The dispatchers do not
+     * route here in arm64 mode; this is the backstop for any other caller. The stamp is NOT completed here (the drain loop owns completion). */
+    if (lagfx_proto_arm64(p)) {
+        lagfx_xg_reject(p, LAGFX_XG_REJ_EXEC_ENTRY, hdr);
+        return LAGFX_HANDLER_ERR_NOT_IMPLEMENTED;
     }
 
     /* macOS may send minimal 8-byte CmdExecIndirect2 payloads for

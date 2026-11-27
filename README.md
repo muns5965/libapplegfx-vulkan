@@ -69,10 +69,11 @@ Info replies (device info, compute info, pipeline info) report what the guest ma
 | `CmdGetDeviceInfo` | x86 table | Apple Henge table (verbatim) |
 | Compute `0x20` | command-buffer walker (`CmdExecIndirect2`) | drops task object cache; never executes |
 | Compute `0x25` | registers an object on the first live task (fallback) | removes `{task, ref}` |
-| Compute `0x37` | command-buffer walker | command-buffer walker (unchanged) |
+| Compute `0x37` | command-buffer walker | not executed: counted and logged (`g7-gpu-xlate`), stamp completed; the x86 walker is never run |
+| Root `0x20` | command-buffer walker | same: counted, logged, stamp completed |
 | Compute `0x38`, `0x44` | handled | handled |
 
-The `0x44` object and placement lists are only recorded; nothing consumes them yet. Metal command execution in arm64 mode is reachable only through `0x37`; how an ARM64 guest submits Metal command buffers is not yet mapped in this library.
+The `0x44` object and placement lists are only recorded; nothing consumes them yet. Metal command execution in arm64 mode is reachable only through `0x43` / `0x45` (16 KiB task address space); the x86 command-buffer walker and its 4 KiB task translator are never used in arm64 mode (`src/protocol/xlate_guard.c` counts any attempt as `legacy_xlate_in_arm64`).
 
 ### Compatibility and limits: x86
 
