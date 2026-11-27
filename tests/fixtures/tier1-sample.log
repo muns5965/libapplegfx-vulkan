@@ -1,0 +1,15 @@
+pipeline-reduce: row=CH10 result=FAIL vk=-13
+pipeline-reduce: row=CH11 result=BUILT vk=0
+pipeline-reduce: row=IW1.all result=BUILT vk=0
+pipeline-reduce: row=IW0.all result=BUILT vk=0
+pipeline-reduce: row=PB.CH10 result=FAIL vk=-13
+pipeline-reduce: row=XN01 result=FAIL
+pipeline-reduce: row=XN02 result=FAIL
+pipeline-reduce: row=XN04 result=BUILT
+pipeline-reduce: row=XN08 result=FAIL
+pipeline-reduce: row=XN10 result=FAIL
+pipeline-reduce: row=XN1e result=BUILT
+pipeline-reduce: row=XN1d result=BUILT
+pipeline-reduce: row=XN1b result=FAIL
+pipeline-reduce: row=XN17 result=BUILT
+pipeline-reduce: row=XN0f result=BUILT

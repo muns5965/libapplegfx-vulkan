@@ -2436,3 +2436,10 @@ if fs.is_file(meson.current_source_dir() / 'blit-mipgen-unit.c') and vulkan_dep.
   )
   test('blit mip-chain generation (standalone recorder) vs CPU box filter + refusals (unit, lavapipe + validation)', blit_mipgen_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
+
+# Tier-1 independent runner (scripts/tier1-runner.py): evaluates a recorded device log without running anything (no Vulkan needed).
+if py3_exe.found() and sh.found()
+  test('tier-1 runner: evaluates a recorded log (A / B reading, absent rows never CRASH)',
+    sh, args : ['-c', 'out=$("$0" -I "$1" --from-log "$2") && echo "$out" | grep -q "B consistent: location 4" && echo "$out" | grep -q "A consistent" && echo "$out" | grep -q "RI8 .*absent"',
+                py3_exe.full_path(), meson.project_source_root() / 'scripts/tier1-runner.py', meson.current_source_dir() / 'fixtures/tier1-sample.log'])
+endif
