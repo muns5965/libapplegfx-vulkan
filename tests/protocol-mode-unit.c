@@ -164,7 +164,7 @@ int main(void) {
         lagfx_protocol_t *d = mk(LAGFX_PROTO_ARM64_VMAPPLE);
         ((lagfx_device_t *)d->dev)->desc.shell.display_command = disp_cb;
         g_disp_n = 0;
-        uint32_t w[5] = { 4u, 0u /*barrier ch,stamp*/, 0u, 0x0abcu, 0x55u };   /* arg_count_8b=1: 8 barrier bytes, then {a0, pfn} */
+        uint32_t w[10] = { 4u, 0u /*barrier ch,stamp*/, 0u, 0x0abcu, 0x55u };   /* arg_count_8b=1: 8 barrier bytes, then {a0, pfn} */
         submit(d, 0x01, 1, w, 5);
         assert(g_disp_n == 1 && g_disp_chan == 1 && g_disp_len == 12u + 20u);
         assert((g_disp_words[0] & 0xffff) == 1u && (g_disp_words[0] >> 16) == 1u);   /* op 1, one barrier slot */

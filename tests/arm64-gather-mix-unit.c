@@ -364,7 +364,7 @@ static lagfx_protocol_t *new_task(lagfx_task_entry_t **t, const uint8_t *lib, si
     return p;
 }
 static void exec_all(lagfx_protocol_t *p, uint32_t task, uint32_t len) {
-    uint32_t refs[8 + NPOS], flags[8 + NPOS], nr = 0;
+    uint32_t refs[10 + NPOS], flags[10 + NPOS], nr = 0;
     const uint32_t fixed[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_GTEX, REF_GRT_A, REF_GRT_B, REF_PIPE_TEX, REF_UV, REF_MAT };
     for (uint32_t i = 0; i < sizeof fixed / sizeof *fixed; i++) { refs[nr] = fixed[i]; flags[nr++] = (fixed[i] == REF_SRC || fixed[i] == REF_UBO || fixed[i] == REF_WBUF) ? 1u : 0u; }
     for (uint32_t i = 0; i < NPOS; i++) { refs[nr] = REF_POS0 + i; flags[nr++] = 0; }
