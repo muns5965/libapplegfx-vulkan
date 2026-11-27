@@ -184,9 +184,31 @@ static int part_c(void) {
     return 0;
 }
 
+/* S04: Metal clear colour -> VkClearColorValue member by numeric class (no device needed). */
+static int part_clear(void) {
+    VkClearColorValue v; const double c[4] = { 7.9, -3.0, 300.0, 5e9 }, nan4[4] = { 0.0 / 0.0, 1, 1, 1 };
+    lagfx_fmtcap_clear_color(VK_FORMAT_R8G8B8A8_UNORM, c, &v);
+    if (v.float32[0] != 7.9f || v.float32[1] != -3.0f) { printf("FAIL clear: UNORM keeps float32\n"); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_R8G8B8A8_UINT, c, &v);   /* 8-bit: truncate toward zero, saturate to [0, 255] */
+    if (v.uint32[0] != 7u || v.uint32[1] != 0u || v.uint32[2] != 255u || v.uint32[3] != 255u) { printf("FAIL clear: R8G8B8A8_UINT %u %u %u %u\n", v.uint32[0], v.uint32[1], v.uint32[2], v.uint32[3]); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_R16G16B16A16_SINT, c, &v);   /* 16-bit signed */
+    if (v.int32[0] != 7 || v.int32[1] != -3 || v.int32[2] != 300 || v.int32[3] != 32767) { printf("FAIL clear: R16 SINT %d %d %d %d\n", v.int32[0], v.int32[1], v.int32[2], v.int32[3]); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_R32G32B32A32_SINT, c, &v);
+    if (v.int32[3] != 2147483647) { printf("FAIL clear: R32 SINT saturation %d\n", v.int32[3]); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_R32_UINT, c, &v);
+    if (v.uint32[3] != 4294967295u) { printf("FAIL clear: R32 UINT saturation\n"); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_A2B10G10R10_UINT_PACK32, c, &v);   /* 10 / 10 / 10 / 2 bits */
+    if (v.uint32[2] != 300u || v.uint32[3] != 3u) { printf("FAIL clear: A2B10G10R10_UINT %u %u\n", v.uint32[2], v.uint32[3]); return 1; }
+    lagfx_fmtcap_clear_color(VK_FORMAT_R8_SINT, nan4, &v);
+    if (v.int32[0] != 0) { printf("FAIL clear: NaN -> 0\n"); return 1; }
+    printf("PASS: clear colour union member by numeric class, truncating + saturating\n");
+    return 0;
+}
+
 int main(void) {
     int rc = part_a();
     if (rc) return rc;
+    if ((rc = part_clear())) return rc;
     struct lagfx_vk_state *vk = NULL;
     lagfx_device_descriptor_t dd;
     memset(&dd, 0, sizeof dd);

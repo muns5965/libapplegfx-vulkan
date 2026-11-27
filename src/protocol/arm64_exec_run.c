@@ -953,7 +953,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         VkClearValue cv;
         memset(&cv, 0, sizeof cv);
-        if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) for (int c = 0; c < 4; c++) cv.color.float32[c] = (float)d.colors[k].clear_color[c];
+        if (lop == VK_ATTACHMENT_LOAD_OP_CLEAR) lagfx_fmtcap_clear_color(t->format, d.colors[k].clear_color, &cv.color);   /* the union member follows the format's numeric class (S04) */
         VkImageView view; uint32_t w, h;
         if (!(t->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) p->diag2.exec.fmt.target_not_attachable++;   /* the device cannot render to this format (counted: not a silent no_target) */
         if (!lagfx_a64_res_target_begin(r->x, t, &view, &w, &h)) { CNT(p).no_target++; continue; }   /* layout GENERAL -> COLOR_ATTACHMENT_OPTIMAL */

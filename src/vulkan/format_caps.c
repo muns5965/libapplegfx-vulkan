@@ -138,6 +138,38 @@ int lagfx_fmtcap_class(VkFormat f) {
     }
 }
 
+/* Bits of component `ch` (0..3, in RGBA order) of an integer colour format; 0 for any other. */
+static unsigned int_comp_bits(VkFormat f, int ch) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_B8G8R8A8_UINT:
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8A8_SINT: case VK_FORMAT_B8G8R8A8_SINT: return 8;
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16A16_UINT:
+    case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16A16_SINT: return 16;
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32B32A32_UINT:
+    case VK_FORMAT_R32_SINT: case VK_FORMAT_R32G32_SINT: case VK_FORMAT_R32G32B32A32_SINT: return 32;
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32: return ch == 3 ? 2u : 10u;
+    default: return 0;
+    }
+}
+
+void lagfx_fmtcap_clear_color(VkFormat fmt, const double c[4], VkClearColorValue *out) {
+    memset(out, 0, sizeof *out);
+    const int cls = lagfx_fmtcap_class(fmt);
+    for (int i = 0; i < 4; i++) {
+        const double v = c[i];
+        if (cls == LAGFX_FMTCAP_CLASS_FLOAT) { out->float32[i] = (float)v; continue; }
+        unsigned bits = int_comp_bits(fmt, i);
+        if (!bits) bits = 32u;   /* S8_UINT and any class-integer format this table does not list: the full 32-bit member */
+        if (cls == LAGFX_FMTCAP_CLASS_UINT) {
+            const double mx = (double)((bits == 32u) ? 0xffffffffull : ((1ull << bits) - 1ull));
+            out->uint32[i] = v != v || v <= 0.0 ? 0u : v >= mx ? (uint32_t)mx : (uint32_t)v;
+        } else {
+            const double hi = (double)((1ll << (bits - 1u)) - 1ll), lo = -(double)(1ll << (bits - 1u));
+            out->int32[i] = v != v ? 0 : v >= hi ? (int32_t)hi : v <= lo ? (int32_t)lo : (int32_t)v;
+        }
+    }
+}
+
 const char *lagfx_fmtcap_class_name(int cls) {
     static const char *const n[LAGFX_FMTCAP_CLASS_N] = { "float", "uint", "sint" };
     return cls >= 0 && cls < LAGFX_FMTCAP_CLASS_N ? n[cls] : "?";

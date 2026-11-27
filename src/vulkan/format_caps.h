@@ -82,6 +82,13 @@ enum { LAGFX_FMTCAP_CLASS_FLOAT = 0, LAGFX_FMTCAP_CLASS_UINT, LAGFX_FMTCAP_CLASS
 int lagfx_fmtcap_class(VkFormat fmt);
 const char *lagfx_fmtcap_class_name(int cls);
 
+/* Metal clear colour (MTLClearColor: 4 doubles r,g,b,a) -> VkClearColorValue for an attachment of `fmt`. VkClearColorValue [V]: float32 is for formats whose numeric type is
+ * floating point (UNORM / SNORM / SRGB / SFLOAT ... included), int32 for SINT, uint32 for UINT; "unsigned integer values are converted to the format of the image by casting to
+ * the integer type with fewer bits" and a value the format cannot hold is poison (signed). So an integer format gets its member by class, each component converted by truncation
+ * toward zero (NaN -> 0) and SATURATED to the component's range (A2B10G10R10: 10/10/10/2 bits). The truncation (vs rounding) is [N]: Metal's conversion of a double clear colour to an
+ * integer format is not documented in the pages available here. */
+void lagfx_fmtcap_clear_color(VkFormat fmt, const double c[4], VkClearColorValue *out);
+
 /* One line per format of `list` (a library format table), then a summary; every emit is <= 400 chars. Counts formats lacking each capability the library needs (all
  * out parameters optional). Returns the number of lines. */
 typedef void (*lagfx_fmtcap_emit_fn)(void *user, const char *line);

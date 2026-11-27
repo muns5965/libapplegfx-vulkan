@@ -256,6 +256,30 @@ static void test_fetch_class(void) {
     puts("PASS: input-attachment numeric class vs attachment format: matching float / uint draws run; float-on-uint and uint-on-float are refused and counted");
 }
 
+/* S04 (docs/spec-audit.md): VkClearColorValue's union member must follow the attachment's numeric class (VkClearColorValue: float32 for float / normalized formats, int32 for
+ * SINT, uint32 for UINT [V]). An R32Uint target cleared with the float bits of 7.0 reads back 0x40E00000; with the uint32 member it reads back 7. */
+static void b_none(void) {}
+static void test_clear_integer_class(void) {
+    static rc_res_t r; const uint32_t refs_u[2] = { REF_TEX3, 0 };
+    g_rc.fs = FS_U;
+    const double c7[4] = { 7, 0, 0, 0 };
+    rc_run(refs_u, c7, NULL, b_none, false, &r);
+    uint32_t bad = 0; for (uint32_t i = 0; i < RT_W * RT_H; i++) bad += r.u32[i] != 7u;
+    assert(bad == 0 && r.val_msgs == 0);
+    const double big[4] = { 5e9, 0, 0, 0 };   /* beyond uint32: saturates (Vulkan leaves a value the format cannot hold undefined) */
+    rc_run(refs_u, big, NULL, b_none, false, &r);
+    assert(r.u32[0] == 0xffffffffu && r.u32[RT_W * RT_H - 1] == 0xffffffffu);
+    const double neg[4] = { -3, 0, 0, 0 };
+    rc_run(refs_u, neg, NULL, b_none, false, &r);
+    assert(r.u32[0] == 0u);
+    /* a float target keeps float semantics */
+    static rc_res_t rf; const uint32_t refs_f[2] = { REF_TEX2, 0 }; const double half[4] = { 0.5, 0, 0, 1 };
+    g_rc.fs = FS_F;
+    rc_run(refs_f, half, NULL, b_none, false, &rf);
+    assert(h16(rf.half, 3, 3, 0) == 0x3800u);   /* binary16 0.5 */
+    puts("PASS: an integer colour attachment is cleared through the uint32 / int32 member by its numeric class (R32Uint 7 -> 7; saturating); a float target keeps float32");
+}
+
 /* ---- injected less-capable device (wraps the real queries; overrides one format / usage) ---- */
 typedef struct { lagfx_fmtcap_backend_t real; VkFormat fmt; VkFormatFeatureFlags clear; VkImageUsageFlags refuse_any; VkImageUsageFlags refuse_all; } inj_t;
 static inj_t g_inj; static lagfx_fmtcap_backend_t g_inj_be;
@@ -350,6 +374,7 @@ int main(void) {
     test_split_strip_and_cap();
     test_split_mrt();
     test_fetch_class();
+    test_clear_integer_class();
     test_injected_formats();
     test_msaa_texture_refused();
     lagfx_device_free(g_dev);
