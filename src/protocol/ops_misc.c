@@ -37,6 +37,10 @@
 #include "state.h"
 #include "../device.h"
 #include "../common/log.h"
+#ifdef LAGFX_HAVE_VULKAN
+#include "../vulkan/instance.h"
+#include "../vulkan/msaa.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -290,7 +294,7 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
         { 0x00, 0          }, /* end-of-stream sentinel */
     };
     /* ARM64 vmapple: devices/pvg_lite.c device_info[] verbatim (Apple Henge, research/android-port 53f0d72). */
-    static const struct { uint32_t key; uint32_t value; } arm64_pairs[] = {
+    struct { uint32_t key; uint32_t value; } arm64_pairs[] = {   /* not const: key 0x01 (MSAASamples) is clamped to what the host can render below */
         { 0x01, 4 },
         { 0x02, 0 },
         { 0x03, 0x400 },
@@ -333,6 +337,18 @@ lagfx_handler_status_t lagfx_op_get_device_info_2(lagfx_protocol_t *p,
         { 0x00, 0 },
     };
     const bool arm64 = lagfx_proto_arm64(p);
+#ifdef LAGFX_HAVE_VULKAN
+    /* MSAASamples (key 0x01) is the guest's supportsRasterSampleCount: gate (value >= N). Advertising 4 on a host that cannot rasterize 4 samples into the colour
+     * formats the mirror creates would make the guest pick a count the library refuses (diag2.exec.fmt.msaa_refused). The value is lowered to the host maximum (floor 1,
+     * the gate for N = 1 stays open) and the change is counted; with no Vulkan device the historical value is kept. */
+    if (dev->vk && dev->vk->initialized) {
+        lagfx_fmtcap_backend_t st; const lagfx_fmtcap_backend_t *be = lagfx_fmtcap_active(dev->vk->phys_device, &st);
+        bool clamped = false;
+        for (size_t i = 0; i < sizeof pairs / sizeof pairs[0]; i++) if (pairs[i].key == 0x01u) pairs[i].value = lagfx_msaa_devinfo_max(be, pairs[i].value, &clamped);
+        for (size_t i = 0; i < sizeof arm64_pairs / sizeof arm64_pairs[0]; i++) if (arm64_pairs[i].key == 0x01u) arm64_pairs[i].value = lagfx_msaa_devinfo_max(be, arm64_pairs[i].value, &clamped);
+        if (clamped) { p->diag2.exec.fmt.devinfo_msaa_clamped++; LAGFX_WARN("CmdGetDeviceInfo2: MSAASamples lowered to the host maximum (host cannot rasterize the advertised count)"); }
+    }
+#endif
     const size_t n_pairs = arm64 ? sizeof(arm64_pairs) / sizeof(arm64_pairs[0]) : sizeof(pairs) / sizeof(pairs[0]);
 
     /* resp_qwords is in 8-byte units; each pair is 8 bytes, so the

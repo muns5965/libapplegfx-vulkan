@@ -374,7 +374,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     /* Multisample state */
     VkPipelineMultisampleStateCreateInfo ms = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO,
-        .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT,
+        .rasterizationSamples = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT,   /* must equal the attachments' sample count (vkCmdDraw valid usage) */
     };
 
     /* Color blend attachment — PREMULTIPLIED src-over (CoreAnimation's

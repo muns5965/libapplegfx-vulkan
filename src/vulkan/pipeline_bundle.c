@@ -28,7 +28,7 @@ typedef struct { const char *name; size_t off; unsigned elem, count; } field_t;
 static const field_t k_fields[] = {
     F4(color_format, 1), F4(depth_format, 1), F1(vtx_in_loc, 8), F1(vtx_in_comp, 8), F1(n_vtx_inputs, 1), F1(vtx_in_src_known, 8), F1(vtx_in_src_unfed, 8), F4(vtx_in_src_off, 8), F1(vtx_in_buf_known, 8), F4(vtx_in_buf, 8), F4(pso_attr_buf, 8), F1(pso_attr_buf_known, 1), F4(vtx_stride, 1), F4(pso_attr_fmt, 8), F4(pso_attr_off, 8), F1(n_pso_attrs, 1), F1(pso_attrs_serialized, 1),
     F1(topology_plus1, 1), F4(caps_enabled, 1), F1(blend_set, 1), F1(blend_enable, 1), F4(blend_src_rgb, 1), F4(blend_dst_rgb, 1), F4(blend_op_rgb, 1), F4(blend_src_a, 1), F4(blend_dst_a, 1),
-    F4(blend_op_a, 1), F4(color_write_mask, 1), F1(n_color, 1), F1(independent_blend, 1), F1(masks_valid, 1), F1(raster_order_access, 1), F4(color_formats, 4), F4(color_write_masks, 4),
+    F4(blend_op_a, 1), F4(color_write_mask, 1), F1(n_color, 1), F1(independent_blend, 1), F1(masks_valid, 1), F1(raster_order_access, 1), F1(raster_samples, 1), F4(color_formats, 4), F4(color_write_masks, 4),
     F4(ds_depth_format, 1), F4(ds_stencil_format, 1), F1(dyn_state, 1), F1(no_color, 1),
 };
 #define NFIELDS (sizeof k_fields / sizeof k_fields[0])
