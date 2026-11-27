@@ -163,3 +163,11 @@ executable('dump-vtxattrs',
   dependencies : libapplegfx_vulkan_dep,
   build_by_default : true,
 )
+
+# spv-ssa — runs the opt-in SSA promotion (LAGFX_SPV_SSA) on a SPIR-V file offline and prints the structure counters.
+executable('spv-ssa',
+  'spv-ssa.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : libapplegfx_vulkan_dep,
+  build_by_default : true,
+)

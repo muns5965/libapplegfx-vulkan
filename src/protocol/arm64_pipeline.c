@@ -380,6 +380,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
 #include "../vulkan/instance.h"
 #include "../vulkan/descriptor_layout.h"
 #include "../vulkan/pipeline_bundle.h"
+#include "../vulkan/spv_ssa.h"
 #include "../air/bitcode_reader.h"
 #include "../air2spv/translate.h"
 #include "../air2spv/spv_reflect.h"
@@ -473,6 +474,8 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     lagfx_air_module_free(m);
     if (st != LAGFX_OK || !*spv || !*sz) { free(*spv); *spv = NULL; CNTP(p).rf_translate++; return false; }
     CNTP(p).xlate_air2spv++;
+    /* OPT-IN (LAGFX_SPV_SSA=1..4, default OFF: nothing below runs and the module is the translator's, byte for byte): Function variables -> SSA, see src/vulkan/spv_ssa.h. A failure keeps the original. */
+    if (lagfx_spv_ssa_env_mode()) lagfx_spv_ssa_apply_env(spv, sz, keys_out ? "vertex" : "fragment");
     return true;
 }
 

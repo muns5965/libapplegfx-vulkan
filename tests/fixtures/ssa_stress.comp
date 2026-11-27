@@ -1,0 +1,62 @@
+#version 450
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer In { uint d[]; } inb;
+layout(std430, binding = 1) writeonly buffer Out { uint o[]; } outb;
+
+void bump(inout uint x, uint k) { x = x * 3u + k; }          // a local passed by pointer: it escapes and must stay in memory
+
+uint hash(uint v) { v ^= v >> 16; v *= 0x7feb352dU; v ^= v >> 15; v *= 0x846ca68bU; v ^= v >> 16; return v; }
+
+void main() {
+    uint gid = gl_GlobalInvocationID.x;
+    uint a = inb.d[gid];
+    uint b = inb.d[(gid * 7u + 3u) & 255u];
+    uint acc = 0u;                  // loop carried
+    float f = 1.0;                  // float loop carried, with initializer
+    uint cnt;                       // no initializer, written on every path before it is read
+    int  sgn = (a & 1u) != 0u ? 1 : -1;
+    bool flag = false;
+    vec4 v = vec4(float(a & 255u), float(b & 255u), 1.0, 2.0);   // vector local
+    mat2 m = mat2(1.0, 2.0, 3.0, 4.0);                         // matrix local
+    uint arr[4] = uint[4](a, b, a ^ b, a + b);                  // array local (aggregate)
+    uint esc = a;                                              // escapes through bump()
+
+    // loop with continue / break / carried values
+    for (uint k = 0u; k < (a & 7u) + 2u; k++) {
+        if (((a >> k) & 1u) != 0u) { acc += k * a; continue; }
+        else if (k == 5u) { flag = true; break; }
+        acc ^= a << k;
+        f = f * 1.5 + float(k);
+        v.x += 1.0;
+    }
+    // switch with fallthrough and default
+    switch (b & 3u) {
+    case 0u: acc += 1u; break;
+    case 1u: acc += 2u;                       // falls through
+    case 2u: acc *= 3u; break;
+    default: acc -= 7u; break;
+    }
+    // variable defined on one path only, used only on that path
+    uint late;
+    if ((a & 15u) == 7u) { late = hash(a); acc += late; }
+    if ((b & 15u) == 9u) { cnt = 11u; } else { cnt = b & 3u; }
+    acc += cnt;
+    // nested loops with an early exit and a loop-carried bool
+    uint inner = 0u;
+    for (uint i = 0u; i < 4u; i++) {
+        for (uint j = 0u; j < 3u; j++) {
+            inner += (i * 5u + j) ^ (a >> (i + j));
+            if (inner > 400u) { flag = !flag; break; }
+        }
+        if (inner > 900u) break;
+    }
+    acc += inner;
+    // a loop whose trip count depends on data and that modifies a vec
+    uint t = a & 3u;
+    while (t > 0u) { v.y += float(t); m[0][0] += 0.25; t--; }
+    bump(esc, b);
+    uint r = hash(acc) ^ floatBitsToUint(f) ^ floatBitsToUint(v.x + v.y * 0.5 + m[0][0] * m[1][1]) ^ uint(sgn + 2) ^ (flag ? 0x80000000u : 0u) ^ arr[b & 3u] ^ esc;
+    // early return on some lanes
+    if ((r & 0xf0u) == 0x30u) { outb.o[gid] = r + 1u; return; }
+    outb.o[gid] = r;
+}
