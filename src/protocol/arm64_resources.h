@@ -206,6 +206,7 @@ bool              lagfx_a64_res_is_pending(lagfx_protocol_t *p);
 uint32_t          lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping);
 /* Counts one ARM64 display command (ops 1 / 2 / 8) into p->diag2.disp: op seen, and for a swap whether its surface resolved / holds GPU pixels / is current in the guest. */
 /* Diagnostics only: size, fourcc, Metal format number and VkFormat number of the mirror surface for `mapping` (false: none). */
+bool              lagfx_a64_res_display_owner(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task);
 bool              lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t *w, uint32_t *h, uint32_t *fourcc, uint32_t *mtl_format, int32_t *vk_format);
 void              lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr);
 

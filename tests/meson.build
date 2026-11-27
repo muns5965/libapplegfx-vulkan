@@ -2053,3 +2053,14 @@ if fs.is_file(meson.current_source_dir() / 'display-diag-unit.c')
   )
   test('display diagnostics helpers (unit)', display_diag_unit_test)
 endif
+
+# Gamma-region read: the owner task of the display mapping is asked before the last 0x44 task and before any scan (no Vulkan device).
+if fs.is_file(meson.current_source_dir() / 'display-diag-gamma-owner-unit.c')
+  display_diag_gamma_owner_test = executable('display-diag-gamma-owner-unit',
+    'display-diag-gamma-owner-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('display diagnostics: gamma region read prefers the mapping owner task (unit)', display_diag_gamma_owner_test)
+endif

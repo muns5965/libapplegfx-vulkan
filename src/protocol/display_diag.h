@@ -141,6 +141,9 @@ typedef struct lagfx_protocol lagfx_protocol_t;
 /* the one read of guest memory (gamma region): registered by diag.c so this module does not pull the protocol/device layers into every static-library consumer */
 typedef bool (*lagfx_dd_reader_t)(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, uint32_t len, uint8_t *out);
 void lagfx_dd_set_reader(lagfx_dd_reader_t r);
+/* the task that created the display mapping `mapping` (false: unknown); registered by diag.c. The gamma read asks this task FIRST. */
+typedef bool (*lagfx_dd_owner_t)(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task);
+void lagfx_dd_set_owner_lookup(lagfx_dd_owner_t f);
 void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_t *raw, uint32_t length);
 /* One op-0x08 swap named `mapping`; info is what the surface registry knows (resolved == false: nothing). */
 typedef struct { bool resolved, gpu, guest_current; uint32_t w, h, fourcc, mtl_format; int32_t vk_format; } lagfx_dd_surface_t;

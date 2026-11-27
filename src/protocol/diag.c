@@ -45,6 +45,8 @@ static bool dd_read_region(lagfx_protocol_t *p, uint32_t task_id, uint64_t va, u
     return t && lagfx_task_read_virtual(p, t, va, len, out);
 }
 
+static bool dd_owner(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task) { return lagfx_a64_res_display_owner(p, mapping, task); }
+
 void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, const uint8_t *raw, uint32_t length) {
     if (!p || !raw || length < 12u || src < 0 || src > 2) return;
     uint64_t t = now_ns();
@@ -59,6 +61,7 @@ void lagfx_diag_cmd(lagfx_protocol_t *p, int src, uint32_t chan, uint32_t rp, co
     if (src == LAGFX_DIAG_COMPUTE && op == 0x20) p->diag2.exec_20++;
     if (op == 0x43 || op == 0x45) p->diag2.exec_43_45++;
     lagfx_dd_set_reader(dd_read_region);
+    lagfx_dd_set_owner_lookup(dd_owner);
     lagfx_dd_note_cmd(p, src, chan, raw, length);   /* display diagnostics: counts / read-only captures, no effect on dispatch */
     /* Bounded: the first 64 of each (source, opcode) and every 64th after that; root commands only the first 16. Counters above never stop. */
     uint64_t cap = src == LAGFX_DIAG_ROOT ? 16u : 64u;

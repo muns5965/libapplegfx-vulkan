@@ -54,6 +54,7 @@ lagfx_a64_status_t lagfx_a64_res_poll(lagfx_protocol_t *p, uint32_t w) { (void)p
 bool lagfx_a64_res_is_pending(lagfx_protocol_t *p) { (void)p; return false; }
 uint32_t lagfx_a64_res_display_swap(lagfx_protocol_t *p) { (void)p; return 0; }
 uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) { (void)p; (void)mapping; return 0; }
+bool lagfx_a64_res_display_owner(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task) { (void)p; (void)mapping; (void)task; return false; }
 bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t *w, uint32_t *h, uint32_t *fourcc, uint32_t *mtl_format, int32_t *vk_format) { (void)p; (void)mapping; (void)w; (void)h; (void)fourcc; (void)mtl_format; (void)vk_format; return false; }
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return 0; }
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
@@ -1423,6 +1424,17 @@ uint32_t lagfx_a64_res_display_note(lagfx_protocol_t *p, uint64_t mapping) {
 }
 
 /* Diagnostics only (no side effects): size / fourcc / Metal format number / VkFormat number of the mirror surface a swap names. */
+/* The task that created the mapped-texture object bound to display mapping `mapping` (the first, i.e. earliest allocated, object holding that surface). */
+bool lagfx_a64_res_display_owner(lagfx_protocol_t *p, uint64_t mapping, uint32_t *task) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    if (!m || !task || mapping > 0xffffffffull) return false;
+    for (uint32_t i = 0; i < m->n; i++) {
+        const lagfx_a64_obj_t *o = m->objs[i];
+        if (o && o->ms && o->ms->mapping == (uint32_t)mapping) { *task = o->task; return true; }
+    }
+    return false;
+}
+
 bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t *w, uint32_t *h, uint32_t *fourcc, uint32_t *mtl_format, int32_t *vk_format) {
     mgr2_t *m = p ? p->a64_res : NULL;
     if (!m || mapping > 0xffffffffull) return false;

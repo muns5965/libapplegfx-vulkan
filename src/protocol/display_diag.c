@@ -27,6 +27,8 @@ static uint64_t dd_ms(void) {   /* ms since the first call of this module (INFER
 /* One tagged line to stderr (like the g7-gpu statistics lines, so it reaches the runner's log) and to the lagfx log. Bounded by the callers' caps. */
 static lagfx_dd_reader_t s_reader;
 void lagfx_dd_set_reader(lagfx_dd_reader_t r) { s_reader = r; }
+static lagfx_dd_owner_t s_owner;
+void lagfx_dd_set_owner_lookup(lagfx_dd_owner_t f) { s_owner = f; }
 
 static void dd_say(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 static void dd_say(const char *fmt, ...) {
@@ -98,29 +100,37 @@ void lagfx_dd_note_cmd(lagfx_protocol_t *p, int src, uint32_t chan, const uint8_
                   (unsigned long long)n, chan, arg8, plen, w_off, w_len, w_cnt, w_ck, hx, shown < plen ? "..." : "");
         if (w_off >= 0 && GET(s_gamma_done) == 0u && GET(s_gamma_attempts) < 3u) {
             INC(s_gamma_attempts);
+            /* The task that CREATED the display mapping (named by this very op 0x08) owns the region: ask it first. The last 0x44 is only a guess (vm2: last 0x44 = task 6, the
+             * surface was created by task 2) and the same VA can be mapped in several tasks, so the scan over every other live task is a DIAGNOSTIC FALLBACK, reported as such. */
+            uint64_t mapping = skip + 16u <= plen ? lagfx_dd_rd32(pl + skip + 8u) | (uint64_t)lagfx_dd_rd32(pl + skip + 12u) << 32 : 0;
+            uint32_t owner = 0; bool have_owner = s_owner && skip + 16u <= plen && s_owner(p, mapping, &owner);
             const bool have_task = p->diag2.last44_global_valid != 0;
-            if (!have_task || !s_reader) {
-                dd_say("g7-pvg-gamma: region not read: %s (valid=%d task=%u)", s_reader ? "no live task for the last 0x44" : "no reader registered", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task);
+            if ((!have_task && !have_owner) || !s_reader) {
+                dd_say("g7-pvg-gamma: region not read: %s (valid=%d task=%u owner=%s)", s_reader ? "no live task for the last 0x44 and no owner task of the mapping" : "no reader registered", (int)p->diag2.last44_global_valid, p->diag2.last44_global_task, have_owner ? "known" : "unknown");
             } else {
                 uint8_t *buf = (uint8_t *)malloc(0x4000u);
-                /* The last 0x44 is only a guess for the task that owns the region (vm2: last 0x44 = task 6, the display surface was created by task 2). Try it first, then every other live task. */
-                uint32_t task = p->diag2.last44_global_task, tried = 0;
+                uint32_t task = have_owner ? owner : p->diag2.last44_global_task, tried = 0;
+                const char *via = have_owner ? "owner" : "last44";
                 bool ok = false;
                 if (buf) {
                     ok = s_reader(p, task, 0x118000u, 0x4000u, buf), tried = 1;
-                    for (uint32_t i = 0; !ok && i < LAGFX_MAX_TASKS; i++) {
-                        if (!p->tasks[i].live || p->tasks[i].id == p->diag2.last44_global_task) continue;
+                    if (!ok && have_owner && have_task && p->diag2.last44_global_task != owner) {
                         tried++;
-                        if (s_reader(p, p->tasks[i].id, 0x118000u, 0x4000u, buf)) ok = true, task = p->tasks[i].id;
+                        if (s_reader(p, p->diag2.last44_global_task, 0x118000u, 0x4000u, buf)) ok = true, task = p->diag2.last44_global_task, via = "last44(owner failed)";
+                    }
+                    for (uint32_t i = 0; !ok && i < LAGFX_MAX_TASKS; i++) {
+                        if (!p->tasks[i].live || (have_owner && p->tasks[i].id == owner) || (have_task && p->tasks[i].id == p->diag2.last44_global_task)) continue;
+                        tried++;
+                        if (s_reader(p, p->tasks[i].id, 0x118000u, 0x4000u, buf)) ok = true, task = p->tasks[i].id, via = "scan(DIAGNOSTIC FALLBACK: neither the owner nor the last 0x44 could read it; the same VA may exist in several tasks)";
                     }
                 }
                 if (ok) {
                     lagfx_dd_gamma_t g; char line[420];
                     lagfx_dd_gamma_summarize(buf, 0x4000u, &g); lagfx_dd_gamma_format(line, sizeof line, &g);
                     __atomic_store_n(&s_gamma_done, 1u, __ATOMIC_RELAXED);
-                    dd_say("g7-pvg-gamma: region task=%u (last 0x44 task=%u, %u task(s) tried) va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", task, p->diag2.last44_global_task, tried, line);
+                    dd_say("g7-pvg-gamma: region task=%u via=%s (owner=%d last 0x44 task=%u, %u task(s) tried) va=0x118000 len=0x4000 %s (INFER: the descriptor's offset is a task virtual address; checksum word 0x48400000 is NOT verified here; never applied)", task, via, have_owner ? (int)owner : -1, p->diag2.last44_global_task, tried, line);
                 } else {
-                    dd_say("g7-pvg-gamma: region read FAILED task=%u (%u task(s) tried) va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", p->diag2.last44_global_task, tried, (unsigned long long)GET(s_gamma_attempts));
+                    dd_say("g7-pvg-gamma: region read FAILED task=%u owner=%d (%u task(s) tried) va=0x118000 len=0x4000 (INFER: offset is not a plain task VA, or the page is unmapped) attempt=%llu", task, have_owner ? (int)owner : -1, tried, (unsigned long long)GET(s_gamma_attempts));
                 }
                 free(buf);
             }
