@@ -57,7 +57,9 @@ lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, co
                                         bool to_guest, lagfx_guest_surface_xfer_stats_t *st);
 
 /* READ-ONLY writeback verification (diagnostic, opt-in by LAGFX_WB_VERIFY=1; see lagfx_wbv_*). Reads the guest pages back (xfer, to_guest=false, into a temporary tight
- * buffer) and compares the valid pixels (w * bpp bytes a row, row padding excluded) with `buf` (stride bytes a row). BGRA only (bpp 4); anything else is refused.
+ * buffer) and compares the valid pixels (w * bpp bytes a row, row padding excluded) with `buf` (stride bytes a row). BGRA (bpp 4) and RGhA (bpp 8: the 16-bit
+ * channels are compared as raw bit patterns, r/g/b = first 6 bytes, alpha = last 2; the hashes step over whole LE u64 pixels). This is a write/read round-trip check of the
+ * guest pages ONLY: it never looks at the GPU image and never at colour (no half->float, no gamma), see docs.
  * Pixel bytes are taken as b, g, r, a at +0..+3 (INFER: from the fourcc 'BGRA' little-endian word, alpha in the high byte). A pixel whose b/g/r differ counts in rgb_mismatch
  * (whatever its alpha); one whose b/g/r are equal but alpha differs counts in alpha_only_mismatch. hash_* = Henge pvgpix' hash: FNV-1a basis 1469598103934665603, prime
  * 1099511628211, one step per whole little-endian 32-bit pixel ((h ^ px) * prime), every pixel of w x h, alpha included, not sampled. The guest is read twice;
@@ -65,6 +67,7 @@ lagfx_status_t lagfx_guest_surface_xfer(const lagfx_shell_callbacks_t *shell, co
 typedef struct {
     uint32_t w, h, bpp;
     uint64_t pixels, rgb_mismatch, alpha_only_mismatch, pages_skipped;
+    uint64_t half_nonfinite, half_negative, half_above_one;   /* bpp 8 only, counted on the written buffer: pixels with any Inf/NaN, any negative (non-zero), any finite channel above 1.0 */
     int32_t first_x, first_y;                  /* first differing pixel (row-major), -1 if none */
     uint64_t hash_buf, hash_guest, hash_guest2;
     bool stable;

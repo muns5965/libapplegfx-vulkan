@@ -19,6 +19,7 @@
 #include <vulkan/vulkan.h>
 #include "arm64-exec-run-shaders.h"
 #include <assert.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -280,6 +281,28 @@ static void synchronize(lagfx_protocol_t *p, uint32_t stamp, uint32_t ref) {
     uint32_t w[3] = { 1, 1, ref };
     submit(p, 0x35, stamp, w, 3);
 }
+
+
+/* ---- binary16 reference (IEEE 754): independent of the library, used by the colour tests ---- */
+static uint16_t ref_half_from(float f, bool rtz) {
+    uint32_t b; memcpy(&b, &f, 4);
+    uint32_t sign = (b >> 16) & 0x8000u, e = (b >> 23) & 0xffu, m = b & 0x7fffffu;
+    if (e == 0xffu) return (uint16_t)(sign | 0x7c00u | (m ? 0x200u : 0u));
+    int32_t he = (int32_t)e - 127 + 15;
+    if (he >= 31) return (uint16_t)(sign | (rtz ? 0x7bffu : 0x7c00u));
+    uint32_t mant, shift;
+    if (he <= 0) { if (he < -10) return (uint16_t)sign; mant = m | 0x800000u; shift = (uint32_t)(14 - he); he = 0; }
+    else { mant = m; shift = 13; }
+    uint32_t q = mant >> shift, rem = mant & ((1u << shift) - 1u), half = 1u << (shift - 1u);
+    uint32_t out = he == 0 ? q : ((uint32_t)he << 10) | q;
+    if (!rtz && (rem > half || (rem == half && (out & 1u)))) out++;   /* carries into the exponent (and to Inf) correctly */
+    return (uint16_t)(sign | out);
+}
+static uint16_t ref_half_rne(float f) { return ref_half_from(f, false); }
+static uint16_t ref_half_rtz(float f) { return ref_half_from(f, true); }
+static bool ref_half_exact(float f) { return ref_half_rne(f) == ref_half_rtz(f); }
+static float ref_srgb_encode(float v) { return v <= 0.0031308f ? 12.92f * v : 1.055f * powf(v, 1.0f / 2.4f) - 0.055f; }
+static float ref_srgb_decode(float v) { return v <= 0.04045f ? v / 12.92f : powf((v + 0.055f) / 1.055f, 2.4f); }
 
 #define CNT(p) ((p)->diag2.exec.run)
 
@@ -710,6 +733,81 @@ int main(void) {
       lagfx_vk_validation_msg_count = base;   /* the control's own messages are expected; everything else must stay at 0 */
       if (cb) lagfx_vk_cmdbuf_free(vk, cb);
       for (int i = 0; i < 2; i++) if (okc) { vkDestroyBuffer(vk->device, bf[i], NULL); vkFreeMemory(vk->device, bm[i], NULL); } }
+
+    /* (3e) COLOUR VALUES on the RGhA display surface (numeric, lavapipe). Source basis: Khronos Vulkan spec "Floating-Point Format Conversions" (rounding mode of float32 -> float16
+     * is NOT defined: "to one or the other" neighbour; Inf stays Inf, NaN stays NaN) and IEEE 754 binary16 (public). The library applies NO transfer function and NO matrix between the
+     * guest's clear colour and the half floats it writes back (the shell shows them: Henge docs/agents/colorprobe.md, pass-through of display-encoded values). So expected bytes =
+     * float32 clear value converted to binary16, per channel, alpha NOT premultiplied into rgb. We accept the round-to-nearest-even half or the round-toward-zero half (the two
+     * neighbours the spec allows) and require exact equality when the value is representable. Not a prediction of Adreno: its rounding / denormal behaviour is only measured on the phone. */
+    {
+        struct { double c[4]; } tab[] = {
+            { { 128.0 / 255, 64.0 / 255, 191.0 / 255, 0.25 } },                  /* 8-bit style values; alpha 0.25 must not scale rgb */
+            { { 0.04045, 0.0031308, 0.2140411, 0.5 } },                          /* sRGB transfer breakpoints / a mid value: must NOT be encoded or decoded */
+            { { 0.5, 2.0, -0.5, 1.0 } },                                         /* exact in half; extended range (>1, <0) is kept, not clamped */
+            { { 65504.0, 6.103515625e-5, 1.0 / 3.0, 0.9990234375 } },            /* max finite, min normal, 1/3, 1 - 2^-10 */
+            { { 5.9604644775390625e-8, 1e-6, 3e-8, 0.0 } },                      /* subnormals (2^-24 = min subnormal): rne / rtz / flush-to-zero all pass the test, the log says which */
+            { { -0.0, 1.0001, 1e-4, 0.7071068 } },
+        };
+        const uint32_t NT = (uint32_t)(sizeof tab / sizeof tab[0]);
+        int flushed = 0, not_rne = 0;
+        for (uint32_t t = 0; t < NT; t++) {
+            const uint32_t res[1][2] = { { REF_M9, 2 | 4 } };   /* clear, write back at once */
+            memset(surf_page(0), SENT, 4u << 14);
+            run_exec(p, 100 + t, REF_M9, 2, tab[t].c, false, res, 1, true);
+            assert(cell(1) == 100 + t);
+            for (int k = 0; k < 4; k++) {
+                float f = (float)tab[t].c[k];
+                uint16_t rne = ref_half_rne(f), rtz = ref_half_rtz(f), got0 = 0, got1 = 0, gotc = 0;
+                const uint8_t *a = half_px(0, 0) + 2 * k, *b = half_px(SW - 1, SH - 1) + 2 * k, *c = half_px(17, 53) + 2 * k;
+                got0 = (uint16_t)(a[0] | a[1] << 8), got1 = (uint16_t)(b[0] | b[1] << 8), gotc = (uint16_t)(c[0] | c[1] << 8);
+                assert(got0 == got1 && got0 == gotc);   /* every pixel of the clear is identical */
+                if (ref_half_exact(f)) assert(got0 == rne);
+                else if (rne == 0 && rtz == 0) assert(got0 == 0);                       /* below half of the min subnormal */
+                else if (((rne | rtz) & 0x7c00u) == 0) { assert(got0 == rne || got0 == rtz || (got0 & 0x7fffu) == 0); if ((got0 & 0x7fffu) == 0) flushed++; }
+                else assert(got0 == rne || got0 == rtz);
+                if (got0 != rne) { not_rne++; printf("INFO: colour %u ch %d: float32 %.9g -> got 0x%04x, rne 0x%04x, rtz 0x%04x\n", t, k, (double)f, got0, rne, rtz); }
+                /* the transfer function was not applied: for a mid value the sRGB-encoded half would differ */
+                if (f > 0.05f && f < 0.9f) assert(got0 != ref_half_rne(ref_srgb_encode(f)) && got0 != ref_half_rne(ref_srgb_decode(f)));
+            }
+        }
+        /* a non-premultiplied alpha check in numbers: rgb (1, 1, 1) with alpha 0.25 stays (0x3c00 x3, 0x3400) */
+        { static const double pm[4] = { 1, 1, 1, 0.25 }; const uint32_t res[1][2] = { { REF_M9, 2 | 4 } };
+          memset(surf_page(0), SENT, 4u << 14);
+          run_exec(p, 110, REF_M9, 2, pm, false, res, 1, true);
+          static const uint8_t e[8] = { 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x3c, 0x00, 0x34 };
+          assert(!memcmp(half_px(5, 5), e, 8)); }
+        printf("PASS: RGhA clear colours (%u colours x 4 channels) written back as binary16: no transfer function, no premultiply, extended range kept (not-RNE channels: %d, flushed subnormals: %d on this driver)\n", NT, not_rne, flushed);
+    }
+
+    /* (3f) every one of the 65536 binary16 bit patterns (zeros, subnormals, +-Inf, all NaN payloads) survives guest -> image -> readback -> synchronize -> guest unchanged:
+     * the transport applies no conversion at all (gamma identity of the copy path). The image side is checked through the library's own readback as well. */
+    {
+        const uint32_t per = SW * SH * 4u;   /* halves per pass: 5120 pixels x 4 channels */
+        uint8_t *img = malloc(SW * SH * 8u);
+        uint64_t checked = 0, nan_seen = 0;
+        for (uint32_t base = 0; base < 65536u; base += per) {
+            for (uint32_t y = 0; y < SH; y++) for (uint32_t x = 0; x < SW; x++) {
+                uint16_t v[4];
+                for (int k = 0; k < 4; k++) v[k] = (uint16_t)((base + (y * SW + x) * 4u + (uint32_t)k) & 0xffffu);
+                memcpy(half_px(x, y), v, 8);
+            }
+            { const uint32_t r1[1][2] = { { REF_M9, 1 } }; run_exec(p, 120 + 2 * (base / per), 0, 0, green, false, r1, 1, false); }
+            uint32_t w, h;
+            assert(lagfx_a64_res_readback(p, 1, REF_M9, img, SW * SH * 8u, &w, &h) && w == SW && h == SH);
+            memset(surf_page(0), SENT, 4u << 14);
+            synchronize(p, 121 + 2 * (base / per), REF_M9);
+            for (uint32_t y = 0; y < SH; y++) for (uint32_t x = 0; x < SW; x++) {
+                uint16_t v[4];
+                for (int k = 0; k < 4; k++) { v[k] = (uint16_t)((base + (y * SW + x) * 4u + (uint32_t)k) & 0xffffu); if ((v[k] & 0x7c00u) == 0x7c00u && (v[k] & 0x3ffu)) nan_seen++; }
+                assert(!memcmp(img + ((size_t)y * SW + x) * 8u, v, 8));   /* image (GPU side) */
+                assert(!memcmp(half_px(x, y), v, 8));                      /* guest pages after write-back */
+                checked += 4;
+            }
+        }
+        free(img);
+        assert(checked >= 65536u && nan_seen >= 2u * 1023u);
+        printf("PASS: all 65536 binary16 patterns (%llu NaN channel values among %llu checked) round-trip guest -> image -> guest bit for bit\n", (unsigned long long)nan_seen, (unsigned long long)checked);
+    }
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
