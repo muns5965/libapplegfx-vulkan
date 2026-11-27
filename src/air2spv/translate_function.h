@@ -126,6 +126,14 @@ lagfx_status_t lagfx_air2spv_translate_function_ex(
  * thread's following translations. 0 = native (the device subgroup is the simdgroup; the default). See t_simd_emul in translate_function.c for the assumptions. */
 void lagfx_air2spv_set_simd_emulation(uint32_t width);
 
+/* SIMD-group / quad-group operations (air.simd*, air.quad*, ...) the translator cannot translate (anything but the shuffles / queries listed above). Such a call used to
+ * leave an OpUndef behind silently. A COMPUTE translation that meets one now FAILS (LAGFX_ERR_PROTOCOL); graphics stages still build but count them.
+ *   lagfx_air2spv_last_unsupported_simd   the calling thread's last translation: number of such calls (0 = none) and the first one's name (first_name may be NULL)
+ *   lagfx_air2spv_simd_unsupported_totals process-wide: translations that met one, calls, compute kernels rejected */
+typedef struct { uint64_t modules, calls, kernels_rejected; } lagfx_simd_unsupported_totals_t;
+uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap);
+void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out);
+
 /* Internal (tests): look up an AIR math-intrinsic callee name in the GLSL.std.450 dispatch table. On a hit returns true and fills the GLSL.std.450 instruction
  * number, the operand count and whether it is a chained three-operand form (fmax3/fmin3); any out pointer may be NULL. */
 bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_inst, uint32_t *num_args, bool *three_way);

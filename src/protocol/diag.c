@@ -306,9 +306,9 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
 #define U(f) (unsigned long long)T->f
         char tl[900];
         snprintf(tl, sizeof tl,
-                 "g7-gpu-tile: pipes=%llu failed=%llu[no_kernel=%llu missing_cap=%llu bindings=%llu] binds[buf=%llu tex=%llu ignored=%llu] dispatches=%llu groups=%llu whole=%llu region=%llu(unaligned=%llu empty=%llu) "
+                 "g7-gpu-tile: pipes=%llu failed=%llu[no_kernel=%llu missing_cap=%llu bindings=%llu unsupported_simd=%llu] binds[buf=%llu tex=%llu ignored=%llu] dispatches=%llu groups=%llu whole=%llu region=%llu(unaligned=%llu empty=%llu) "
                  "sg[pinned32=%llu override=%llu emulated=%llu] rt_index_ignored=%llu draws_ignored=%llu skipped[no_pass=%llu no_pipe=%llu bad_rec=%llu local=%llu no_sg32=%llu rt=%llu unbound=%llu unaligned=%llu feedback=%llu desc=%llu pipe_build=%llu] resume_failed=%llu",
-                 U(pipes), U(pipe_failed), U(pipe_no_kernel), U(pipe_missing_cap), U(pipe_bindings), U(binds_buf), U(binds_tex), U(binds_ignored), U(dispatches), U(groups), U(whole), U(region), U(region_unaligned), U(region_empty),
+                 U(pipes), U(pipe_failed), U(pipe_no_kernel), U(pipe_missing_cap), U(pipe_bindings), U(pipe_unsupported_simd), U(binds_buf), U(binds_tex), U(binds_ignored), U(dispatches), U(groups), U(whole), U(region), U(region_unaligned), U(region_empty),
                  U(sg_pinned), U(sg_override), U(sg_emulated), U(rt_index_ignored), U(draws_ignored), U(skip_no_pass), U(skip_no_pipe), U(skip_bad_rec), U(skip_local), U(skip_no_sg32), U(skip_rt), U(skip_unbound), U(skip_unaligned), U(skip_feedback),
                  U(skip_desc), U(skip_pipe_build), U(resume_failed));
 #undef U

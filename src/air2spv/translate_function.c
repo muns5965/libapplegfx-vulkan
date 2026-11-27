@@ -2097,7 +2097,8 @@ static uint32_t frag_link_convert(xlate_ctx_t *c, uint32_t val, uint32_t vl, uin
  *   threadgroup size             -> BuiltIn WorkgroupSize = composite of SpecId 0/1/2 spec constants (AIR does not fix it; the dispatch does)
  *   air.get_simdgroup_size       -> BuiltIn SubgroupSize        (OpCapability GroupNonUniform)
  *   thread_index_in_simdgroup    -> BuiltIn SubgroupLocalInvocationId
- *   air.simd_shuffle*            -> OpGroupNonUniformShuffle (+ select), Subgroup scope (OpCapability GroupNonUniformShuffle)
+ *   air.simd_shuffle*            -> OpGroupNonUniformShuffle (+ select), Subgroup scope (OpCapability GroupNonUniformShuffle); 8/16-bit and half values travel as 32-bit, 64-bit values as two
+ *                                   32-bit words (a 64-bit group operand needs shaderSubgroupExtendedTypes); shuffle_down / _up clamp the source lane so an out-of-group lane keeps its data
  *   air.wg.barrier               -> OpControlBarrier Workgroup/Workgroup, AcquireRelease | WorkgroupMemory (| UniformMemory / ImageMemory per the flags)
  *   air.store/load.implicit_imageblock -> OpImageWrite / OpImageRead of a Rgba16f storage image, a set 0 storage image OpName'd "lagfx.imageblock.<render-target index>" (binding from the allocator).
  *                                   A tile function is run as an ordinary dispatch over the WHOLE attachment with one workgroup per tile (tile size == workgroup
@@ -2178,11 +2179,42 @@ static uint32_t cs_load(xlate_ctx_t *c, int csv) {
  *   thread_index_in_simdgroup = SubgroupLocalInvocationId & (W-1);  threads_per_simdgroup = W;  simdgroup_index = LocalInvocationIndex / W
  *   shuffle(idx)              = OpGroupNonUniformShuffle(value, (SubgroupLocalInvocationId & ~(W-1)) | (idx & (W-1)))
  * Assumptions (UNVERIFIED on hardware): the invocations of a workgroup map to subgroup lanes in LocalInvocationIndex order (subgroup k holds indices
- * k*S .. k*S+S-1, S = the device subgroup size, a multiple of W), so a logical group is W consecutive LocalInvocationIndex values; and an out-of-range shuffle
- * index (down/up past the group end) wraps inside the logical group (Metal leaves that undefined; no kernel may depend on it). 0 = native (unchanged output). */
+ * k*S .. k*S+S-1, S = the device subgroup size, a multiple of W), so a logical group is W consecutive LocalInvocationIndex values (tests/air2spv-simd-semantics-lavapipe.c
+ * MEASURES this on the device it runs on: Vulkan's text does not promise it); shuffle_down / _up past the logical group's end never read another group (the lane keeps its
+ * own data, MSL 6.10.2); a simd_shuffle / _xor index outside [0, W) is not a valid lane id (MSL) and wraps inside the logical group. 0 = native (unchanged output).
+ * NOT emulated (not provable from lane arithmetic): simdgroup_barrier (OpControlBarrier at Subgroup scope covers the whole wide subgroup, a superset of the logical group), and every
+ * operation that depends on which lanes are ACTIVE (ballot / vote / reductions / prefix sums / broadcast_first / is_first / quad ops): those have no translation at all
+ * (see lagfx_air2spv_last_unsupported_simd) and a kernel using one is not built. */
 static _Thread_local uint32_t t_simd_emul;
 
 void lagfx_air2spv_set_simd_emulation(uint32_t width) { t_simd_emul = width; }
+
+/* SIMD-group / quad-group operations the translator has no implementation for (everything under air.simd* / air.quad* that is not one of the shuffles or queries above:
+ * simd_sum / _min / _max / _prefix_*, simd_ballot / _all / _any, simd_broadcast*, simd_is_first, quad_*, rotate, simdgroup_matrix, async copies, ...). Such a call was
+ * dropped and its result became an OpUndef that downstream code stored silently. It is now counted, named, and makes a COMPUTE translation fail (no stub exists for a
+ * kernel). Graphics stages keep their behaviour (the module still builds) but the count is exported. Per translation (thread-local) and process-wide. */
+static _Thread_local struct { uint32_t n; char first[80]; } t_unsup_simd;
+static lagfx_simd_unsupported_totals_t g_simd_unsup;
+
+uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap) {
+    if (first_name && cap) { snprintf(first_name, cap, "%s", t_unsup_simd.n ? t_unsup_simd.first : ""); }
+    return t_unsup_simd.n;
+}
+void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out) {
+    if (!out) return;
+    out->modules = __atomic_load_n(&g_simd_unsup.modules, __ATOMIC_RELAXED);
+    out->calls = __atomic_load_n(&g_simd_unsup.calls, __ATOMIC_RELAXED);
+    out->kernels_rejected = __atomic_load_n(&g_simd_unsup.kernels_rejected, __ATOMIC_RELAXED);
+}
+static bool is_subgroup_op_name(const char *n) {
+    static const char *const pfx[] = { "air.simd", "air.quad", "air.wait_simdgroup", "air.get_simdgroup", "air.get_quadgroup", "air.is_helper_thread" };
+    for (size_t i = 0; i < sizeof pfx / sizeof pfx[0]; i++) if (!strncmp(n, pfx[i], strlen(pfx[i]))) return true;
+    return false;
+}
+static void note_unsupported_simd(const char *fn_name) {
+    if (!t_unsup_simd.n) snprintf(t_unsup_simd.first, sizeof t_unsup_simd.first, "%s", fn_name);
+    t_unsup_simd.n++;
+}
 
 static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uint32_t b);
 /* the simdgroup width a kernel sees (a constant when emulating, else the subgroup size) */
@@ -2201,6 +2233,14 @@ static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uin
     uint32_t id = lagfx_spv_builder_alloc_id(c->b);
     uint32_t o[] = { ty, id, a, b };
     lagfx_spv_builder_emit_op(c->b, op, o, 4);
+    return id;
+}
+
+/* OpSelect cond ? a : b on values of SPIR-V type ty. */
+static uint32_t cs_select(xlate_ctx_t *c, uint32_t ty, uint32_t cond, uint32_t a, uint32_t b) {
+    uint32_t id = lagfx_spv_builder_alloc_id(c->b);
+    uint32_t o[] = { ty, id, cond, a, b };
+    lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_SELECT, o, 5);
     return id;
 }
 
@@ -4086,7 +4126,7 @@ bool lagfx_air2spv_glsl_intrinsic_lookup(const char *fn_name, uint32_t *glsl_ins
 
 /* Carrier for a subgroup op: Vulkan only lets 8/16/64-bit values through the group ops with shaderSubgroupExtendedTypes, so 16-bit floats and 8/16-bit ints are
  * widened to 32 bits around the op (exact for every non-NaN value). Returns false for a type with no carrier (64-bit, bool, struct...). */
-typedef struct { uint32_t carrier_ty; uint32_t elem_air; uint32_t lanes; bool widen; bool is_float; } cs_carrier_t;
+typedef struct { uint32_t carrier_ty; uint32_t elem_air; uint32_t lanes; bool widen; bool is_float; bool split64; } cs_carrier_t;
 
 static bool cs_carrier_for(xlate_ctx_t *c, uint32_t air_ty, cs_carrier_t *k) {
     uint32_t nt = 0;
@@ -4095,13 +4135,18 @@ static bool cs_carrier_for(xlate_ctx_t *c, uint32_t air_ty, cs_carrier_t *k) {
     uint32_t lanes = 1u, elem = air_ty;
     if (ts[air_ty].kind == LAGFX_AIR_TYPE_VECTOR && ts[air_ty].num_op >= 2u) { lanes = ts[air_ty].op[0]; elem = ts[air_ty].op[1]; }
     if (elem >= nt || lanes < 1u || lanes > 4u) return false;
-    k->elem_air = elem; k->lanes = lanes; k->widen = false; k->is_float = false;
+    k->elem_air = elem; k->lanes = lanes; k->widen = false; k->is_float = false; k->split64 = false;
     uint32_t sc;
     switch (ts[elem].kind) {
     case LAGFX_AIR_TYPE_FLOAT: sc = emit_type_float32(c); k->is_float = true; break;
     case LAGFX_AIR_TYPE_HALF:  sc = emit_type_float32(c); k->is_float = true; k->widen = true; break;
     case LAGFX_AIR_TYPE_INTEGER: {
         uint32_t w = ts[elem].num_op >= 1u ? ts[elem].op[0] : 32u;
+        if (w == 64u) {   /* two 32-bit words per value (OpBitcast to / from a uint vector): a 64-bit group operand would need shaderSubgroupExtendedTypes, a bit-exact word pair needs nothing */
+            if (lanes > 2u) return false;
+            k->split64 = true; k->carrier_ty = emit_type_vec(c, emit_type_int_w(c, 32u, 0u), 2u * lanes);
+            return true;
+        }
         if (w != 8u && w != 16u && w != 32u) return false;
         sc = emit_type_int_w(c, 32u, 0u); k->widen = (w != 32u); break;
     }
@@ -4135,6 +4180,7 @@ static uint32_t cs_shuffle(xlate_ctx_t *c, uint32_t air_ty, uint32_t val, uint32
     uint32_t sub = emit_const_uint32(c, 3u /* Subgroup */);
     uint32_t v = val;
     if (k->widen) v = cs_conv(c, k->is_float ? LAGFX_SPV_OP_F_CONVERT : LAGFX_SPV_OP_UCONVERT, k->carrier_ty, v);
+    if (k->split64) v = cs_conv(c, LAGFX_SPV_OP_BITCAST, k->carrier_ty, v);
     if (t_simd_emul) {   /* the logical group's base lane + the index inside it (see t_simd_emul) */
         uint32_t u32 = emit_type_int_w(c, 32u, 0u);
         uint32_t base = cs_op2(c, LAGFX_SPV_OP_BITWISE_AND, u32, cs_load(c, CSV_SG_LANE), emit_const_uint32(c, ~(t_simd_emul - 1u)));
@@ -4143,6 +4189,7 @@ static uint32_t cs_shuffle(xlate_ctx_t *c, uint32_t air_ty, uint32_t val, uint32
     uint32_t r = lagfx_spv_builder_alloc_id(c->b);
     uint32_t o[] = { k->carrier_ty, r, sub, v, idx };
     lagfx_spv_builder_emit_op(c->b, 345u /* OpGroupNonUniformShuffle */, o, 5);
+    if (k->split64) r = cs_conv(c, LAGFX_SPV_OP_BITCAST, emit_air_type(c, air_ty), r);
     if (k->widen) r = cs_conv(c, k->is_float ? LAGFX_SPV_OP_F_CONVERT : LAGFX_SPV_OP_UCONVERT, emit_air_type(c, air_ty), r);
     return r;
 }
@@ -4906,8 +4953,16 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 cs_cap(c, true);
                 uint32_t lane = cs_simd_lane(c), idx;
                 switch (sh[q].kind) {
-                case 1:  idx = cs_op2(c, LAGFX_SPV_OP_IADD, u32, lane, arg); break;
-                case 2:  idx = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, arg); break;
+                case 1: {   /* MSL 6.10.2: simd_shuffle_down "doesn't modify the upper delta lanes of data because it doesn't wrap values around the SIMD-group": the lane whose source is past the end keeps its own data */
+                    uint32_t src = cs_op2(c, LAGFX_SPV_OP_IADD, u32, lane, arg);
+                    idx = cs_select(c, u32, cs_op2(c, LAGFX_SPV_OP_ULESS_THAN, emit_type_bool(c), src, cs_simd_size(c)), src, lane);
+                    break;
+                }
+                case 2: {   /* simd_shuffle_up: "doesn't modify the lower delta lanes of data": a lane below delta keeps its own data */
+                    uint32_t src = cs_op2(c, LAGFX_SPV_OP_ISUB, u32, lane, arg);
+                    idx = cs_select(c, u32, cs_op2(c, LAGFX_SPV_OP_UGREATER_EQUAL, emit_type_bool(c), lane, arg), src, lane);
+                    break;
+                }
                 case 3:  idx = cs_op2(c, LAGFX_SPV_OP_BITWISE_XOR, u32, lane, arg); break;
                 default: idx = arg; break;
                 }
@@ -5034,6 +5089,10 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
         }
         #undef CS_ARG
     }
+
+    /* A SIMD-group / quad-group operation that reached this point has no implementation (the compute handlers above return when they translate one): its result stays
+     * unbound, i.e. an OpUndef. Record it; a compute translation fails at the end (translate_function_ex). */
+    if (is_subgroup_op_name(fn_name)) { note_unsupported_simd(fn_name); return; }
 
     /* === air.sample_texture_2d.<vty> → OpImageSampleImplicitLod ===
      * `tex.sample(s, uv)` lowers to
@@ -9755,6 +9814,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     *out_size_bytes = 0u;
 
     xlate_ctx_t c = {0};
+    t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
     c.b = lagfx_spv_builder_create(256u);
     if (!c.b) return LAGFX_ERR_OUT_OF_MEMORY;
     c.m = m;
@@ -9827,6 +9887,17 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
         LAGFX_ERR("air2spv: descriptor binding table is inconsistent (%u conflict(s), %u overflow(s)):\n%s", c.ba.nconflict, c.ba.noverflow, tab);
         st = LAGFX_ERR_INTERNAL;
         goto fail;
+    }
+    if (t_unsup_simd.n) {
+        __atomic_add_fetch(&g_simd_unsup.modules, 1u, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_simd_unsup.calls, t_unsup_simd.n, __ATOMIC_RELAXED);
+        if (c.stage == LAGFX_XLATE_STAGE_COMPUTE) {   /* a kernel whose SIMD-group result is undefined is not built (there is no stub for a kernel either) */
+            __atomic_add_fetch(&g_simd_unsup.kernels_rejected, 1u, __ATOMIC_RELAXED);
+            LAGFX_WARN("air2spv: compute kernel not translated: %u SIMD-group / quad-group operation(s) have no implementation (first: %s)", t_unsup_simd.n, t_unsup_simd.first);
+            st = LAGFX_ERR_PROTOCOL;
+            goto fail;
+        }
+        LAGFX_WARN("air2spv: %u SIMD-group / quad-group operation(s) have no implementation (first: %s): their results are undefined values", t_unsup_simd.n, t_unsup_simd.first);
     }
     if (c.stage == LAGFX_XLATE_STAGE_COMPUTE) cs_emit_entry_point(&c);   /* after the body: the interface list now holds every builtin / image variable it used */
 

@@ -619,7 +619,7 @@ typedef struct lagfx_protocol {
             } pipe;
             /* ARM64 tile shaders (src/protocol/arm64_tile.c): tile pipelines, tile binds, dispatches run as compute between two halves of the render pass */
             struct {
-                uint64_t pipes, pipe_failed, pipe_no_kernel, pipe_missing_cap, pipe_bindings;
+                uint64_t pipes, pipe_failed, pipe_no_kernel, pipe_missing_cap, pipe_bindings, pipe_unsupported_simd;   /* pipe_unsupported_simd: the kernel uses a SIMD-group / quad-group operation the translator cannot translate (its result would be undefined): not built */
                 uint64_t binds_buf, binds_tex, binds_ignored;           /* 0x9d/0x9e, 0xa1 applied; samplers / threadgroup memory / dims (counted, not mapped) */
                 uint64_t dispatches, groups, whole, region, region_unaligned, region_empty, rt_index_ignored, sg_pinned, sg_override, sg_emulated;
                 uint64_t draws_ignored;                                 /* draw records while a tile pipeline was bound */
