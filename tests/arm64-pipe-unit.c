@@ -1026,6 +1026,7 @@ static void test_linear_unlisted(void) {
             assert(RUNC(p).draws == ++draws && PIPE(p).desc_unbound == 0 && lagfx_a64_res_stats(p)->linear_made == made0 + 1);
             lin_check(p, t, F[f].fmt, 1);
         }
+        assert(RUNC(p).ext_cxs_binds == (uint64_t)draws);   /* the texture_copy fragment's constexpr pixel sampler was bound from its decoded word (not the default sampler) on every draw */
         assert(RUNC(p).ext_tex_prepared == 3u && PIPE(p).desc_linear_stale == 0);   /* each texture was missing from the mirror only at its first pass */
         lagfx_a64_exec_drop_task(p, 1);
         lagfx_a64_exec_free(p);

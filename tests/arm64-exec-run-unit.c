@@ -117,6 +117,8 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_IB  4u
 #define REF_TEX2 5u
 #define VPN_TEX2 13u
+#define REF_TEX3 20u         /* arm64-exec-res-unit.c: a 3D texture */
+#define VPN_TEX3 16u
 #define RT_W 16u
 #define RT_H 16u
 
@@ -220,10 +222,11 @@ static uint32_t cb_finish(void) {
     return g_cbn;
 }
 static bool g_res_tex2;   /* also list the second render target in the exec's resource list */
+static bool g_res_tex3;   /* ... and the 3D texture of arm64-exec-res-unit.c */
 static void exec(lagfx_protocol_t *p, uint32_t task, uint32_t len, bool with_res) {
-    uint32_t w[3 + 10 + 4], n = 0;
-    w[n++] = task; w[n++] = with_res ? (g_res_tex2 ? 5 : 4) : 0; w[n++] = 1;
-    if (with_res) { w[n++] = REF_TEX; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0; w[n++] = REF_IB; w[n++] = 1; if (g_res_tex2) { w[n++] = REF_TEX2; w[n++] = 2; } }
+    uint32_t w[3 + 12 + 4], n = 0;
+    w[n++] = task; w[n++] = with_res ? (4u + (g_res_tex2 ? 1u : 0u) + (g_res_tex3 ? 1u : 0u)) : 0; w[n++] = 1;
+    if (with_res) { w[n++] = REF_TEX; w[n++] = 2; w[n++] = REF_VB; w[n++] = 1; w[n++] = REF_PIPE; w[n++] = 0; w[n++] = REF_IB; w[n++] = 1; if (g_res_tex2) { w[n++] = REF_TEX2; w[n++] = 2; } if (g_res_tex3) { w[n++] = REF_TEX3; w[n++] = 2; } }
     uint64_t off = VA_CMD, l = len;
     memcpy(w + n, &off, 8); n += 2; memcpy(w + n, &l, 8); n += 2;
     submit(p, 0x43, 0, w, n);

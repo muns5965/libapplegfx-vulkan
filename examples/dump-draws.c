@@ -157,7 +157,8 @@ int main(int argc, char **argv) {
                     else snprintf(msg, sizeof msg, "obj %u %s%s (linear or not: no `res` line, dump predates it)", ref, ms ? "mapped surface " : "kind unknown", ms ? ms : "");
                 }
             } else if (bd->kind == LAGFX_A64_BIND_SAMPLER) {
-                if (bd->metal_index < 0) snprintf(msg, sizeof msg, "inline sampler: default sampler");
+                if (bd->cxs) snprintf(msg, sizeof msg, "constexpr sampler 0x%016llx (VkSampler from the decoded word)", (unsigned long long)bd->cxs_raw);
+                else if (bd->metal_index < 0) snprintf(msg, sizeof msg, "inline sampler: default sampler");
                 else if (bd->stage == 0) snprintf(msg, sizeof msg, "? vertex sampler table not in the dump");
                 else if (!slot(draws[d], "fsamp", (uint32_t)bd->metal_index, &ref, NULL)) snprintf(msg, sizeof msg, "UNBOUND: fsamp slot %d never bound in the dump (desc_unbound[5])", bd->metal_index), bad++;
                 else { const char *o = objtag(task, ref); snprintf(msg, sizeof msg, "obj %u %s", ref, o ? o : "not captured in the dump"); }
