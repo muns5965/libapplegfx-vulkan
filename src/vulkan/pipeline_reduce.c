@@ -479,6 +479,7 @@ void lagfx_pipeline_reduce_run(const lagfx_reduce_cfg_t *cfg, lagfx_reduce_resul
         l->r0 = st == LRS_NA ? LRS_FAIL : st;   /* a filtered-out R0 is assumed to FAIL (the bundle recorded -13) */
         if (st == LRS_BUILT && !cfg->list_only) emit_line(l, "pipeline-reduce: note R0 BUILT here: the original module does not fail in this process; the rows below are informative only and the adaptive searches are skipped");
     }
+    if (rvs) do_row(l, "R0V", "ORIGINAL pair: original fragment module + REAL vertex stage (the pair that was recorded as failing; R0 uses a stub VS and can fail on interface linkage instead)", MEAN_P, rvs, rvsn, 0, cfg->fs, cfg->fs_bytes, NULL, 0);
     const int r0fail = l->r0 == LRS_FAIL || l->r0 == LRS_CRASH;
     lagfx_red_recipe_t r;
     char what[500];
