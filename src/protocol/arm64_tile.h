@@ -22,6 +22,8 @@
  *     translate_function.c t_simd_emul for the assumptions). The native-32 and pinned paths are unchanged and always preferred. tile.sg_emulated counts these
  *     dispatches. LAGFX_TILE_SIMD_EMULATE=<W> (W a power of two, 2 <= W <= the device subgroup size) forces emulation with logical width W on ANY device (test
  *     hook: the unit tests run W=16 on a 32-wide lavapipe, which exercises the same logical-group boundary logic as W=32 on a 64-wide device).
+ *     A kernel that calls a SIMD-group / quad-group operation the translator has no implementation for (simd_sum, simd_ballot, simd_all / any, prefix sums, broadcast, is_first,
+ *     quad_* ...) is NOT built: tile.pipe_unsupported_simd counts it and the first operation's name is logged (air2spv lagfx_air2spv_last_unsupported_simd).
  * Not mapped (counted): tile samplers (tags 0x9f / 0xa0: the default sampler is used), threadgroup / imageblock memory (0x9c), the render-target array
  * index of 0xa3, imageblock formats other than Rgba16f, draws while a tile pipeline is bound.
  */

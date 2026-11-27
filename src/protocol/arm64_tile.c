@@ -167,7 +167,14 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
                         lagfx_status_t xst = lagfx_air2spv_translate_module(mm, &spv, &spv_n);
                         lagfx_air2spv_set_simd_emulation(0);
                         if (xst == LAGFX_OK && spv && spv_n) { nab = lagfx_air_arg_bindings(mm, ab, 16); if (nab > 16u) nab = 16u; m = mm; }
-                        else { free(spv); spv = NULL; p->diag2.exec.pipe.rf_translate++; lagfx_air_module_free(mm); }
+                        else {
+                            char un[80]; uint32_t nun = lagfx_air2spv_last_unsupported_simd(un, sizeof un);
+                            if (nun) {   /* a SIMD-group / quad-group operation without an implementation: the kernel is not built (its result would be an undefined value) */
+                                TILE(p).pipe_unsupported_simd++;
+                                LAGFX_WARN("arm64 tile pipeline %u: kernel uses %u SIMD-group / quad-group operation(s) with no implementation (first: %s); pipeline not built", ref, nun, un);
+                            }
+                            free(spv); spv = NULL; p->diag2.exec.pipe.rf_translate++; lagfx_air_module_free(mm);
+                        }
                     } else p->diag2.exec.pipe.rf_module++;
                 }
         free(lib); lib = NULL;

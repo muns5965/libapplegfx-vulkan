@@ -335,15 +335,50 @@ int main(void) {
     if (fails) { printf("FAIL: translated SIMD-group operations differ from the Metal reference in %u case(s)\n", fails); rc = 1; }
     else printf("PASS: simdgroup queries and simd_shuffle / down / up / xor / and_fill_down / and_fill_up (uint, ushort, half, uint2, ulong) equal the Metal reference for native and logical widths\n");
 
-    /* ---- 3. an operation without an implementation must make a compute translation fail, never store an OpUndef ---- */
+    /* ---- 3. an operation without an implementation must make a compute translation fail (never store an OpUndef), be named, and be counted ---- */
     {
-        const char *unsup[] = { "simd_unsup_sum.air.bc", "simd_unsup_ballot.air.bc" }; unsigned bad_unsup = 0;
+        const char *unsup[] = { "simd_unsup_sum.air.bc", "simd_unsup_ballot.air.bc" }, *want[] = { "air.simd_sum.f32", "air.simd_ballot" }; unsigned bad_unsup = 0;
         for (unsigned i = 0; i < 2; i++) {
+            lagfx_simd_unsupported_totals_t t0, t1; lagfx_air2spv_simd_unsupported_totals(&t0);
             uint8_t *spv; size_t sn; lagfx_status_t st = translate(unsup[i], 0, &spv, &sn);
+            char nm[80]; uint32_t cnt = lagfx_air2spv_last_unsupported_simd(nm, sizeof nm); lagfx_air2spv_simd_unsupported_totals(&t1);
             if (st == LAGFX_OK || spv) { printf("FAIL: %s: translation succeeded (st=%d) although the kernel uses a SIMD-group operation with no implementation (its result would be an OpUndef)\n", unsup[i], (int)st); rc = 1; bad_unsup++; }
+            if (cnt != 1 || strcmp(nm, want[i])) { printf("FAIL: %s: last unsupported SIMD-group call = %u x '%s', expected 1 x '%s'\n", unsup[i], cnt, nm, want[i]); rc = 1; bad_unsup++; }
+            if (t1.modules != t0.modules + 1 || t1.calls != t0.calls + 1 || t1.kernels_rejected != t0.kernels_rejected + 1) { printf("FAIL: %s: process counters did not move by (1 module, 1 call, 1 rejected kernel)\n", unsup[i]); rc = 1; bad_unsup++; }
             free(spv);
         }
-        if (!bad_unsup) printf("PASS: SIMD-group operations without an implementation (air.simd_sum, air.simd_ballot) fail the compute translation\n");
+        /* a graphics stage keeps building (behaviour unchanged) but the call is counted and named */
+        {
+            lagfx_simd_unsupported_totals_t t0, t1; lagfx_air2spv_simd_unsupported_totals(&t0);
+            uint8_t *spv; size_t sn; lagfx_status_t st = translate("simd_unsup_frag.air.bc", 0, &spv, &sn);
+            char nm[80]; uint32_t cnt = lagfx_air2spv_last_unsupported_simd(nm, sizeof nm); lagfx_air2spv_simd_unsupported_totals(&t1);
+            if (st != LAGFX_OK || !spv) { printf("FAIL: fragment with air.quad_sum: translation failed (st=%d); graphics stages keep building\n", (int)st); rc = 1; bad_unsup++; }
+            if (cnt != 1 || strcmp(nm, "air.quad_sum.f32") || t1.modules != t0.modules + 1 || t1.calls != t0.calls + 1 || t1.kernels_rejected != t0.kernels_rejected) { printf("FAIL: fragment with air.quad_sum: counted %u x '%s' (modules +%llu calls +%llu rejected +%llu)\n", cnt, nm, (unsigned long long)(t1.modules - t0.modules), (unsigned long long)(t1.calls - t0.calls), (unsigned long long)(t1.kernels_rejected - t0.kernels_rejected)); rc = 1; bad_unsup++; }
+            free(spv);
+        }
+        /* a translation without such a call resets the per-translation record */
+        {
+            uint8_t *spv; size_t sn; lagfx_status_t st = translate("simd_semantics.air.bc", 0, &spv, &sn);
+            if (st != LAGFX_OK || lagfx_air2spv_last_unsupported_simd(NULL, 0) != 0) { printf("FAIL: simd_semantics reports unsupported SIMD-group calls (st=%d)\n", (int)st); rc = 1; bad_unsup++; }
+            free(spv);
+        }
+        if (!bad_unsup) printf("PASS: SIMD-group operations without an implementation (air.simd_sum, air.simd_ballot) fail a compute translation and are named and counted; a fragment still builds and is counted\n");
+    }
+    /* ---- 4. imageblock: store, air.load.implicit_imageblock, modify, store (the read path of the tile storage image) vs the CPU ---- */
+    {
+        uint8_t *spv; size_t sn; lagfx_status_t st = translate("imageblock_rmw.air.bc", 0, &spv, &sn);
+        unsigned bad = 0;
+        if (st != LAGFX_OK || !spv) { printf("FAIL: imageblock_rmw translation st=%d\n", (int)st); rc = 1; bad++; }
+        else {
+            for (uint32_t s = 0; s < nshapes && !bad; s++) {
+                if (run(spv, sn, shapes[s][0], shapes[s][1], got)) return 1;
+                for (uint32_t g = 0; g < NGROUPS; g++) for (uint32_t t = 0; t < n; t++) for (uint32_t c = 0; c < 4; c++)
+                    if (got[((size_t)g * n + t) * 16 + c] != t + c + 1u && bad++ < 4) printf("  imageblock_rmw shape %ux%u g=%u thread %u ch %u: got %u expected %u\n", shapes[s][0], shapes[s][1], g, t, c, got[((size_t)g * n + t) * 16 + c], t + c + 1u);
+            }
+            if (bad) { printf("FAIL: imageblock load / store round trip differs from the CPU (%u words)\n", bad); rc = 1; }
+            else printf("PASS: imageblock store -> air.load.implicit_imageblock -> modify -> store equals the CPU for %u workgroups x %u shapes\n", NGROUPS, nshapes);
+        }
+        free(spv);
     }
     if (g_val_errors) { printf("FAIL: %u Vulkan validation error(s)\n", g_val_errors); rc = 1; }
     vkDeviceWaitIdle(g_dev);

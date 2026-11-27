@@ -455,6 +455,24 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
 #endif
 
 #ifdef LAGFX_HAVE_VULKAN
+/* A tile kernel that uses a SIMD-group operation the translator cannot translate (air.simd_sum, hand-written fixture): the pipeline is NOT built (its result would be an OpUndef
+ * stored into the imageblock), counted as pipe_unsupported_simd; the dispatch then finds no pipeline and the attachment keeps its clear. */
+static void test_tile_unsupported_simd(struct lagfx_vk_state *vk) {
+    size_t bn = 0, ln = 0;
+    uint8_t *bc = slurp("simd_unsup_sum.air.bc", &bn);
+    if (!bc) { puts("SKIP: fixture simd_unsup_sum.air.bc missing"); return; }
+    uint8_t *lib = synth_mtlb(bc, bn, "simd_unsup_sum", 2, &ln);
+    g_vert = false; g_S = vk->sg_size; g_W = 2 * g_S, g_H = 8, g_TW = 3 * g_S + 4, g_TH = g_H;
+    unsigned nc, nk;
+    lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, ln);
+    tile_pass_clear(); cb_pipeline(REF_TILE); cb_dispatch_all(g_S, 4);
+    exec_refs(p, 1, cb_finish());
+    assert(TILE(p).pipe_unsupported_simd == 1 && TILE(p).pipes == 0 && TILE(p).pipe_failed >= 1 && TILE(p).dispatches == 0 && RUNC(p).submit_failed == 0);
+    assert(compare(p, t, REF_DST, no_px, &nc, &nk) == 0);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+    free(lib); free(bc);
+    puts("PASS: a tile kernel with an untranslatable SIMD-group operation (air.simd_sum) is not built (tile.pipe_unsupported_simd counted), the attachment is untouched");
+}
 #include "air/bitcode_reader.h"
 #include "air2spv/translate.h"
 /* Translator level (no device): the kernel translated for logical 32-lane groups (the Adreno case: a 64-wide subgroup) and for 64 / 128 wide ones is valid SPIR-V, differs from
@@ -503,6 +521,7 @@ int main(void) {
     /* forced logical simdgroups narrower than the device subgroup: the same group-boundary logic as 32 lanes inside a 64-wide Adreno subgroup (a logical group is the lower /
      * upper part of the physical subgroup), run on lavapipe's real 32-wide one */
     for (uint32_t w = vk->sg_size >> 1; w >= 4u && !(w & (w - 1u)); w >>= 1) test_tile(lib, ln, w);
+    test_tile_unsupported_simd(vk);
     free(lib); free(bc);
 #else
     puts("SKIP: built without Vulkan");

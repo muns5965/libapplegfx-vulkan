@@ -9,6 +9,9 @@
 #                           and stores word 4j+c as channel c of the Rgba16f imageblock texel (x, y + j*group_height) (every value < 2048: exact in half).
 #   simd_unsup_sum.air.bc     tile kernel storing air.simd_sum.f32(float(tid)) (name / signature ASSUMED, not seen in Apple output): an operation the translator does not implement
 #   simd_unsup_ballot.air.bc  tile kernel storing the low word of air.simd_ballot(tid & 1) (name / signature ASSUMED): ditto
+#   simd_unsup_frag.air.bc    FRAGMENT function (i1const_fragment.ll's interface) returning air.quad_sum.f32(color.x) (name / signature ASSUMED): a graphics stage still builds, the call is counted
+#   imageblock_rmw.air.bc     tile kernel: store (t, t+1, t+2, t+3) with t = tid into the imageblock, air.load.implicit_imageblock it back (signature ASSUMED as the translator reads it:
+#                             rt, coord, sample, ?), add 1 to every channel, store again
 # The kernels take only [[imageblock]] + thread-position attributes: llvm-as emits opaque pointers, which the translator's buffer handling (typed-pointer Apple AIR) cannot use.
 # Usage: tests/fixtures/gen-simd-fixtures.sh   (needs llvm-as; the .air.bc files are committed)
 set -eu
@@ -184,4 +187,46 @@ entry:
   ret void
 }
 EOT
-echo "wrote simd_semantics.air.bc simd_unsup_sum.air.bc simd_unsup_ballot.air.bc"
+emit imageblock_rmw <<'EOT'
+declare void @air.store.implicit_imageblock.v4f16(<4 x half>, i32, <2 x i16>, i32, i16)
+declare <4 x half> @air.load.implicit_imageblock.v4f16(i32, <2 x i16>, i32, i16)
+define void @imageblock_rmw(%"struct.metal::_imageblock_base" %blk, i32 %gid, i32 %tid, i16 %lane, i16 %size, i16 %sgi, i16 %nsg, <2 x i16> %pos, <2 x i16> %tgsize) {
+entry:
+  %t0 = uitofp i32 %tid to half
+  %t1 = fadd half %t0, 1.0
+  %t2 = fadd half %t0, 2.0
+  %t3 = fadd half %t0, 3.0
+  %a = insertelement <4 x half> undef, half %t0, i64 0
+  %b = insertelement <4 x half> %a, half %t1, i64 1
+  %c = insertelement <4 x half> %b, half %t2, i64 2
+  %d = insertelement <4 x half> %c, half %t3, i64 3
+  call void @air.store.implicit_imageblock.v4f16(<4 x half> %d, i32 0, <2 x i16> %pos, i32 0, i16 0)
+  %ld = call <4 x half> @air.load.implicit_imageblock.v4f16(i32 0, <2 x i16> %pos, i32 0, i16 0)
+  %r = fadd <4 x half> %ld, <half 1.0, half 1.0, half 1.0, half 1.0>
+  call void @air.store.implicit_imageblock.v4f16(<4 x half> %r, i32 0, <2 x i16> %pos, i32 0, i16 0)
+  ret void
+}
+EOT
+
+{
+  sed -n '1,/^define <4 x float> @I1ConstFragment/{/^define <4 x float> @I1ConstFragment/!p}' i1const_fragment.ll
+  cat <<'EOT'
+define <4 x float> @SimdUnsupFragment(<4 x float> %0, <4 x float> %1) {
+entry:
+  %x = extractelement <4 x float> %1, i64 0
+  %q = call float @air.quad_sum.f32(float %x)
+  %v0 = insertelement <4 x float> poison, float %q, i64 0
+  %v1 = insertelement <4 x float> %v0, float %q, i64 1
+  %v2 = insertelement <4 x float> %v1, float %q, i64 2
+  %v3 = insertelement <4 x float> %v2, float 1.0, i64 3
+  ret <4 x float> %v3
+}
+
+declare float @air.quad_sum.f32(float)
+
+EOT
+  sed -n '/^!llvm.module.flags/,$p' i1const_fragment.ll | sed 's/@I1ConstFragment/@SimdUnsupFragment/'
+} > /tmp/simd_unsup_frag.$$.ll
+llvm-as /tmp/simd_unsup_frag.$$.ll -o simd_unsup_frag.air.bc
+rm -f /tmp/simd_unsup_frag.$$.ll
+echo "wrote simd_semantics.air.bc simd_unsup_sum.air.bc simd_unsup_ballot.air.bc simd_unsup_frag.air.bc imageblock_rmw.air.bc"
