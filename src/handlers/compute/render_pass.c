@@ -98,6 +98,8 @@ int lagfx_parse_render_pass_descriptor(const uint8_t *payload,
         out->colors[idx].slot                = (uint8_t)i;
         out->colors[idx].texture_ref         = rd32(wire.colors[i].texture_ref);
         out->colors[idx].resolve_texture_ref = rd32(wire.colors[i].resolve_texture_ref);
+        out->colors[idx].resolve_level       = rd16(wire.colors[i].resolve_level);
+        out->colors[idx].resolve_slice       = rd16(wire.colors[i].resolve_slice);
         out->colors[idx].load_action         = rd16(wire.colors[i].load_action);
         out->colors[idx].store_action        = rd16(wire.colors[i].store_action);
         for (unsigned c = 0; c < 4; ++c) {

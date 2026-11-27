@@ -20,6 +20,7 @@
 /* Resource registry must be defined before protocol struct uses it.
  * Included here to avoid circular deps when state.h is included by handlers. */
 #include "resource_registry.h"
+#include "../vulkan/msaa_stats.h"
 
 
 /* === Constants =================================================== */
@@ -649,6 +650,7 @@ typedef struct lagfx_protocol {
                 uint64_t msaa_refused;                 /* textures refused because the guest descriptor names more than one sample (PVG sample-count field is not wired to the Vulkan multisample path: see src/vulkan/msaa.h) */
                 uint64_t devinfo_msaa_clamped;         /* guest device-info MSAASamples lowered because the host cannot do the advertised count */
             } fmt;
+            lagfx_msaa_stats_t msaa;   /* multisample path (arm64_msaa.c, src/vulkan/msaa.c); printed as g7-gpu-msaa when any is non-zero */
         } exec;
         uint32_t last44_task[LAGFX_MAX_CHANNELS]; uint8_t last44_valid[LAGFX_MAX_CHANNELS];
         uint32_t last44_global_task; uint64_t last44_global_seq; uint8_t last44_global_valid;

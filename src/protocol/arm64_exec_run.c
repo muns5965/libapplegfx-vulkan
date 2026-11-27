@@ -52,6 +52,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
 #include "arm64_capture_rec.h"
+#include "arm64_msaa.h"
 #include <vulkan/vulkan.h>
 
 #define A64_MAX_VB    31u
@@ -82,7 +83,7 @@ typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded dept
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | (1 + variant index) << 4 for an unnormalized-sampler shader variant */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo, samples; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | (1 + variant index) << 4 for an unnormalized-sampler shader variant */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
     uint32_t ncache;
     /* Shader variants for draws that bind an unnormalized-coordinates sampler (spv_unnorm.c): keyed by the set of unnormalized sampler slots of the vertex / fragment table. rc 0 = the shader never
      * samples through them (original shader), 1 = rewritten module(s), -1 = an unsupported use (draw skipped). Built lazily at the first such draw, owned by this object. */
@@ -137,6 +138,7 @@ typedef struct {
     bool wrote_storage;              /* a draw of the open pass may write storage images: pass_end adds a shader-write barrier */
     deferred_t *def; uint32_t ndef, capdef;
     lagfx_a64_tile_t *tile;          /* tile shader stage (arm64_tile.c), created by the first tile record */
+    lagfx_a64_msaa_pass_t ms;        /* multisample state of the open pass (arm64_msaa.c): sample count, deferred store tags, resolve targets */
     struct { VkRenderingAttachmentInfo ca[4], dai, sai; bool has_d, has_s; VkImage img; } rsnap;   /* how the open pass began: a tile dispatch ends and resumes it (LOAD ops) */
 } a64_run_t;
 
@@ -451,7 +453,7 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
 /* pl == VK_NULL_HANDLE records a failed build (looked up like a hit, returns NULL). */
 static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm[2], uint32_t topo, VkPipeline pl, a64_run_t *r) {
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo, pp->cache[pp->ncache].lkey = pp->src.layout_key;
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo, pp->cache[pp->ncache].samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u), pp->cache[pp->ncache].lkey = pp->src.layout_key;
     pp->ncache++;
 }
 
@@ -505,7 +507,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
     const uint32_t key = topo; topo &= 15u;   /* bits 4..6 of the key: 1 + index of the unnormalized-sampler shader variant of the pipeline (0 = the shaders as resolved) */
     for (uint32_t i = 0; i < pp->ncache; i++)
-        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
+        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].samples == (r->ms.samples > 1u ? r->ms.samples : 1u) && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
     if (key >> 4) {
         const uint32_t vi = (key >> 4) - 1u;
@@ -533,6 +535,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     blend_for_formats(r, p, &d, fmts, nslots);
     if (r->vk->have_raster_order) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
     d.topology_plus1 = (uint8_t)(topo + 1u);
+    d.raster_samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u);   /* must equal the attachments' count; the pipeline descriptor's own count field is not decoded [N]: taken from the pass (Metal requires them equal) */
     VkPipeline pl = VK_NULL_HANDLE;
     if (lagfx_pipeline_build(r->vk->device, &d, &pl) != LAGFX_OK) {
         p->diag2.exec.pipe.pipe_build_failed++;
@@ -541,6 +544,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
         return VK_NULL_HANDLE;
     }
     p->diag2.exec.pipe.pipes_built++;
+    if (r->ms.samples > 1u) p->diag2.exec.msaa.pipes_ms++;
     if (topo < 8u) p->diag2.exec.pipe.topo[topo]++;
     cache_put(pp, fmts, dfm, key, pl, r);
     return pl;
@@ -729,6 +733,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             bool fb = false;
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* sampling an attachment being rendered */
+            if (t->samples_req > 1u) { p->diag2.exec.msaa.sampled_ms_refused++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++; DDM(1); return false; }   /* a multisampled texture read needs texture2d_ms in the translator (spelling unverified): the draw is skipped, counted */
             /* A linear texture (a buffer's bytes seen as an image): the mirror image is a copy that begin_pass (outside the pass) re-pulls whenever the backing buffer changed.
              * A change after that, inside the open pass (a shader-writable bind, a tile kernel, ...) leaves the image stale: skip rather than draw with old bytes. */
             if (t->linear && !lagfx_a64_res_linear_fresh(r->x, t)) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[4]++, p->diag2.exec.pipe.desc_linear_stale++; DDM(1); return false; }
@@ -844,6 +849,9 @@ static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uin
 static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (prim > 4u) { CNT(p).prim_unsupported++; CNT(p).draws_skipped++; return false; }
     if (prim == 0u && r->pipe->src.no_point_size) { p->diag2.exec.pipe.point_no_size++; CNT(p).draws_skipped++; return false; }   /* Metal needs [[point_size]] too */
+    if (r->ms.samples > 1u)   /* framebuffer fetch of multisampled attachments needs a multisampled SubpassData input type in the shader, which the translator does not emit: refused, counted */
+        for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
+            if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.msaa.fbfetch_ms_refused++; CNT(p).draws_skipped++; return false; }
     if (!r->vk->have_local_read)   /* a pipeline that reads the attachments cannot run without the device feature */
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
@@ -890,6 +898,7 @@ static void pass_end(a64_run_t *r) {
         }
         r->wrote_storage = false;
         for (uint32_t i = 0; i < r->nslots && i < 4u; i++) if (r->rts[i]) lagfx_a64_res_target_end(r->x, r->rts[i]);   /* COLOR_ATTACHMENT_OPTIMAL -> GENERAL + barrier: a following blit / pass sees the result */
+        lagfx_a64_msaa_pass_end(r->p, r->x, &r->ms);   /* resolve targets back to GENERAL; the copy of a 1x-fallback attachment */
         if (r->dsobj) lagfx_a64_res_ds_end(r->x, r->dsobj);
         if (r->cap_pass) lagfx_a64_cap_pass_close(r->cap);   /* capture: post copies + bound resources, recorded after the attachments are back in GENERAL */
     }
@@ -921,6 +930,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     memset(r->vb, 0, sizeof r->vb);
     memset(&r->region, 0, sizeof r->region);
     reset_frag_tables(r);
+    r->ms.samples = 0;
     lagfx_render_pass_full_desc_t d;
     if (n < LAGFX_RENDER_PASS_WIRE_SIZE || lagfx_parse_render_pass_descriptor(rec, n, &d) != 0) { CNT(p).bad_rec++; tag_unsup(p, 26); return; }
     {   /* a new encoder: Metal's defaults for everything the depth / stencil / raster records set */
@@ -949,6 +959,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         lagfx_a64_obj_t *t = lagfx_a64_res_object(r->x, d.colors[k].texture_ref);
         if (lagfx_a64_res_stats(p)->linear_unsupported != lin0) CNT(p).obj_unsupported_linear++;      /* a type 8/9 render target the mirror could not build */
         if (!t || t->kind != LAGFX_A64_TEXTURE) { CNT(p).no_target++; continue; }
+        if (first && lagfx_a64_msaa_obj_samples(t) != r->ms.samples) { CNT(p).extra_attach_ignored++; p->diag2.exec.msaa.attach_mixed_ignored++; continue; }   /* one sample count per pass (Vulkan: every attachment equals rasterizationSamples) */
         uint32_t load = d.colors[k].load_action;   /* MTLLoadAction: 0 DontCare, 1 Load, 2 Clear */
         VkAttachmentLoadOp lop = load == 2u ? VK_ATTACHMENT_LOAD_OP_CLEAR : load == 1u ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         VkClearValue cv;
@@ -961,10 +972,14 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         bool dup = false;
         for (uint32_t q = 0; q < 4u; q++) dup |= r->rts[q] == t;
         if (dup) { lagfx_a64_res_target_end(r->x, t); CNT(p).extra_attach_ignored++; continue; }   /* the same image twice is not a valid attachment set */
-        if (!first) first = t, fw = w, fh = h;
+        if (!first) first = t, fw = w, fh = h, r->ms.samples = lagfx_a64_msaa_obj_samples(t);
         r->rts[slot] = t;
         cap_load[slot] = load; for (int c = 0; c < 4; c++) cap_clear[slot][c] = d.colors[k].clear_color[c];
         ca[slot].imageView = view, ca[slot].loadOp = lop, ca[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE, ca[slot].clearValue = cv;
+        {   /* multisampled texture: store action / resolve texture (arm64_msaa.c); a plain texture keeps STORE (a resolve action on it is counted) */
+            const lagfx_a64_obj_t *att[4] = { r->rts[0], r->rts[1], r->rts[2], r->rts[3] };
+            lagfx_a64_msaa_color(p, r->x, &r->ms, slot, slot, t, d.colors[k].store_action, d.colors[k].resolve_texture_ref, d.colors[k].resolve_level || d.colors[k].resolve_slice, att, &ca[slot]);
+        }
         if (slot + 1u > nslots) nslots = slot + 1u;
         if (slot > 0u) CNT(p).multi_attach++;
     }
@@ -986,7 +1001,12 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         }
         if (o && lagfx_a64_res_ds_begin(r->x, o, &dview, &dw, &dh)) {
             if ((first && (dw < fw || dh < fh)) || dup_of_color(r, o)) { CNT(p).ds_attach_unsupported++; CNT(p).extra_attach_ignored++; }   /* attachments must cover the render area */
-            else dso = o;
+            else if (first && lagfx_a64_msaa_obj_samples(o) != r->ms.samples) { CNT(p).ds_attach_unsupported++; p->diag2.exec.msaa.ds_mismatch_ignored++; }   /* depth / stencil and colour of one pass share one sample count */
+            else {
+                dso = o;
+                if (!first) r->ms.samples = lagfx_a64_msaa_obj_samples(o);   /* a depth-only multisampled pass */
+                if (r->ms.samples > 1u && (d.depth_resolve_texture_ref || d.stencil_resolve_texture_ref || d.depth_store_action >= 2u || d.stencil_store_action >= 2u)) p->diag2.exec.msaa.ds_resolve_unsupported++;   /* depth / stencil resolve: stored only */
+            }
         } else if (o) CNT(p).ds_attach_unsupported++;
     }
     if (!first && !dso) { CNT(p).no_target++; tag_partial(p, 26); return; }
@@ -1014,6 +1034,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     if (lagfx_translate_render_begin_ds(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, NULL, ca, nslots,
                                         dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL) != LAGFX_OK) {
         for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
+        lagfx_a64_msaa_pass_abort(r->x, &r->ms);
         if (dso) lagfx_a64_res_ds_end(r->x, dso);
         memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
         CNT(p).no_target++; tag_partial(p, 26); return;
@@ -1024,6 +1045,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
+    if (r->ms.samples > 1u) p->diag2.exec.msaa.ms_passes++;
     if (r->cap) {
         lagfx_a64_cap_att_in_t ai[4]; uint32_t na = 0;
         for (uint32_t k = 0; k < 4u; k++) if (r->rts[k]) { memset(&ai[na], 0, sizeof ai[na]); ai[na].o = r->rts[k], ai[na].slot = k, ai[na].load = cap_load[k]; for (int c = 0; c < 4; c++) ai[na].clear[c] = (float)cap_clear[k][c]; na++; }
@@ -1221,6 +1243,7 @@ static void draw_cmd_inner(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, cons
     else st = lagfx_translate_render_draw(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, (uint32_t)d.first_vertex, (uint32_t)d.base_instance);
     if (st != LAGFX_OK) { CNT(p).draws_skipped++; tag_partial(p, tag); return; }
     CNT(p).draws++;
+    if (r->ms.samples > 1u) p->diag2.exec.msaa.draws_ms++;
     tag_done(p, tag);
 }
 
@@ -1397,6 +1420,7 @@ static bool tile_resume(void *c) {
     return false;   /* the pass goes on without rendering: its draws are counted as no_target */
 }
 static void tile_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const uint8_t *rec, uint32_t n) {
+    if (r->ms.samples > 1u) { p->diag2.exec.msaa.tile_ms_refused++; tag_partial(p, tag); return; }   /* a tile dispatch suspends and resumes the pass: not modelled with a resolve / multisampled attachments */
     if (!r->tile) r->tile = lagfx_a64_tile_new(r->vk);
     if (!r->tile) { tag_unsup(p, tag); return; }
     if (tag == LAGFX_A64_TAG_TILE_DISPATCH || tag == LAGFX_A64_TAG_TILE_REGION || tag == LAGFX_A64_TAG_TILE_REGION_RT) {
@@ -1637,9 +1661,11 @@ void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const
         if (sz < 8u || q + sz > lim) break;
         const uint8_t *rec = buf + pos + q + 8u;
         uint32_t n = sz - 8u;
-        if (tag == 26u) { pass_end(r); prescan_pass_textures(r, p, buf + pos + q + sz, lim - q - sz); }   /* outside any pass: the textures this pass samples */
+        if (tag == 26u) { pass_end(r); prescan_pass_textures(r, p, buf + pos + q + sz, lim - q - sz); lagfx_a64_msaa_prescan(p, &r->ms, buf + pos + q + sz, lim - q - sz); }   /* outside any pass: the textures this pass samples; deferred store actions / resolve textures (tags 0x66 / 0x96) */
         if (tag >= 30u && tag <= 36u) {                         /* these describe the pass that follows */
             if (tag == 32u || tag == 33u) tag_unsup(p, tag); else tag_partial(p, tag);
+        } else if ((tag == 102u || tag == 150u) && r->pass_open && r->ms.samples > 1u) {   /* read ahead by lagfx_a64_msaa_prescan at the pass's start */
+            tag_done(p, tag);
         } else if (!supported_tag(tag) && !direct_tag(tag)) {
             tag_unsup(p, tag);
         } else if (tag != 26u && !r->pass_open && !hint_tag(tag)) {

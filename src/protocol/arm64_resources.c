@@ -11,6 +11,7 @@
 #include "../vulkan/command.h"
 #include "../vulkan/devinfo.h"
 #include "../vulkan/format_caps.h"
+#include "arm64_msaa.h"
 #include "../vulkan/render_target.h"
 #include "../vulkan/surface_writeback.h"
 #include "../translate/blit_encoder.h"
@@ -405,7 +406,10 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     const VkImageUsageFlags req = ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
     const VkImageUsageFlags opt = ds ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
     lagfx_fmtcap_usage_t cu;
-    if (!lagfx_fmtcap_image_usage(be, o->format, o->img_type, o->width, o->height, o->depth, o->mips, is_tex3d(o) ? 1u : o->layers, VK_SAMPLE_COUNT_1_BIT, req, opt, &cu)) {
+    VkSampleCountFlagBits ns = VK_SAMPLE_COUNT_1_BIT;   /* the image's sample count: more than one only for a guest multisample texture (arm64_msaa.c), granted by the device's answer */
+    if (o->samples_req > 1u) {
+        if (!lagfx_a64_msaa_plan_image(m->p, be, o, &ns, &cu)) return false;
+    } else if (!lagfx_fmtcap_image_usage(be, o->format, o->img_type, o->width, o->height, o->depth, o->mips, is_tex3d(o) ? 1u : o->layers, VK_SAMPLE_COUNT_1_BIT, req, opt, &cu)) {
         m->p->diag2.exec.fmt.refused[cu.why]++;
         return false;
     }
@@ -414,7 +418,7 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     if (cu.dropped) { m->p->diag2.exec.fmt.img_trimmed++; fmt_note_dropped(m->p, cu.dropped); }
     o->usage = u;
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = o->img_type, .format = o->format,
-        .extent = { o->width, o->height, o->depth }, .mipLevels = o->mips, .arrayLayers = is_tex3d(o) ? 1u : o->layers, .samples = VK_SAMPLE_COUNT_1_BIT,
+        .extent = { o->width, o->height, o->depth }, .mipLevels = o->mips, .arrayLayers = is_tex3d(o) ? 1u : o->layers, .samples = ns,
         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     if (vkCreateImage(vk->device, &ci, NULL, &o->img) != VK_SUCCESS) { o->img = VK_NULL_HANDLE; return false; }
     VkMemoryRequirements rq;
@@ -433,7 +437,7 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
     if (ds) {
         if (u & VK_IMAGE_USAGE_TRANSFER_DST_BIT) { VkClearDepthStencilValue zz = { 0.0f, 0u }; vkCmdClearDepthStencilImage(cb, o->img, VK_IMAGE_LAYOUT_GENERAL, &zz, 1, &rg); }
-    } else {
+    } else if (ns == VK_SAMPLE_COUNT_1_BIT && (u & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {   /* a multisampled image has no transfer usage: its content is undefined until the first pass writes it (as in Metal) */
         VkClearColorValue z; memset(&z, 0, sizeof z);
         vkCmdClearColorImage(cb, o->img, VK_IMAGE_LAYOUT_GENERAL, &z, 1, &rg);
     }
@@ -671,8 +675,11 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         o->img_type = mtype == 7 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
         if (!ok) { MKFAIL(o->tex_block_h > 1 ? TEXWHY_C_FORMAT : TEXWHY_C_PAYLOAD); goto bad; }   /* block height > 1: a block-compressed layout */
         if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad; }
-        if (mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
-        if (samples > 1) { MKFAIL(TEXWHY_C_MSAA); p->diag2.exec.fmt.msaa_refused++; goto bad; }
+        uint32_t ms_req = 1;   /* multisample gate (arm64_msaa.c): type 4 with samples > 1 is a 2D multisample texture; every other sample count is a shape the mirror refuses (counted) */
+        const int msg = lagfx_a64_msaa_tex_gate(p, mtype, samples, dmips, array, &ms_req);
+        if (msg == LAGFX_A64_MSAA_REFUSE) { MKFAIL(TEXWHY_C_MSAA); goto bad; }
+        if (msg != LAGFX_A64_MSAA_YES && mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
+        o->samples_req = (uint8_t)ms_req;
         if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         if (mtype == 7) { if (!o->depth || o->depth > 2048) { MKFAIL(TEXWHY_C_DIMS); goto bad; } } else o->depth = 1;
         if (!dmips || dmips > LAGFX_A64_MAX_MIPS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
@@ -681,7 +688,12 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (!o->layers || o->layers > LAGFX_A64_MAX_LAYERS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         o->kind = LAGFX_A64_TEXTURE, o->length = (len + 0x3fffu) & ~0x3fffull;
         if (o->ds_aspects) {   /* depth / stencil attachment: a plain 2D image of one level, content only on the device */
-            if (mtype != 2 || o->mips != 1) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
+            if ((mtype != 2 && ms_req <= 1u) || o->mips != 1) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
+            o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
+            if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
+            return o;
+        }
+        if (ms_req > 1u) {   /* multisampled colour texture: a device image only (no guest pages, no blit, no write-back, no sampling by the shaders yet), see arm64_msaa.h */
             o->has_pages = false, o->length = 0, o->tex_mip_count = 0;
             if (!create_image(vk, m, o)) { MKFAIL(TEXWHY_C_VULKAN); goto bad; }
             return o;
@@ -936,7 +948,7 @@ static bool xfer_fits(uint64_t off, uint64_t row, uint64_t img, uint64_t w, uint
 typedef struct { uint64_t x, y, z, w, h, d; uint32_t slice, level; } box_t;
 
 static bool box_ok(const lagfx_a64_obj_t *t, const box_t *b) {
-    if (t->ds_aspects) return false;   /* depth / stencil images take part in no copy */
+    if (t->ds_aspects || t->samples_req > 1u) return false;   /* depth / stencil and multisampled images take part in no copy (no guest pages, no transfer usage) */
     if (!b->w || !b->h || !b->d || b->w > 65536 || b->h > 65536 || b->d > 65536 || b->x > 65536 || b->y > 65536 || b->z > 65536) return false;
     if (b->level >= t->mips) return false;
     if (is_tex3d(t) ? b->slice != 0 : (b->slice >= t->layers || b->d != 1 || b->z != 0)) return false;
@@ -950,7 +962,7 @@ static void rd_box(const uint8_t *r, uint32_t org, uint32_t sz, uint32_t sl_off,
 }
 
 static bool buf_tex_copy(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, lagfx_a64_obj_t *t, uint64_t off, uint64_t row, uint64_t img, const box_t *bx, bool to_tex) {
-    if (b->kind != LAGFX_A64_BUFFER || t->kind != LAGFX_A64_TEXTURE || !box_ok(t, bx)) return false;
+    if (b->kind != LAGFX_A64_BUFFER || t->kind != LAGFX_A64_TEXTURE || !box_ok(t, bx)) { if (t->kind == LAGFX_A64_TEXTURE && t->samples_req > 1u) x->p->diag2.exec.msaa.blit_ms_refused++; return false; }
     if (!row || row % t->bpp || row / t->bpp < bx->w || off % t->bpp || row > (1ull << 31)) return false;
     if (bx->d > 1 && (img < row * bx->h || img % row)) return false;
     if (!xfer_fits(off, row, bx->d > 1 ? img : 0, bx->w, bx->h, bx->d, t->bpp, b->length)) return false;
@@ -995,6 +1007,7 @@ static bool blit_301(lagfx_a64_rexec_t *x, const uint8_t *r) {
 static bool blit_303(lagfx_a64_rexec_t *x, const uint8_t *r) {
     lagfx_a64_obj_t *a = lagfx_a64_res_object(x, lagfx_le32(r)), *b = lagfx_a64_res_object(x, lagfx_le32(r + 4));
     if (!a || !b || a->kind != LAGFX_A64_TEXTURE || b->kind != LAGFX_A64_TEXTURE || a->format != b->format || a->img_type != b->img_type) return false;
+    if (a->samples_req > 1u || b->samples_req > 1u) { x->p->diag2.exec.msaa.blit_ms_refused++; return false; }   /* a multisampled texture takes part in no blit */
     box_t s, d;
     rd_box(r, 8, 0x20, 0x50, 0x52, &s);
     d.x = u64at(r, 0x38), d.y = u64at(r, 0x40), d.z = u64at(r, 0x48), d.w = s.w, d.h = s.h, d.d = s.d;
@@ -1148,6 +1161,7 @@ bool lagfx_a64_res_snap_buffer(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, uint64_
 }
 
 bool lagfx_a64_res_snap_texture(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, bool tight, uint64_t max_bytes, lagfx_a64_snap_t *s) {
+    if (o && o->samples_req > 1u && x) { x->p->diag2.exec.msaa.capture_ms_skipped++; return false; }   /* a multisampled image cannot be copied to a buffer */
     if (!x || !o || !s || o->kind != LAGFX_A64_TEXTURE || o->ds_aspects || !o->img || !max_bytes) return false;
     if (!tight && (!o->has_pages || !o->length)) return false;
     uint64_t full = tight ? (uint64_t)o->width * o->height * (is_tex3d(o) ? o->depth : 1u) * o->bpp : o->length;
@@ -1493,6 +1507,7 @@ VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o
 }
 
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (o && o->samples > 1u) return VK_NULL_HANDLE;   /* a multisampled image is no sampled 2D texture (texelFetch with a sample index is the only read; the translator does not emit it) */
     VkImageView v = tex_view(x, o, VK_IMAGE_USAGE_SAMPLED_BIT);
     if (!v || o->mtl_format != 1u || o->ms) return v;
     /* MTLPixelFormatA8Unorm (1) samples as (0, 0, 0, a) (Metal's documented read of an alpha-only format); the image is R8_UNORM, so the view moves red into alpha.
@@ -1572,7 +1587,7 @@ bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, vo
     mgr2_t *m = p ? p->a64_res : NULL;
     struct lagfx_vk_state *vk = vk_of(p);
     lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
-    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || BUSY(m)) return false;
+    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || o->samples_req > 1u || BUSY(m)) return false;
     size_t need = (size_t)o->width * o->height * o->bpp;
     if (!dst || dst_size < need) return false;
     VkBuffer b; VkDeviceMemory bm; uint8_t *mp;

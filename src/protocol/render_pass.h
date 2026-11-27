@@ -172,6 +172,7 @@ typedef struct {
         uint8_t  slot;
         uint32_t texture_ref;
         uint32_t resolve_texture_ref;
+        uint16_t resolve_level, resolve_slice;   /* of the resolve texture (multisample resolve): only (0, 0) is honoured */
         uint16_t load_action;
         uint16_t store_action;
         double   clear_color[4];

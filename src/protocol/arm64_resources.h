@@ -101,6 +101,7 @@ struct lagfx_a64_obj {
     VkBuffer buf; VkDeviceMemory buf_mem; uint8_t *map;     /* guest-layout copy (the object itself for a buffer) */
     VkImage  img; VkDeviceMemory img_mem;                   /* textures */
     uint8_t  ds_aspects;                                    /* depth / stencil attachment texture (bit 0 depth, bit 1 stencil): a device image only, see lagfx_a64_res_ds_begin */
+    uint8_t  samples, samples_req;                          /* multisample (arm64_msaa.c): samples = VkSampleCountFlagBits value of the image (0 = 1), samples_req = the guest descriptor's count (> 1 marks a device-only multisample texture, also when it fell back to 1x) */
     VkFormat format; VkImageType img_type; VkImageUsageFlags usage; VkImageView view;   /* view: lazily made, 2D layer 0 level 0 (render target) */
     uint32_t bpp, width, height, depth, mips, layers;
     uint32_t mtl_format;                                    /* Metal pixel format number of the guest descriptor (0 unknown); diagnostics / capture only */

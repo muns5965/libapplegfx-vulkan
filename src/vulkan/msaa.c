@@ -36,7 +36,7 @@ static uint32_t mem_type(VkPhysicalDevice pd, uint32_t bits, VkMemoryPropertyFla
     return UINT32_MAX;
 }
 
-static bool make_image(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits s, VkImageUsageFlags usage, VkImage *img, VkDeviceMemory *mem, VkImageView *view) {
+static bool make_image_a(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits s, VkImageUsageFlags usage, VkImageAspectFlags aspect, VkImage *img, VkDeviceMemory *mem, VkImageView *view) {
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { w, h, 1 }, .mipLevels = 1, .arrayLayers = 1,
         .samples = s, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     if (vkCreateImage(vk->device, &ci, NULL, img) != VK_SUCCESS) return false;
@@ -47,12 +47,16 @@ static bool make_image(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint
     if (mt == UINT32_MAX || vkAllocateMemory(vk->device, &ai, NULL, mem) != VK_SUCCESS) { vkDestroyImage(vk->device, *img, NULL); *img = VK_NULL_HANDLE; return false; }
     if (vkBindImageMemory(vk->device, *img, *mem, 0) != VK_SUCCESS) goto fail;
     VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = *img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt,
-        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
-    if (vkCreateImageView(vk->device, &vi, NULL, view) != VK_SUCCESS) goto fail;
+        .subresourceRange = { aspect, 0, 1, 0, 1 } };
+    if (view && vkCreateImageView(vk->device, &vi, NULL, view) != VK_SUCCESS) goto fail;
     return true;
 fail:
     vkFreeMemory(vk->device, *mem, NULL); vkDestroyImage(vk->device, *img, NULL); *mem = VK_NULL_HANDLE; *img = VK_NULL_HANDLE;
     return false;
+}
+
+static bool make_image(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits s, VkImageUsageFlags usage, VkImage *img, VkDeviceMemory *mem, VkImageView *view) {
+    return make_image_a(vk, fmt, w, h, s, usage, VK_IMAGE_ASPECT_COLOR_BIT, img, mem, view);
 }
 
 int lagfx_msaa_target_create(struct lagfx_vk_state *vk, const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, bool want_resolve, lagfx_msaa_target_t *t) {
@@ -116,4 +120,41 @@ uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t adver
     if (advertised <= host) return advertised;
     if (clamped) *clamped = true;
     return host;
+}
+
+int lagfx_msaa_plan(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
+                    VkImageUsageFlags optional_1x, lagfx_msaa_plan_t *out) {
+    memset(out, 0, sizeof *out);
+    out->requested = requested ? requested : 1u;
+    uint32_t want = out->requested > 16u ? 16u : out->requested;
+    uint32_t s = 1;
+    while ((s << 1) <= want) s <<= 1;   /* largest power of two <= request (Metal counts are 1, 2, 4, 8) */
+    for (; s > 1u; s >>= 1) {
+        lagfx_fmtcap_usage_t u;
+        if (lagfx_fmtcap_image_usage(be, fmt, VK_IMAGE_TYPE_2D, w, h, 1, 1, 1, (VkSampleCountFlagBits)s, required, optional_ms, &u)) {
+            out->samples = (VkSampleCountFlagBits)s, out->usage = u.usage, out->dropped = u.dropped;
+            out->clamped = s != out->requested;
+            return LAGFX_MSAA_OK;
+        }
+    }
+    lagfx_fmtcap_usage_t u;
+    if (!lagfx_fmtcap_image_usage(be, fmt, VK_IMAGE_TYPE_2D, w, h, 1, 1, 1, VK_SAMPLE_COUNT_1_BIT, required, optional_1x, &u)) return LAGFX_MSAA_NO_FORMAT;
+    out->samples = VK_SAMPLE_COUNT_1_BIT, out->usage = u.usage, out->dropped = u.dropped;
+    out->fallback_1x = out->requested > 1u;
+    return LAGFX_MSAA_OK;
+}
+
+bool lagfx_msaa_image_create(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                             VkImage *img, VkDeviceMemory *mem, VkImageView *view) {
+    *img = VK_NULL_HANDLE, *mem = VK_NULL_HANDLE;
+    if (view) *view = VK_NULL_HANDLE;
+    return make_image_a(vk, fmt, w, h, samples, usage, aspect, img, mem, view);
+}
+
+bool lagfx_msaa_cmd_resolve_image(VkCommandBuffer cb, VkFormat fmt, VkImage ms, VkImageLayout ms_layout, VkImage dst, VkImageLayout dst_layout, uint32_t w, uint32_t h) {
+    (void)fmt;
+    if (!cb || !ms || !dst || !w || !h) return false;
+    VkImageResolve r = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .extent = { w, h, 1 } };
+    vkCmdResolveImage(cb, ms, ms_layout, dst, dst_layout, 1, &r);
+    return true;
 }
