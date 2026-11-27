@@ -409,7 +409,12 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     for (uint32_t i = 0; i < 4u; i++) {
         if (!(tp->rt_mask & (1u << i))) continue;
         lagfx_a64_obj_t *o = i < e->nslots ? e->rts[i] : NULL;
-        if (!o || o->format != VK_FORMAT_R16G16B16A16_SFLOAT || !(o->usage & VK_IMAGE_USAGE_STORAGE_BIT) || !o->view || o->linear) { TILE(p).skip_rt++; return false; }
+        if (!o || o->format != VK_FORMAT_R16G16B16A16_SFLOAT || !(o->usage & VK_IMAGE_USAGE_STORAGE_BIT) || !o->view || o->linear) {
+            TILE(p).skip_rt++;
+            TILE(p).skip_rt_why[!o ? 0 : o->format != VK_FORMAT_R16G16B16A16_SFLOAT ? 1 : !(o->usage & VK_IMAGE_USAGE_STORAGE_BIT) ? 2 : 3]++;
+            if (o && !TILE(p).skip_rt_first.valid) TILE(p).skip_rt_first.format = (uint32_t)o->format, TILE(p).skip_rt_first.usage = (uint32_t)o->usage, TILE(p).skip_rt_first.linear = o->linear ? 1 : 0, TILE(p).skip_rt_first.valid = 1;
+            return false;
+        }
     }
     uint32_t gx0 = 0, gy0 = 0, gx1, gy1;
     if (d->region) {
@@ -486,6 +491,8 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     if (d->region) TILE(p).region++; else TILE(p).whole++;
     if (pin) TILE(p).sg_pinned++;
     if (tp->simd_emul && tp->lane_mapped) TILE(p).sg_emulated++;
+    p->diag2.exec.qcomtile.emul_dispatches++;
+    if (vk->qcomtile.enabled) p->diag2.exec.qcomtile.emul_while_enabled++;
     return true;
 }
 

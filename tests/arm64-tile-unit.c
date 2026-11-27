@@ -13,6 +13,8 @@
 #include "protocol/arm64_pipeline.h"
 #include "protocol/arm64_tile.h"
 #include "protocol/arm64_completion.h"
+#include "protocol/diag.h"
+#include <unistd.h>
 #include "vulkan/caps.h"
 #include "device.h"
 #include "common/le.h"
@@ -383,6 +385,19 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         unsigned bad = compare(p, t, REF_DST, right_half_and_top_left, &nc, &nk);
         printf("tile region dispatches: %u computed + %u kept pixels, %u channel mismatches\n", nc, nk, bad);
         assert(bad == 0 && nk == g_S * 4u);
+        {   /* VK_QCOM_tile_shading opt-in (default OFF): the dispatches ran as compute emulation, the extension was not enabled, and the diag dump carries the g7-gpu-qcomtile line with those counts */
+            assert(p->diag2.exec.qcomtile.emul_dispatches == 2 && p->diag2.exec.qcomtile.emul_while_enabled == 0 && !g_dev->vk->qcomtile.enabled);
+            char lp[] = "/tmp/tile-diag-XXXXXX"; int lfd = mkstemp(lp); assert(lfd >= 0);
+            fflush(stderr); int sv = dup(2); assert(sv >= 0 && dup2(lfd, 2) >= 0);   /* the dump prints each line to stderr as well as to the log sink */
+            p->diag2.t0_ns = 1; lagfx_diag_final(p);
+            fflush(stderr); dup2(sv, 2); close(sv); close(lfd);
+            FILE *lf = fopen(lp, "r"); char ln[4096]; bool found = false;
+            while (lf && fgets(ln, sizeof ln, lf)) if (strstr(ln, "g7-gpu-qcomtile:") && strstr(ln, "use[emul_dispatches=2 emul_while_qcom_enabled=0 qcom_native_dispatches=0]") && strstr(ln, "chosen_path=compute_emulation")) found = true;
+            if (lf) fclose(lf);
+            unlink(lp);
+            assert(found);
+            puts("PASS: g7-gpu-qcomtile counted line in the diag dump (base line + use[emul_dispatches=2 emul_while_qcom_enabled=0 qcom_native_dispatches=0])");
+        }
         lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
         puts("PASS: tile region dispatch (tag 0xa2): WorkgroupId base shifted to the region origin, attachment contents preserved across suspend / resume, untouched region keeps its clear");
     }
@@ -445,6 +460,7 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         cb_reset(); cb_pass(REF_DST4, 2, sent); tile_bind_all(); cb_dispatch_all(g_S, 4);
         exec_refs(p, 1, cb_finish());
         assert(TILE(p).skip_rt == 1 && TILE(p).dispatches == 0);
+        assert(TILE(p).skip_rt_why[1] == 1 && TILE(p).skip_rt_first.valid && TILE(p).skip_rt_first.format != VK_FORMAT_R16G16B16A16_SFLOAT);   /* the cause is recorded: a non-Rgba16f attachment */
         cb_reset(); cb_pass(REF_DST, 2, sent); cb_dispatch_all(g_S, 4);    /* no pipeline set in this pass */
         exec_refs(p, 1, cb_finish());
         assert(TILE(p).skip_no_pipe == 1);
