@@ -1567,6 +1567,17 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-ext-unit.c') and vulkan_d
   test('arm64 exec render extensions (unit, lavapipe)', ee_test, env : ['LAGFX_VK_VALIDATION=1'])
 endif
 
+# sRGB colour target numeric check (format 81 vs 80 control) on lavapipe + validation.
+if fs.is_file(meson.current_source_dir() / 'arm64-exec-gamma-unit.c') and vulkan_dep.found()
+  gm_test = executable('arm64-exec-gamma-unit',
+    'arm64-exec-gamma-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    build_by_default : true,
+  )
+  test('arm64 exec sRGB render target numeric (unit, lavapipe)', gm_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
+
 # Vertex fetch / index handling against a CPU model (indexed offsets, base vertex, vertex pulling at gathered offsets, real compositor vertex layout) on lavapipe.
 if fs.is_file(meson.current_source_dir() / 'arm64-vertex-index-unit.c') and vulkan_dep.found()
   vi_test = executable('arm64-vertex-index-unit',
