@@ -708,6 +708,21 @@ int main(void) {
       lagfx_a64_test_hook = 6;
       assert(lagfx_a64_res_poll(p, 2000) == LAGFX_A64_FAILED && lagfx_a64_test_hook == 0 && !lagfx_a64_res_is_pending(p));
       assert(CNT(p).wb_down_pending_cleared_on_fail == cl + 2 && lagfx_a64_test_ms_down_pending(p, MAP_OK) == 0 && CNT(p).mapped_written_back == wbx && *surf_px(32, 40) == 0xabababab); }
+    { /* the SAME owed frame retried by repeated display commands (no new exec): first failure from the exec, then the display retries fail too; after WB_RETRY_MAX it is given up and display commands copy nothing */
+      const uint32_t res[1][2] = { { REF_M1, 4 } };
+      static const double red4[4] = { 1, 0, 0, 1 };
+      surf_fill(SENT);
+      uint64_t ex = CNT(p).wb_retry_exhausted, ro = CNT(p).wb_retry_owed, wbx = CNT(p).mapped_written_back;
+      lagfx_a64_test_hook = 4;
+      run_exec(p, 87, REF_M1, 2, red4, false, res, 1, true);   /* failure 1: owed */
+      g_dev->desc.shell.get_surface_desc = NULL;
+      int n = 0;
+      while (CNT(p).wb_retry_exhausted == ex && n < 20) { lagfx_a64_res_display_swap(p); n++; }
+      assert(n == 8 && CNT(p).wb_retry_owed == ro + 8 && CNT(p).wb_retry_exhausted == ex + 1 && CNT(p).mapped_written_back == wbx);   /* 1 exec failure + 7 display failures = 8 owed, the 8th display failure gives up */
+      uint64_t se = CNT(p).swap_events;
+      g_dev->desc.shell.get_surface_desc = get_desc;
+      assert(lagfx_a64_res_display_swap(p) == 0 && CNT(p).swap_events == se && *surf_px(32, 40) == 0xabababab);   /* given up: nothing owed, no GPU copy even though the descriptor reads again */
+      { static const double g4[4] = { 0, 1, 0, 1 }; run_exec(p, 88, REF_M1, 2, g4, false, res, 1, true); assert(*surf_px(32, 40) == GREEN); } }
     { /* retry is bounded: a surface whose descriptor never reads again stops being owed after WB_RETRY_MAX (8) failures */
       const uint32_t res[1][2] = { { REF_M1, 4 } };
       static const double red4[4] = { 1, 0, 0, 1 };
@@ -718,7 +733,7 @@ int main(void) {
       assert(lagfx_a64_res_display_swap(p) == 0 && *surf_px(32, 40) == 0xabababab);   /* given up: no copy per display command */
       { static const double g4[4] = { 0, 1, 0, 1 }; run_exec(p, 99, REF_M1, 2, g4, false, res, 1, true); assert(*surf_px(32, 40) == GREEN); } }   /* a later flag-4 exec writes again and resets the counter */
     printf("PASS: failed write-back is owed again in every mode (immediate recovers at the next display command), bounded at WB_RETRY_MAX\n");
-    printf("PASS: host-read barrier recorded, data unchanged; failed submit / sync failure / device lost clear the pending copy, timeout keeps it, foreign generation refused; unreadable descriptor counted (owed in swap mode only)\n");
+    printf("PASS: host-read barrier recorded, data unchanged; failed submit / sync failure / device lost clear the pending copy, timeout keeps it, foreign generation refused; unreadable descriptor counted (owed again in every mode)\n");
 
     /* (8) validation control: a deliberate read-after-write hazard (fill, then copy from the filled buffer, no barrier) must be flagged by synchronization validation.
      * Proves the layer is live when it reports 0 messages for everything above. Soft: if the layer / sync validation is not available it only says so. */
