@@ -620,10 +620,12 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             VK_BLEND_FACTOR_SRC_ALPHA_SATURATE, VK_BLEND_FACTOR_CONSTANT_COLOR, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_COLOR, VK_BLEND_FACTOR_CONSTANT_ALPHA, VK_BLEND_FACTOR_ONE_MINUS_CONSTANT_ALPHA };
         static const uint8_t ops[5] = { VK_BLEND_OP_ADD, VK_BLEND_OP_SUBTRACT, VK_BLEND_OP_REVERSE_SUBTRACT, VK_BLEND_OP_MIN, VK_BLEND_OP_MAX };
         const lagfx_a64_blend_t *b = &d.color0;
-        /* BlendColor factors (11..14) need vkCmdSetBlendConstants, which the exec path does not issue yet: such a pipeline keeps the fixed state (counted as a stub) */
-        bool ok_vals = b->found && b->src_rgb < 11u && b->dst_rgb < 11u && b->src_a < 11u && b->dst_a < 11u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
+        /* BlendColor factors (Metal 11..14 = CONSTANT_COLOR, ONE_MINUS_CONSTANT_COLOR, CONSTANT_ALPHA, ONE_MINUS_CONSTANT_ALPHA) are accepted: the pipeline makes the blend constants dynamic
+         * (desc.blend_const_dyn) and the exec sets them from setBlendColor (tag 101) before each draw (arm64_exec_run.c). 15.. (source-1 factors) stay unmapped (stub_blend). */
+        bool ok_vals = b->found && b->src_rgb < 15u && b->dst_rgb < 15u && b->src_a < 15u && b->dst_a < 15u && b->op_rgb < 5u && b->op_a < 5u && (b->mask & ~0xfu) == 0u;
         if (ok_vals) {
             out->desc.blend_set = 1;
+            if (lagfx_a64_blend_uses_constant(b->src_rgb, b->dst_rgb, b->src_a, b->dst_a)) out->desc.blend_const_dyn = 1;
             out->desc.blend_enable = lagfx_a64_blend_on(b);   /* key 2 = blendingEnabled; absent = Metal default = off (factors can be serialized without it: 13 of the 36 dump descriptors) */
             out->desc.blend_src_rgb = fac[b->src_rgb], out->desc.blend_dst_rgb = fac[b->dst_rgb], out->desc.blend_op_rgb = ops[b->op_rgb];
             out->desc.blend_src_a = fac[b->src_a], out->desc.blend_dst_a = fac[b->dst_a], out->desc.blend_op_a = ops[b->op_a];
@@ -633,11 +635,12 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             out->desc.masks_valid = 1;
             if (b->found1) {
                 const lagfx_a64_att_blend_t *a = &b->a1;
-                if (a->src_rgb < 11u && a->dst_rgb < 11u && a->src_a < 11u && a->dst_a < 11u && a->op_rgb < 5u && a->op_a < 5u) {
+                if (a->src_rgb < 15u && a->dst_rgb < 15u && a->src_a < 15u && a->dst_a < 15u && a->op_rgb < 5u && a->op_a < 5u) {
+                    if (lagfx_a64_blend_uses_constant(a->src_rgb, a->dst_rgb, a->src_a, a->dst_a)) out->desc.blend_const_dyn = 1;
                     out->desc.slot_blend[1].set = 1, out->desc.slot_blend[1].enable = a->enabled_token && a->enabled_value != 0u;
                     out->desc.slot_blend[1].src_rgb = fac[a->src_rgb], out->desc.slot_blend[1].dst_rgb = fac[a->dst_rgb], out->desc.slot_blend[1].op_rgb = ops[a->op_rgb];
                     out->desc.slot_blend[1].src_a = fac[a->src_a], out->desc.slot_blend[1].dst_a = fac[a->dst_a], out->desc.slot_blend[1].op_a = ops[a->op_a];
-                }   /* else (BlendColor factors): slot 1 copies attachment 0 and the pipeline counts it as a mismatch */   /* attachment 1's write mask (the dump's second attachment record carries writeMask 0) */
+                }   /* else (source-1 factors): slot 1 copies attachment 0 and the pipeline counts it as a mismatch */   /* attachment 1's write mask (the dump's second attachment record carries writeMask 0) */
                 uint8_t m1 = b->mask1;
                 out->desc.color_write_masks[1] = ((m1 & 8u) ? VK_COLOR_COMPONENT_R_BIT : 0u) | ((m1 & 4u) ? VK_COLOR_COMPONENT_G_BIT : 0u) | ((m1 & 2u) ? VK_COLOR_COMPONENT_B_BIT : 0u) | ((m1 & 1u) ? VK_COLOR_COMPONENT_A_BIT : 0u);
             }

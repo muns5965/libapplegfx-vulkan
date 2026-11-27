@@ -140,7 +140,7 @@ typedef struct {
     /* depth / stencil attachment of the open pass (NULL / UNDEFINED = none) and the encoder state Metal keeps outside the pipeline; all of it is reset by a new pass
      * (a new Metal encoder starts from the defaults) and applied as Vulkan dynamic state before each draw */
     lagfx_a64_obj_t *dsobj; VkFormat ds_dfmt, ds_sfmt;
-    struct { lagfx_a64_dss_t dss; uint32_t sref[2]; uint32_t cull, winding; float bias[3]; bool dirty; } es;
+    struct { lagfx_a64_dss_t dss; uint32_t sref[2]; uint32_t cull, winding; float bias[3]; float blend_color[4]; bool dirty; } es;
     bool wrote_storage;              /* a draw of the open pass may write storage images: pass_end adds a shader-write barrier */
     deferred_t *def; uint32_t ndef, capdef;
     lagfx_a64_tile_t *tile;          /* tile shader stage (arm64_tile.c), created by the first tile record */
@@ -1264,6 +1264,10 @@ static void apply_encoder_state(a64_run_t *r, lagfx_protocol_t *p) {
 static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     if (!prepare_pipeline(r, p, prim)) return false;
     apply_encoder_state(r, p);
+    if (r->pipe->src.desc.blend_const_dyn) {   /* set before EVERY draw of such a pipeline: binding another pipeline may leave the dynamic value undefined */
+        vkCmdSetBlendConstants(lagfx_a64_res_cmdbuf(r->x), r->es.blend_color);
+        CNT(p).blend_const_draws++;
+    }
     if (r->dsobj && (lagfx_a64_dss_depth_test(&r->es.dss) || lagfx_a64_dss_stencil_test(&r->es.dss))) CNT(p).ds_draws++;
     lagfx_gap_note_draw(prim, r->region.vp_x, r->region.vp_y, r->region.vp_w, r->region.vp_h, r->region.vp_z_set ? r->region.vp_znear : 0.0f, r->region.vp_z_set ? r->region.vp_zfar : 1.0f, r->region.sc_x, r->region.sc_y, r->region.sc_w, r->region.sc_h, r->rt_w, r->rt_h);   /* idle-gap diagnostics: window only */
     lagfx_vk_render_target_t ext = { .width = r->rt_w, .height = r->rt_h };   /* set_region only needs the extent */
@@ -1652,6 +1656,13 @@ static void render_tag(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, const ui
         CNT(p).stencil_ref_set++;
         tag_done(p, tag);
         break;
+    case 101: {                              /* setBlendColor {red f32, green f32, blue f32, alpha f32} (render_inner_ops.c 0x65 SetBlendColor, 16 bytes): the constant of the blend factors 11..14; read by the next draw of a pipeline with dynamic blend constants */
+        if (n < 16u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
+        lagfx_a64_blend_color_decode(rec, r->es.blend_color);
+        CNT(p).blend_color_set++;
+        tag_done(p, tag);
+        break;
+    }
     case 107: case 115: {                    /* setCullMode (0 none, 1 front, 2 back) / setFrontFacingWinding (0 clockwise, 1 counter-clockwise): {mode u64} */
         if (n < 8u) { CNT(p).bad_rec++; tag_unsup(p, tag); break; }
         uint64_t m = lagfx_le64(rec);
@@ -1772,7 +1783,7 @@ static bool supported_tag(uint32_t tag) {
 static bool hint_tag(uint32_t tag) { return tag == 137u || tag == 27u || tag == 134u || tag == 135u || tag == 24u || tag == 25u; }
 static bool direct_tag(uint32_t tag) {
     switch (tag) {
-    case 0: case 2: case 3: case 4: case 5: case 6: case 8: case 9: case 10: case 11: case 16: case 17: case 113: case 128: case 127: case 129:
+    case 0: case 2: case 3: case 4: case 5: case 6: case 8: case 9: case 10: case 11: case 16: case 17: case 113: case 128: case 127: case 129: case 101:
     case 137: case 27: case 134: case 135: case 24: case 25: case 22: case 23: case 133: return true;
     case 155: case 156: case 157: case 158: case 159: case 160: case 161: case 162: case 163: case 164: return true;
     default: return false;

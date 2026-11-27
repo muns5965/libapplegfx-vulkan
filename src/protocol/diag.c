@@ -290,6 +290,12 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", wl);
             LAGFX_LOG("%s", wl);
         }
+        if (R->blend_color_set || R->blend_const_draws) {   /* setBlendColor records (tag 101) and draws that took them through vkCmdSetBlendConstants */
+            char bl[160];
+            snprintf(bl, sizeof bl, "g7-gpu-blendc: set=%llu draws_with_constants=%llu", (unsigned long long)R->blend_color_set, (unsigned long long)R->blend_const_draws);
+            fprintf(stderr, "%s\n", bl);
+            LAGFX_LOG("%s", bl);
+        }
         if (R->dss_decoded || R->dss_bad || R->ds_passes || R->cull_set || R->winding_set || R->bias_set || R->stencil_ref_set || R->viewport_depth_set || R->viewport_degenerate) {
             char dl[700];
             snprintf(dl, sizeof dl,

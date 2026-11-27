@@ -19,6 +19,7 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include "state.h"
 
 #define LAGFX_A64_PIPE_MAX_BLOB   (256u << 10)   /* serialized descriptor bytes read */
@@ -58,6 +59,18 @@ typedef struct {
 } lagfx_a64_blend_t;
 
 static inline bool lagfx_a64_blend_on(const lagfx_a64_blend_t *b) { return b->enabled_token && b->enabled_value != 0u; }
+/* setBlendColor payload: four little-endian f32 (red, green, blue, alpha). A NaN component reads as 0 (Vulkan: undefined for NaN); values are passed as given (VkCmdSetBlendConstants takes any float; the clamp, if any, belongs to the blend equation). */
+static inline void lagfx_a64_blend_color_decode(const uint8_t *rec, float out[4]) {
+    for (int i = 0; i < 4; i++) {
+        uint32_t u = (uint32_t)rec[4 * i] | ((uint32_t)rec[4 * i + 1] << 8) | ((uint32_t)rec[4 * i + 2] << 16) | ((uint32_t)rec[4 * i + 3] << 24);
+        float f; memcpy(&f, &u, 4);
+        out[i] = f == f ? f : 0.0f;
+    }
+}
+/* MTLBlendFactor 11..14 (BlendColor, OneMinusBlendColor, BlendAlpha, OneMinusBlendAlpha) read the encoder's blend colour: the pipeline needs dynamic blend constants. */
+static inline bool lagfx_a64_blend_uses_constant(uint32_t src_rgb, uint32_t dst_rgb, uint32_t src_a, uint32_t dst_a) {
+    return (src_rgb >= 11u && src_rgb <= 14u) || (dst_rgb >= 11u && dst_rgb <= 14u) || (src_a >= 11u && src_a <= 14u) || (dst_a >= 11u && dst_a <= 14u);
+}
 
 typedef enum { LAGFX_A64_ROOT_NA = 0, LAGFX_A64_ROOT_OK, LAGFX_A64_ROOT_MALFORMED, LAGFX_A64_ROOT_MISSING, LAGFX_A64_ROOT_SAME, LAGFX_A64_ROOT_BAD_TYPE, LAGFX_A64_ROOT_N } lagfx_a64_root_status_t;
 const char *lagfx_a64_root_status_name(int st);

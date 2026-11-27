@@ -91,6 +91,8 @@ typedef struct {
     /* Colour attachment 0 blend state. blend_set == 0 keeps the fixed premultiplied source-over below (every existing caller); blend_set == 1 uses these
      * Vulkan values (enable false = blending off, the factors/ops/mask are then ignored except the write mask). */
     uint8_t          blend_set, blend_enable;
+    uint8_t          blend_const_dyn;   /* 1: a blend factor is CONSTANT_COLOR / ONE_MINUS_CONSTANT_COLOR / CONSTANT_ALPHA / ONE_MINUS_CONSTANT_ALPHA: VK_DYNAMIC_STATE_BLEND_CONSTANTS is enabled and the caller must
+                                          * vkCmdSetBlendConstants before every draw (the static constants are not used) */
     uint32_t         blend_src_rgb, blend_dst_rgb, blend_op_rgb, blend_src_a, blend_dst_a, blend_op_a;   /* VkBlendFactor / VkBlendOp */
     uint32_t         color_write_mask;   /* VkColorComponentFlags */
     /* Several colour attachments: n_color 0/1 = the single attachment above (color_format, blend_*). n_color 2..4: attachment i has format color_formats[i]

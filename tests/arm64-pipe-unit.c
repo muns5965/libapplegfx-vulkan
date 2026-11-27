@@ -536,6 +536,68 @@ static void tri_exec(lagfx_protocol_t *p, uint32_t pipe_ref, uint32_t prim, uint
     exec(p, 1, cb_finish());
 }
 
+/* BlendColor factors (Metal 11..14): a pipeline whose colour attachment 0 blends with them keeps the DECODED state (not the fixed source-over) and reads the blend colour the
+ * guest sets with setBlendColor (tag 101, four f32), through vkCmdSetBlendConstants before each draw. The blend is src * 0 + dst * constant (factors ZERO / BlendColor for
+ * rgb, ZERO / BlendAlpha for alpha), so the result does not depend on the shader's colour: dst = the green clear. Without dynamic blend constants the pipeline fell back to the fixed
+ * premultiplied source-over (stub_blend) and the pixel was the shader's colour over green. Host test on lavapipe; NOT device-verified. */
+static uint32_t put_pipeline_blend(uint32_t ref, uint32_t pay_off, const uint32_t *fns, uint32_t nfn, uint32_t salt, const uint8_t fac[4]) {
+    uint8_t b[320]; memset(b, 0, sizeof b);
+    uint32_t o = 16;
+    b[o++] = (uint8_t)(nfn + 1u);
+    for (uint32_t i = 0; i < nfn; i++) { b[o++] = (uint8_t)(1u + i); b[o++] = 0x04; memcpy(b + o, &fns[i], 4); o += 4; }
+    b[o++] = 0x08; b[o++] = 0x04; memcpy(b + o, &salt, 4); o += 4;
+    /* colour attachment array chunk: 0c 00 00 00 <len> <count> | 00 04 <0> | 01 04 <pixfmt 80> | tokens (key 2 enabled, 3 srcRGB, 4 dstRGB, 6 srcA, 7 dstA) | 12 bytes of the next record */
+    const uint32_t count = 2u + 5u, len = 6u * count + 13u, pixfmt = 80u, one = 1u;
+    b[o++] = 0x0c; o += 3; memcpy(b + o, &len, 4); o += 4; b[o++] = (uint8_t)count;
+    b[o++] = 0x00; b[o++] = 0x04; o += 4;
+    b[o++] = 0x01; b[o++] = 0x04; memcpy(b + o, &pixfmt, 4); o += 4;
+    b[o++] = 0x02; b[o++] = 0x04; memcpy(b + o, &one, 4); o += 4;
+    static const uint8_t keys[4] = { 3, 4, 6, 7 };
+    for (int i = 0; i < 4; i++) { uint32_t v = fac[i]; b[o++] = keys[i]; b[o++] = 0x04; memcpy(b + o, &v, 4); o += 4; }
+    o += 12;
+    uint32_t tag = 0xe, plen = o - 16;
+    memcpy(b, &tag, 4); memcpy(b + 4, &o, 4); memcpy(b + 8, &ref, 4); memcpy(b + 12, &plen, 4);
+    va_write(VA_PAY + pay_off, b, o);
+    entry(ref, LAGFX_A64_OBJ_SERIALIZED, o, VA_PAY + pay_off);
+    return o;
+}
+static void blend_exec(lagfx_protocol_t *p, bool set_color, const float c[4], uint32_t pipe_ref) {
+    cb_reset(); cb_pass(REF_TEX, 2, G4); cb_viewport(RT_W, RT_H);
+    if (set_color) cb_cmd(101, c, 16);
+    cb_pipeline(pipe_ref); cb_draw(3, 0, 3);
+    exec(p, 1, cb_finish());
+}
+static bool near_ch(uint32_t px_, unsigned shift, unsigned want) { unsigned got = (px_ >> shift) & 0xffu; return got + 2u >= want && got <= want + 2u; }
+static void test_blend_constants(void) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_task_entry_t *t;
+    lagfx_protocol_t *p = new_task(&t);
+    uint8_t img[RT_W * RT_H * 4];
+    uint32_t tri[2] = { REF_FN_TRI_A, REF_FN_TRI_B };
+    const uint8_t fac[4] = { 0 /* srcRGB ZERO */, 11 /* dstRGB BlendColor */, 0 /* srcA ZERO */, 13 /* dstA BlendAlpha */ };
+    put_pipeline_blend(REF_PIPE_TRI2, 0x800, tri, 2, 3, fac);
+    const float c1[4] = { 1.0f, 0.5f, 1.0f, 0.25f }, c2[4] = { 0.0f, 0.25f, 0.0f, 0.5f };
+    blend_exec(p, true, c1, REF_PIPE_TRI2);
+    assert(PIPE(p).blend_decoded == 1 && PIPE(p).stub_blend == PIPE(p).resolved - 1u && RUNC(p).draws == 1);   /* decoded, not the fixed fallback (the other resolved pipelines carry no blend record: stub) */
+    assert(RUNC(p).blend_color_set == 1 && RUNC(p).blend_const_draws == 1);
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, NULL, NULL));
+    uint32_t v = px(img, 8, 8);
+    printf("INFO: blend constants (1, .5, 1, .25): centre=%08x\n", v);
+    assert(near_ch(v, 8, 128) && near_ch(v, 16, 0) && near_ch(v, 0, 0) && near_ch(v, 24, 64));   /* G = 1 * .5, R = B = 0 (dst 0), A = 1 * .25 */
+    blend_exec(p, true, c2, REF_PIPE_TRI2);   /* another colour: the value is taken per exec / pass, not baked into the pipeline */
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, NULL, NULL));
+    v = px(img, 8, 8);
+    assert(near_ch(v, 8, 64) && near_ch(v, 24, 128) && near_ch(v, 16, 0));
+    blend_exec(p, false, c1, REF_PIPE_TRI2);   /* a new encoder starts from Metal's default blend colour (0, 0, 0, 0) */
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, NULL, NULL));
+    v = px(img, 8, 8);
+    assert(near_ch(v, 8, 0) && near_ch(v, 24, 0));
+    assert(RUNC(p).blend_color_set == 2 && RUNC(p).blend_const_draws == 3);
+    assert(RUNC(p).bad_rec == 0);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+    puts("PASS: BlendColor factors keep the decoded blend state and read setBlendColor (tag 101) through dynamic blend constants (lavapipe, host-test only)");
+}
+
 static void test_resolver_triangle_and_topology(void) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     lagfx_task_entry_t *t;
@@ -1475,6 +1537,7 @@ int main(void) {
     if (g_dev->vk && g_dev->vk->initialized) {
         test_dump_via_resolver();
         test_resolver_triangle_and_topology();
+        test_blend_constants();
         test_textured_draw();
         test_linear_sampled();
         test_linear_unlisted();

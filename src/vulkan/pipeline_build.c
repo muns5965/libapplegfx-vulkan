@@ -489,6 +489,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR,
     };
     uint32_t n_dyn = 2;
+    if (desc->blend_const_dyn) dyn_states[n_dyn++] = VK_DYNAMIC_STATE_BLEND_CONSTANTS;   /* constant-colour / alpha factors: the encoder's blend colour is set before each draw */
     if (desc->dyn_state) {   /* Metal keeps these on the encoder, not in the pipeline: the executor sets them before each draw */
         dyn_states[n_dyn++] = VK_DYNAMIC_STATE_CULL_MODE;
         dyn_states[n_dyn++] = VK_DYNAMIC_STATE_FRONT_FACE;
