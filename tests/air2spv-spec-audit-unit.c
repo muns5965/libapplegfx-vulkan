@@ -16,11 +16,13 @@
 #include "air2spv/translate_function.h"
 #include "air/bitcode_reader.h"
 #include "vulkan/caps.h"
+#include "vulkan/spv_variants.h"
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
 
 static int g_fail;
 #define EXPECT(c, ...) do { if (!(c)) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); g_fail++; } } while (0)
@@ -69,7 +71,27 @@ static bool has_ext(const uint32_t *w, size_t nw, const char *name) {
     return false;
 }
 
+
+/* order of the integer width conversions of a module: U = OpUConvert, S = OpSConvert, B = OpBitcast (a same-width air.convert) */
+static void conv_seq(const uint32_t *w, size_t nw, char *o, size_t cap) {
+    size_t n = 0;
+    for (size_t i = 5; i < nw && n + 1 < cap;) { uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu; if (!wc) break; if (op == 113u) o[n++] = 'U'; else if (op == 114u) o[n++] = 'S'; else if (op == 124u) o[n++] = 'B'; i += wc; }
+    o[n] = 0;
+}
+/* spirv-val (vulkan1.3) when the tool is installed: 1 = accepted, 0 = not available, -1 = rejected */
+static int spirv_val(const uint32_t *w, size_t nw) {
+    if (system("command -v spirv-val >/dev/null 2>&1") != 0) return 0;
+    char path[] = "/tmp/lagfx_specaudit_XXXXXX";
+    int fd = mkstemp(path); if (fd < 0) return 0;
+    FILE *f = fdopen(fd, "wb"); if (!f) return 0;
+    fwrite(w, 4, nw, f); fclose(f);
+    char cmd[300]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.3 %s >/dev/null 2>&1", path);
+    int rc = system(cmd); unlink(path);
+    return rc == 0 ? 1 : -1;
+}
+
 int main(void) {
+    unsetenv("LAGFX_SPV_NANMAX");   /* the default translation must not depend on the caller's environment */
     size_t nw;
     uint32_t *w = translate("spec_srem_fragment.air.bc", false, &nw);
     if (w) {
@@ -147,6 +169,55 @@ int main(void) {
             }
         }
         lagfx_air2spv_set_discard_demote(false);
+    }
+    /* S07 matrix (fixtures gen-convert-fixtures.sh, executed on lavapipe by air2spv-int-intrinsics-lavapipe): the extension follows the SOURCE signedness, same width = OpBitcast.
+     * Sequence = every width conversion of the module in order, including the zext / sext / trunc casts of the fixture (they are OpUConvert / OpSConvert too). */
+    {
+        static const struct { const char *fx; const char *seq; } k[] = {
+            /* a: s8<-s32 S, s32<-s8 S, u8<-u32 U, u32<-u8 U, s16<-s32 S, u32<-s16 S (old: U), u16<-u32 U, s32<-u16 U (old: S) */
+            { "rt_convert_a_fragment.air.bc", "SSUUSSUU" },
+            /* b: u32<-s32 B (old: U, invalid same width), sext S, s16<-s64 S, s32<-s16 S | zext U, s16<-u64 U (old: S), s32<-s16 S */
+            { "rt_convert_b_fragment.air.bc", "BSSSUUS" },
+            /* c: s16x2<-s32x2 S, u32x2<-s16x2 S (old: U), s32x2<-u16x2 U (old: S) */
+            { "rt_convert_c_fragment.air.bc", "SSU" },
+        };
+        for (size_t i = 0; i < sizeof k / sizeof k[0]; i++) {
+            w = translate(k[i].fx, false, &nw);
+            if (!w) continue;
+            char sq[64]; conv_seq(w, nw, sq, sizeof sq);
+            EXPECT(!strcmp(sq, k[i].seq), "%s: width-conversion sequence \"%s\", want \"%s\"", k[i].fx, sq, k[i].seq);
+            EXPECT(spirv_val(w, nw) >= 0, "%s: spirv-val rejects the module (an OpUConvert / OpSConvert of equal widths is invalid)", k[i].fx);
+            free(w);
+        }
+    }
+    /* D2: the NaN min / max candidate is OPT-IN. Default: FMin 37 / FMax 40 / FClamp 43 only; forced on: the same instructions as NMin 79 / NMax 80 / NClamp 81; the repro-ladder rewrite
+     * (lagfx_spv_variant_nanmax) of the DEFAULT module is byte-identical to the forced-on translation; the default stays byte-identical whatever was done before */
+    {
+        static const char *const fx[2] = { "rt_nanmax_a_fragment.air.bc", "rt_nanmax_b_fragment.air.bc" };
+        for (int f = 0; f < 2; f++) {
+            size_t n0, n1, n2, n3;
+            lagfx_air2spv_set_nanmax(-1); uint32_t *d0 = translate(fx[f], false, &n0);
+            lagfx_air2spv_set_nanmax(1);  uint32_t *on = translate(fx[f], false, &n1);
+            lagfx_air2spv_set_nanmax(0);  uint32_t *d1 = translate(fx[f], false, &n2);
+            lagfx_air2spv_set_nanmax(-1);
+            uint32_t *rw = NULL; size_t nr = 0; char info[200] = "";
+            int nch = d0 ? lagfx_spv_variant_nanmax(d0, n0, &rw, &nr, info, sizeof info) : -1;
+            n3 = nr;
+            if (d0 && on && d1) {
+                EXPECT(n0 == n2 && !memcmp(d0, d1, n0 * 4u), "%s: default translation changed after a forced-on one (not byte-identical)", fx[f]);
+                int ext_d = 0, ext_n = 0; (void)ext_d; (void)ext_n;
+                EXPECT(nch == 4, "%s: lagfx_spv_variant_nanmax changed %d, want 4 (%s)", fx[f], nch, info);
+                EXPECT(rw && n1 == n3 && !memcmp(on, rw, n1 * 4u), "%s: translator opt-in (LAGFX_SPV_NANMAX) and the SPIR-V rewrite variant differ", fx[f]);
+                EXPECT(n0 == n1 && memcmp(d0, on, n0 * 4u) != 0, "%s: forced-on translation equals the default (nothing switched)", fx[f]);
+                EXPECT(spirv_val(on, n1) >= 0, "%s: NMin/NMax/NClamp module rejected by spirv-val", fx[f]);
+                /* instruction numbers of the OpExtInst words that differ */
+                int d37 = 0, d40 = 0, d43 = 0, n79 = 0, n80 = 0, n81 = 0;
+                for (size_t i = 5; i < n0;) { uint32_t wc = d0[i] >> 16; if (!wc) break; if ((d0[i] & 0xffffu) == 12u) { uint32_t in0 = d0[i + 4], in1 = on[i + 4]; d37 += in0 == 37u; d40 += in0 == 40u; d43 += in0 == 43u; n79 += in1 == 79u; n80 += in1 == 80u; n81 += in1 == 81u; } i += wc; }
+                if (f == 0) EXPECT(d40 == 2 && d37 == 2 && n80 == 2 && n79 == 2 && d43 == 0, "%s: FMax %d FMin %d -> NMax %d NMin %d, want 2 / 2 -> 2 / 2", fx[f], d40, d37, n80, n79);
+                else EXPECT(d43 == 4 && n81 == 4 && d40 == 0 && d37 == 0, "%s: FClamp %d -> NClamp %d, want 4 (3 clamp + 1 saturate) -> 4", fx[f], d43, n81);
+            }
+            free(d0); free(on); free(d1); free(rw);
+        }
     }
     if (g_fail) { printf("air2spv-spec-audit-unit: %d failure(s)\n", g_fail); return 1; }
     printf("air2spv-spec-audit-unit: OK\n");
