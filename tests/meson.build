@@ -2453,3 +2453,14 @@ if fs.is_file(meson.current_source_dir() / 'spv-msfetch-unit.c')
   )
   test('spv msfetch rewrite (unit, spirv-val)', spv_msfetch_test)
 endif
+
+# Display gamma LUT application (gamma_apply.c): table build, channel order, env gate, end to end through the checksum selection; no Vulkan device.
+if fs.is_file(meson.current_source_dir() / 'gamma-apply-unit.c')
+  gamma_apply_test = executable('gamma-apply-unit',
+    'gamma-apply-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('gamma LUT application (unit)', gamma_apply_test)
+endif

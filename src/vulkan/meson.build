@@ -30,6 +30,7 @@ lagfx_sources += files(
   'composite.c',
   'iosurface.c',
   'display_blit.c',
+  'gamma_apply.c',
   'draw_record.c',
   'surface_writeback.c',
   'gpu_readback.c',

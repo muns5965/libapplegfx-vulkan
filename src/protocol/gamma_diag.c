@@ -1,5 +1,5 @@
 /*
- * libapplegfx-vulkan — gamma-descriptor diagnostics, stateful part. See gamma_diag.h. READ-ONLY: logging and counters; nothing is applied.
+ * libapplegfx-vulkan — gamma-descriptor diagnostics, stateful part. See gamma_diag.h. Logging and counters, and the accepted table; applying it is vulkan/gamma_apply.c (opt-in).
  *
  * Copyright © 2026 Matthew Jackson
  * SPDX-License-Identifier: MIT
@@ -289,12 +289,12 @@ static void gd_region_read(lagfx_protocol_t *p, const lagfx_gd_desc_t *d, lagfx_
         INC(s_st.read_done); INC(s_st.translate_ok);
         if (nmatch == 1u) { INC(s_st.sel_accepted); INC(s_st.sum_match); }
         else { INC(s_st.sum_mismatch); if (nmatch >= 2u) INC(s_st.sel_ambiguous); else INC(s_st.sel_no_match); }
-        gd_say("g7-pvg-gamma: region task=%u via=%s (owner=%d last 0x44 task=%u, %u task(s) tried) va=0x%llx len=0x%llx %s lut_decode[fits=%d sum=0x%08x expect=0x%08x match=%d ramp_maxdev=%.6f] (INFER: the descriptor's offset is a task virtual address; the checksum is the wrapping u32 sum of 3*count words, see gamma_diag.h; a read that succeeds in the wrong task does NOT match; never applied)",
+        gd_say("g7-pvg-gamma: region task=%u via=%s (owner=%d last 0x44 task=%u, %u task(s) tried) va=0x%llx len=0x%llx %s lut_decode[fits=%d sum=0x%08x expect=0x%08x match=%d ramp_maxdev=%.6f] (INFER: the descriptor's offset is a task virtual address; the checksum is the wrapping u32 sum of 3*count words, see gamma_diag.h; a read that succeeds in the wrong task does NOT match; applied only with LAGFX_GAMMA_APPLY=1)",
                shown->task, shown->via, have_owner ? (int)owner : -1, p->diag2.last44_global_task, tried, (unsigned long long)d->off, (unsigned long long)d->len, shown->line, (int)shown->l.fits, shown->l.sum, d->sum, (int)shown->l.sum_match, (double)shown->l.maxdev);
         /* the one selection line per attempt (<= GD_MAX_REGION_ATTEMPTS lines in total) */
         char selfld[40]; selfld[0] = 0;
         if (nmatch) snprintf(selfld, sizeof selfld, " %s=%u", nmatch == 1u ? "task" : "first_match", mtasks[0]);
-        gd_say("g7-pvg-gamma: gamma-select attempt=%llu result=%s%s (owner=%d preferred=%u) tried=%u readable=%u rejected[mismatch=%u nofit=%u unreadable=%u]:%s (selection only: nothing is applied)",
+        gd_say("g7-pvg-gamma: gamma-select attempt=%llu result=%s%s (owner=%d preferred=%u) tried=%u readable=%u rejected[mismatch=%u nofit=%u unreadable=%u]:%s (selection; the table is applied to the scanout bytes only with LAGFX_GAMMA_APPLY=1, see vulkan/gamma_apply.h)",
                (unsigned long long)att, nmatch == 1u ? "ACCEPTED" : nmatch >= 2u ? "AMBIGUOUS" : "NO_MATCH", selfld, have_owner ? (int)owner : -1, pref,
                tried, nread, nmis, nfit, nunr, rk ? rej : " none");
         if (nmatch >= 2u) { gd_say("g7-pvg-gamma: gamma-select AMBIGUOUS: %u tasks match the checksum (first %u, %u): not choosing", nmatch, mtasks[0], mtasks[1]); }

@@ -10,6 +10,7 @@
 #include "instance.h"
 #include "command.h"
 #include "common/log.h"
+#include "vulkan/gamma_apply.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -322,6 +323,9 @@ lagfx_status_t lagfx_vk_display_present_surface(
             result = LAGFX_ERR_BACKEND;
             goto cleanup;
         }
+        /* the accepted op 0x08 gamma table (LAGFX_GAMMA_APPLY=1 only; a no-op otherwise): applied to the 8-bit scanout bytes, never to the Vulkan image */
+        if (display_rt->format == VK_FORMAT_B8G8R8A8_UNORM || display_rt->format == VK_FORMAT_R8G8B8A8_UNORM || display_rt->format == VK_FORMAT_B8G8R8A8_SRGB || display_rt->format == VK_FORMAT_R8G8B8A8_SRGB)
+            (void)lagfx_gamma_apply_present((uint8_t *)mapped, (size_t)display_width * (size_t)display_height, display_rt->format == VK_FORMAT_B8G8R8A8_UNORM || display_rt->format == VK_FORMAT_B8G8R8A8_SRGB);
         if (!write_memory(shell_opaque, scanout_gpa, (uint64_t)rt_bytes,
                           mapped)) {
             LAGFX_WARN("display_blit: DMA writeback to gpa=0x%llx "
