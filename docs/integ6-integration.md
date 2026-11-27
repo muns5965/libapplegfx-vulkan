@@ -74,3 +74,9 @@ Nothing new. Every item above was verified on lavapipe / offline only; nothing i
 - No device verification of any of: QCOM tile shading, cubic filtering, GPU readback, SSA, NaN-max, MSAA, addrfix/xlate guard behaviour on a real guest, gapdiag/gamma output on a real run.
 - `LRD_*` mask is now 64 bit; any out-of-tree consumer of `lagfx_spv_reduce_t.bits` as `uint32_t` must be widened.
 - The xlate-guard statistics are a separate `g7-gpu-xlate` line (not part of the diag.c stats line).
+
+## Final tip, full meson (release)
+
+| step | OK / Fail / Skip | tests |
+|------|------------------|-------|
+| tip after the UBSan guards and this document | 160 / 0 / 1 | 161 |
