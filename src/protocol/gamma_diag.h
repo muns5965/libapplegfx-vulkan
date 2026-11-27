@@ -141,6 +141,14 @@ typedef struct {
     uint64_t applied_ok;             /* gamma applied to rendering: ALWAYS 0, nothing applies a table */
     uint64_t sum_match, sum_mismatch;/* diagnostic decode of a region that read OK: checksum equals the descriptor's / does not (region reads and lut-probes) */
     uint64_t descs_seen, desc_changes;
+    /* address-space selection (g7-gamma-select); per region-read attempt that had at least one readable task. read_done / sum_match / sum_mismatch keep their meaning:
+     * read_done = attempts where some task read OK, sum_match = attempts that ended with an accepted table, sum_mismatch = attempts with a decodable read but no accepted table. */
+    uint64_t sel_accepted;           /* attempts that selected exactly one task whose read decodes AND matches the descriptor's checksum */
+    uint64_t sel_ambiguous;          /* attempts where two or more non-preferred tasks matched: nothing selected */
+    uint64_t sel_no_match;           /* attempts with a readable task but no match at all */
+    uint64_t sel_rejected_mismatch;  /* task reads rejected: decoded but checksum differs (summed over attempts) */
+    uint64_t sel_rejected_nofit;     /* task reads rejected: len cannot hold 3 * count words / bad count */
+    uint64_t sel_rejected_unreadable;/* task reads that failed (unmapped / phys fail / no task) while selecting */
 } lagfx_gd_stats_t;
 void lagfx_gd_stats_get(lagfx_gd_stats_t *s);
 /* " translate_ok=.. unmapped=.. phys_read_fail=.. descriptor_parse_fail=.. applied_ok=0 sum_match=.. sum_mismatch=.." (leading space, no brackets), appended inside gamma[...]. */
@@ -149,6 +157,25 @@ size_t lagfx_gd_stats_suffix(char *out, size_t cap);
 /* Every channel-4 op 0x08 (its 1-based index among them is counted here: descs_seen, equal to display_diag.c's ch4 count in production). pl/plen = the command payload after the 12-byte header, skip = barrier bytes (arg8 * 8). `reader` / `owner` are the
  * display_diag.c registrations (the region read keeps their order: owner of the mapping, last 0x44, scan). */
 void lagfx_gd_note_op8(lagfx_protocol_t *p, uint32_t chan, const uint8_t *pl, uint32_t plen, uint32_t skip, lagfx_dd_reader_t reader, lagfx_dd_owner_t owner);
+
+/* ---- selected LUT result (g7-gamma-select): the validated outcome of the address-space selection, for a LATER display path. NOTHING here applies a gamma table. ----
+ * state ACCEPTED: `task` read the descriptor's region at `va` and the 3 * count float32 words in it have the wrapping u32 sum `sum` == the descriptor's sum (checksum-validated [V host
+ * test]). A matching checksum proves the content, NOT that the plane order / float layout is what a display path expects [I]. AMBIGUOUS: >= 2 tasks matched, tasks[] lists them, no
+ * data is offered. NONE: no readable task matched yet (or no attempt). The record is one-shot like the region read: it is not replaced once accepted. */
+typedef enum { LAGFX_GD_SEL_NONE = 0, LAGFX_GD_SEL_ACCEPTED = 1, LAGFX_GD_SEL_AMBIGUOUS = 2 } lagfx_gd_sel_state_t;
+typedef struct {
+    lagfx_gd_sel_state_t state;
+    uint32_t task;            /* ACCEPTED: the task that matched */
+    bool preferred;           /* ACCEPTED: it was the preferred (owner, else last 0x44) task, i.e. no fallback was needed */
+    uint32_t count, sum;      /* the descriptor's count and checksum it was validated against */
+    uint64_t va, len;         /* descriptor off / len */
+    uint32_t nwords;          /* 3 * count: bytes valid in the copy = 4 * nwords */
+    uint32_t ntasks, tasks[4];/* AMBIGUOUS: first matching tasks (ntasks may exceed 4; only 4 are kept) */
+    uint32_t attempt;         /* region-read attempt number that produced this record */
+} lagfx_gd_select_t;
+/* Copies the current selection into *o. When state is ACCEPTED and `copy` != NULL, copies min(cap, 4 * nwords) bytes of the validated table into it and returns the byte count
+ * copied (4 * nwords when cap suffices; a short copy means cap was too small: do not use it). Returns 0 otherwise. Thread-safe against lagfx_gd_note_op8. */
+size_t lagfx_gd_select_get(lagfx_gd_select_t *o, uint8_t *copy, size_t cap);
 void lagfx_gd_test_reset(void);   /* tests only: zero the counters and the one-shot state */
 
 #endif
