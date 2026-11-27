@@ -539,6 +539,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .runtimeDescriptorArray                     = have_descriptor_indexing     ? VK_TRUE : VK_FALSE,
         .shaderSampledImageArrayNonUniformIndexing  = have_descriptor_indexing     ? VK_TRUE : VK_FALSE,
         .bufferDeviceAddress                        = have_buffer_device_address   ? VK_TRUE : VK_FALSE,
+        .samplerMirrorClampToEdge                   = probe12.samplerMirrorClampToEdge ? VK_TRUE : VK_FALSE,   /* MTLSamplerAddressModeMirrorClampToEdge */
         .pNext                                      = &feat11,
     };
     /* shaderInt64: our AIR→SPIR-V translator emits OpCapability Int64
@@ -636,6 +637,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT ro_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT, .rasterizationOrderColorAttachmentAccess = VK_TRUE };
     feat2.features.samplerAnisotropy = probe2.features.samplerAnisotropy ? VK_TRUE : VK_FALSE;   /* sampler anisotropy (Metal maxAnisotropy) */
     s->have_sampler_anisotropy = feat2.features.samplerAnisotropy == VK_TRUE;
+    s->have_sampler_mirror_clamp = feat12.samplerMirrorClampToEdge == VK_TRUE;
     /* Shader stores: storage-image writes without a format (texture2d<T, access::write>) and buffer/image writes from the fragment and vertex stages. */
     feat2.features.shaderStorageImageWriteWithoutFormat = probe2.features.shaderStorageImageWriteWithoutFormat ? VK_TRUE : VK_FALSE;
     feat2.features.fragmentStoresAndAtomics = probe2.features.fragmentStoresAndAtomics ? VK_TRUE : VK_FALSE;

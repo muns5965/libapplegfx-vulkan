@@ -70,6 +70,7 @@ lagfx_sampler_state_t lagfx_sampler_state_from_constexpr(const lagfx_constexpr_s
                 s.unnormalized = true; s.lod_min = 0.0f; s.lod_max = 0.0f;
                 s.mip_mode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
                 s.addr_w = s.addr_u;
+                s.mag_filter = s.min_filter;   /* Vulkan: the two filters must be equal (the minification one is kept: INFER, as arm64_sampler.c) */
             }
         }
     }

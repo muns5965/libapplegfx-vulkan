@@ -1782,6 +1782,20 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-texture-sample-lavapipe.c') 
     workdir : meson.current_source_dir() / '..')
 endif
 
+# Sampler state + texture3d on a Vulkan 1.3 device (lavapipe), compared with an independent CPU reference: constexpr samplers (normalized + pixel coordinates), runtime sampler
+# descriptors (address modes, filters, unnormalized), Dim3D images. Skips (77) without a device. Fixtures: tests/fixtures/gen-sampler-fixtures.sh.
+if fs.is_file(meson.current_source_dir() / 'air2spv-sampler-lavapipe.c') and vulkan_dep.found()
+  air2spv_smp_vk_test = executable('air2spv-sampler-lavapipe',
+    'air2spv-sampler-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, meson.get_compiler('c').find_library('m', required : false)],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],
+    build_by_default : true,
+  )
+  test('air2spv sampler state + texture3d on lavapipe', air2spv_smp_vk_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # OpUndef usage report + fail-closed translation (fixtures undefctl_fragment / i1const_fragment).
 if fs.is_file(meson.current_source_dir() / 'air2spv-undef-report-unit.c')
   air2spv_undef_test = executable('air2spv-undef-report-unit',

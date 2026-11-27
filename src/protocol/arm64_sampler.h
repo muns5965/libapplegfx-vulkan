@@ -33,11 +33,15 @@ enum {
     LAGFX_A64_SAMP_UNNORM_APPLIED     = 4u,   /* unnormalized coordinates: mapped with Vulkan's restrictions (equal filters, no mips, clamp addressing, no anisotropy) */
     LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX = 8u,  /* mirror clamp to edge was mapped to mirror repeat */
     LAGFX_A64_SAMP_ANISO_APPLIED      = 16u,
+    LAGFX_A64_SAMP_LODAVG_IGNORED     = 32u,  /* lodAverage (state bit 4) was set: not mapped */
 };
 
 /* d = the first n >= 20 bytes of the payload (a record that ends before the LOD clamps gets the descriptor defaults 0 / FLT_MAX). Pure: no Vulkan calls.
  * have_aniso / max_aniso describe the device (samplerAnisotropy enabled, limits.maxSamplerAnisotropy). Returns LAGFX_A64_SAMP_* flags. */
 uint32_t lagfx_a64_sampler_decode(const uint8_t *d, uint32_t n, bool have_aniso, float max_aniso, VkSamplerCreateInfo *ci);
+/* The same with have_mirror_clamp = the device enables samplerMirrorClampToEdge (Vulkan 1.2): MTLSamplerAddressModeMirrorClampToEdge then maps to
+ * VK_SAMPLER_ADDRESS_MODE_MIRROR_CLAMP_TO_EDGE exactly (no LAGFX_A64_SAMP_MIRROR_CLAMP_APPROX); without it, mirrored repeat as before. */
+uint32_t lagfx_a64_sampler_decode_ex(const uint8_t *d, uint32_t n, bool have_aniso, float max_aniso, bool have_mirror_clamp, VkSamplerCreateInfo *ci);
 #endif
 
 #endif
