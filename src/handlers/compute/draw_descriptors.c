@@ -45,7 +45,7 @@ typedef int lagfx_draw_descriptors_not_empty_t;
 VkDescriptorSet lagfx_build_draw_descriptor_set(
         lagfx_protocol_t *p, lagfx_task_entry_t *task,
         struct lagfx_vk_state *vk, VkDescriptorSetLayout dsl,
-        const uint8_t *binding_no, const uint8_t *binding_kind, uint32_t n,
+        const uint8_t *binding_no, const uint8_t *binding_kind, const uint64_t *cxs_raw, uint32_t n,
         VkBuffer *out_bufs, VkDeviceMemory *out_mems, uint32_t *out_n) {
     *out_n = 0;
     if (!vk || vk->draw_desc_pool == VK_NULL_HANDLE
@@ -330,10 +330,20 @@ VkDescriptorSet lagfx_build_draw_descriptor_set(
                 *out_n = 0;
                 return VK_NULL_HANDLE;
             }
+            /* A constexpr sampler of the shader: its own state (normalized VkSampler; a pixel sampler's coordinates are divided by the image size in the
+             * shader). The pixel-texcoord heuristic below is for samplers whose state the translator could not name. */
+            VkSampler cxs_s = VK_NULL_HANDLE;
+            if (cxs_raw && cxs_raw[i]) {
+                lagfx_constexpr_sampler_t cs;
+                if (lagfx_constexpr_sampler_decode(cxs_raw[i], &cs)) {
+                    lagfx_sampler_state_t sst = lagfx_sampler_state_from_constexpr_norm(&cs);
+                    cxs_s = lagfx_sampler_cache_get(&vk->sampler_cache, &sst);
+                }
+            }
             /* GOAL-M2x: pixel-space texcoords (Metal coord::pixel) need the
              * unnormalized sampler — the normalized one clamp-smears atlases. */
             iinfos[nw] = (VkDescriptorImageInfo){
-                .sampler = (task->pending_draw.pixel_texcoords
+                .sampler = cxs_s ? cxs_s : (task->pending_draw.pixel_texcoords
                             && vk->unnorm_sampler != VK_NULL_HANDLE)
                                ? vk->unnorm_sampler : vk->default_sampler };
             writes[nw] = (VkWriteDescriptorSet){

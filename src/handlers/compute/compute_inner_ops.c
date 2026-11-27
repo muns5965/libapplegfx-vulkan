@@ -54,6 +54,7 @@
 #include "vulkan/draw_record.h"
 #include "vulkan/descriptor_layout.h"
 #include "air2spv/spv_reflect.h"
+#include "air2spv/constexpr_sampler.h"
 #include "air/bitcode_reader.h"
 #include "air2spv/translate.h"
 #include "air2spirv/metallib_extract.h"
@@ -1559,6 +1560,13 @@ static int op_set_render_pipeline_state(lagfx_protocol_t *p,
                         for (size_t u = 0; u < nrb; u++) {
                             task->pending_pipeline.spv_binding_no[u]   = (uint8_t)rb[u].binding;
                             task->pending_pipeline.spv_binding_kind[u] = (uint8_t)rb[u].kind;
+                            task->pending_pipeline.spv_cxs_raw[u]      = 0;
+                            for (int s = 0; s < 2; s++) {   /* a constexpr sampler of either stage: its decoded word (translator OpName) */
+                                lagfx_spv_cxs_t cx[LAGFX_CONSTEXPR_SAMPLER_MAX];
+                                size_t ncx = spv_keep[s] ? lagfx_spv_reflect_constexpr_samplers(spv_keep[s], spv_keep_sz[s], cx, LAGFX_CONSTEXPR_SAMPLER_MAX) : 0;
+                                for (size_t q = 0; q < ncx && q < LAGFX_CONSTEXPR_SAMPLER_MAX; q++)
+                                    if (rb[u].kind == LAGFX_SPV_BINDING_SAMPLER && cx[q].binding == rb[u].binding) task->pending_pipeline.spv_cxs_raw[u] = cx[q].raw;
+                            }
                             /* Attach the Metal resource index: the translator
                              * numbers each stage's resources sequentially from
                              * 0 (fragment offset by FRAG_BINDING_BASE under

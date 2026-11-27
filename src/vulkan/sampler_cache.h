@@ -47,9 +47,9 @@ typedef struct {
  * no compare, normalized coordinates. */
 lagfx_sampler_state_t lagfx_sampler_state_default(void);
 
-/* State for a constexpr sampler: the default with the fields that are
- * evidenced in the AIR encoding applied (currently only the LOD clamps;
- * see constexpr_sampler.h). An invalid/NULL decode yields the default. */
+/* State for a constexpr sampler: address modes, filters, mip filter, LOD clamps, anisotropy from the decoded word (field meaning INFER, see constexpr_sampler.h);
+ * bicubic and the compare function are not mapped. A pixel (unnormalized) word becomes an unnormalized VkSampler only when Vulkan's restrictions hold (kept for
+ * callers that sample with explicit LOD 0); the translator-wired path uses lagfx_sampler_state_from_constexpr_norm instead. An invalid/NULL decode yields the default. */
 lagfx_sampler_state_t lagfx_sampler_state_from_constexpr(const lagfx_constexpr_sampler_t *cs);
 
 /* The host sampler of a constexpr sampler whose coordinates the SHADER converts (the translator divides the texel coordinates of a pixel / unnormalized constexpr

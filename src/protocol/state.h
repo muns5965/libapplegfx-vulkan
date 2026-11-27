@@ -228,6 +228,7 @@ typedef struct {
      * translator's LAGFX_MAX_VERTEX_ARGS raise to 32. */
     uint8_t    spv_binding_no[32];
     uint8_t    spv_binding_kind[32];
+    uint64_t   spv_cxs_raw[32];       /* sampler bindings that are a constexpr sampler of the shader: the raw AIR sampler word (0 = none); the draw binds the VkSampler decoded from it */
     /* Metal resource index per reflected binding (from the AIR arg metadata's
      * air.location_index — lagfx_air_arg_bindings). THE authoritative
      * binding→guest-slot map: e.g. UberCompositeVertex's mvp_matrix is
