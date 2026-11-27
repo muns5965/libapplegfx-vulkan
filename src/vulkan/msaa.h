@@ -69,4 +69,34 @@ bool lagfx_msaa_color_attachment(const lagfx_msaa_target_t *t, VkAttachmentLoadO
  * mirror (B8G8R8A8_UNORM and R16G16B16A16_SFLOAT as colour attachments; the smaller of the two maxima), never below 1. *clamped |= the value changed. */
 uint32_t lagfx_msaa_devinfo_max(const lagfx_fmtcap_backend_t *be, uint32_t advertised, bool *clamped);
 
+
+/* ---- guest-visible textures (src/protocol/arm64_msaa.c) ---------------------------------------------------------------------------------------------------------------- */
+
+typedef struct {
+    VkSampleCountFlagBits samples;   /* granted: >= 1 */
+    uint32_t requested;              /* what the guest descriptor said (0 treated as 1) */
+    VkImageUsageFlags usage;         /* the mask the image may be created with (checked as ONE mask for the granted count) */
+    VkImageUsageFlags dropped;       /* optional usages that had to go */
+    bool clamped;                    /* samples > 1 but below the request (largest supported power of two <= request) */
+    bool fallback_1x;                /* request > 1 and the granted count is 1: the explicit downgrade (the caller counts it, never silent) */
+} lagfx_msaa_plan_t;
+
+/* Decide the sample count and usage mask of a 2D optimal image {fmt, w x h}. required must be granted at every count (COLOR_ATTACHMENT or DEPTH_STENCIL_ATTACHMENT); optional_ms is
+ * asked for with a count > 1 (SAMPLED, INPUT_ATTACHMENT: transfers are NOT offered, copies of a multisampled image need equal counts on both sides and no buffer copy exists),
+ * optional_1x only when the count falls back to 1 (add the transfers there). The mask is checked as a whole with vkGetPhysicalDeviceImageFormatProperties2 (through `be`) for the
+ * granted count and extent; the next lower count is tried when it is refused. Returns LAGFX_MSAA_OK, or LAGFX_MSAA_NO_FORMAT when not even a single-sample image can be made
+ * with `required`. requested <= 1 gives samples = 1 without clamped / fallback_1x. */
+int lagfx_msaa_plan(const lagfx_fmtcap_backend_t *be, VkFormat fmt, uint32_t w, uint32_t h, uint32_t requested, VkImageUsageFlags required, VkImageUsageFlags optional_ms,
+                    VkImageUsageFlags optional_1x, lagfx_msaa_plan_t *out);
+
+/* A device-local 2D image of `samples` (any aspect of the format) with `usage`, memory bound, optional whole-image view (NULL = none). false on any Vulkan failure (nothing leaks). */
+bool lagfx_msaa_image_create(struct lagfx_vk_state *vk, VkFormat fmt, uint32_t w, uint32_t h, VkSampleCountFlagBits samples, VkImageUsageFlags usage, VkImageAspectFlags aspect,
+                             VkImage *img, VkDeviceMemory *mem, VkImageView *view);
+
+/* Resolve a multisampled colour image into a single-sample image of the same format and extent with vkCmdResolveImage (the outside-the-pass path: a resolve wanted after
+ * the pass, and the reference the dynamic-rendering resolve is compared with in tests). Both images must be in the given layouts (TRANSFER_SRC_OPTIMAL / TRANSFER_DST_OPTIMAL or
+ * GENERAL) and have the transfer usages. Float / normalized formats are averaged; for an integer format the Vulkan spec makes the chosen sample implementation defined here,
+ * whereas the attachment path (lagfx_msaa_resolve_mode) pins SAMPLE_ZERO: use the attachment path when the choice matters. */
+bool lagfx_msaa_cmd_resolve_image(VkCommandBuffer cb, VkFormat fmt, VkImage ms, VkImageLayout ms_layout, VkImage dst, VkImageLayout dst_layout, uint32_t w, uint32_t h);
+
 #endif

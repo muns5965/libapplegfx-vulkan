@@ -16,6 +16,7 @@
 #include "arm64_exec_decode.h"
 #include "handlers/compute/task_translate.h"
 #include "object_resolver.h"
+#include "../air2spv/msaa_air_scan.h"
 #include "../common/log.h"
 
 #include <stdio.h>
@@ -316,6 +317,16 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                 fprintf(stderr, "%s\n", fl);
                 LAGFX_LOG("%s", fl);
             }
+        }
+        lagfx_air_msaa_totals_t at;   /* process-wide AIR scan (translator): multisample reads / sample builtins seen in translated modules, never translated */
+        lagfx_air2spv_msaa_totals(&at);
+        lagfx_msaa_stats_t ms = X->msaa;
+        ms.air_ms_ops = at.ms_ops, ms.air_sample_builtins = at.sample_builtins;
+        if (lagfx_msaa_stats_any(&ms)) {   /* multisample path: one line, every refusal / downgrade counted (src/vulkan/msaa_stats.h) */
+            char ml[1024];
+            lagfx_msaa_stats_line(&ms, ml, sizeof ml);
+            fprintf(stderr, "%s\n", ml);
+            LAGFX_LOG("%s", ml);
         }
     }
     if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */

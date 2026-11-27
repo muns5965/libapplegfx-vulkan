@@ -14,6 +14,7 @@
  */
 
 #include "translate.h"
+#include "msaa_air_scan.h"
 #include <string.h>
 #include "emit_position.h"
 #include "emit_render_target.h"
@@ -369,6 +370,7 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
 
     lagfx_translate_stage_t stage = discover_stage(m);
     int rc = -1;
+    lagfx_air2spv_msaa_scan(m, NULL);   /* counts AIR multisample reads / sample builtins (not translated: spelling unverified, see msaa_air_scan.h) */
 
     /* Per-function body translation is the default path for modules with a
      * non-prototype function; the legacy reference emitters remain the

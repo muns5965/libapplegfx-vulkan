@@ -17,6 +17,7 @@ lagfx_sources += files(
   'arm64_objects.c',      # ARM64 per-task (task, ref) object table
   'arm64_pipeline.c',     # ARM64 pipeline-state resolver (serialized pipeline -> SPIR-V, layouts)
   'arm64_tile.c',         # ARM64 tile shaders: tag 0x33 tile pipelines, tile binds, compute dispatch between two halves of a render pass
+  'arm64_msaa.c',         # ARM64 multisample path: texture gate, attachment resolve, deferred store actions (src/vulkan/msaa.c does the Vulkan part)
   'arm64_depth_stencil.c', # ARM64 depth/stencil state object (tag 4) decoder
   'arm64_capture_load.c', # ARM64 render replay capture: loader (no Vulkan)
   'arm64_capture.c',      # ARM64 render replay capture: writer (LAGFX_ARM64_DUMP_DATA=1)

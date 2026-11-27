@@ -634,9 +634,10 @@ static void test_msaa_texture_refused(void) {
     assert(q->diag2.exec.fmt.msaa_refused == 0 && q->diag2.exec.run.draws == 1);
     lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
     g_res_tex2 = false;
-    puts("PASS: a guest texture descriptor with samples > 1 is refused with a dedicated counter (the Vulkan MSAA machinery is not wired to the PVG field: see src/vulkan/msaa.h); 1 sample is accepted");
+    puts("PASS: a guest texture descriptor with samples > 1 is refused with a dedicated counter (a sample count on a non-multisample texture type is not a texture Metal can create; the real multisample path is tested in arm64-msaa-guest-unit.c); 1 sample is accepted");
 }
 
+#ifndef LAGFX_COMPAT_NO_MAIN   /* arm64-msaa-guest-unit.c includes this file as its harness and has its own main */
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -661,6 +662,7 @@ int main(void) {
     free(g_mem);
     return 0;
 }
+#endif /* LAGFX_COMPAT_NO_MAIN */
 #else
 int main(void) { puts("SKIP: built without Vulkan"); return 77; }
 #endif

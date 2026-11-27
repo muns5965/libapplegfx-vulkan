@@ -2228,3 +2228,24 @@ if fs.is_file(meson.current_source_dir() / 'gap-diag-unit.c')
   )
   test('idle-gap diagnostics (unit)', gap_diag_unit_test)
 endif
+
+# MSAA coverage against a CPU reference (BGRA8 + RGBA16F, 2x/4x where reported), per-sample texel fetch, resolve by store action and by vkCmdResolveImage, injected-caps plan, validation negative control.
+msaa_cov_test = executable('vulkan-msaa-coverage-unit',
+  'vulkan-msaa-coverage-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('vulkan msaa coverage vs CPU reference (lavapipe + validation)', msaa_cov_test, env : ['LAGFX_VK_VALIDATION=1'])
+
+# ARM64 exec guest-visible MSAA path (texture sample count, store actions, resolve texture, counted refusals, 1x fallback). Includes the render-compat harness.
+if fs.is_file(meson.current_source_dir() / 'arm64-msaa-guest-unit.c') and vulkan_dep.found()
+  msaa_guest_test = executable('arm64-msaa-guest-unit',
+    'arm64-msaa-guest-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],   # integ6: the included render-compat harness (spec-audit validation baseline) reads tests/fixtures via SRCDIR
+    build_by_default : true,
+  )
+  test('arm64 msaa guest path (unit, lavapipe + validation)', msaa_guest_test, env : ['LAGFX_VK_VALIDATION=1'])
+endif
