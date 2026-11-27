@@ -92,6 +92,7 @@ struct lagfx_a64_obj {
     struct lagfx_a64_msurf *ms; uint32_t mapping;       /* type 11: the shared surface image (host_valid / guest_stale of the object live in ms); has_pages stays false */
     bool     linear; uint32_t lin_buf; uint64_t lin_off, lin_row;   /* type 8/9 over buffer ref lin_buf: bytes at lin_off, row pitch lin_row (see lin_xfer) */
     uint64_t wgen;                      /* buffer: bumped at every write the mirror knows of (guest upload, blit / fill / texture->buffer copy, linear push, shader-writable bind, tile kernel) */
+    uint64_t gw_epoch;                  /* buffer: exec epoch in which a GPU write to it was last RECORDED; while the exec is still recording, that write has not run yet, so the host mapping does not hold it (see lagfx_a64_res_gpu_pending) */
     uint64_t rd_epoch; bool gpu_dirty;  /* buffer: exec epoch of the last read from the guest's pages; written by the GPU (blit / push / shader / tile) since that read */
     VkImageView view3;                  /* sampled VK_IMAGE_VIEW_TYPE_3D view of a 3D texture (all mip levels); lazily made */
     VkImageView mview, aview;           /* sampled views of the whole mip chain: mview = 2D (layer 0), aview = 2D_ARRAY (all layers); lazily made, only for textures with mips > 1 / array shaders */
@@ -134,7 +135,7 @@ void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref);
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x);
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
-void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b);
+void lagfx_a64_res_buf_written(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b);
 VkImageView lagfx_a64_res_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* 2D textures only (a 3D one yields VK_NULL_HANDLE): 2D view of layer 0, ALL mip levels */
 /* The sampled view a shader's image dimensionality asks for (dim3: Dim3D; arr: Dim2D arrayed), and what of the texture it leaves out. *flags (may be NULL) gets:
  *   LAGFX_A64_SV_MIPS_DROPPED   the texture has mip levels the view does not cover (only when the whole-chain view could not be made: a counted fallback to level 0)
@@ -152,6 +153,13 @@ VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o)
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 /* A host-visible storage buffer (zeroed, persistently mapped) owned by the exec and freed with it, e.g. an aligned copy of a misaligned buffer range. */
 bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map);
+/* A write to buffer b was recorded into THIS exec's command buffer (blit fill / copy, linear push, texture->buffer copy, shader-writable bind, tile kernel): at record time
+ * the host mapping b->map still holds the bytes from before it, so a host copy of b would be stale. lagfx_a64_res_scratch_xfer is lagfx_a64_res_scratch for a buffer that is
+ * filled by lagfx_a64_res_gather_record: the GPU copies b[off, off + len) into dst[0, len) after every earlier recorded GPU write and before any later read. The recorder must be
+ * OUTSIDE a render pass. dst must come from lagfx_a64_res_scratch_xfer (or have been refreshed through this call before). */
+bool lagfx_a64_res_gpu_pending(lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *b);
+bool lagfx_a64_res_scratch_xfer(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map);
+bool lagfx_a64_res_gather_record(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, uint64_t off, uint64_t len, VkBuffer dst);
 /* ---- render replay capture support (arm64_capture.c, LAGFX_ARM64_DUMP_DATA=1 only: nothing here is called otherwise) ----
  * Snapshots are GPU copies recorded into the exec's command buffer (so they see what earlier execs and earlier passes of this exec rendered, never the stale CPU
  * mirror); the host reads them only after the fence signalled, from the finish hook. The recorder must be OUTSIDE a render pass (images are in GENERAL layout there). */

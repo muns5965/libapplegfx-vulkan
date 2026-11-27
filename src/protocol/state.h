@@ -589,6 +589,7 @@ typedef struct lagfx_protocol {
                 uint64_t ext_samp_compare, ext_samp_unnorm, ext_samp_mirror_clamp, ext_samp_lod_dropped, ext_samp_lod_binds;
                 uint64_t ext_samp_addr_unknown, ext_samp_mip_unknown;   /* sampler object creations (same event as sampler_cache.h rt_sampler_objs_*, not draws or guest requests) with an address field 6/7 / mip field 3, outside the public Metal enum range: mapped to the compat fallback */
                 uint64_t ext_gather_why[5]; /* ext_gather_failed by cause: 0 buffer without host map, 1 range > A64_GATHER_MAX, 2 gather copy count full (A64_GATHER_CACHE), 3 scratch allocation, 4 per-exec byte budget (A64_GATHER_BUDGET) */
+                uint64_t ext_gather_gpu, ext_gather_gpu_refreshed, ext_gather_host_stale, ext_gather_gpu_lost;   /* copies made by the GPU (a write to the buffer was recorded earlier in the exec) / cached copies refreshed in place / pending write but no GPU copy possible (multisampled pass): host copy, may be stale / pass could not be resumed after the copy (draw skipped) */
                 uint64_t ext_gather_bytes, ext_gather_reused; /* bytes copied by gathers / binds served from a covering copy at a nonzero offset */
                 uint64_t ext_gathered, ext_gather_failed, ext_range_clamped, ext_storage_img_unsupported, ext_vs_tex_binds, ext_unnorm_lod0, ext_unnorm_skipped, ext_wsb_skipped;
                 uint64_t ext_cxs_binds, ext_tex3d_binds, ext_tex_dim_mismatch;   /* constexpr-sampler descriptors bound from the decoded AIR word / Dim3D sampled-image descriptors bound / draws skipped because the texture's dimensionality is not the shader's (2D vs 3D) */
@@ -638,6 +639,7 @@ typedef struct lagfx_protocol {
                 uint64_t skip_rt_why[6];                                /* skip_rt by cause: 0 no such colour attachment, 1 format is neither R16G16B16A16_SFLOAT nor B8G8R8A8_UNORM, 2 no STORAGE usage, 3 no view / linear, 4 BGRA8: device lacks shaderStorageImageRead/WriteWithoutFormat, 5 BGRA8: format has no without-format storage access / not queryable (diagnostic: why an imageblock attachment was refused) */
                 uint64_t bgra8_dispatches, bgra8_variants, bgra8_variant_failed;   /* dispatches that ran with a B8G8R8A8 imageblock / kernel variants built for them / variant builds that failed (the dispatch is then skipped: skip_pipe_build) */
                 struct { uint32_t format, usage; uint8_t linear, valid; } skip_rt_first;   /* the first refused attachment: VkFormat, VkImageUsageFlags */
+                uint64_t gather_gpu;                                    /* of the gathered copies: made by the GPU because a write to the buffer was recorded earlier in the exec */
                 uint64_t gathered, gather_failed, unaligned_written;    /* read-only buffers bound through an aligned copy / copy impossible / unaligned buffers the kernel may write (skipped) */
 #define LAGFX_TILE_SEEN_MAX 8u
                 /* the first 8 distinct dispatch geometries and unaligned buffer binds (for the log) */

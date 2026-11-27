@@ -71,7 +71,7 @@ bool lagfx_a64_res_diagnose(lagfx_protocol_t *p, uint32_t task, uint32_t ref, la
 bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref) { (void)x; (void)ref; return false; }
 void lagfx_a64_res_sync_linear(lagfx_a64_rexec_t *x) { (void)x; }
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { (void)x; (void)o; return false; }
-void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { (void)b; }
+void lagfx_a64_res_buf_written(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b) { (void)x; (void)b; }
 static lagfx_a64_stats_t g_zero;
 const lagfx_a64_stats_t *lagfx_a64_res_stats(lagfx_protocol_t *p) { (void)p; return &g_zero; }
 void lagfx_a64_res_destroy(lagfx_protocol_t *p) { (void)p; }
@@ -788,6 +788,14 @@ struct lagfx_a64_rexec {
     void (*hook)(void *, bool); void *hook_ctx;
 };
 
+/* A GPU write to buffer b was recorded (or may happen) in this exec: new write generation, the guest pages are stale, and the host mapping is behind until the exec has run. */
+static void gpu_wrote(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b) {
+    if (!b) return;
+    b->wgen++, b->gpu_dirty = true;
+    if (x && x->m) b->gw_epoch = x->m->epoch;
+}
+
+
 static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x) { return x ? x->cb : VK_NULL_HANDLE; }
@@ -962,7 +970,7 @@ static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!o->linear) return true;
     lagfx_a64_obj_t *b = lin_backing(x->p, x->m, x->vk, x->t, o, true);
     bool ok = lin_xfer(x->cb, b, o, x->m, false);
-    if (ok) { b->host_valid = true; b->wgen++, b->gpu_dirty = true; o->lin_pulled = true, o->lin_seen = b->wgen; }   /* the pushing image is the buffer's new content; another image over it is now stale */
+    if (ok) { b->host_valid = true; gpu_wrote(x, b); o->lin_pulled = true, o->lin_seen = b->wgen; }   /* the pushing image is the buffer's new content; another image over it is now stale */
     return ok;
 }
 
@@ -1002,7 +1010,7 @@ static bool buf_tex_copy(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, lagfx_a64_obj
         .imageOffset = { (int32_t)bx->x, (int32_t)bx->y, (int32_t)bx->z }, .imageExtent = { (uint32_t)bx->w, (uint32_t)bx->h, (uint32_t)bx->d } };
     if (!to_tex && !lin_pull_x(x, t)) return false;   /* a linear texture is read: take the buffer's current bytes first */
     lagfx_translate_blit_cmd_buffer_image(x->cb, b->buf, t->img, &r, to_tex);
-    if (!to_tex) host_barrier(x->m, x->cb), b->wgen++, b->gpu_dirty = true;   /* image -> buffer: the host may read the buffer (flag 4 / gathers) after the fence */
+    if (!to_tex) host_barrier(x->m, x->cb), gpu_wrote(x, b);   /* image -> buffer: the host may read the buffer (flag 4 / gathers) after the fence */
     if (to_tex) lin_push_x(x, t);                       /* ... written: back into the buffer (and so the guest pages of the buffer) */
     return true;
 }
@@ -1031,7 +1039,7 @@ static bool blit_301(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (a == b && so < dof + n && dof < so + n) return false;   /* overlapping copy within one buffer */
     VkBufferCopy c = { so, dof, n };
     lagfx_translate_blit_cmd_buffer_buffer(x->cb, a->buf, b->buf, &c);
-    b->wgen++, b->gpu_dirty = true;
+    gpu_wrote(x, b);
     return true;
 }
 
@@ -1075,7 +1083,7 @@ static bool blit_306(lagfx_a64_rexec_t *x, const uint8_t *r) {
     if (a0 < a1) lagfx_translate_blit_cmd_fill_buffer(x->cb, b->buf, a0, a1 - a0, v);
     if (head) { VkBufferCopy c = { 0, loc, head }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
     if (tail) { VkBufferCopy c = { 0, a1, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
-    b->wgen++, b->gpu_dirty = true;   /* only after every fallible step succeeded */
+    gpu_wrote(x, b);   /* only after every fallible step succeeded */
     return true;
 }
 
@@ -1099,7 +1107,7 @@ static bool blit_319(lagfx_a64_rexec_t *x, const uint8_t *r) {
     }
     if (mid) vkCmdFillBuffer(x->cb, b->buf, loc, mid, pat);
     if (tail) { VkBufferCopy c = { 0, loc + mid, tail }; lagfx_translate_blit_cmd_buffer_buffer(x->cb, sb, b->buf, &c); }
-    b->wgen++, b->gpu_dirty = true;   /* only after every fallible step succeeded */
+    gpu_wrote(x, b);   /* only after every fallible step succeeded */
     return true;
 }
 
@@ -1158,6 +1166,28 @@ bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *bu
     if (!make_buf(x->vk, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &b, &m, &mp)) return false;
     x->tmp_b[x->ntmp] = b, x->tmp_m[x->ntmp] = m, x->ntmp++;
     *buf = b, *map = mp;
+    return true;
+}
+
+bool lagfx_a64_res_gpu_pending(lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *b) { return x && x->m && b && b->gw_epoch && b->gw_epoch == x->m->epoch; }
+
+/* Same slot pool as lagfx_a64_res_scratch; the buffer is also a transfer destination (filled by lagfx_a64_res_gather_record). *map (may be NULL) = its host mapping. */
+bool lagfx_a64_res_scratch_xfer(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map) {
+    if (!x || !size || x->ntmp >= MAX_TMP) return false;
+    VkBuffer b; VkDeviceMemory m; uint8_t *mp;
+    if (!make_buf(x->vk, size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &b, &m, &mp)) return false;
+    x->tmp_b[x->ntmp] = b, x->tmp_m[x->ntmp] = m, x->ntmp++;
+    *buf = b;
+    if (map) *map = mp;
+    return true;
+}
+
+bool lagfx_a64_res_gather_record(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b, uint64_t off, uint64_t len, VkBuffer dst) {
+    if (!x || !b || b->kind != LAGFX_A64_BUFFER || !b->buf || !dst || !len || off >= b->length || len > b->length - off) return false;
+    barrier(x->cb);   /* every earlier GPU write of this exec (fills, copies, shader / tile writes) -> this copy; also orders it after earlier readers of dst when it is refreshed in place */
+    VkBufferCopy r = { off, 0, len };
+    vkCmdCopyBuffer(x->cb, b->buf, dst, 1, &r);
+    barrier(x->cb);   /* the copy -> the later shader reads of dst */
     return true;
 }
 
@@ -1832,7 +1862,7 @@ bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) 
 }
 
 /* ---- linear texture sampling support (see arm64_resources.h) ---- */
-void lagfx_a64_res_buf_written(lagfx_a64_obj_t *b) { if (b) b->wgen++, b->gpu_dirty = true; }
+void lagfx_a64_res_buf_written(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b) { gpu_wrote(x, b); }
 
 bool lagfx_a64_res_linear_fresh(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!x || !o) return false;

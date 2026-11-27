@@ -663,20 +663,45 @@ static bool descriptor_pool(a64_run_t *r) {
     return true;
 }
 
+static void tile_suspend(void *c);
+static bool tile_resume(void *c);
 /* A storage-buffer range that starts at an offset the device cannot bind (not a multiple of minStorageBufferOffsetAlignment): the bytes [off, off + range) of the
  * mirror buffer are copied (host side, at record time) into an exec-owned scratch buffer and that is bound at offset 0. Reference: the independent pvg-vulkan
- * runtime does the same ("gather") for guest binds that are not zero-copyable. Limits: the copy is a snapshot of the mirror at this draw (GPU writes of the same
- * exec to that buffer, e.g. by an earlier blit, or writes by the shader itself, are not seen / not written back), and ranges above A64_GATHER_MAX are refused.
+ * runtime does the same ("gather") for guest binds that are not zero-copyable. Limits: the copy is a snapshot taken at this draw: GPU writes recorded earlier in the
+ * same exec (blit, texture copy, shader / tile writes) are included (the copy is then made by the GPU), writes by the draw's own shaders are not written back, and ranges above A64_GATHER_MAX are refused.
  * One copy per (buffer generation, write generation wgen, offset) and exec: a write the mirror recorded since the copy (wgen moved) makes the copy stale, so it is not reused; a later bind whose range lies inside an earlier copy at an alignment-multiple distance reuses it (*doff). NULL = not possible (the draw is skipped, counted as desc_unaligned). */
+/* Records the copy of b[off, off + len) into dst on the GPU, after every GPU write recorded so far in this exec. A copy cannot be recorded inside a dynamic-rendering instance:
+ * the open pass is ended and begun again (LOAD ops, the way a tile dispatch does it). 1 = done, 0 = not possible here (multisampled pass; nothing recorded), -1 = recorded but the pass
+ * could not be resumed (the draw must be skipped). */
+static int gather_gpu(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t len, VkBuffer dst) {
+    const bool was = r->rendering;
+    if (was && r->ms.samples > 1u) return 0;
+    if (was) tile_suspend(r);
+    bool ok = lagfx_a64_res_gather_record(r->x, b, off, len, dst);
+    if (was && !tile_resume(r)) { CNT(p).ext_gather_gpu_lost++; return -1; }
+    return ok ? 1 : 0;
+}
+
 static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *b, uint64_t off, uint64_t range, VkDeviceSize *doff) {
     *doff = 0;
     if (!b->map) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[0]++; return VK_NULL_HANDLE; }
     if (range > A64_GATHER_MAX) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[1]++; return VK_NULL_HANDLE; }   /* range = the whole rest of the buffer, not what the shader reads */
+    /* A GPU write to b recorded earlier in this exec has not run yet: the host mapping does not hold it, so the bytes are taken by a GPU copy ordered after it. */
+    const bool pend = lagfx_a64_res_gpu_pending(r->x, b);
     /* An existing copy of the same buffer generation that starts at c->off <= off and covers [off, off + range) serves this bind too when the distance is a multiple of
-     * the device alignment: bind it at that offset (the same bytes, the same snapshot, the same descriptor range). Equal (off, range) is the distance 0 case. */
+     * the device alignment: bind it at that offset (the same bytes, the same snapshot, the same descriptor range). Equal (off, range) is the distance 0 case. A copy older than the
+     * buffer's last write (wgen) is refreshed in place by the GPU while that write is still pending (the earlier draws that read it run before the refresh), otherwise not reused. */
     for (uint32_t i = 0; i < r->ngc; i++) {
-        const __typeof__(r->gc[0]) *c = &r->gc[i];
-        if (c->gen != b->gen || c->wgen != b->wgen || c->off > off || off + range > c->off + c->range || (off - c->off) % r->min_sb_align) continue;
+        __typeof__(r->gc[0]) *c = &r->gc[i];
+        if (c->gen != b->gen || c->off > off || off + range > c->off + c->range || (off - c->off) % r->min_sb_align) continue;
+        if (c->wgen != b->wgen) {
+            if (!pend) continue;
+            int g = gather_gpu(r, p, b, c->off, c->range, c->buf);
+            if (g < 0) { CNT(p).ext_gather_failed++; return VK_NULL_HANDLE; }
+            if (!g) continue;
+            c->wgen = b->wgen;
+            CNT(p).ext_gather_gpu_refreshed++;
+        }
         *doff = off - c->off;
         if (*doff) CNT(p).ext_gather_reused++;
         return c->buf;
@@ -684,8 +709,14 @@ static VkBuffer gather_copy(a64_run_t *r, lagfx_protocol_t *p, lagfx_a64_obj_t *
     VkBuffer sb; uint8_t *mp;
     if (r->ngc >= r->gc_cap) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[2]++; return VK_NULL_HANDLE; }   /* A64_GATHER_CACHE distinct copies per exec */
     if (range > r->gc_budget - r->gc_bytes) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[4]++; return VK_NULL_HANDLE; }   /* total bytes of this exec's copies would exceed A64_GATHER_BUDGET */
-    if (!lagfx_a64_res_scratch(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
-    memcpy(mp, b->map + off, (size_t)range);
+    if (!lagfx_a64_res_scratch_xfer(r->x, range, &sb, &mp)) { CNT(p).ext_gather_failed++, CNT(p).ext_gather_why[3]++; return VK_NULL_HANDLE; }   /* scratch slots (64 per exec) used up or the allocation failed */
+    int g = pend ? gather_gpu(r, p, b, off, range, sb) : 0;
+    if (g < 0) { CNT(p).ext_gather_failed++; return VK_NULL_HANDLE; }   /* the slot stays allocated (freed with the exec) */
+    if (g) CNT(p).ext_gather_gpu++;
+    else {
+        if (pend) CNT(p).ext_gather_host_stale++;   /* a write is pending but the GPU copy was not possible: the host bytes may be older */
+        memcpy(mp, b->map + off, (size_t)range);
+    }
     r->gc[r->ngc].gen = b->gen, r->gc[r->ngc].wgen = b->wgen, r->gc[r->ngc].off = off, r->gc[r->ngc].range = range, r->gc[r->ngc].buf = sb, r->ngc++;
     r->gc_bytes += range;
     CNT(p).ext_gathered++, CNT(p).ext_gather_bytes += range;
@@ -784,7 +815,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             uint64_t off = st ? (mi < A64_MAX_FB ? r->fb[mi].off : 0) : (mi < A64_MAX_VB ? r->vb[mi].off : 0);
             if (!b || off >= b->length) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[0]++; buf_miss(r, p, pp, i, b, off); return false; }
             VkBuffer dbuf = b->buf; VkDeviceSize doff = off, range = b->length - off;
-            if (s->bind[i].writable) lagfx_a64_res_buf_written(b);   /* the shader may write it: a linear texture over it is stale from here on */
+            if (s->bind[i].writable) lagfx_a64_res_buf_written(r->x, b);   /* the shader may write it: a linear texture over it is stale from here on */
             if (r->max_sb_range && range > r->max_sb_range) range = r->max_sb_range, CNT(p).ext_range_clamped++;   /* the descriptor range may not exceed maxStorageBufferRange */
             if (off % r->min_sb_align && s->bind[i].writable) { CNT(p).ext_wsb_skipped++; p->diag2.exec.pipe.desc_unaligned++; return false; }   /* a gathered copy would swallow the shader's writes (and the copy is a snapshot): skip, counted, rather than diverge */
             if (off % r->min_sb_align) {   /* Metal allows any 4-aligned offset, Vulkan only multiples of minStorageBufferOffsetAlignment: bind an aligned copy of the range */

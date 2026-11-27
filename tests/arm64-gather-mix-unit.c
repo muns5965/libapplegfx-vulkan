@@ -525,6 +525,103 @@ static void test_mix(const uint8_t *lib, size_t libn) {
 
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
 }
+
+/* ---- freshness of a gathered copy against GPU writes recorded earlier in the SAME exec ----
+ * The gather snapshot is taken while commands are recorded; a blit fill / copy recorded earlier in the exec has not run yet, so a host (memcpy) copy would hold the OLD bytes.
+ * One exec = [render seg: pass A, one draw whose position buffer is bound at an unaligned offset] [blit seg: a GPU write to that buffer] [render seg: pass B, the same draw].
+ * The write zeroes the quad, so a fresh copy draws nothing in pass B (cell stays blue) and a stale one draws the quad (green). Pass A always draws it. */
+/* every exec buffer is one segment: {off, len} each, at its own address */
+static uint64_t g_segoff[8], g_seglen[8]; static uint32_t g_nseg;
+static void seg_begin(void) { cb_reset(); }
+static void seg_end(uint8_t type, uint8_t cont) {
+    uint32_t seglen = g_cbn, info = (uint32_t)type | ((uint32_t)cont << 8);
+    memcpy(g_cb, &seglen, 4); memcpy(g_cb + 4, &info, 4);
+    assert(g_nseg < 8u);
+    g_segoff[g_nseg] = VA_CMD + 0x2000ull * g_nseg, g_seglen[g_nseg] = g_cbn;
+    va_write(g_segoff[g_nseg], g_cb, g_cbn); g_nseg++;
+}
+static void exec_segs(lagfx_protocol_t *p, uint32_t task) {
+    uint32_t refs[10 + NPOS], flags[10 + NPOS], nr = 0;
+    const uint32_t fixed[] = { REF_SRC, REF_DST, REF_UBO, REF_WBUF, REF_GTEX, REF_GRT_A, REF_GRT_B, REF_PIPE_TEX, REF_UV, REF_MAT };
+    for (uint32_t i = 0; i < sizeof fixed / sizeof *fixed; i++) { refs[nr] = fixed[i]; flags[nr++] = (fixed[i] == REF_SRC || fixed[i] == REF_UBO || fixed[i] == REF_WBUF) ? 1u : 0u; }
+    for (uint32_t i = 0; i < NPOS; i++) { refs[nr] = REF_POS0 + i; flags[nr++] = 0; }
+    uint32_t w[3 + 2 * (10 + NPOS) + 4 * 8], n = 0;
+    w[n++] = task; w[n++] = nr; w[n++] = g_nseg;
+    for (uint32_t i = 0; i < nr; i++) { w[n++] = refs[i]; w[n++] = flags[i]; }
+    for (uint32_t i = 0; i < g_nseg; i++) { memcpy(w + n, &g_segoff[i], 8); n += 2; memcpy(w + n, &g_seglen[i], 8); n += 2; }
+    submit(p, 0x43, 0, w, n);
+}
+static void blit_fill(uint32_t buf, uint64_t loc, uint64_t len, uint8_t v) {
+    uint8_t r[0x18]; memset(r, 0, sizeof r);
+    memcpy(r, &buf, 4); memcpy(r + 4, &loc, 8); memcpy(r + 12, &len, 8); r[20] = v;
+    cb_cmd(306, r, sizeof r);
+}
+static void blit_copy(uint32_t a, uint32_t b, uint64_t so, uint64_t dof, uint64_t n) {
+    uint8_t r[0x20]; memset(r, 0, sizeof r);
+    memcpy(r, &a, 4); memcpy(r + 4, &b, 4); memcpy(r + 8, &so, 8); memcpy(r + 0x10, &dof, 8); memcpy(r + 0x18, &n, 8);
+    cb_cmd(301, r, sizeof r);
+}
+static void fresh_draw_pass(uint32_t grt, uint32_t posref, uint64_t off) {
+    const uint32_t tex[1] = { REF_GTEX }, vb[3] = { REF_POS0, REF_UV, REF_MAT };
+    cb_pass(grt, 2, B4); cb_pipeline(REF_PIPE_TEX); cb_bufs(125, 0, vb, 3); cb_refs(114, 0, tex, 1);
+    cb_bufs(125, 0, &posref, 1); cb_buf_offset(0, off);
+    cb_viewport(0, 0, CELL, CELL); cb_draw(4, 0, 4);
+}
+/* mode 0: no write between the draws (the copy must be reused: ONE gather, quad drawn twice); 1: blit fill zeroes the quad; 2: blit copy of zeros over the quad */
+static void run_fresh(lagfx_protocol_t *p, lagfx_task_entry_t *t, int mode, const char *name) {
+    const uint64_t off = POS_OFFS[0];
+    g_nseg = 0;
+    seg_begin(); cb_pass(REF_GTEX, 2, G4); fresh_draw_pass(REF_GRT_A, REF_POS0, off); seg_end(0, 0);
+    if (mode == 1) { seg_begin(); blit_fill(REF_POS0, 0, 0x100, 0); seg_end(2, 0); }
+    if (mode == 2) { seg_begin(); blit_copy(REF_UV, REF_POS0, 0x1000, off, 32); seg_end(2, 0); }
+    seg_begin(); fresh_draw_pass(REF_GRT_B, REF_POS0, off); seg_end(0, 0);
+    uint64_t rg0 = RUNC(p).ext_gathered, rf0 = RUNC(p).ext_gather_failed, sf0 = RUNC(p).submit_failed;
+    exec_segs(p, 1);
+    assert(RUNC(p).submit_failed == sf0 && RUNC(p).ext_gather_failed == rf0);
+    uint32_t a[GRT_DIM * GRT_DIM], b[GRT_DIM * GRT_DIM];
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_GRT_A, a, sizeof a, NULL, NULL));
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_GRT_B, b, sizeof b, NULL, NULL));
+    uint32_t wantB = mode == 0 ? GREEN : BLUE;
+    printf("INFO: %s: pass A cell0 %08x, pass B cell0 %08x (want %08x), gathers made %llu\n", name, a[0], b[0], wantB, (unsigned long long)(RUNC(p).ext_gathered - rg0));
+    assert(a[0] == GREEN);
+    if (b[0] != wantB) { printf("FAIL: %s: the second draw used a stale gather copy (pass B cell0 %08x, expected %08x)\n", name, b[0], wantB); exit(1); }
+    if (mode == 0) assert(RUNC(p).ext_gathered - rg0 == 1u);   /* no write in between: the copy of the first draw serves the second */
+}
+/* The tile path: a blit fill zeroes the scale of the uniforms (the half at byte 10, 0.5 before) in the unaligned copy at UBO_UNAL, then one tile is dispatched whose uniform buffer is bound
+ * there. A fresh gather gives colour channels 0 (acc * 0); a copy of the old host bytes gives the model value (acc * 0.5). */
+static void run_fresh_tile(lagfx_protocol_t *p, lagfx_task_entry_t *t) {
+    static const double sent[4] = { SENT, SENT, SENT, SENT };
+    g_nseg = 0;
+    seg_begin(); blit_fill(REF_UBO, UBO_UNAL + 10u, 2, 0); seg_end(2, 0);
+    seg_begin(); cb_pass(REF_DST, 2, sent); cb_pipeline(REF_TILE); cb_tile_buf(0, REF_UBO, UBO_UNAL); cb_tile_buf(1, REF_WBUF, 0); cb_tile_tex(0, REF_SRC);
+    cb_dispatch_region(g_S, 4, 0, 0, g_S, 4); seg_end(0, 0);
+    uint64_t tg0 = TILE(p).gathered, tf0 = TILE(p).gather_failed, td0 = TILE(p).dispatches, gg0 = TILE(p).gather_gpu, sf0 = RUNC(p).submit_failed;
+    exec_segs(p, 1);
+    assert(RUNC(p).submit_failed == sf0 && TILE(p).dispatches - td0 == 1u && TILE(p).gather_failed == tf0);
+    uint16_t *img = malloc((size_t)g_W * g_H * 8);
+    uint32_t w, h;
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_DST, img, (size_t)g_W * g_H * 8, &w, &h) && w == g_W && h == g_H);
+    float got = h2f(img[0]), stale = model(0, 0, 0);
+    printf("INFO: (f3) tile gather after a blit fill: pixel (0,0).r = %g (fresh 0, stale %g), tile gathers %llu (by GPU %llu)\n", got, stale, (unsigned long long)(TILE(p).gathered - tg0), (unsigned long long)(TILE(p).gather_gpu - gg0));
+    free(img);
+    assert(stale != 0.0f);
+    if (got != 0.0f) { puts("FAIL: (f3) the tile dispatch read a stale uniform buffer copy"); exit(1); }
+    assert(TILE(p).gather_gpu - gg0 >= 1u);
+}
+static void test_fresh(const uint8_t *lib, size_t libn) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    struct lagfx_vk_state *vk = g_dev->vk;
+    g_S = vk->sg_size >= 4 && vk->sg_size <= 64 ? (lagfx_vk_can_pin_subgroup32(vk) ? 32u : vk->sg_size) : 32u;
+    if (vk->phys_props.limits.minStorageBufferOffsetAlignment < 16u) { puts("SKIP: gather freshness (the device binds storage buffers at any 4-aligned offset)"); return; }
+    unsetenv("LAGFX_A64_GATHER_BUDGET"); unsetenv("LAGFX_A64_GATHER_CACHE");
+    lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+    run_fresh(p, t, 0, "(f0) no write between the draws: the copy is reused");
+    run_fresh(p, t, 1, "(f1) blit fill between the draws");
+    run_fresh(p, t, 2, "(f2) blit buffer copy between the draws");
+    run_fresh_tile(p, t);
+    puts("PASS: a gather after a GPU write recorded earlier in the same exec sees the new bytes; without a write the copy is reused");
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+}
 #endif
 
 int main(void) {
@@ -543,6 +640,7 @@ int main(void) {
     g_vlib = synth_mtlb(v, vn, "viewport_to_ndc", 0, &g_vlib_n);
     g_flib = synth_mtlb(f, fn, "texture_copy", 1, &g_flib_n);
     test_mix(lib, ln);
+    test_fresh(lib, ln);
     free(lib); free(bc); free(v); free(f); free(g_vlib); free(g_flib);
 #else
     puts("SKIP: built without Vulkan");
