@@ -10,6 +10,7 @@
 #include "../device.h"
 #include "../vulkan/instance.h"
 #include "../vulkan/command.h"
+#include "../vulkan/render_pass.h"
 #include "../vulkan/caps.h"
 #include "../vulkan/sampler_cache.h"
 #include "display_diag.h"
@@ -394,6 +395,11 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         }
         {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
             size_t po = strlen(pl);
+            {   /* legacy backend framebuffer cache (render_pass.c): live must stay near the number of live attachment views; full > 0 = passes were refused */
+                lagfx_device_t *fd = (lagfx_device_t *)p->dev; lagfx_render_cache_stats_t fs; lagfx_vk_render_cache_stats(fd ? fd->vk : NULL, &fs);
+                if (fs.fb_created && po + 160 < sizeof pl) { po += (size_t)snprintf(pl + po, sizeof pl - po, " fb_cache[created=%llu destroyed=%llu hits=%llu live=%u peak=%llu full=%llu rp=%u]",
+                    (unsigned long long)fs.fb_created, (unsigned long long)fs.fb_destroyed, (unsigned long long)fs.fb_hits, fs.fb_live, (unsigned long long)fs.fb_peak, (unsigned long long)fs.fb_full, fs.rp_live); }
+            }
             if (po + 200 < sizeof pl)
                 snprintf(pl + po, sizeof pl - po, " obj_table[created=%llu destroyed=%llu reused=%llu live=%llu peak_live=%llu high_water=%llu full=%llu lookup_miss=%llu deferred=%llu]",
                          U(obj_created), U(obj_destroyed), U(obj_reused), U(obj_live), U(obj_peak_live), U(obj_high_water), U(obj_full), U(obj_lookup_miss), U(obj_deferred));

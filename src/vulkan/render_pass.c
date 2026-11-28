@@ -29,6 +29,7 @@ struct lagfx_render_cache {
     fb_ent_t *fb; unsigned n_fb, cap_fb, max_fb;
     defer_ent_t *def; unsigned n_def, cap_def;
     unsigned fail_waitidle; bool fail_lost;   /* test seam */
+    lagfx_render_cache_stats_t st;            /* framebuffer cache counters (legacy backend) */
 };
 
 static unsigned env_limit(const char *name, unsigned def) {
@@ -356,10 +357,10 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
     if (rp != VK_NULL_HANDLE) {
         for (unsigned i = 0; i < rc->n_fb && fb == VK_NULL_HANDLE; i++) {
             const fb_ent_t *e = &rc->fb[i];
-            if (e->rp == rp && e->nview == na && e->w == d->width && e->h == d->height && !memcmp(e->view, views, na * sizeof views[0])) fb = e->fb;
+            if (e->rp == rp && e->nview == na && e->w == d->width && e->h == d->height && !memcmp(e->view, views, na * sizeof views[0])) { fb = e->fb; rc->st.fb_hits++; }
         }
         if (fb == VK_NULL_HANDLE) {
-            if (rc->n_fb >= rc->max_fb) { LAGFX_ERR("render_begin: framebuffer cache full (%u): a view is not being forgotten", rc->n_fb); goto fb_done; }
+            if (rc->n_fb >= rc->max_fb) { rc->st.fb_full++; LAGFX_ERR("render_begin: framebuffer cache full (%u): a view is not being forgotten", rc->n_fb); goto fb_done; }
             if (rc->n_fb == rc->cap_fb) {
                 unsigned nc = rc->cap_fb ? rc->cap_fb * 2u : 16u; if (nc > rc->max_fb) nc = rc->max_fb;
                 fb_ent_t *n = realloc(rc->fb, nc * sizeof *n); if (!n) goto fb_done;
@@ -371,6 +372,7 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
             if (vr != VK_SUCCESS) { LAGFX_ERR("render_begin: vkCreateFramebuffer failed (%d)", (int)vr); fb = VK_NULL_HANDLE; }
             else {
                 fb_ent_t *e = &rc->fb[rc->n_fb++];
+                rc->st.fb_created++; if (rc->n_fb > rc->st.fb_peak) rc->st.fb_peak = rc->n_fb;
                 memset(e, 0, sizeof *e);
                 e->rp = rp; e->nview = na; e->w = d->width; e->h = d->height; e->fb = fb;
                 memcpy(e->view, views, na * sizeof views[0]);
@@ -421,6 +423,7 @@ lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageVie
         }
         if (out == LAGFX_FORGET_DEFERRED) { i++; continue; }
         vkDestroyFramebuffer(vk->device, c->fb[i].fb, NULL);
+        c->st.fb_destroyed++;
         c->fb[i] = c->fb[--c->n_fb];
     }
     pthread_mutex_unlock(&c->mu);
@@ -494,4 +497,14 @@ uint32_t lagfx_legacy_fetch_mask(const lagfx_render_desc_t *d) {
     for (uint32_t i = 0; i < d->color_count && i < 4u; i++)
         if (d->color[i].format != VK_FORMAT_UNDEFINED) m |= 1u << i;   /* every real slot; multisampled ones only take part through the caller's capability / usage gate */
     return m;
+}
+
+void lagfx_vk_render_cache_stats(struct lagfx_vk_state *vk, lagfx_render_cache_stats_t *out) {
+    if (!out) return;
+    memset(out, 0, sizeof *out);
+    if (!vk || !vk->render_cache) return;
+    struct lagfx_render_cache *c = vk->render_cache;
+    pthread_mutex_lock(&c->mu);
+    *out = c->st; out->fb_live = c->n_fb; out->rp_live = c->n_rp;
+    pthread_mutex_unlock(&c->mu);
 }

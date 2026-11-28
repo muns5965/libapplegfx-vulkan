@@ -499,6 +499,23 @@ static void run_backend(int legacy) {
         lagfx_vk_render_target_destroy(vk, &rt);
     }
 
+    /* B2. Churn: 4200 targets created, rendered to, destroyed. The framebuffer cache must stay at the live count (it used to grow by one per target until the limit refused every pass). */
+    if (legacy) {
+        lagfx_render_cache_stats_t s0, s1; lagfx_vk_render_cache_stats(vk, &s0);
+        unsigned bad = 0;
+        for (unsigned i = 0; i < 4200u; i++) {
+            lagfx_vk_render_target_t rt; memset(&rt, 0, sizeof rt);
+            if (lagfx_vk_render_target_create(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &rt) != LAGFX_OK || !one_shot(vk, rec_load_pass, &rt)) bad++;
+            lagfx_vk_render_target_destroy(vk, &rt);
+        }
+        lagfx_vk_render_cache_stats(vk, &s1);
+        CHECK(bad == 0, "churn: some of 4200 targets failed to render");
+        CHECK(s1.fb_full == s0.fb_full && s1.fb_live == s0.fb_live && s1.fb_peak <= s0.fb_live + 4u && s1.fb_created - s0.fb_created == s1.fb_destroyed - s0.fb_destroyed,
+              "churn: framebuffer cache not flat (live / peak / created-destroyed / full)");
+        printf("INFO churn: 4200 targets, fb cache live %u -> %u, peak %llu, created %llu destroyed %llu hits %llu full %llu\n", s0.fb_live, s1.fb_live, (unsigned long long)s1.fb_peak,
+               (unsigned long long)(s1.fb_created - s0.fb_created), (unsigned long long)(s1.fb_destroyed - s0.fb_destroyed), (unsigned long long)(s1.fb_hits - s0.fb_hits), (unsigned long long)s1.fb_full);
+    }
+
     /* C. WaitIdle failure injection (the legacy backend is the one that caches framebuffers) */
     if (legacy) {
         for (int lost = 0; lost < 2; lost++) {
