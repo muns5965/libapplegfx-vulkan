@@ -507,12 +507,14 @@ int main(void) {
 
     const bool legacy_be = lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY;
     /* 12: framebuffer fetch (input attachment) in a multisampled pass: a multisampled SubpassData read per SAMPLE (SPIR-V rewrite, sample-rate shading); the resolve equals the CPU coverage reference */
-    if (legacy_be) { puts("SKIP 12: the legacy VkRenderPass backend has no framebuffer fetch / input-attachment local read (Dynamic Rendering Local Read only); the fetch is refused and counted on legacy, covered by the refusal counters, not by pixels"); } else { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F;
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F;
       /* default: the device must ADVERTISE local reads of multisampled attachments (Vulkan 1.4 dynamicRenderingLocalReadMultisampledAttachments). lavapipe reports 0, so with the property as the device gave it the draw is refused */
       const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = false;
+      if (!legacy_be) {   /* the negative control is the dynamic path's advertised-property gate; the legacy backend gates on sample-rate shading instead */
       gr_run(&s, &g);
       assert(g.ms.fbfetch_ms_refused >= 1 && g.ms.fbfetch_ms_no_local_read_ms >= 1 && g.draws == 0 && g.skipped >= 1 && g.ms.fbfetch_ms_variants == 0);
       puts("PASS negative: device without multisampled local read -> multisampled fetch refused (fbfetch_ms_no_local_read_ms), draw skipped, no shader variant built");
+      }
       g_dev->vk->have_local_read_ms = true;   /* lavapipe renders it correctly although it does not advertise it (LAGFX_VK_FORCE_MS_LOCAL_READ=1 in production): the rendering checks below run with it forced */
       g_shader_msgs = 0; lagfx_vk_validation_hook = shader_msg_hook; gr_run(&s, &g); lagfx_vk_validation_hook = NULL;
       unsigned part = 0; assert(g_shader_msgs == 0);
@@ -529,7 +531,7 @@ int main(void) {
       puts("PASS negative: no sample-rate shading -> multisampled fetch refused (fbfetch_ms_refused, sample_shading_refused), draw skipped"); }
 
     /* 12c: per-sample distinct start values: the fetch must read ITS OWN sample. Forcing sample 0 (negative control through the rewrite's test seam) must break the result. */
-    if (legacy_be) { puts("SKIP 12c: the legacy VkRenderPass backend has no framebuffer fetch / input-attachment local read (Dynamic Rendering Local Read only); the fetch is refused and counted on legacy, covered by the refusal counters, not by pixels"); } else { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.two = true;
+    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.two = true;
       const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = true;
       unsigned part = 0;
       gr_run(&s, &g);

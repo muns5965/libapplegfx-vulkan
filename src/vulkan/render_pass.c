@@ -94,9 +94,9 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
 /* Legacy-only: the input-attachment slots (fetch_mask) must be real, single-sample colour attachments in GENERAL. Kept out of desc_valid so the dynamic backend, which ignores the mask,
  * is never constrained by it. */
 static bool fetch_valid(const lagfx_render_desc_t *d, bool real_layouts) {
-    for (uint32_t i = 0; i < LAGFX_RENDER_MAX_COLOR; i++) {   /* input-attachment slots (legacy): real, single-sample colour attachments in GENERAL */
+    for (uint32_t i = 0; i < LAGFX_RENDER_MAX_COLOR; i++) {   /* input-attachment slots (legacy): real colour attachments in GENERAL */
         if (!(d->fetch_mask & (1u << i))) continue;
-        if (i >= d->color_count || d->color[i].format == VK_FORMAT_UNDEFINED || samples_of(&d->color[i]) != VK_SAMPLE_COUNT_1_BIT) return false;
+        if (i >= d->color_count || d->color[i].format == VK_FORMAT_UNDEFINED ) return false;   /* multisampled fetch slots are allowed here (subpassInputMS); the CALLER gates them on lagfx_vk_fetch_ms_capable */
         if (real_layouts && d->color[i].layout != VK_IMAGE_LAYOUT_UNDEFINED && d->color[i].layout != VK_IMAGE_LAYOUT_GENERAL) return false;   /* a compatible pass for pipeline creation names no real layout */
     }
     if (d->fetch_mask >> LAGFX_RENDER_MAX_COLOR) return false;
@@ -413,11 +413,15 @@ VkImageLayout lagfx_vk_fetch_layout(const struct lagfx_vk_state *vk) {
     return lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC ? (VkImageLayout)1000232000 /* VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR */ : VK_IMAGE_LAYOUT_GENERAL;
 }
 bool lagfx_vk_raster_order(const struct lagfx_vk_state *vk) { return vk && vk->have_raster_order && lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC; }
-bool lagfx_vk_fetch_ms_capable(const struct lagfx_vk_state *vk) { return vk && lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC && vk->have_local_read && vk->have_local_read_ms; }
+bool lagfx_vk_fetch_ms_capable(const struct lagfx_vk_state *vk) {
+    if (!vk) return false;
+    if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return vk->have_local_read && vk->have_local_read_ms;
+    return vk->legacy_fetch && vk->have_sample_rate_shading;   /* legacy: multisampled input attachment (subpassInputMS) read per sample = sample-rate shading pipeline */
+}
 uint32_t lagfx_legacy_fetch_mask(const lagfx_render_desc_t *d) {
     uint32_t m = 0;
     if (!d) return 0;
     for (uint32_t i = 0; i < d->color_count && i < 4u; i++)
-        if (d->color[i].format != VK_FORMAT_UNDEFINED && samples_of(&d->color[i]) == VK_SAMPLE_COUNT_1_BIT) m |= 1u << i;
+        if (d->color[i].format != VK_FORMAT_UNDEFINED) m |= 1u << i;   /* every real slot; multisampled ones only take part through the caller's capability / usage gate */
     return m;
 }

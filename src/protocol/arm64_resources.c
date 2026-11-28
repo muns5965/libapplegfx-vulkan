@@ -1667,7 +1667,7 @@ VkImageLayout lagfx_a64_res_target_layout(const lagfx_a64_rexec_t *x, const lagf
     return lagfx_a64_res_target_fetch(x, o) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 }
 bool lagfx_a64_res_target_fetch(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o) {
-    return x && o && lagfx_vk_fetch_capable(x->vk) && (o->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) && (o->samples <= 1u);
+    return x && o && lagfx_vk_fetch_capable(x->vk) && (o->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) && (o->samples <= 1u || lagfx_vk_fetch_ms_capable(x->vk));
 }
 
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h) {

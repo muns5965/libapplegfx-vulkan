@@ -1378,7 +1378,9 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
  * primitives, the draw is REFUSED (counted fbf_split_capped, draws_skipped): recording it whole would make overlapping fragments race, i.e. silently wrong. On a device below Vulkan 1.3 a strip is split
  * WITHOUT the front-face flip: that path never culls (static cull NONE) and has no stencil / FrontFacing use, so facing cannot change coverage (fbf_split_unsupported is no longer counted). Triangle strips: triangle i is {v_i, v_i+1+(i%2),
  * v_i+2-(i%2)}; a 3-vertex strip draw from v_i is that triangle with the opposite winding for odd i, so the front face is flipped for those sub-draws (provoking vertex v_i is the
- * same). Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
+ * same). CONSTRAINT: every sub-draw is its own draw, so gl_PrimitiveID restarts at 0 in each (and gl_VertexIndex / InstanceIndex are re-based by the offsets below). The translator emits no
+ * PrimitiveID today (grep src); if it ever does, this split must carry the original id (e.g. through a push constant) or refuse such pipelines. Applies to every device that lacks rasterization order.
+ * Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
 #define A64_FBF_SPLIT_MAX 16384ull
 #define A64_PRE13_APPLIES_RASTER_STATE 0   /* set to 1 when apply_encoder_state starts applying cull / front face / stencil without core 1.3 */
 /* 0 = no split needed, 1 = split, -1 = needs a split that is over the cap: refuse the draw. */
