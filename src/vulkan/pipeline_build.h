@@ -3,6 +3,8 @@
 #define LIBAPPLEGFX_VULKAN_PIPELINE_BUILD_H
 
 #include "libapplegfx-vulkan.h"
+#include "render_pass.h"
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -125,6 +127,11 @@ typedef struct {
     const void      *diag_gpci_pnext;
     uint64_t         diag_render_pass;
     uint32_t         diag_subpass;
+    /* PRODUCTION legacy-render-pass build (Vulkan 1.1 devices without dynamic rendering, or LAGFX_VK_FORCE_LEGACY_RENDERPASS): a VkRenderPass handle != 0 builds the pipeline
+     * against that pass / subpass and chains NO VkPipelineRenderingCreateInfo. The pass must be COMPATIBLE with the attachments this desc names (lagfx_pipeline_render_desc()
+     * -> lagfx_vk_render_pass_compat()). 0 = dynamic rendering, exactly as before. Takes precedence over diag_render_pass. */
+    uint64_t         render_pass;
+    uint32_t         subpass;
     /* diag_no_fragment != 0 (pipeline-reduce rows only): no fragment stage (fragment_shader may be VK_NULL_HANDLE) and rasterizerDiscardEnable = VK_TRUE (a vertex-only pipeline). */
     uint8_t          diag_no_fragment;
     uint32_t         diag_create_flags;   /* DIAGNOSTIC (pipeline-reduce): VkPipelineCreateFlags of the VkGraphicsPipelineCreateInfo; 0 in production */
@@ -150,6 +157,12 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline);
 
+/* The attachments a pipeline built from `desc` draws to, as a render description (formats, sample count, default attachment layouts; width/height/views are left for the
+ * caller). Feed it to lagfx_vk_render_pass_compat() and put the handle in desc->render_pass. Returns false for a shape the legacy render-pass backend does not express yet:
+ * an UNDEFINED (unused) colour slot, no_color, dyn_state (extended-dynamic-state pipelines need dynamic rendering anyway), a depth + stencil pair with different formats, or
+ * a depth/stencil format together with a missing colour format. The caller then refuses the draw cleanly instead of building a pipeline for the wrong pass. */
+bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out);
+
 /* While on, THIS thread's failing lagfx_pipeline_build() calls log nothing, write no bundle and start no matrix (the matrix / repro rebuild failing pipelines on purpose). */
 void lagfx_pipeline_build_quiet(int on);
 
@@ -162,7 +175,6 @@ uint64_t lagfx_pipeline_spv_hash(const void *data, size_t n);
 VkFormat lagfx_pso_vertex_format_to_vk(uint32_t mtl_vertex_format);   /* VK_FORMAT_UNDEFINED = not handled */
 
 #ifdef LAGFX_HAVE_VULKAN
-#include <stdbool.h>
 /* Vertex-input state of desc (n_vtx_inputs > 0): binding 0 into *vbind, up to 8 attributes into vattr, their count into *out_n. Returns false (and the index of the first
  * attribute in *bad_attr) when a decoded PSO attribute has a Metal vertex format that is not in the table; that attribute's format is VK_FORMAT_UNDEFINED, the others
  * are filled normally. lagfx_pipeline_build() fails the pipeline with LAGFX_ERR_PROTOCOL in that case. */

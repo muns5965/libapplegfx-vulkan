@@ -845,6 +845,14 @@ void lagfx_emit_pending_draw(lagfx_protocol_t *p, lagfx_task_entry_t *task,
             }
         }
     }
+    if (lagfx_vk_render_backend(dev_with_vk->vk) == LAGFX_RENDER_LEGACY) {
+        /* No dynamic rendering on this device (or LAGFX_VK_FORCE_LEGACY_RENDERPASS): build the pipeline against the render pass draw_record will begin. A shape the
+         * legacy backend cannot express yet skips the draw, it does not build a pipeline for another pass. */
+        lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE;
+        if (lagfx_pipeline_render_desc(&pdesc, &rd)) lrp = lagfx_vk_render_pass_compat(dev_with_vk->vk, &rd);
+        if (lrp == VK_NULL_HANDLE) { LAGFX_WARN("%s: legacy render pass unavailable for this pipeline shape; draw skipped", op); return; }
+        pdesc.render_pass = (uint64_t)(uintptr_t)lrp;
+    }
     VkPipeline pipeline = lagfx_get_cached_pipeline(task, device, &pdesc);
     if (pipeline == VK_NULL_HANDLE) {
         LAGFX_WARN("%s: pipeline build failed", op);

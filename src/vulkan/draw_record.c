@@ -7,12 +7,13 @@
  *
  * Implementation of lagfx_vk_draw_record_and_submit. Encapsulates the
  * one-shot draw path: allocate CB, begin, transition image layout,
- * begin rendering with dynamic rendering, bind pipeline, record draw,
+ * begin rendering (render_pass.c: dynamic rendering, or a legacy VkRenderPass on devices without it), bind pipeline, record draw,
  * end rendering, end CB, submit, wait for fence, free CB.
  */
 
 #include "draw_record.h"
 #include "command.h"
+#include "render_pass.h"
 #include "common/log.h"
 #include "common/perf.h"
 #include <math.h>
@@ -211,15 +212,16 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
         return LAGFX_ERR_BACKEND;
     }
     
+    /* rt->layout describes what the GPU will see once this command buffer has run; it is rewritten by the barrier recorded below, so every failure before the
+     * submit is accepted restores it (the barrier never executed). */
+    const VkImageLayout prev_layout = rt->layout;
     lagfx_vk_cmd_rt_to_color(cb, rt);
-    
-    /* Begin dynamic rendering with color attachment (pattern from display.c:519-530) */
-    VkRenderingAttachmentInfo color_att = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = rt->view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,  /* preserve existing content */
-        .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+
+    lagfx_render_color_t color_att = {
+        .view = rt->view, .format = rt->format, .width = rt->width, .height = rt->height,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .load = VK_ATTACHMENT_LOAD_OP_LOAD,  /* preserve existing content */
+        .store = VK_ATTACHMENT_STORE_OP_STORE,
     };
 
     /* M1 diagnostic (env-gated): clear to a distinctive teal before this draw.
@@ -229,21 +231,20 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
      * within M1. If it stays black, the draws cover the RT with black geometry
      * and visible content genuinely needs M2 resource data. Decisive either way. */
     if (getenv("LAGFX_TEST_CLEAR") != NULL) {
-        color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
-        color_att.clearValue.color.float32[0] = 0.0f;
-        color_att.clearValue.color.float32[1] = 0.6f;
-        color_att.clearValue.color.float32[2] = 0.6f;
-        color_att.clearValue.color.float32[3] = 1.0f;
+        color_att.load = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color_att.clear.float32[0] = 0.0f;
+        color_att.clear.float32[1] = 0.6f;
+        color_att.clear.float32[2] = 0.6f;
+        color_att.clear.float32[3] = 1.0f;
     }
 
-    VkRenderingInfo ri = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = {{0, 0}, {rt->width, rt->height}},
-        .layerCount = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments = &color_att,
-    };
-    vkCmdBeginRendering(cb, &ri);
+    st = lagfx_vk_render_begin(vk, cb, &color_att);
+    if (st != LAGFX_OK) {
+        LAGFX_ERR("draw_record_and_submit: render_begin failed (%d)", (int)st);
+        rt->layout = prev_layout;
+        lagfx_vk_cmdbuf_free(vk, cb);
+        return st;
+    }
     
     /* Bind the pipeline (pattern from triangle-lavapipe-e2e.c:500) */
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -279,12 +280,13 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     }
     
     /* End rendering */
-    vkCmdEndRendering(cb);
+    lagfx_vk_render_end(vk, cb);
     
     /* End command buffer (pattern from triangle-lavapipe-e2e.c:503) */
     vr = vkEndCommandBuffer(cb);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("draw_record_and_submit: vkEndCommandBuffer failed (%d)", (int)vr);
+        rt->layout = prev_layout;
         lagfx_vk_cmdbuf_free(vk, cb);
         return LAGFX_ERR_BACKEND;
     }
@@ -295,6 +297,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     vr = vkCreateFence(vk->device, &fci, NULL, &fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("draw_record_and_submit: vkCreateFence failed (%d)", (int)vr);
+        rt->layout = prev_layout;
         lagfx_vk_cmdbuf_free(vk, cb);
         return LAGFX_ERR_BACKEND;
     }
@@ -311,6 +314,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("draw_record_and_submit: vkQueueSubmit failed (%d)", (int)vr);
+        rt->layout = prev_layout;   /* not accepted by the queue: the barrier never ran */
         vkDestroyFence(vk->device, fence, NULL);
         lagfx_vk_cmdbuf_free(vk, cb);
         return LAGFX_ERR_BACKEND;

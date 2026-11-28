@@ -290,7 +290,13 @@ void lagfx_vk_render_target_destroy(struct lagfx_vk_state *vk,
         memset(rt, 0, sizeof(*rt));
         return;
     }
-    lagfx_vk_render_forget_view(vk, rt->view);   /* a legacy-backend framebuffer may still reference the view */
+    if (lagfx_vk_render_forget_view(vk, rt->view) == LAGFX_FORGET_DEFERRED) {
+        /* The device could not be proven idle: a kept framebuffer still references the view, and recorded work may still use the image. View, image and memory are
+         * parked together and destroyed at shutdown (after the framebuffers); destroying any of them now would be the very use-after-free this guards against. */
+        lagfx_vk_render_defer_target(vk, rt->view, rt->image, rt->memory);
+        memset(rt, 0, sizeof(*rt));
+        return;
+    }
     if (rt->view != VK_NULL_HANDLE) {
         vkDestroyImageView(vk->device, rt->view, NULL);
     }

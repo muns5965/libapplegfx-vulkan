@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "pipeline_build.h"
 #include "pipeline_bundle.h"
+#include "render_pass.h"
 #include "common/log.h"
 #include "common/policy.h"
 #ifdef LAGFX_HAVE_VULKAN
@@ -273,6 +274,22 @@ paired:
     return ok;
 }
 
+bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out) {
+    if (!desc || !out) return false;
+    memset(out, 0, sizeof *out);
+    if (desc->no_color || desc->dyn_state) return false;
+    const uint32_t ncol = (desc->n_color >= 2u && desc->n_color <= 4u) ? desc->n_color : 1u;
+    const VkSampleCountFlagBits smp = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
+    for (uint32_t i = 0; i < ncol; i++) {
+        VkFormat f = ncol > 1u ? (VkFormat)desc->color_formats[i]
+                   : desc->color_format != VK_FORMAT_UNDEFINED ? desc->color_format : VK_FORMAT_B8G8R8A8_UNORM;   /* same default as the builder */
+        if (f == VK_FORMAT_UNDEFINED) return false;
+        out->color[i].format = f; out->color[i].samples = smp; out->color[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    out->color_count = ncol;
+    return true;
+}
+
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
                                     VkPipeline *out_pipeline) {
@@ -512,11 +529,12 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     };
 
     /* Graphics pipeline create info */
+    const uint64_t use_rp = desc->render_pass ? desc->render_pass : desc->diag_render_pass;
     if (desc->diag_no_fragment) rsst.rasterizerDiscardEnable = VK_TRUE;   /* DIAGNOSTIC (pipeline-reduce): vertex-only pipeline */
     VkGraphicsPipelineCreateInfo gpci = {
         .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
         .flags = desc->diag_create_flags,
-        .pNext = desc->diag_render_pass ? NULL : &rendering_info,
+        .pNext = use_rp ? NULL : &rendering_info,
         .stageCount = desc->diag_no_fragment ? 1u : 2u,   /* diag_no_fragment: DIAGNOSTIC, vertex-only pipeline */
         .pStages = stages,
         .pVertexInputState = &vin,
@@ -528,8 +546,8 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         .pColorBlendState = &cb,
         .pDynamicState = &dyn,
         .layout = desc->layout,
-        .renderPass = desc->diag_render_pass ? (VkRenderPass)(uintptr_t)desc->diag_render_pass : VK_NULL_HANDLE,   /* DIAGNOSTIC hook of the -13 matrix; VK_NULL_HANDLE in production */
-        .subpass = desc->diag_render_pass ? desc->diag_subpass : 0,
+        .renderPass = use_rp ? (VkRenderPass)(uintptr_t)use_rp : VK_NULL_HANDLE,   /* legacy backend (render_pass) or the -13 matrix hook (diag_render_pass); VK_NULL_HANDLE = dynamic rendering */
+        .subpass = desc->render_pass ? desc->subpass : desc->diag_render_pass ? desc->diag_subpass : 0,
     };
 
     VkPipeline pipe = VK_NULL_HANDLE;
