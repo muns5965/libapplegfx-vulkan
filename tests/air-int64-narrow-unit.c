@@ -20,16 +20,15 @@ static uint8_t *slurp(const char *p, size_t *n) {
     uint8_t *b = malloc(l > 0 ? (size_t)l : 1u); if (!b || fread(b, 1, (size_t)l, f) != (size_t)l) { fclose(f); free(b); return NULL; }
     fclose(f); *n = (size_t)l; return b;
 }
-static int validates(const uint8_t *spv, size_t n, const char *tmp) {
+static int validates(const uint8_t *spv, size_t n, const char *tmp, const char *env) {
     FILE *f = fopen(tmp, "wb"); if (!f) return -1; fwrite(spv, 1, n, f); fclose(f);
-    char cmd[600]; snprintf(cmd, sizeof cmd, "spirv-val --target-env vulkan1.2 %s >/dev/null 2>&1", tmp);
+    char cmd[600]; snprintf(cmd, sizeof cmd, "spirv-val --target-env %s %s >/dev/null 2>&1", env, tmp);
     return system(cmd) == 0;
 }
 
-int main(void) {
+static void sweep(int strict_atomics, int have_val) {
     const char *dir = SRCDIR "/tests/fixtures";
-    DIR *d = opendir(dir); CHECK(d, "fixture dir %s", dir); if (!d) return 1;
-    int have_val = system("spirv-val --version >/dev/null 2>&1") == 0;
+    DIR *d = opendir(dir); CHECK(d, "fixture dir %s", dir); if (!d) return;
     char tmp[64]; snprintf(tmp, sizeof tmp, "/tmp/air-int64-narrow-%d.spv", (int)getpid());
     int total = 0, need64 = 0, narrowed = 0, refused = 0, vok = 0, vbase_bad = 0, vnarrow_only = 0;
     struct dirent *e;
@@ -40,7 +39,7 @@ int main(void) {
         lagfx_air_module_t *m = NULL;
         if (lagfx_air_module_open(air, an, &m) != LAGFX_OK) { free(air); continue; }
         uint8_t *s0 = NULL, *s1 = NULL; size_t n0 = 0, n1 = 0;
-        lagfx_air2spv_set_atomic_lenient(1);
+        lagfx_air2spv_set_atomic_lenient(strict_atomics ? 0 : 1);
         lagfx_air2spv_set_narrow_int64(0); int r0 = lagfx_air2spv_translate_module(m, &s0, &n0);
         lagfx_air2spv_set_narrow_int64(1); int r1 = lagfx_air2spv_translate_module(m, &s1, &n1);
         lagfx_air2spv_set_narrow_int64(0); lagfx_air2spv_set_atomic_lenient(-1);
@@ -54,22 +53,33 @@ int main(void) {
                 CHECK(lagfx_spv_required_caps_ex(s1, n1, &n_on), "%s: caps scan (narrowed)", e->d_name);
                 CHECK(!(n_on & (1u << LAGFX_VK_CAP_INT64)), "%s: narrowed module still needs Int64 (0x%x)", e->d_name, n_on);
                 if (have_val && (n_off & (1u << LAGFX_VK_CAP_INT64))) {
-                    int v0 = validates(s0, n0, tmp), v1 = validates(s1, n1, tmp);
-                    if (v0 && !v1) { vnarrow_only++; CHECK(0, "%s: narrowing breaks spirv-val", e->d_name); }
-                    else if (!v0) vbase_bad++; else vok++;
+                    static const char *const envs[] = { "vulkan1.2", "vulkan1.1spv1.4" };   /* S26-class and the S8 target (Vulkan 1.1 + VK_KHR_spirv_1_4) */
+                    for (unsigned k = 0; k < 2u; k++) {
+                        int v0 = validates(s0, n0, tmp, envs[k]), v1 = validates(s1, n1, tmp, envs[k]);
+                        if (v0 && !v1) { vnarrow_only++; CHECK(0, "%s: narrowing breaks spirv-val (%s)", e->d_name, envs[k]); }
+                        else if (!v0) vbase_bad++; else vok++;
+                    }
                 }
             } else {
                 refused++;
-                CHECK(lagfx_air2spv_last_narrow_refusal()[0] || r1 != 0, "%s: refused without a reason", e->d_name);
+                CHECK(r1 != 0 && lagfx_air2spv_last_narrow_refusal()[0], "%s: refused without a narrowing reason (status %d)", e->d_name, r1);
             }
         }
         free(s0); free(s1); lagfx_air_module_free(m); free(air);
     }
     closedir(d); remove(tmp);
-    printf("INFO fixtures translated=%d needing-Int64=%d narrowed=%d refused=%d spirv-val(narrowed ok=%d, base already invalid=%d, narrowing-only failures=%d, validator %s)\n",
-           total, need64, narrowed, refused, vok, vbase_bad, vnarrow_only, have_val ? "present" : "absent");
+    printf("INFO [%s atomics] fixtures translated=%d needing-Int64=%d narrowed=%d refused=%d spirv-val(narrowed ok=%d, base already invalid=%d, narrowing-only failures=%d, validator %s)\n",
+           strict_atomics ? "strict" : "lenient", total, need64, narrowed, refused, vok, vbase_bad, vnarrow_only, have_val ? "present" : "absent");
     CHECK(total > 100, "fixture sweep too small (%d)", total);
     CHECK(refused >= 3, "the 64-bit atomic fixtures must be refused (refused=%d)", refused);
+}
+
+int main(void) {
+    int have_val = system("spirv-val --version >/dev/null 2>&1") == 0;
+    const char *req = getenv("LAGFX_REQUIRE_SPIRV_VAL");
+    if (req && req[0] == '1') CHECK(have_val, "LAGFX_REQUIRE_SPIRV_VAL=1 but spirv-val is not installed");
+    sweep(0, have_val);   /* lenient atomics: also exercises the float-atomic fixtures */
+    sweep(1, have_val);   /* product behaviour */
     printf(fails ? "FAILED (%d)\n" : "PASS\n", fails);
     return fails ? 1 : 0;
 }

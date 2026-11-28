@@ -1258,7 +1258,8 @@ static uint32_t get_value_spv_type(const xlate_ctx_t *c, uint32_t value_id);
 /* true when the AIR type is, or contains (vector element / array element / struct member / pointee), a 64-bit integer */
 static bool air_type_has_i64(xlate_ctx_t *c, uint32_t ty, unsigned depth) {
     uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
-    if (ty >= n) return false;
+    if (ty == LAGFX_AIR_TYPE_NONE) return false;   /* unknown (no type tracked for the value): cannot be told, counted as not-64-bit */
+    if (ty >= n) return true;                      /* an invalid type index is not assumed safe */
     if (depth > 6u) return true;   /* cannot be inspected: not assumed safe */
     const lagfx_air_type_t *t = &ts[ty];
     if (t->kind == LAGFX_AIR_TYPE_INTEGER) return t->num_op >= 1u && t->op[0] == 64u;

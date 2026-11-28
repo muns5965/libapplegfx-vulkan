@@ -2513,4 +2513,4 @@ air_int64_narrow_test = executable('air-int64-narrow-unit',
   c_args : ['-DSRCDIR="' + meson.current_source_dir() + '/.."'],
   build_by_default : true,
 )
-test('air2spv Int64 narrowing sweep (unit, all AIR fixtures, spirv-val)', air_int64_narrow_test, workdir : meson.current_source_dir() / '..')
+test('air2spv Int64 narrowing sweep (unit, all AIR fixtures, spirv-val)', air_int64_narrow_test, workdir : meson.current_source_dir() / '..', env : {'LAGFX_REQUIRE_SPIRV_VAL' : '1'})
