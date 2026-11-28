@@ -98,6 +98,8 @@ struct lagfx_a64_obj {
     uint64_t rd_epoch; bool gpu_dirty;  /* buffer: exec epoch of the last read from the guest's pages; written by the GPU (blit / push / shader / tile) since that read */
     VkImageView view3;                  /* sampled VK_IMAGE_VIEW_TYPE_3D view of a 3D texture (all mip levels); lazily made */
     VkImageView mview, aview;           /* sampled views of the whole mip chain: mview = 2D (layer 0), aview = 2D_ARRAY (all layers); lazily made, only for textures with mips > 1 / array shaders */
+    VkImageView stview;                 /* storage view of a BGRA8 image seen as RGBA8 (st_surr); lazily made */
+    bool st_surr;                       /* B8G8R8A8 image created MUTABLE_FORMAT | EXTENDED_USAGE so that an R8G8B8A8 view can be a STORAGE image (the device has no STORAGE_IMAGE feature for BGRA8); every other view carries a usage without STORAGE; shaders writing it need lagfx_spv_swizzle_storage_rb */
     VkImageView sview;                  /* sampled view when it differs from view (A8Unorm: components 0,0,0,R); lazily made */
     uint64_t lin_seen; bool lin_pulled; /* linear texture: wgen of the backing buffer when the image last took (pulled) or gave (pushed) the buffer's bytes; image is current iff lin_pulled && lin_seen == buffer wgen */
     uint64_t length;                    /* bytes, rounded up to 16 KiB */

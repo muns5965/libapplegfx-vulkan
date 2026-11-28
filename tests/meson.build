@@ -1733,6 +1733,16 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-int64-lower-lavapipe.c') and
   test('Int64 lowering (uvec2 words): translate + lower + execute without shaderInt64 vs CPU u64 model (lavapipe)', i64l_test, timeout : 120)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'spv-storage-swizzle-lavapipe.c') and vulkan_dep.found()
+  ssw_test = executable('spv-storage-swizzle-lavapipe',
+    'spv-storage-swizzle-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('storage image red/blue swizzle (BGRA8 surrogate): shader half, executed on lavapipe', ssw_test, timeout : 60)
+endif
+
 # Tile kernel subgroup plan (pure decision table; the Adreno 64..128 range is emulated as logical 32-lane groups in a pinned subgroup).
 if fs.is_file(meson.current_source_dir() / 'tile-simd-plan-unit.c') and vulkan_dep.found()
   tsp_test = executable('tile-simd-plan-unit',

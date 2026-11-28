@@ -3,6 +3,7 @@
  */
 #include "arm64_exec_run.h"
 #include "../air2spv/spv_reflect.h"
+#include "../air2spv/spv_storage_swizzle.h"
 #include "arm64_objects.h"
 #include "arm64_pipeline.h"
 #include "arm64_depth_stencil.h"
@@ -99,7 +100,7 @@ typedef struct {
     uint32_t ncache;
     /* Shader variants for draws that bind an unnormalized-coordinates sampler (spv_unnorm.c): keyed by the set of unnormalized sampler slots of the vertex / fragment table. rc 0 = the shader never
      * samples through them (original shader), 1 = rewritten module(s), -1 = an unsupported use (draw skipped). Built lazily at the first such draw, owned by this object. */
-    struct { uint32_t vmask, fmask; uint8_t ms; int rc; VkShaderModule vm, fm; } fv[A64_FS_VARIANTS];   /* ms: the fragment module is the multisampled-fetch rewrite (spv_msfetch.c) */ uint32_t nfv;
+    struct { uint32_t vmask, fmask, swmask; uint8_t ms; int rc; VkShaderModule vm, fm; } fv[A64_FS_VARIANTS];   /* ms: the fragment module is the multisampled-fetch rewrite (spv_msfetch.c) */ uint32_t nfv;
     uint32_t ref;
 } a64_pipe_t;
 
@@ -985,18 +986,32 @@ static uint32_t unnorm_mask(const a64_run_t *r, const a64_pipe_t *pp, uint32_t s
     return m;
 }
 
+/* Bit i = pipeline binding i is a fragment storage image whose bound texture is a BGRA8-as-RGBA8 surrogate (lagfx_a64_obj_t.st_surr): its shader must swap red / blue (spv_storage_swizzle.c).
+ * *vertex_bad is set when such a texture is bound to a VERTEX-stage storage binding (not rewritten: the draw is skipped, counted). */
+static uint32_t storage_swizzle_mask(const a64_run_t *r, const a64_pipe_t *pp, bool *vertex_bad) {
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < pp->src.n_bind && i < 32u; i++) {
+        const lagfx_a64_bind_t *b = &pp->src.bind[i];
+        if (b->kind != LAGFX_A64_BIND_STORAGE_IMAGE || b->metal_index < 0 || (uint32_t)b->metal_index >= A64_MAX_FB) continue;
+        const lagfx_a64_obj_t *t = r->ftex[b->metal_index];
+        if (!t || !t->st_surr) continue;
+        if (b->stage == 1u) m |= 1u << i; else *vertex_bad = true;
+    }
+    return m;
+}
+
 /* The shader variant for a draw whose samplers at vmask / fmask are unnormalized. Returns 0 = the shaders as resolved (they never sample through those samplers: NOT a reason to skip),
  * 1 + index = a variant of the pipeline (rewritten per use by lagfx_spv_unnorm_rewrite), -1 = skip the draw (an unsupported use, no SPIR-V to analyse, or the module could not be made; counted). */
-static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uint32_t vmask, uint32_t fmask, bool msfetch) {
+static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uint32_t vmask, uint32_t fmask, bool msfetch, uint32_t swmask) {
     for (uint32_t i = 0; i < pp->nfv; i++)
-        if (pp->fv[i].vmask == vmask && pp->fv[i].fmask == fmask && pp->fv[i].ms == (uint8_t)msfetch) return pp->fv[i].rc < 0 ? -1 : pp->fv[i].rc == 0 ? 0 : (int)i + 1;
+        if (pp->fv[i].vmask == vmask && pp->fv[i].fmask == fmask && pp->fv[i].swmask == swmask && pp->fv[i].ms == (uint8_t)msfetch) return pp->fv[i].rc < 0 ? -1 : pp->fv[i].rc == 0 ? 0 : (int)i + 1;
     if (pp->nfv == A64_FS_VARIANTS) { CNT(p).ext_unnorm_unsup[4]++; return -1; }   /* more distinct sampler situations than the table holds (not seen in any capture) */
     const uint32_t slot = pp->nfv++;
-    pp->fv[slot].vmask = vmask, pp->fv[slot].fmask = fmask, pp->fv[slot].ms = (uint8_t)msfetch, pp->fv[slot].rc = 0, pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE;
+    pp->fv[slot].vmask = vmask, pp->fv[slot].fmask = fmask, pp->fv[slot].swmask = swmask, pp->fv[slot].ms = (uint8_t)msfetch, pp->fv[slot].rc = 0, pp->fv[slot].vm = pp->fv[slot].fm = VK_NULL_HANDLE;
     int rc_all = 0;
     for (uint32_t st = 0; st < 2u; st++) {
         const uint32_t mask = st ? fmask : vmask;
-        if (!mask && !(st && msfetch)) continue;
+        if (!mask && !(st && (msfetch || swmask))) continue;
         uint32_t bn[A64_MAX_FSAMP], nb = 0;
         for (uint32_t i = 0; i < pp->src.n_bind && nb < A64_MAX_FSAMP; i++) {
             const lagfx_a64_bind_t *b = &pp->src.bind[i];
@@ -1015,6 +1030,14 @@ static int unnorm_variant(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp, uin
             const int r2 = lagfx_spv_msfetch_rewrite(rc == 1 ? o : spv, rc == 1 ? osz : sz, &o2, &o2sz, &nr);
             if (r2 < 0) { p->diag2.exec.msaa.fbfetch_ms_refused++; rc = -3; }
             else if (r2 == 1) { free(o); o = o2, osz = o2sz, rc = 1; p->diag2.exec.msaa.fbfetch_ms_variants++, p->diag2.exec.msaa.fbfetch_ms_reads += nr; }
+        }
+        if (rc >= 0 && st && swmask) {   /* BGRA8 storage surrogate: the fragment module swaps red / blue on the surrogate bindings (after any other rewrite) */
+            uint32_t pr[32][2], np = 0;
+            for (uint32_t i = 0; i < pp->src.n_bind && i < 32u; i++) if (swmask >> i & 1u) pr[np][0] = 0u, pr[np][1] = pp->src.bind[i].binding, np++;
+            uint8_t *o3 = NULL; size_t o3sz = 0; char why[96];
+            const int r3 = lagfx_spv_swizzle_storage_rb(rc == 1 ? o : spv, rc == 1 ? osz : sz, pr, np, &o3, &o3sz, why, sizeof why);
+            if (r3 < 0) { CNT(p).ext_storage_img_why[4]++; LAGFX_WARN("arm64 pipeline %u: storage image surrogate cannot be used by this fragment shader: %s", pp->ref, why); rc = -3; }
+            else if (r3 == 1) { free(o); o = o3, osz = o3sz, rc = 1; CNT(p).ext_storage_swizzled++; }
         }
         if (rc == -3) rc_all = -1;
         else if (rc < 0) {
@@ -1059,8 +1082,10 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
     uint32_t alt = 0;   /* unnormalized-coordinates samplers in this draw: the shader USES that sample through them are rewritten (per OpSampledImage, spv_unnorm.c); a shader that never samples through them runs unchanged */
     {
         const uint32_t vmask = unnorm_mask(r, r->pipe, 0), fmask = unnorm_mask(r, r->pipe, 1);
-        if (vmask | fmask | (uint32_t)msfetch) {
-            int v = unnorm_variant(r, p, r->pipe, vmask, fmask, msfetch);
+        bool vbad = false; const uint32_t swmask = storage_swizzle_mask(r, r->pipe, &vbad);
+        if (vbad) { CNT(p).ext_storage_img_why[4]++; CNT(p).draws_skipped++; return false; }   /* a surrogate bound to a vertex-stage storage binding: not rewritten */
+        if (vmask | fmask | swmask | (uint32_t)msfetch) {
+            int v = unnorm_variant(r, p, r->pipe, vmask, fmask, msfetch, swmask);
             if (v < 0) { if (!msfetch) CNT(p).ext_unnorm_skipped++; CNT(p).draws_skipped++; return false; }
             if (v == 0) { if (vmask | fmask) CNT(p).ext_unnorm_unused++; }
             else alt = (uint32_t)v << 4, (vmask | fmask) ? (void)CNT(p).ext_unnorm_lod0++ : (void)0;

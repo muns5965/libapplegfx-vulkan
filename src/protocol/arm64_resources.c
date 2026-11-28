@@ -306,6 +306,7 @@ static bool obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     }
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
     if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
+    if (o->stview) vkDestroyImageView(vk->device, o->stview, NULL);
     if (o->view3) vkDestroyImageView(vk->device, o->view3, NULL);
     if (o->mview) vkDestroyImageView(vk->device, o->mview, NULL);
     if (o->aview) vkDestroyImageView(vk->device, o->aview, NULL);
@@ -487,7 +488,25 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
     VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = o->img_type, .format = o->format,
         .extent = { o->width, o->height, o->depth }, .mipLevels = o->mips, .arrayLayers = is_tex3d(o) ? 1u : o->layers, .samples = ns,
         .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-    if (vkCreateImage(vk->device, &ci, NULL, &o->img) != VK_SUCCESS) { o->img = VK_NULL_HANDLE; return false; }
+    /* STORAGE for B8G8R8A8_UNORM: the device refuses it for that format (Adreno 730: the only storage-image format the S8 logs lost), but an R8G8B8A8 view of the same bytes can be a storage image
+     * (MUTABLE_FORMAT + EXTENDED_USAGE, core 1.1). Only taken when the device ANSWERS that this exact image is creatable, and the draw path then rewrites the shaders (lagfx_spv_swizzle_storage_rb). */
+    o->st_surr = false;
+    if (!ds && o->format == VK_FORMAT_B8G8R8A8_UNORM && ns == VK_SAMPLE_COUNT_1_BIT && !is_tex3d(o) && !o->linear && !(u & VK_IMAGE_USAGE_STORAGE_BIT) && (cu.dropped & VK_IMAGE_USAGE_STORAGE_BIT) &&
+        !(lagfx_a64_test_drop_usage & VK_IMAGE_USAGE_STORAGE_BIT) && (lagfx_fmtcap_features(be, VK_FORMAT_R8G8B8A8_UNORM) & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) {
+        VkPhysicalDeviceImageFormatInfo2 fi = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2, .format = o->format, .type = o->img_type, .tiling = VK_IMAGE_TILING_OPTIMAL,
+            .usage = u | VK_IMAGE_USAGE_STORAGE_BIT, .flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT };
+        VkImageFormatProperties2 fp = { .sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_PROPERTIES_2 };
+        if (vkGetPhysicalDeviceImageFormatProperties2(vk->phys_device, &fi, &fp) == VK_SUCCESS && fp.imageFormatProperties.maxMipLevels >= o->mips && fp.imageFormatProperties.maxArrayLayers >= ci.arrayLayers &&
+            fp.imageFormatProperties.maxExtent.width >= o->width && fp.imageFormatProperties.maxExtent.height >= o->height) {
+            ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT; ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT; o->st_surr = true;
+        }
+    }
+    const VkResult cr = vkCreateImage(vk->device, &ci, NULL, &o->img);
+    if (cr != VK_SUCCESS && o->st_surr) {   /* the surrogate was promised but refused: the plain image, as before */
+        o->st_surr = false; ci.flags &= ~(VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT | VK_IMAGE_CREATE_EXTENDED_USAGE_BIT); ci.usage &= ~VK_IMAGE_USAGE_STORAGE_BIT;
+        o->img = VK_NULL_HANDLE; if (vkCreateImage(vk->device, &ci, NULL, &o->img) != VK_SUCCESS) { o->img = VK_NULL_HANDLE; return false; }
+    } else if (cr != VK_SUCCESS) { o->img = VK_NULL_HANDLE; return false; }
+    if (o->st_surr) { o->usage = ci.usage; u = ci.usage; m->p->diag2.exec.fmt.st_surr++; }
     VkMemoryRequirements rq;
     vkGetImageMemoryRequirements(vk->device, o->img, &rq);
     uint32_t mt = mem_type(vk, rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
@@ -1628,11 +1647,20 @@ bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t 
 
 /* ---- render targets and readback ---- */
 
+/* A surrogate-storage image (st_surr) was created with EXTENDED_USAGE: a view that does not say otherwise inherits the image's usage, including STORAGE, which its own format (BGRA8) cannot do. Every
+ * non-storage view therefore states its usage explicitly. */
+static void view_usage(lagfx_a64_obj_t *o, VkImageViewCreateInfo *vi, VkImageViewUsageCreateInfo *u) {
+    if (!o->st_surr) return;
+    *u = (VkImageViewUsageCreateInfo){ .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, .usage = o->usage & ~VK_IMAGE_USAGE_STORAGE_BIT };
+    vi->pNext = u;
+}
+
 static VkImageView tex_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageUsageFlags need) {
     if (!x || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & need)) return VK_NULL_HANDLE;
     if (!o->view) {
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        VkImageViewUsageCreateInfo vu; view_usage(o, &vi, &vu);
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
     }
     return o->view;
@@ -1649,6 +1677,7 @@ static VkImageView mk_sampled_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkI
     VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = type, .format = o->format,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, o->mips ? o->mips : 1u, 0, layers } };
     if (o->mtl_format == 1u && !o->ms) vi.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+    VkImageViewUsageCreateInfo vu; view_usage(o, &vi, &vu);
     if (vkCreateImageView(x->vk->device, &vi, NULL, slot) != VK_SUCCESS) { *slot = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
     return *slot;
 }
@@ -1668,6 +1697,7 @@ static VkImageView base_sample_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!o->sview) {
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
             .components = { VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R }, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        VkImageViewUsageCreateInfo vu; view_usage(o, &vi, &vu);
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->sview) != VK_SUCCESS) { o->sview = VK_NULL_HANDLE; return v; }
     }
     return o->sview;
@@ -1710,7 +1740,18 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
 }
 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */
-VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { return tex_view(x, o, VK_IMAGE_USAGE_STORAGE_BIT); }
+VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
+    if (!x || !o || !o->st_surr) return tex_view(x, o, VK_IMAGE_USAGE_STORAGE_BIT);
+    /* BGRA8 image, RGBA8 STORAGE-only view of the same bytes: shaders that use it are rewritten with lagfx_spv_swizzle_storage_rb so the stored bytes are BGRA-ordered */
+    if (o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & VK_IMAGE_USAGE_STORAGE_BIT)) return VK_NULL_HANDLE;
+    if (!o->stview) {
+        VkImageViewUsageCreateInfo vu = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, .usage = VK_IMAGE_USAGE_STORAGE_BIT };
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .pNext = &vu, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        if (vkCreateImageView(x->vk->device, &vi, NULL, &o->stview) != VK_SUCCESS) { o->stview = VK_NULL_HANDLE; return VK_NULL_HANDLE; }
+    }
+    return o->stview;
+}
 
 /* TEST HOOK: optional usage bits removed from textures created while it is non-zero (simulates a device / format that refuses them). Always 0 in production. */
 VkImageUsageFlags lagfx_a64_test_drop_usage = 0;
@@ -1731,6 +1772,7 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
     if (!o->view) {
         VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = o->format,
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+        VkImageViewUsageCreateInfo vu; view_usage(o, &vi, &vu);
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return false; }
     }
     const bool fetch = lagfx_vk_fetch_capable(x->vk) && (o->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);   /* the fragment shader may read it as an input attachment: order that stage / access too (dynamic path as well) */

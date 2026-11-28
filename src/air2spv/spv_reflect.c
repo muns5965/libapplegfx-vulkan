@@ -561,7 +561,8 @@ static bool wg_size_of(const wg_info_t *in, const uint32_t *w, uint32_t t, const
         if (in->is_spec[lid]) for (size_t i = 0; i < nspec; i++) if (spec[i][0] == in->spec_id[lid]) n = spec[i][1];
         if (n == 0) return false;                 /* a zero-length array is not a valid type */
         uint64_t stride; if (!wg_round(e, ea, &stride) || !wg_mul(stride, n, out)) return false;   /* the element stride is its size rounded up to its alignment (vec3 -> 16) */
-        if (align) *align = ea; return true;
+        if (align) *align = ea;
+        return true;
     }
     case 5: {
         uint64_t off = 0;
