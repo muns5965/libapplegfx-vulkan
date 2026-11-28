@@ -1723,6 +1723,17 @@ if fs.is_file(meson.current_source_dir() / 'seg-census-unit.c')
   test('segment census: framing, stop reasons, truncation, overflow, dumps (unit)', sc_test, timeout : 30)
 endif
 
+# Common Vulkan compute execution base (protocol/compute_exec.c) against a CPU reference on lavapipe; independent of any guest record format.
+if fs.is_file(meson.current_source_dir() / 'compute-exec-lavapipe.c') and vulkan_dep.found()
+  cx_test = executable('compute-exec-lavapipe',
+    'compute-exec-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep],
+    build_by_default : true,
+  )
+  test('common compute base: pipeline, descriptors, dispatch, barriers (lavapipe)', cx_test, timeout : 60)
+endif
+
 # ARM64 pipeline resolver + descriptor binding + topology + cache invalidation + real-data capture (lavapipe; honest SKIP without fixtures / ICD).
 if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   pu_deps = [libapplegfx_vulkan_dep]

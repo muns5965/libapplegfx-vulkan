@@ -428,8 +428,8 @@ void lagfx_pipeline_matrix_run(VkDevice dev, const lagfx_pipeline_desc_t *d0, co
     row(c, "M9k", "only OpReturnValue(OpUndef) operands -> OpConstantNull", R_UK, true);
     /* stage / vertex-input / capability localisation (the offline ladder's d1 / d2 / e / f rows, here on the device; DIAGNOSTIC meanings, never single=true so M10 does not combine them) */
     row(c, "M11a", "real VERTEX + stub fragment (VS alone)", R_STUBFS, false);
-    row(c, "M11b", "stub vertex + real FRAGMENT (FS alone)", R_STUBVS, false);
-    row(c, "M12", "Half4 vertex attributes declared Float4 (vertex input format)", R_VINF32, false);
+    row(c, "M11b", "stub vertex + real FRAGMENT (FS alone; a FAIL is inconclusive: the stub VS cannot supply the FS varyings, only a BUILT is informative)", R_STUBVS, false);
+    row(c, "M12", "Half4 vertex attributes declared Float4 (creation-only: data not converted; a BUILT names the vertex-input format, it is not a fix)", R_VINF32, false);
     row(c, "M13", "drop unused Int8/16/Float16/Int64 capability declarations", R_STRIP, false);
     row(c, "M14", "64-bit dynamic vector index -> 32-bit", R_IDX32, false);
     /* M10: the largest compatible set of the single rows whose outcome differs from M0 (BUILT where M0 failed, or another VkResult), then pairs of them (at most 8 rows in all) */
