@@ -131,7 +131,7 @@ void           lagfx_vk_render_end(struct lagfx_vk_state *vk, VkCommandBuffer cm
 lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageView view);
 
 /* Framebuffer cache of the legacy backend: created / destroyed / reused (hits) / refused because full, live now and the peak. All zero on the dynamic backend (no cache). */
-typedef struct { uint64_t fb_created, fb_destroyed, fb_hits, fb_full, fb_peak; unsigned fb_live, rp_live; } lagfx_render_cache_stats_t;
+typedef struct { uint64_t fb_created, fb_destroyed, fb_hits, fb_full, fb_peak, forget_waits, forget_wait_us, forget_deferred; unsigned fb_live, rp_live; } lagfx_render_cache_stats_t;   /* forget_*: vkDeviceWaitIdle calls (count, total microseconds) made to forget a view, and the ones that failed (the view's objects were kept) */
 void lagfx_vk_render_cache_stats(struct lagfx_vk_state *vk, lagfx_render_cache_stats_t *out);
 
 /* Park a view / image / memory (any may be NULL) whose framebuffers could not be released; they are destroyed at shutdown, after the framebuffers. false: out of memory (the

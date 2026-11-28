@@ -5,6 +5,7 @@
 #include "command.h"
 #include "common/log.h"
 #include <pthread.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -416,10 +417,15 @@ lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageVie
         if (!idle && out == LAGFX_FORGET_OK) {
             VkResult vr;
             if (c->fail_waitidle) { c->fail_waitidle--; vr = c->fail_lost ? VK_ERROR_DEVICE_LOST : VK_ERROR_OUT_OF_HOST_MEMORY; }
-            else vr = vkDeviceWaitIdle(vk->device);
+            else {
+                struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+                vr = vkDeviceWaitIdle(vk->device);
+                clock_gettime(CLOCK_MONOTONIC, &t1);
+                c->st.forget_waits++; c->st.forget_wait_us += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000ll + (t1.tv_nsec - t0.tv_nsec) / 1000ll);
+            }
             if (vr == VK_SUCCESS) idle = true;
             else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; lagfx_vk_mark_device_lost(vk); LAGFX_ERR("render_forget_view: device lost; the objects are destroyed (nothing can still run), but no new work is accepted from now on"); }
-            else { out = LAGFX_FORGET_DEFERRED; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are deferred to shutdown", (int)vr); }
+            else { out = LAGFX_FORGET_DEFERRED; c->st.forget_deferred++; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are deferred to shutdown", (int)vr); }
         }
         if (out == LAGFX_FORGET_DEFERRED) { i++; continue; }
         vkDestroyFramebuffer(vk->device, c->fb[i].fb, NULL);

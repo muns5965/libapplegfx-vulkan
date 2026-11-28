@@ -275,28 +275,31 @@ static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
     free(ms);
 }
 
-/* A view the legacy backend used as a framebuffer attachment is referenced by the render-pass cache's VkFramebuffers: they must be forgotten BEFORE the view is destroyed, or the cache fills up
- * (framebuffer cache full (1024) -> every later pass refused, S8: 749 draws) and a recycled view handle could match a stale framebuffer. A view whose framebuffers could not be proven idle
- * is leaked (kept alive) instead of destroyed under them. */
-static void destroy_view(struct lagfx_vk_state *vk, VkImageView v) {
-    if (!v) return;
-    if (lagfx_vk_render_forget_view(vk, v) == LAGFX_FORGET_DEFERRED) return;
-    vkDestroyImageView(vk->device, v, NULL);
+/* A view the legacy backend used as a framebuffer attachment is referenced by the render-pass cache's VkFramebuffers: they must be forgotten BEFORE the view (and the image / memory behind it) is
+ * destroyed, or the cache fills up (framebuffer cache full (1024) -> every later pass refused, S8: 749 draws) and a recycled view handle could match a stale framebuffer.
+ * When the device cannot be proven idle for one of the views (forget DEFERRED) the WHOLE object is leaked until shutdown: its views, image, memory and shared surface stay alive together;
+ * destroying the image under a kept view / framebuffer would be worse than the leak. Returns false in that case. */
+static bool forget_views(struct lagfx_vk_state *vk, const lagfx_a64_obj_t *o) {
+    const VkImageView v[5] = { o->view, o->sview, o->view3, o->mview, o->aview };
+    bool ok = true;
+    for (unsigned i = 0; i < 5u; i++) if (v[i] && lagfx_vk_render_forget_view(vk, v[i]) == LAGFX_FORGET_DEFERRED) ok = false;
+    return ok;
 }
 
 static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (!o) return;
+    if (!forget_views(vk, o)) { LAGFX_ERR("arm64 res: object task=%u ref=%u leaked: its framebuffers could not be proven idle", o->task, o->ref); free(o); return; }
     if (o->ms) {   /* the image belongs to the shared surface */
-        if (o->view) destroy_view(vk, o->view);
+        if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
         msurf_unref(vk, o->ms);
         free(o);
         return;
     }
-    if (o->view) destroy_view(vk, o->view);
-    if (o->sview) destroy_view(vk, o->sview);
-    if (o->view3) destroy_view(vk, o->view3);
-    if (o->mview) destroy_view(vk, o->mview);
-    if (o->aview) destroy_view(vk, o->aview);
+    if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
+    if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
+    if (o->view3) vkDestroyImageView(vk->device, o->view3, NULL);
+    if (o->mview) vkDestroyImageView(vk->device, o->mview, NULL);
+    if (o->aview) vkDestroyImageView(vk->device, o->aview, NULL);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);

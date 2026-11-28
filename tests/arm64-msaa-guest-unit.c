@@ -232,7 +232,15 @@ static void cb_pass_ms_depth(uint32_t cref, uint32_t dref, uint16_t dstore) {   
 }
 typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_stats_t ms; uint64_t draws, skipped, no_target, pipes_built, ds_unsup, val; char line[1100]; char rej[96]; float dsr[RT_W * RT_H]; bool dsr_ok; } mp_t;
 #define REF_MSD8 34u   /* multisampled depth texture asked with 8 samples: refused in exact mode on a 1|4 device */
+static void (*g_mp_after)(lagfx_protocol_t *p);   /* called after the readbacks, before the task is dropped */
 static unsigned g_mp_extra;   /* bit 0: REF_MS16 as a 8-sample colour texture (refused); bit 1: REF_MSD8 (refused 8-sample depth) */
+static uint64_t g_leak_val0, g_leak_val1;
+static void leak_after(lagfx_protocol_t *p) {
+    lagfx_vk_render_test_fail_waitidle(g_dev->vk, 1, false);   /* the next vkDeviceWaitIdle of a view forget fails */
+    lagfx_a64_res_forget(p, 1, REF_TEX);
+    g_leak_val1 = lagfx_vk_validation_msg_count;
+    lagfx_vk_render_test_fail_waitidle(g_dev->vk, 0, false);
+}
 static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
@@ -265,6 +273,7 @@ static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     o->ms = p->diag2.exec.msaa, o->draws = p->diag2.exec.run.draws, o->skipped = p->diag2.exec.run.draws_skipped, o->no_target = p->diag2.exec.run.no_target, o->pipes_built = p->diag2.exec.pipe.pipes_built, o->ds_unsup = p->diag2.exec.run.ds_attach_unsupported;
     lagfx_msaa_stats_line(&p->diag2.exec.msaa, o->line, sizeof o->line);
     if (o->ms.ms_pass_refused) snprintf(o->rej, sizeof o->rej, "%s", lagfx_a64_msaa_last_reject());
+    if (g_mp_after) g_mp_after(p);
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex2 = false;
 }
@@ -644,6 +653,16 @@ int main(void) {
       { unsigned nonzero = 0; for (uint32_t i = 0; i < RT_W * RT_H; i++) { uint32_t v; memcpy(&v, m.msx + i * 4, 4); nonzero += v != 0; } assert(nonzero > 40); }
       puts("PASS exact: after a rejected pass the next plain pass draws normally (1 draw), the rejected pass's resolve target is still untouched");
       g_mp_extra = 0;
+      if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {   /* object release while the device cannot be proven idle: the WHOLE object is kept (views, image, memory), nothing is destroyed under a cached framebuffer */
+          mp_run(b_pipe_key_1x_only, &m, false);   /* warm: plain pass into REF_TEX leaves a cached framebuffer */
+          lagfx_render_cache_stats_t c0, c1;
+          g_mp_after = leak_after; lagfx_vk_render_cache_stats(g_dev->vk, &c0); g_leak_val0 = lagfx_vk_validation_msg_count;
+          mp_run(b_pipe_key_1x_only, &m, false);
+          g_mp_after = NULL; lagfx_vk_render_cache_stats(g_dev->vk, &c1);
+          assert(c1.forget_deferred >= c0.forget_deferred + 1u && g_leak_val1 == g_leak_val0 && c1.fb_full == c0.fb_full);
+          { lagfx_render_cache_stats_t c2; mp_run(b_pipe_key_1x_only, &m, false); lagfx_vk_render_cache_stats(g_dev->vk, &c2); assert(m.draws == 2 && c2.fb_full == c1.fb_full); }   /* the device keeps rendering afterwards */
+          puts("PASS legacy: a failed WaitIdle while releasing a mirror object keeps the whole object (forget_deferred counted, no validation message), later passes still render");
+      }
       /* (b) depth attachment refused (8x depth not offered) with a valid 4x colour attachment */
       g_mp_extra = 2u;
       mp_run(b_rej_depth, &m, false);
