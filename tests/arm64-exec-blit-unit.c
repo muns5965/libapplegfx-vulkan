@@ -7,6 +7,8 @@
 #include "protocol/arm64_resources.h"
 #include "vulkan/instance.h"
 #include "device.h"
+#include "protocol/diag.h"
+#include <unistd.h>
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -412,6 +414,15 @@ static void test_bad_inputs(void) {
     CHECK(S()->blit_unsup_tag[307 - 300] >= s0.blit_unsup_tag[307 - 300] + 1, "307 counted in the per-tag unsupported census");
     CHECK(S()->blit_rej_tag[303 - 300] >= s0.blit_rej_tag[303 - 300] + 4, "refused 303 commands counted per tag (65-wide, destination outside, overlap, 2D->3D, buffer as texture)");
     uint8_t got[2 * PG]; va_read((uint64_t)VPN_B << 14, got, sizeof got);
+    {   /* the periodic / final diag prints the census line the Android export carries (g7-gpu-blit) */
+        char path[] = "/tmp/lagfx-blitdiagXXXXXX"; int fd = mkstemp(path); CHECK(fd >= 0, "mkstemp");
+        fflush(stderr); int saved = dup(2); dup2(fd, 2);
+        lagfx_diag_stats(g_p, 1ull << 40, true);
+        fflush(stderr); dup2(saved, 2); close(saved);
+        char buf[65536]; lseek(fd, 0, SEEK_SET); ssize_t n = read(fd, buf, sizeof buf - 1); close(fd); unlink(path); buf[n > 0 ? n : 0] = 0;
+        const char *l = strstr(buf, "g7-gpu-blit:");
+        CHECK(l && strstr(l, "unsup[307]=") && strstr(l, "rej[303]="), "diag prints the blit census line with the per-tag counters");
+    }
     uint8_t exp[2 * PG]; memset(exp, 0x44, sizeof exp); memcpy(exp + 110, a + 100, 50);
     CHECK(!memcmp(got, exp, sizeof got), "rejected commands changed nothing");
     /* a buffer over unmapped guest pages: reads as zero, write-back skips the hole, nothing crashes */

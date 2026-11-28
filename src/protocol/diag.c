@@ -336,6 +336,20 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", ml);
             LAGFX_LOG("%s", ml);
         }
+        {   /* blit census (src/protocol/arm64_resources.c): commands not executed (no payload layout / lowering) and commands refused by validation, per wire tag 300..331. One line, only when something was seen. */
+            const lagfx_a64_stats_t *B = lagfx_a64_res_stats(p);
+            uint64_t unsup = 0, rej = 0;
+            for (unsigned i = 0; i < 32u; i++) unsup += B->blit_unsup_tag[i], rej += B->blit_rej_tag[i];
+            if (unsup || rej) {
+                char bl[640]; size_t n = (size_t)snprintf(bl, sizeof bl, "g7-gpu-blit: seen=%llu done=%llu rejected=%llu noop=%llu unsupported=%llu |", (unsigned long long)B->blit_seen, (unsigned long long)B->blit_done, (unsigned long long)B->blit_rejected, (unsigned long long)B->blit_noop, (unsigned long long)B->blit_unsupported);
+                for (unsigned i = 0; i < 32u && n < sizeof bl; i++) {
+                    if (B->blit_unsup_tag[i]) n += (size_t)snprintf(bl + n, sizeof bl - n, " unsup[%u]=%llu", 300u + i, (unsigned long long)B->blit_unsup_tag[i]);
+                    if (B->blit_rej_tag[i] && n < sizeof bl) n += (size_t)snprintf(bl + n, sizeof bl - n, " rej[%u]=%llu", 300u + i, (unsigned long long)B->blit_rej_tag[i]);
+                }
+                fprintf(stderr, "%s\n", bl);
+                LAGFX_LOG("%s", bl);
+            }
+        }
     }
     if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;
