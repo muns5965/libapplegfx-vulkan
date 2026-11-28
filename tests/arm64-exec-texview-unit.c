@@ -12,6 +12,8 @@
 #ifdef LAGFX_HAVE_VULKAN
 #include "vulkan/format_caps.h"
 #include "vulkan/filter_cubic.h"
+#include "protocol/arm64_resources.h"
+#include "vulkan/command.h"
 #include "arm64-exec-texview-shaders.h"
 #include "arm64-exec-res-shaders.h"   /* k_fs_unorm_spv: texture(sampler2D(tex@24, smp@25), gl_FragCoord.xy), implicit LOD */
 
@@ -330,6 +332,135 @@ static void test_cubic(void) {
     unsetenv("LAGFX_CUBIC");
     puts("PASS: cubic opt-in: default unchanged; extension absent -> LINEAR + NO_EXT; absent format feature -> NO_FORMAT; unnormalized -> NO_COMBO (no cubic sampler created on lavapipe)");
 }
+
+/* ---- sub-range views (lagfx_a64_res_make_sub_view): the helper's view is put into the object's view slot (o->aview / o->mview, which the exec uses as is when set), so the REAL draw path
+ * samples through it and the pixels tell which (layer, level) the view exposes. Host-only: no guest path creates such a view yet (texture-view objects are not decoded). ---- */
+static uint32_t g_ov_layer = 99, g_ov_level = 99, g_ov_col;   /* the parent's (layer, level) overwritten on the GPU after the view was made */
+static uint32_t col_ov(uint32_t layer, uint32_t level) { return layer == g_ov_layer && level == g_ov_level ? g_ov_col : col(layer, level); }
+static lagfx_a64_view_range_t g_rg;
+static uint32_t w_sub_arr(uint32_t cx, uint32_t cy) {   /* LOD = column clamps to the view's levels, layer = row clamps to the view's layers */
+    uint32_t l = cx < g_rg.levels ? cx : g_rg.levels - 1u, y = cy < g_rg.layers ? cy : g_rg.layers - 1u;
+    return col_ov(g_rg.base_layer + y, g_rg.base_mip + l);
+}
+static uint32_t w_sub_2d(uint32_t cx, uint32_t cy) { (void)cy; uint32_t l = cx < g_rg.levels ? cx : g_rg.levels - 1u; return col_ov(g_rg.base_layer, g_rg.base_mip + l); }
+
+/* Overwrite level `level`, layer `layer` of the mirror image (a TEX_W >> level square) with one colour by a GPU copy: a write to the PARENT after the view exists. */
+static void parent_write(lagfx_protocol_t *p, lagfx_a64_obj_t *o, uint32_t layer, uint32_t level, uint32_t color) {
+    struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
+    uint32_t n = (TEX_W >> level) * (TEX_W >> level), data[64];
+    for (uint32_t i = 0; i < n; i++) data[i] = color;
+    VkBuffer b; VkDeviceMemory m;
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n * 4u, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT, .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+    assert(vkCreateBuffer(vk->device, &bci, NULL, &b) == VK_SUCCESS);
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(vk->device, b, &mr);
+    VkPhysicalDeviceMemoryProperties mp; vkGetPhysicalDeviceMemoryProperties(vk->phys_device, &mp);
+    uint32_t mt = ~0u;
+    for (uint32_t i = 0; i < mp.memoryTypeCount && mt == ~0u; i++)
+        if ((mr.memoryTypeBits & (1u << i)) && (mp.memoryTypes[i].propertyFlags & (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) == (VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) mt = i;
+    assert(mt != ~0u);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt };
+    assert(vkAllocateMemory(vk->device, &mai, NULL, &m) == VK_SUCCESS && vkBindBufferMemory(vk->device, b, m, 0) == VK_SUCCESS);
+    void *mapped; assert(vkMapMemory(vk->device, m, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS);
+    memcpy(mapped, data, n * 4u); vkUnmapMemory(vk->device, m);
+    VkCommandBuffer cb; assert(lagfx_vk_cmdbuf_alloc(vk, &cb) == LAGFX_OK);
+    VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+    assert(vkBeginCommandBuffer(cb, &bi) == VK_SUCCESS);
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1 }, .imageExtent = { TEX_W >> level, TEX_W >> level, 1 } };
+    vkCmdCopyBufferToImage(cb, b, o->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+    assert(vkEndCommandBuffer(cb) == VK_SUCCESS);
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+    assert(lagfx_vk_submit_checked(vk, &si, VK_NULL_HANDLE) == LAGFX_OK);
+    assert(vkQueueWaitIdle(vk->graphics_queue) == VK_SUCCESS);
+    lagfx_vk_cmdbuf_free(vk, cb);
+    vkDestroyBuffer(vk->device, b, NULL); vkFreeMemory(vk->device, m, NULL);
+}
+
+static void sub_arr_case(lagfx_protocol_t *p, lagfx_a64_obj_t *o, uint32_t bm, uint32_t lv, uint32_t bl, uint32_t ly, const char *name) {
+    struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
+    uint8_t img[RT_W * RT_H * 4];
+    g_rg = (lagfx_a64_view_range_t){ bm, lv, bl, ly };
+    const char *why = NULL;
+    VkImageView v = lagfx_a64_res_make_sub_view(vk, o, VK_IMAGE_VIEW_TYPE_2D_ARRAY, &g_rg, &why);
+    if (!v) { fprintf(stderr, "%s: make_sub_view refused: %s\n", name, why ? why : "?"); assert(0); }
+    assert(why == NULL);
+    if (o->aview) vkDestroyImageView(vk->device, o->aview, NULL);
+    o->aview = v;   /* the exec owns it from here (destroyed with the object) */
+    tv_exec(p, img);
+    assert(p->diag2.exec.run.draws >= 1 && p->diag2.exec.run.draws_skipped == 0);
+    check(name, img, w_sub_arr);
+}
+
+static void test_sub_view(void) {
+    uint8_t img[RT_W * RT_H * 4];
+    g_clamp_lo = -1.f; g_lo = 0, g_hi = 3;
+    lagfx_protocol_t *p = tv_run(1, 0x86000000u, 3, 4, 4);   /* 4 layers x 4 levels, array shader: column = LOD, row = layer */
+    struct lagfx_vk_state *vk = ((lagfx_device_t *)p->dev)->vk;
+    tv_exec(p, img);                                          /* creates the objects with the whole-chain view */
+    check("whole view (control)", img, w_arr4);
+    lagfx_a64_obj_t *o = lagfx_a64_res_lookup(p, 1, REF_TEX3);
+    assert(o && o->kind == LAGFX_A64_TEXTURE && o->mips == 4 && o->layers == 4);
+    g_ov_layer = g_ov_level = 99;
+    sub_arr_case(p, o, 1, 2, 1, 2, "levels 1..2 x layers 1..2");
+    sub_arr_case(p, o, 2, 1, 3, 1, "level 2 x layer 3");
+    sub_arr_case(p, o, 0, 4, 2, 2, "levels 0..3 x layers 2..3");
+    sub_arr_case(p, o, 3, 1, 0, 4, "last level x all layers");
+    /* a write to the PARENT after the view exists is what the view reads: (layer 2, level 1) -> a new colour, inside the last view's range? use a view that contains it */
+    g_ov_layer = 2, g_ov_level = 1, g_ov_col = 0xff102030u;
+    parent_write(p, o, 2, 1, g_ov_col);
+    sub_arr_case(p, o, 1, 2, 1, 2, "parent update visible through levels 1..2 x layers 1..2");
+    /* ... and outside the view's range it is not visible: a view of levels 2..3 never shows level 1 */
+    sub_arr_case(p, o, 2, 2, 1, 3, "parent update outside the view is invisible");
+    /* releasing a sub-view leaves the parent alone: a second, caller-owned view is made and freed, the object's own slot is replaced by the whole-chain view and draws exactly as before */
+    g_rg = (lagfx_a64_view_range_t){ 1, 2, 1, 2 };
+    VkImageView extra = lagfx_a64_res_make_sub_view(vk, o, VK_IMAGE_VIEW_TYPE_2D_ARRAY, &g_rg, NULL);
+    assert(extra);
+    lagfx_a64_res_free_sub_view(vk, extra);
+    vkDestroyImageView(vk->device, o->aview, NULL); o->aview = VK_NULL_HANDLE;   /* the exec makes the whole-chain view again */
+    g_rg = (lagfx_a64_view_range_t){ 0, 4, 0, 4 };
+    tv_exec(p, img);
+    check("whole view after the sub-views were released", img, w_sub_arr);
+    done(p);
+    /* 2D view of one layer, two levels, through the plain texture2d shader (o->mview slot) */
+    p = tv_run(0, 0x86000000u, 3, 4, 4);
+    vk = ((lagfx_device_t *)p->dev)->vk;
+    tv_exec(p, img);
+    o = lagfx_a64_res_lookup(p, 1, REF_TEX3);
+    assert(o);
+    g_ov_layer = g_ov_level = 99;
+    g_rg = (lagfx_a64_view_range_t){ 1, 2, 2, 1 };
+    VkImageView v2 = lagfx_a64_res_make_sub_view(vk, o, VK_IMAGE_VIEW_TYPE_2D, &g_rg, NULL);
+    assert(v2);
+    if (o->mview) vkDestroyImageView(vk->device, o->mview, NULL);
+    o->mview = v2;
+    tv_exec(p, img);
+    check("2D view: layer 2, levels 1..2", img, w_sub_2d);
+    done(p);
+    /* refusals: nothing is created, `why` says what */
+    p = tv_run(1, 0x86000000u, 3, 4, 4);
+    vk = ((lagfx_device_t *)p->dev)->vk;
+    tv_exec(p, img);
+    o = lagfx_a64_res_lookup(p, 1, REF_TEX3);
+    static const struct { VkImageViewType t; lagfx_a64_view_range_t r; const char *what; } bad[] = {
+        { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 0, 0, 0, 1 }, "zero levels" },        { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 0, 1, 0, 0 }, "zero layers" },
+        { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 4, 1, 0, 1 }, "base mip past the chain" }, { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 3, 2, 0, 1 }, "levels run past the chain" },
+        { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 0, 1, 4, 1 }, "base layer past the array" }, { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 0, 1, 3, 2 }, "layers run past the array" },
+        { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 1, 0xffffffffu, 0, 1 }, "level count overflow" }, { VK_IMAGE_VIEW_TYPE_2D_ARRAY, { 0, 1, 1, 0xffffffffu }, "layer count overflow" },
+        { VK_IMAGE_VIEW_TYPE_2D, { 0, 1, 0, 2 }, "2D view of two layers" },     { VK_IMAGE_VIEW_TYPE_CUBE, { 0, 1, 0, 6 }, "cube" },
+        { VK_IMAGE_VIEW_TYPE_3D, { 0, 1, 0, 1 }, "3D type" },
+    };
+    for (size_t i = 0; i < sizeof bad / sizeof bad[0]; i++) {
+        const char *why = NULL;
+        VkImageView v = lagfx_a64_res_make_sub_view(vk, o, bad[i].t, &bad[i].r, &why);
+        if (v || !why) { fprintf(stderr, "refusal case '%s': view %p why %s\n", bad[i].what, (void *)v, why ? why : "(none)"); assert(0); }
+    }
+    assert(!lagfx_a64_res_make_sub_view(vk, NULL, VK_IMAGE_VIEW_TYPE_2D, &bad[0].r, NULL) && !lagfx_a64_res_make_sub_view(vk, o, VK_IMAGE_VIEW_TYPE_2D, NULL, NULL));
+    done(p);
+    g_ov_layer = g_ov_level = 99;
+    puts("PASS: sub-range views (host only): levels / layers windows read exactly the colours of that window (LOD and layer clamp to the view), a GPU write to the parent shows through the view only inside its range, freeing a view leaves the parent drawing as before, 11 invalid ranges / types refused");
+}
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
@@ -340,6 +471,7 @@ int main(void) {
     test_1d_array_type();
     test_unnorm_mips();
     test_cubic();
+    test_sub_view();
     assert(lagfx_vk_validation_msg_count == 0);   /* checked before the test's own shader modules / layouts are destroyed */
     struct lagfx_vk_state *vk = g_dev->vk;
     for (int i = 0; i < 3; i++) { if (i < 2 && g_t.m[i]) vkDestroyShaderModule(vk->device, g_t.m[i], NULL); if (g_t.fsm[i]) vkDestroyShaderModule(vk->device, g_t.fsm[i], NULL); }

@@ -1649,7 +1649,7 @@ bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t 
 
 /* A surrogate-storage image (st_surr) was created with EXTENDED_USAGE: a view that does not say otherwise inherits the image's usage, including STORAGE, which its own format (BGRA8) cannot do. Every
  * non-storage view therefore states its usage explicitly. */
-static void view_usage(lagfx_a64_obj_t *o, VkImageViewCreateInfo *vi, VkImageViewUsageCreateInfo *u) {
+static void view_usage(const lagfx_a64_obj_t *o, VkImageViewCreateInfo *vi, VkImageViewUsageCreateInfo *u) {
     if (!o->st_surr) return;
     *u = (VkImageViewUsageCreateInfo){ .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_USAGE_CREATE_INFO, .usage = o->usage & ~VK_IMAGE_USAGE_STORAGE_BIT };
     vi->pNext = u;
@@ -1738,6 +1738,34 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
     if (flags) *flags = f;
     return v;
 }
+
+/* A caller-owned sampled view over a SUB-RANGE of a mirrored texture (a Metal texture view: newTextureView(pixelFormat, textureType, levels, slices)). Aliases the parent's image: later writes to the
+ * parent (upload, blit, render) are what the view reads, and destroying the view leaves the parent untouched. Not cached in the object and not used by any guest path yet (the texture-view
+ * object types 7 / 8 / 0x1b are not decoded); `why` (may be NULL) names the refusal. Same-format views only. */
+VkImageView lagfx_a64_res_make_sub_view(struct lagfx_vk_state *vk, const lagfx_a64_obj_t *o, VkImageViewType type, const lagfx_a64_view_range_t *r, const char **why) {
+    const char *w = NULL;
+    VkImageView v = VK_NULL_HANDLE;
+    uint32_t mips = o ? (o->mips ? o->mips : 1u) : 0u, layers = o ? (o->layers ? o->layers : 1u) : 0u;
+    if (!vk || !o || !r) w = "null argument";
+    else if (o->kind != LAGFX_A64_TEXTURE || !o->img) w = "not a mirrored texture";
+    else if (is_tex3d(o) || o->ds_aspects || o->ms || o->samples > 1u || o->samples_req > 1u) w = "3D, depth/stencil or multisampled texture";
+    else if (!(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) w = "no sampled usage";
+    else if (type != VK_IMAGE_VIEW_TYPE_2D && type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) w = "view type";
+    else if (!r->levels || !r->layers) w = "empty range";
+    else if (r->base_mip >= mips || r->levels > mips - r->base_mip) w = "mip range out of the texture";
+    else if (r->base_layer >= layers || r->layers > layers - r->base_layer) w = "layer range out of the texture";
+    else if (type == VK_IMAGE_VIEW_TYPE_2D && r->layers != 1u) w = "2D view with more than one layer";
+    else {
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = type, .format = o->format,
+            .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, r->base_mip, r->levels, r->base_layer, r->layers } };
+        if (o->mtl_format == 1u) vi.components = (VkComponentMapping){ VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_ZERO, VK_COMPONENT_SWIZZLE_R };
+        VkImageViewUsageCreateInfo vu; view_usage(o, &vi, &vu);
+        if (vkCreateImageView(vk->device, &vi, NULL, &v) != VK_SUCCESS) v = VK_NULL_HANDLE, w = "vkCreateImageView failed";
+    }
+    if (why) *why = w;
+    return v;
+}
+void lagfx_a64_res_free_sub_view(struct lagfx_vk_state *vk, VkImageView v) { if (vk && v) vkDestroyImageView(vk->device, v, NULL); }
 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {

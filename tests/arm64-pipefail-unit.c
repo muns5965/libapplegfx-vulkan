@@ -175,6 +175,22 @@ static bool resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *t, 
     return true;
 }
 
+/* Rebuild the words of module `stage` ("vs"/"fs") from the "pipeline-build-fail-spv:" log lines; returns the byte count (0 = none / incomplete), `lines_seen` counts the log lines of that stage. */
+static size_t spv_from_log(const char *log, const char *stage, uint32_t *out, size_t cap_words, int *lines_seen) {
+    char key[40]; snprintf(key, sizeof key, "pipeline-build-fail-spv: %s hash=", stage);
+    size_t n = 0; int lines = 0, total = 0; unsigned long long bytes = 0;
+    for (const char *q = log; (q = strstr(q, key)); q += strlen(key)) {
+        const char *b = strstr(q, "bytes="); const char *l = strstr(q, "line=");
+        if (!b || !l) return 0;
+        int k = 0, m = 0; sscanf(b, "bytes=%llu", &bytes); sscanf(l, "line=%d/%d", &k, &m);
+        const char *sp = strchr(l, ' '); if (!sp) return 0;
+        lines++; total = m;
+        for (sp++; *sp && *sp != '\n'; ) { unsigned v; int used = 0; if (sscanf(sp, "%8x%n", &v, &used) != 1 || !used) break; if (n < cap_words) out[n] = v; n++; sp += used; while (*sp == ' ') sp++; }
+    }
+    if (lines_seen) *lines_seen = lines;
+    return lines && lines == total && n * 4u == bytes ? n * 4u : 0;
+}
+
 static char *slurp(const char *path) {
     FILE *f = fopen(path, "rb"); if (!f) return NULL;
     char *b = calloc(1, 1 << 17); size_t n = fread(b, 1, (1 << 17) - 1, f); b[n] = 0; fclose(f); return b;
@@ -211,6 +227,13 @@ int main(void) {
     for (int i = 0; i < 3; i++) { pl = VK_NULL_HANDLE; lagfx_status_t st = lagfx_pipeline_build(vk->device, &d, &pl); assert(st == LAGFX_ERR_BACKEND && !pl); }
     log = slurp(logf);
     assert(count(log, "pipeline-build-fail:") == 1);                  /* three identical failures: one line */
+    {   /* the failing SPIR-V is in the log, once, byte-exact (a device log alone then reproduces the failure: scripts/spv-from-log.py) */
+        uint32_t w[512]; int ls = 0;
+        size_t nb = spv_from_log(log, "vs", w, 512, &ls);
+        assert(nb == sizeof k_vs_spv && memcmp(w, k_vs_spv, nb) == 0 && ls == (int)((sizeof k_vs_spv / 4 + 31) / 32));   /* complete, equal, not repeated for the 3 identical failures */
+        nb = spv_from_log(log, "fs", w, 512, &ls);
+        assert(nb == sizeof k_fs_spv && memcmp(w, k_fs_spv, nb) == 0);
+    }
     assert(strstr(log, "result=VK_ERROR_") && strstr(log, "vs[bytes=") && strstr(log, "module=accepted") && strstr(log, "vertex_bindings=1 vertex_attrs=1[loc0:fmt103@0]")
            && strstr(log, "color_format=44") && strstr(log, "render_path=dynamic_rendering(VkPipelineRenderingCreateInfo") && strstr(log, "caps_mask=0x"));
     {   /* the same failure through the LEGACY render-pass path (S8: no dynamicRendering): the line must say so, not claim dynamic rendering */

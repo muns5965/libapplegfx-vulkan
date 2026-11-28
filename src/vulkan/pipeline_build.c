@@ -49,6 +49,26 @@ static uint64_t fnv64(const void *data, size_t n) { return lagfx_pipeline_spv_ha
  * suppressed). Called only after vkCreateGraphicsPipelines failed; creates the two shader modules separately (and destroys them again) to tell which one the driver
  * rejects. Builds nothing that is used afterwards. */
 #define FAIL_KEYS_MAX 8u
+/* The failing SPIR-V of a pipeline, inline in the device log (once per distinct module hash, modules up to SPV_LOG_MAX bytes, at most SPV_LOG_MODULES of them), so a failure can be reproduced
+ * offline from the log alone: lines "pipeline-build-fail-spv: <stage> hash=<h> bytes=<n> line=<k>/<m> <32 hex words>". Rebuild the module with scripts/spv-from-log.py. */
+#define SPV_LOG_MAX 40000u
+#define SPV_LOG_MODULES 12u
+static void log_spv_words(const char *stage, uint64_t h, const uint32_t *spv, size_t bytes) {
+    static uint64_t done[SPV_LOG_MODULES];
+    static unsigned n;
+    if (!spv || !bytes || (bytes & 3u) || bytes > SPV_LOG_MAX) return;
+    for (unsigned i = 0; i < n; i++) if (done[i] == h) return;
+    if (n >= SPV_LOG_MODULES) return;
+    done[n++] = h;
+    size_t words = bytes / 4u, lines = (words + 31u) / 32u;
+    for (size_t l = 0; l < lines; l++) {
+        char buf[32 * 9 + 1];
+        size_t o = 0;
+        for (size_t i = l * 32u; i < words && i < (l + 1u) * 32u; i++) o += (size_t)snprintf(buf + o, sizeof buf - o, "%08x ", spv[i]);
+        LAGFX_ERR("pipeline-build-fail-spv: %s hash=%016llx bytes=%zu line=%zu/%zu %s", stage, (unsigned long long)h, bytes, l + 1u, lines, buf);
+    }
+}
+
 static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc, const VkPipelineVertexInputStateCreateInfo *vin, VkPrimitiveTopology topo, VkFormat color_fmt, VkResult vr, bool legacy_rp) {
     static struct { uint64_t key; uint64_t count; } seen[FAIL_KEYS_MAX];
     static uint32_t nseen;
@@ -91,6 +111,8 @@ static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc
         snprintf(fb, sizeof fb, "%s", r == VK_SUCCESS ? "accepted" : vr_name(r)), fm = fb;
         if (m) vkDestroyShaderModule(device, m, NULL);
     }
+    log_spv_words("vs", vh, desc->vertex_spv, desc->vertex_spv_bytes);
+    log_spv_words("fs", fh, desc->fragment_spv, desc->fragment_spv_bytes);
     LAGFX_ERR("pipeline-build-fail: result=%s(%d) vs[bytes=%zu hash=%016llx module=%s entry=%s] fs[bytes=%zu hash=%016llx module=%s entry=%s] "
               "vertex_bindings=%u vertex_attrs=%u[%s] stride=%u color_format=%d topology=%d render_path=%s "
               "caps_mask=0x%x distinct_failures=%u",

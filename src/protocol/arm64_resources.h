@@ -154,6 +154,11 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
 /* The sampled view of a 3D mirror texture (VK_IMAGE_VIEW_TYPE_3D, all mip levels): feeds a texture3d (Dim3D) descriptor. VK_NULL_HANDLE for a non-3D object or one without sampled usage. */
 VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);
+typedef struct { uint32_t base_mip, levels, base_layer, layers; } lagfx_a64_view_range_t;
+/* Caller-owned sampled view of a sub-range [base_mip, base_mip + levels) x [base_layer, base_layer + layers) of a mirrored texture (2D or 2D_ARRAY, same format); VK_NULL_HANDLE + *why when refused.
+ * Aliases the parent image; free with lagfx_a64_res_free_sub_view (the parent is unaffected). Not wired to a guest path yet. */
+VkImageView lagfx_a64_res_make_sub_view(struct lagfx_vk_state *vk, const lagfx_a64_obj_t *o, VkImageViewType type, const lagfx_a64_view_range_t *r, const char **why);
+void lagfx_a64_res_free_sub_view(struct lagfx_vk_state *vk, VkImageView v);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_note_pass_refused(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* diagnostics: a pass targeting o was refused after target_begin */
