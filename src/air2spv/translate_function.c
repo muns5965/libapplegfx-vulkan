@@ -434,6 +434,7 @@ typedef struct {
     uint32_t                  id_uchar;          /* OpTypeInt 8 0 */
     uint8_t                   cap_int8;          /* OpCapability Int8 emitted */
     uint8_t                   cap_int16;         /* OpCapability Int16 emitted */
+    uint8_t                   cap_int64;         /* OpCapability Int64 emitted (lazily, with the first 64-bit integer type) */
     uint8_t                   cap_float16;       /* OpCapability Float16 emitted */
     bool                      in_entry_block;    /* a recognised loop plan is emitting its ENTRY block: the header / merge OpPhis name c->id_entry_label as that edge's parent, so a block split there (OpKill) must move that label (S06) */
     uint32_t                  id_uint;           /* OpTypeInt 32 0 */
@@ -559,6 +560,7 @@ static void copy_module_state(xlate_ctx_t *dst, const xlate_ctx_t *src) {
     dst->id_uchar       = src->id_uchar;
     dst->cap_int8       = src->cap_int8;
     dst->cap_int16      = src->cap_int16;
+    dst->cap_int64      = src->cap_int64;
     dst->cap_float16    = src->cap_float16;
     dst->id_uint        = src->id_uint;
     dst->id_int32       = src->id_int32;
@@ -658,6 +660,10 @@ static uint32_t emit_type_int_w(xlate_ctx_t *c, uint32_t width, uint32_t sign) {
     } else if (width == 16u && !c->cap_int16) {
         c->cap_int16 = 1u;
         uint32_t cap[] = { LAGFX_SPV_CAPABILITY_INT16 };
+        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1);
+    } else if (width == 64u && !c->cap_int64) {
+        c->cap_int64 = 1u;
+        uint32_t cap[] = { 11u /* Int64 */ };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1);
     }
     uint32_t id = lagfx_spv_builder_alloc_id(c->b);
@@ -2532,10 +2538,8 @@ static void emit_prologue(xlate_ctx_t *c) {
         uint32_t ops[] = { LAGFX_SPV_CAPABILITY_SHADER };
         lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, ops, 1);
     }
-    {
-        uint32_t ops[] = { 11u /* Int64 */ };
-        lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, ops, 1);
-    }
+    /* Int64 is NOT declared here any more: it is emitted with the first 64-bit integer type (emit_type_int_w), so a shader that never makes an i64 does not need shaderInt64
+     * (Adreno 730 / Vulkan 1.1.128 does not offer it, and every pipeline was refused for the declaration alone). */
 
     /* Int8 / Int16 capabilities are emitted lazily at the point of use in
      * emit_type_int_w — the multi-section builder hoists OpCapability into
