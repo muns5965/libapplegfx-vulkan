@@ -443,6 +443,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     const bool ext_ro_arm = has_ext(dext, dext_n, "VK_ARM_rasterization_order_attachment_access");
     const bool ext_af = has_ext(dext, dext_n, "VK_EXT_shader_atomic_float");   /* float atomics: queried below, enabled per feature only when reported (caps.h LAGFX_VK_CAP_ATOMIC_F32_*) */
     const bool ext_qct_ts = has_ext(dext, dext_n, "VK_QCOM_tile_shading"), ext_qct_tp = has_ext(dext, dext_n, "VK_QCOM_tile_properties"), ext_qct_heap = has_ext(dext, dext_n, "VK_QCOM_tile_memory_heap");
+    const bool ext_bda_khr = has_ext(dext, dext_n, "VK_KHR_buffer_device_address"), ext_sync2_khr = has_ext(dext, dext_n, "VK_KHR_synchronization2");   /* for the g7-probe line */
     free(dext);
 
     /* === Device features =========================================
@@ -574,6 +575,13 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     /* Capabilities of the generated SPIR-V (caps.h): enable ONLY what the physical device reports. LAGFX_VK_CAPS_OFF=int64,int8,... (test seam) forces some
      * of them off even if reported. Adreno reports several of these as optional. */
+    /* Raw probe values, printed before anything is derived from them: on a < 1.2 device the Vulkan11/12/13Features structs chained above may be ignored by the
+     * driver (left at 0) while the diagnostics read the same features through other structs; this line shows which side the "supported 0 / enabled 1" mismatch is on. */
+    fprintf(stderr, "g7-probe: api=%u.%u.%u v12{f16=%d i8=%d sb8=%d bda=%d} v11{sb16=%d vptr=%d vptrsb=%d} v13{dynr=%d sync2=%d} ext{dynr=%d bda=%d sync2=%d}\n",
+            VK_VERSION_MAJOR(s->phys_props.apiVersion), VK_VERSION_MINOR(s->phys_props.apiVersion), VK_VERSION_PATCH(s->phys_props.apiVersion),
+            (int)probe12.shaderFloat16, (int)probe12.shaderInt8, (int)probe12.storageBuffer8BitAccess, (int)probe12.bufferDeviceAddress,
+            (int)probe11.storageBuffer16BitAccess, (int)probe11.variablePointers, (int)probe11.variablePointersStorageBuffer, (int)probe13.dynamicRendering, (int)probe13.synchronization2,
+            (int)want_dyn_rendering, (int)ext_bda_khr, (int)ext_sync2_khr);
     const char *caps_off_env = getenv("LAGFX_VK_CAPS_OFF");
     uint32_t caps_off = caps_off_env ? lagfx_vk_caps_parse(caps_off_env) : 0u;
     uint32_t caps_en = 0;
