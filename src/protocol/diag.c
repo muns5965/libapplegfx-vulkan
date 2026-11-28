@@ -284,6 +284,14 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                  (unsigned long long)R->mapped_pages_skipped, (unsigned long long)R->swap_events, (unsigned long long)R->swap_flushed, (unsigned long long)R->swap_deferred, (unsigned long long)R->swap_failed, (unsigned long long)R->swap_dropped, (unsigned long long)R->mapped_remapped, (unsigned long long)R->swap_partial, tg);
         fprintf(stderr, "%s\n", rl);
         LAGFX_LOG("%s", rl);
+        {   /* WHY the unsupported counters above counted: exec segments by type (1 compute, 4 information; 0 render and 2 blit are handled) and mapped_unsupported by the site that refused */
+            char ul[420]; size_t uo = (size_t)snprintf(ul, sizeof ul, "g7-gpu-unsup: seg_unsupported=%llu by_type[1(compute)=%llu 4(info)=%llu other=%llu] mapped_unsupported=%llu by_site[",
+                (unsigned long long)R->seg_unsupported, (unsigned long long)R->seg_unsup_type[1], (unsigned long long)R->seg_unsup_type[4],
+                (unsigned long long)(R->seg_unsupported - R->seg_unsup_type[1] - R->seg_unsup_type[4]), (unsigned long long)R->mapped_unsupported);
+            for (int i = 0; i < 12 && uo < sizeof ul; i++) uo += (size_t)snprintf(ul + uo, sizeof ul - uo, "%s%d=%llu", i ? " " : "", i, (unsigned long long)R->mapped_unsup_site[i]);
+            if (uo < sizeof ul) snprintf(ul + uo, sizeof ul - uo, "] (sites: see MAPUNS in arm64_resources.c)");
+            fprintf(stderr, "%s\n", ul); LAGFX_LOG("%s", ul);
+        }
         {   /* mapped write-back host-sync counters (read-only): HOST_READ barriers recorded / failed-exec clears / finishes skipped / unreadable descriptors */
             char wl[420];
             snprintf(wl, sizeof wl, "g7-wb-sync: wb_host_barriers_recorded=%llu wb_down_pending_cleared_on_fail=%llu wb_down_skipped_not_recorded=%llu wb_finish_desc_unreadable_owed=%llu wb_retry_owed=%llu wb_retry_exhausted=%llu wb_after_refused_pass=%llu",

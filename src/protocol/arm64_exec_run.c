@@ -1905,7 +1905,7 @@ void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const
         lagfx_a64_res_blit_segment(r->x, buf + hl, s->body_len < have_b ? s->body_len : have_b);
         return;
     }
-    if (s->type != 0u) { CNT(p).seg_unsupported++; return; }    /* compute (1), information (4) and the rest: counted, not executed */
+    if (s->type != 0u) { CNT(p).seg_unsupported++; CNT(p).seg_unsup_type[s->type & 7u]++; return; }    /* compute (1), information (4) and the rest: counted, not executed */
     CNT(p).seg_render++;
     uint64_t pos = s->prot_skipped ? 24u : 8u;
     uint64_t have = avail > pos ? avail - pos : 0, lim = s->body_len < have ? s->body_len : have, q = 0;

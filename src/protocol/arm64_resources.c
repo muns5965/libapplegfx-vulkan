@@ -100,6 +100,8 @@ typedef struct { lagfx_protocol_t *p; lagfx_a64_stats_t st; lagfx_a64_obj_t **ob
 } mgr2_t;
 int lagfx_a64_test_hook;   /* tests only: 1 = the next swap submit fails, 2 = the next swap fence check reports a timeout without looking, 3 = the next exec submit fails, 4 = the next mapped write-back finish finds the descriptor unreadable, 5 = the next exec fence wait (res_end) fails (device lost), 6 = the next res_poll fence check fails, 7 = the next exec fence wait (res_end) times out and stays timed out (hook becomes 10) until the test sets it back to 0 or to 6, 8 = the next sync_to_guest submit fails, 9 = the next sync_to_guest wait is not DONE. Plain global, default 0, set by tests only (never from env or protocol input) */
 #define MRUN(p) ((p)->diag2.exec.run)
+/* mapped_unsupported with its site (g7-gpu-run mapped_unsup_site[k]: 0 descriptor does not decode, 1 re-made size/format (find), 2 same (bind), 3 payload unreadable, 4 id > 32 bit, 5 too large, 6 table full, 7 alloc, 8 create_image, 9 usage, 10 alloc ms, 11 ms init) */
+#define MAPUNS(p, k) do { MRUN(p).mapped_unsupported++; MRUN(p).mapped_unsup_site[(k)]++; } while (0)
 #define BUSY(m) ((m)->cur || (m)->pending || (m)->sw_fence)
 #define MAX_MS 256u
 #define OT(m) ((m)->p->diag2.exec.pipe)   /* object table counters */
@@ -533,7 +535,7 @@ static bool ms_desc(lagfx_protocol_t *p, uint32_t mapping, lagfx_guest_surface_t
     size_t n = 0;
     memset(d, 0, sizeof d);
     if (!sh || !sh->get_surface_desc || !sh->get_surface_desc(sh->opaque, mapping, d, sizeof d, &n) || n < LAGFX_SURF_DESC_BYTES || n > sizeof d) { MRUN(p).mapped_no_desc++; return false; }
-    if (lagfx_guest_surface_decode_any(d, n, gs) != LAGFX_OK) { MRUN(p).mapped_unsupported++; return false; }
+    if (lagfx_guest_surface_decode_any(d, n, gs) != LAGFX_OK) { MAPUNS(p, 0); return false; }
     return true;
 }
 
@@ -558,7 +560,7 @@ static bool ms_pull(lagfx_protocol_t *p, mgr2_t *m, VkCommandBuffer cb, msurf_t 
     if (ms->up_epoch == m->epoch) return true;   /* already taken in this exec */
     lagfx_guest_surface_t gs;
     if (!ms_desc(p, ms->mapping, &gs)) return false;
-    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return false; }   /* the guest re-made the surface with another size */
+    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MAPUNS(p, 1); return false; }   /* the guest re-made the surface with another size */
     lagfx_guest_surface_xfer_stats_t st;
     memset(&st, 0, sizeof st);
     if (lagfx_guest_surface_xfer(ms_shell(p), &gs, ms->stage_map, ms->w, ms->h, (size_t)ms->w * ms->bpp, false, &st) != LAGFX_OK) { MRUN(p).mapped_no_desc++; return false; }
@@ -631,7 +633,7 @@ static int ms_finish_down(lagfx_protocol_t *p, msurf_t *ms, uint64_t gen) {
     ms->down_pending = false;
     lagfx_guest_surface_t gs;
     if (lagfx_a64_test_hook == 4 ? (lagfx_a64_test_hook = 0, true) : !ms_desc(p, ms->mapping, &gs)) { ms_owe(p, ms); MRUN(p).wb_finish_desc_unreadable_owed++; return 0; }   /* descriptor unreadable: counted and owed again in every mode (ms_owe); the next display command retries, up to WB_RETRY_MAX consecutive failures */
-    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MRUN(p).mapped_unsupported++; return -1; }
+    if (gs.width != ms->w || gs.height != ms->h || gs.fourcc != ms->fourcc) { MAPUNS(p, 2); return -1; }
     if (ms->id_set && (gs.page_list_gpa != ms->id_pl || gs.alloc != ms->id_alloc || gs.first_offset != ms->id_first || gs.npages != ms->id_np || gs.row_bytes != ms->id_row ||
                       (ms->id_hash && ms_list_hash(p, &gs) != ms->id_hash))) { MRUN(p).mapped_remapped++; return -1; }
     lagfx_guest_surface_xfer_stats_t st;
@@ -651,35 +653,35 @@ static bool mapped_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk_state *v
     uint8_t h[20 + 64];
     memset(h, 0, sizeof h);
     uint32_t n = size < sizeof h ? size : (uint32_t)sizeof h;
-    if (size < 20u + 4u || (!lagfx_arm64_task_read(p, t, at, h, n) && (n <= 52u || !lagfx_arm64_task_read(p, t, at, h, 52u)))) { MRUN(p).mapped_unsupported++; MKFAIL(TEXWHY_C_PAYLOAD); return false; }
+    if (size < 20u + 4u || (!lagfx_arm64_task_read(p, t, at, h, n) && (n <= 52u || !lagfx_arm64_task_read(p, t, at, h, 52u)))) { MAPUNS(p, 3); MKFAIL(TEXWHY_C_PAYLOAD); return false; }
     uint64_t mapping = lagfx_le64(h);
     uint32_t tag = lagfx_le32(h + 8);
     const uint8_t *d = h + 20;
     uint32_t fmt = tag == 0x39u ? (uint32_t)(d[1] | d[2] << 8) : (uint32_t)(d[2] | d[3] << 8);   /* v2 / v1 description (Henge makeMappedTexture) */
-    if (mapping > 0xffffffffull) { MRUN(p).mapped_unsupported++; return false; }
+    if (mapping > 0xffffffffull) { MAPUNS(p, 4); return false; }
     lagfx_guest_surface_t gs;
     { uint64_t nd = MRUN(p).mapped_no_desc;
       if (!ms_desc(p, (uint32_t)mapping, &gs)) { MKFAIL(MRUN(p).mapped_no_desc != nd ? TEXWHY_C_MAPPED_NODESC : TEXWHY_C_MAPPED_BAD); return false; } }
-    if ((uint64_t)gs.width * gs.height * gs.bpp > LAGFX_A64_MAX_OBJ_BYTES) { MRUN(p).mapped_unsupported++; return false; }
+    if ((uint64_t)gs.width * gs.height * gs.bpp > LAGFX_A64_MAX_OBJ_BYTES) { MAPUNS(p, 5); return false; }
     msurf_t *ms = NULL;
     for (uint32_t i = m->nms; i-- > 0;) if (m->ms[i]->mapping == (uint32_t)mapping && m->ms[i]->w == gs.width && m->ms[i]->h == gs.height && m->ms[i]->fourcc == gs.fourcc) { ms = m->ms[i]; break; }
     if (!ms) {
-        if (m->nms >= MAX_MS) { MRUN(p).mapped_unsupported++; return false; }
+        if (m->nms >= MAX_MS) { MAPUNS(p, 6); return false; }
         if (m->nms == 0 || (m->nms & (m->nms - 1u)) == 0) {   /* grow the registry on powers of two */
             uint32_t nc = m->nms ? m->nms * 2u : 8u;
             struct lagfx_a64_msurf **nn = realloc(m->ms, nc * sizeof *nn);
-            if (!nn) { MRUN(p).mapped_unsupported++; return false; }
+            if (!nn) { MAPUNS(p, 7); return false; }
             m->ms = nn;
         }
         /* the image format follows the SURFACE's fourcc (not the description): BGRA -> B8G8R8A8, 'RGhA' -> R16G16B16A16_SFLOAT (raw half floats, no conversion) */
         o->format = gs.fourcc == LAGFX_FOURCC_RGHA ? VK_FORMAT_R16G16B16A16_SFLOAT : fmt == 81u ? VK_FORMAT_B8G8R8A8_SRGB : VK_FORMAT_B8G8R8A8_UNORM;
         o->img_type = VK_IMAGE_TYPE_2D, o->width = gs.width, o->height = gs.height, o->depth = 1, o->mips = 1, o->layers = 1, o->bpp = gs.bpp;
-        if (!create_image(vk, m, o)) { MRUN(p).mapped_unsupported++; return false; }
-        if (!(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { MRUN(p).mapped_unsupported++; return false; }   /* o frees its own image */
+        if (!create_image(vk, m, o)) { MAPUNS(p, 8); return false; }
+        if (!(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) || !(o->usage & VK_IMAGE_USAGE_SAMPLED_BIT)) { MAPUNS(p, 9); return false; }   /* o frees its own image */
         ms = calloc(1, sizeof *ms);
-        if (!ms) { MRUN(p).mapped_unsupported++; return false; }
+        if (!ms) { MAPUNS(p, 10); return false; }
         if (!make_buf(vk, (VkDeviceSize)gs.width * gs.height * gs.bpp, VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT, &ms->stage, &ms->stage_mem, &ms->stage_map)) {
-            free(ms); MRUN(p).mapped_unsupported++; return false;
+            free(ms); MAPUNS(p, 11); return false;
         }
         ms->m = m, ms->mapping = (uint32_t)mapping, ms->w = gs.width, ms->h = gs.height, ms->fourcc = gs.fourcc, ms->bpp = gs.bpp, ms->format = o->format, ms->usage = o->usage, ms->mtl_fmt = fmt;
         ms->img = o->img, ms->img_mem = o->img_mem;   /* ownership moves to the surface */
