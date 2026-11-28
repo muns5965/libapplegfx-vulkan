@@ -47,7 +47,7 @@ static uint64_t fnv64(const void *data, size_t n) { return lagfx_pipeline_spv_ha
  * suppressed). Called only after vkCreateGraphicsPipelines failed; creates the two shader modules separately (and destroys them again) to tell which one the driver
  * rejects. Builds nothing that is used afterwards. */
 #define FAIL_KEYS_MAX 8u
-static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc, const VkPipelineVertexInputStateCreateInfo *vin, VkPrimitiveTopology topo, VkFormat color_fmt, VkResult vr) {
+static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc, const VkPipelineVertexInputStateCreateInfo *vin, VkPrimitiveTopology topo, VkFormat color_fmt, VkResult vr, bool legacy_rp) {
     static struct { uint64_t key; uint64_t count; } seen[FAIL_KEYS_MAX];
     static uint32_t nseen;
     static uint64_t suppressed;
@@ -90,12 +90,12 @@ static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc
         if (m) vkDestroyShaderModule(device, m, NULL);
     }
     LAGFX_ERR("pipeline-build-fail: result=%s(%d) vs[bytes=%zu hash=%016llx module=%s entry=%s] fs[bytes=%zu hash=%016llx module=%s entry=%s] "
-              "vertex_bindings=%u vertex_attrs=%u[%s] stride=%u color_format=%d topology=%d dynamic_rendering=1(VkPipelineRenderingCreateInfo,no-renderpass) "
+              "vertex_bindings=%u vertex_attrs=%u[%s] stride=%u color_format=%d topology=%d render_path=%s "
               "caps_mask=0x%x distinct_failures=%u",
               vr_name(vr), (int)vr, desc->vertex_spv_bytes, (unsigned long long)vh, vm, desc->vertex_entry_point ? desc->vertex_entry_point : "main",
               desc->fragment_spv_bytes, (unsigned long long)fh, fm, desc->fragment_entry_point ? desc->fragment_entry_point : "main",
               vin->vertexBindingDescriptionCount, vin->vertexAttributeDescriptionCount, attrs,
-              vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, desc->caps_enabled, nseen);
+              vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, legacy_rp ? "legacy_renderpass(VkRenderPass,no VkPipelineRenderingCreateInfo)" : "dynamic_rendering(VkPipelineRenderingCreateInfo,no-renderpass)", desc->caps_enabled, nseen);
 }
 
 /* Failure bundle, informational part: the Vulkan create-info state exactly as built above (one fact per line; the bundle prefixes each line with "# "). */
@@ -583,7 +583,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("lagfx_pipeline_build: vkCreateGraphicsPipelines failed (%d)",
                   (int)vr);
-        log_build_failure(device, desc, &vin, ia.topology, color_fmt, vr);
+        log_build_failure(device, desc, &vin, ia.topology, color_fmt, vr, use_rp != 0);
         if (lagfx_pipeline_bundle_dir()) {   /* option, default off: a self-contained bundle of this failure (src/vulkan/pipeline_bundle.h) */
             char local[6144];
             describe_state(local, sizeof local, &gpci, &rendering_info);

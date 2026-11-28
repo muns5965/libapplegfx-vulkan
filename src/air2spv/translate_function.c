@@ -698,7 +698,7 @@ static uint32_t emit_type_int_w(xlate_ctx_t *c, uint32_t width, uint32_t sign) {
 }
 
 static void emit_int_const_bits(xlate_ctx_t *c, uint32_t ty_spv, uint32_t id, uint32_t w, uint64_t bits) {
-    if (w == 64u && t_narrow64) { int64_t sv = (int64_t)bits; if (sv < (int64_t)INT32_MIN || sv > (int64_t)UINT32_MAX) narrow_unsafe("i64 constant beyond 32 bits"); }   /* high bits would be lost */
+    if (w == 64u && t_narrow64) { int64_t sv = (int64_t)bits; if (sv < (int64_t)INT32_MIN || sv > (int64_t)UINT32_MAX) { char why[96]; snprintf(why, sizeof why, "i64 constant beyond 32 bits (0x%016llx)", (unsigned long long)bits); narrow_unsafe(why); } }   /* high bits would be lost */
     if (narrow_w(w) == 64u) { uint32_t o[] = { ty_spv, id, (uint32_t)(bits & 0xFFFFFFFFu), (uint32_t)(bits >> 32u) }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 4); }
     else { uint32_t o[] = { ty_spv, id, (uint32_t)(bits & 0xFFFFFFFFu) }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
 }

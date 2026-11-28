@@ -2025,6 +2025,14 @@ bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref) {
  * round-trips guest bytes). Taken at swaps 1, 2, 4, 8, ... (a readback is a queue wait + a full copy). Pixel "non-black" = any colour channel of R,G,B non-zero (RGBA16Float: any of the
  * three halves with a non-zero magnitude). Reports size / bpp, non-black count, bounding box, the first non-black pixel and its raw channels, a hash of the whole image, and
  * the number of distinct non-black raw pixel values (capped) so that a single flat colour, a few colours and a many-coloured picture are told apart. */
+static float probe_half(uint16_t h) {   /* IEEE half -> float, for the brightness figures only */
+    uint32_t e = (h >> 10) & 0x1fu, f = h & 0x3ffu; float v;
+    if (e == 0u) v = (float)f * (1.0f / 16777216.0f);
+    else if (e == 31u) v = f ? 0.0f : 65504.0f;
+    else v = (1.0f + (float)f / 1024.0f) * (e >= 15u ? (float)(1u << (e - 15u)) : 1.0f / (float)(1u << (15u - e)));
+    return v;
+}
+
 static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t swap_no) {
     mgr2_t *m = p ? p->a64_res : NULL;
     if (!m || mapping_id > 0xffffffffull) return;
@@ -2039,6 +2047,7 @@ static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t 
     if (!readback_obj(p, m, o, img, need, &w, &h)) { p->diag2.disp.image_probe_unavail++; LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu readback_unavailable (busy / unsupported)", (unsigned long long)swap_no, (unsigned long long)mapping_id); free(img); return; }
     uint64_t hash = 1469598103934665603ull, nb = 0, nalpha = 0; uint32_t x0 = w, y0 = h, x1 = 0, y1 = 0, fx = 0, fy = 0; bool first = false; uint8_t fpx[8] = {0};
     uint64_t seen[16]; uint32_t nseen = 0; bool overflow = false;
+    float maxv = 0.0f; uint32_t mx = 0, my = 0; uint64_t nbright = 0; uint8_t mpx[8] = {0};   /* brightest channel seen, where, and how many pixels have a channel >= 0.25 */
     for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
         const uint8_t *q = img + ((size_t)y * w + x) * o->bpp;
         for (uint32_t k = 0; k < o->bpp; k++) hash = (hash ^ q[k]) * 1099511628211ull;
@@ -2047,6 +2056,14 @@ static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t 
         else { black = !(q[0] | q[1] | q[2]); if (q[3]) nalpha++; }
         if (black) continue;
         nb++;
+        {
+            float c0, c1, c2;
+            if (o->bpp == 8u) { uint16_t hr, hg, hb; memcpy(&hr, q, 2); memcpy(&hg, q + 2, 2); memcpy(&hb, q + 4, 2); c0 = probe_half(hr & 0x7fffu), c1 = probe_half(hg & 0x7fffu), c2 = probe_half(hb & 0x7fffu); }
+            else c0 = q[0] / 255.0f, c1 = q[1] / 255.0f, c2 = q[2] / 255.0f;
+            float mv = c0 > c1 ? c0 : c1; if (c2 > mv) mv = c2;
+            if (mv >= 0.25f) nbright++;
+            if (mv > maxv) { maxv = mv; mx = x; my = y; memcpy(mpx, q, o->bpp); }
+        }
         if (!first) { first = true, fx = x, fy = y; memcpy(fpx, q, o->bpp); }
         if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
         uint64_t v = 0; memcpy(&v, q, o->bpp);
@@ -2054,9 +2071,9 @@ static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t 
         if (!dup) { if (nseen < 16u) seen[nseen++] = v; else overflow = true; }
     }
     p->diag2.disp.image_probes++, p->diag2.disp.image_probe_nonblack_last = nb;
-    LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu %ux%u bpp=%u nonblack=%llu (%.4f%%) alpha_nonzero=%llu bbox=(%u,%u)-(%u,%u) first=(%u,%u) raw=%02x%02x%02x%02x%02x%02x%02x%02x distinct_nonblack=%u%s hash=%016llx (GPU image read back from the Vulkan image)",
+    LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu %ux%u bpp=%u nonblack=%llu (%.4f%%) alpha_nonzero=%llu bbox=(%u,%u)-(%u,%u) first=(%u,%u) raw=%02x%02x%02x%02x%02x%02x%02x%02x distinct_nonblack=%u%s brightest=%.4f at (%u,%u) raw=%02x%02x%02x%02x%02x%02x%02x%02x bright>=0.25=%llu hash=%016llx (GPU image read back from the Vulkan image)",
               (unsigned long long)swap_no, (unsigned long long)mapping_id, w, h, o->bpp, (unsigned long long)nb, w && h ? 100.0 * (double)nb / ((double)w * (double)h) : 0.0, (unsigned long long)nalpha,
-              nb ? x0 : 0u, nb ? y0 : 0u, nb ? x1 : 0u, nb ? y1 : 0u, fx, fy, fpx[0], fpx[1], fpx[2], fpx[3], fpx[4], fpx[5], fpx[6], fpx[7], nseen, overflow ? "+" : "", (unsigned long long)hash);
+              nb ? x0 : 0u, nb ? y0 : 0u, nb ? x1 : 0u, nb ? y1 : 0u, fx, fy, fpx[0], fpx[1], fpx[2], fpx[3], fpx[4], fpx[5], fpx[6], fpx[7], nseen, overflow ? "+" : "", (double)maxv, mx, my, mpx[0], mpx[1], mpx[2], mpx[3], mpx[4], mpx[5], mpx[6], mpx[7], (unsigned long long)nbright, (unsigned long long)hash);
     free(img);
 }
 

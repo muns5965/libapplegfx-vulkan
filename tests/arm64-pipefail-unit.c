@@ -212,7 +212,7 @@ int main(void) {
     log = slurp(logf);
     assert(count(log, "pipeline-build-fail:") == 1);                  /* three identical failures: one line */
     assert(strstr(log, "result=VK_ERROR_") && strstr(log, "vs[bytes=") && strstr(log, "module=accepted") && strstr(log, "vertex_bindings=1 vertex_attrs=1[loc0:fmt103@0]")
-           && strstr(log, "color_format=44") && strstr(log, "dynamic_rendering=1") && strstr(log, "caps_mask=0x"));
+           && strstr(log, "color_format=44") && strstr(log, "render_path=dynamic_rendering(VkPipelineRenderingCreateInfo") && strstr(log, "caps_mask=0x"));
     free(log);
     d.topology_plus1 = VK_PRIMITIVE_TOPOLOGY_LINE_LIST + 1u;          /* another key */
     assert(lagfx_pipeline_build(vk->device, &d, &pl) == LAGFX_ERR_BACKEND);
