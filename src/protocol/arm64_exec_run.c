@@ -20,6 +20,7 @@
 #include "../common/le.h"
 #include "../common/log.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -871,7 +872,16 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             for (uint32_t k = 0; k < r->nslots && k < 4u; k++) fb |= t == r->rts[k];
             if (fb) { p->diag2.exec.pipe.desc_feedback++; return false; }   /* writing an attachment being rendered */
             VkImageView v = t->linear ? VK_NULL_HANDLE : lagfx_a64_res_storage_view(r->x, t);   /* linear (buffer backed) and non-storage formats cannot be written */
-            if (!v) { CNT(p).ext_storage_img_unsupported++; return false; }
+            if (!v) {
+                CNT(p).ext_storage_img_unsupported++;
+                const bool lin = t->linear, nousage = !(t->usage & VK_IMAGE_USAGE_STORAGE_BIT);   /* cause: linear (buffer backed) / format gave up STORAGE usage (device feature) / other (view creation) */
+                if (lin) CNT(p).ext_storage_img_why[0]++; else if (nousage) CNT(p).ext_storage_img_why[1]++; else CNT(p).ext_storage_img_why[2]++;
+                static uint64_t seen[8]; static uint32_t nseen;   /* first sight of each (cause, format): one log line */
+                uint64_t key = ((uint64_t)(lin ? 0u : nousage ? 1u : 2u) << 32) | (uint32_t)t->format;
+                uint32_t q = 0; while (q < nseen && seen[q] != key) q++;
+                if (q == nseen && nseen < 8u) { seen[nseen++] = key; LAGFX_LOG("g7-storage-img: unsupported cause=%s VkFormat=%d %ux%u usage=0x%x linear=%d", lin ? "linear" : nousage ? "format-no-storage" : "view-failed", (int)t->format, t->width, t->height, (unsigned)t->usage, (int)lin); }
+                return false;
+            }
             ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, v, VK_IMAGE_LAYOUT_GENERAL };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x57u);
@@ -1892,21 +1902,43 @@ static bool direct_tag(uint32_t tag) {
     }
 }
 
-/* ---- census of the records inside a segment this path does not execute (compute 1, information 4): the first sight of each (type, tag) logs its size and the first bytes of one
- * record, then its running count at 4, 16, 64, ... Same [tag u32][size u32][payload] framing as the render body (arm64_exec_decode.h). Read-only; no state is changed. The
- * point: no capture of a compute / information segment body exists, so the record formats of a compute encoder are not known; this is the data a compute implementation needs. ---- */
+/* ---- census of the records inside a segment this path does not execute (compute 1, information 4). Same [tag u32][size u32][payload] framing as the render body is only an
+ * ASSUMPTION for these types, so everything that contradicts it is recorded too: where parsing stopped and why (g7-seg-census: STOP), the (type, tag) pairs beyond the table
+ * (OVERFLOW count in the g7-seg-census: COUNT line), and representative WHOLE segments written to LAGFX_AIR_CAPTURE_DIR/segdump_t<type>_<fnv>.bin (deduplicated by content hash,
+ * <= SEG_DUMP_FILES files per type, <= SEG_DUMP_MAX bytes each). Read-only; no execution state is changed. ---- */
 #define SEG_CENSUS_MAX 64u
+#define SEG_DUMP_FILES 12u
+#define SEG_DUMP_MAX   (256u * 1024u)
 static struct { uint32_t type, tag, szmin, szmax; uint64_t n; } g_seg_census[SEG_CENSUS_MAX];
 static uint32_t g_seg_census_n;
+static uint64_t g_seg_census_overflow, g_seg_stop[8][4], g_seg_dump_seen[8][SEG_DUMP_FILES]; static uint32_t g_seg_dump_n[8];
+static uint64_t seg_fnv(const uint8_t *b, uint64_t n) { uint64_t h = 1469598103934665603ull; for (uint64_t i = 0; i < n; i++) h = (h ^ b[i]) * 1099511628211ull; return h; }
 static void seg_census(lagfx_protocol_t *p, const lagfx_exec_seg_t *s, const uint8_t *buf, uint32_t avail) {
     (void)p;
     if (s->type != 1u && s->type != 4u) return;
     uint64_t pos = s->prot_skipped ? 24u : 8u;
     uint64_t have = avail > pos ? avail - pos : 0, lim = s->body_len < have ? s->body_len : have, q = 0;
-    uint32_t guard = 0;
-    while (q + 8u <= lim && guard++ < LAGFX_EXEC_MAX_INNER) {
+    /* whole-segment capture (header included), deduplicated by content */
+    {
+        uint64_t whole = pos + lim; if (whole > avail) whole = avail;
+        const char *dd = getenv("LAGFX_AIR_CAPTURE_DIR");
+        if (dd && dd[0] && whole && whole <= SEG_DUMP_MAX) {
+            uint64_t h = seg_fnv(buf, whole); uint32_t t = s->type & 7u, k = 0;
+            while (k < g_seg_dump_n[t] && g_seg_dump_seen[t][k] != h) k++;
+            if (k == g_seg_dump_n[t] && k < SEG_DUMP_FILES) {
+                g_seg_dump_seen[t][g_seg_dump_n[t]++] = h;
+                char path[512]; snprintf(path, sizeof path, "%s/segdump_t%u_%016llx.bin", dd, s->type, (unsigned long long)h);
+                FILE *f = fopen(path, "wb");
+                if (f) { fwrite(buf, 1, (size_t)whole, f); fclose(f); LAGFX_LOG("g7-seg-census: DUMP seg_type=%u bytes=%llu body_len=%llu prot_skipped=%d cont=%d -> %s", s->type, (unsigned long long)whole, (unsigned long long)s->body_len, (int)s->prot_skipped, (int)s->cont, path); }
+            }
+        }
+    }
+    uint32_t guard = 0; const char *why = NULL; uint32_t wsz = 0;
+    while (q + 8u <= lim) {
+        if (guard++ >= LAGFX_EXEC_MAX_INNER) { why = "inner-limit"; break; }
         uint32_t tag = lagfx_le32(buf + pos + q), sz = lagfx_le32(buf + pos + q + 4);
-        if (sz < 8u || q + sz > lim) break;
+        if (sz < 8u) { why = "size<8"; wsz = sz; break; }
+        if (q + sz > lim) { why = "size-past-body"; wsz = sz; break; }
         uint32_t k = 0;
         while (k < g_seg_census_n && !(g_seg_census[k].type == s->type && g_seg_census[k].tag == tag)) k++;
         if (k == g_seg_census_n && k < SEG_CENSUS_MAX) {
@@ -1921,9 +1953,19 @@ static void seg_census(lagfx_protocol_t *p, const lagfx_exec_seg_t *s, const uin
             if (sz > g_seg_census[k].szmax) g_seg_census[k].szmax = sz;
             uint64_t n = ++g_seg_census[k].n;
             if (n >= 4u && !(n & (n - 1u)) && !(__builtin_ctzll(n) & 1))   /* 4, 16, 64, 256, ... */
-                LAGFX_LOG("g7-seg-census: COUNT seg_type=%u tag=%u n=%llu size[min=%u max=%u]", s->type, tag, (unsigned long long)n, g_seg_census[k].szmin, g_seg_census[k].szmax);
-        }
+                LAGFX_LOG("g7-seg-census: COUNT seg_type=%u tag=%u n=%llu size[min=%u max=%u] table_overflow=%llu", s->type, tag, (unsigned long long)n, g_seg_census[k].szmin, g_seg_census[k].szmax, (unsigned long long)g_seg_census_overflow);
+        } else g_seg_census_overflow++;   /* (type, tag) beyond the 64-entry table: counted, not described */
         q += sz;
+    }
+    if (!why && q < lim) why = "trailing-bytes<8";
+    if (why) {   /* the framing assumption failed (or the body ended mid-record): log the first few per type with the offset and the 32 bytes at the stop */
+        uint32_t t = s->type & 7u, w = !strcmp(why, "size<8") ? 0u : !strcmp(why, "size-past-body") ? 1u : !strcmp(why, "inner-limit") ? 2u : 3u;
+        if (g_seg_stop[t][w]++ < 4u) {
+            char hx[3 * 32 + 1]; uint64_t rem = lim - q; uint32_t nb = rem < 32u ? (uint32_t)rem : 32u, o = 0;
+            for (uint32_t i = 0; i < nb; i++) o += (uint32_t)snprintf(hx + o, sizeof hx - o, "%02x%s", buf[pos + q + i], i + 1u < nb ? " " : "");
+            hx[o] = 0;
+            LAGFX_LOG("g7-seg-census: STOP seg_type=%u why=%s at_off=%llu of body %llu rec_size=%u (n=%llu of this kind) bytes: %s", s->type, why, (unsigned long long)q, (unsigned long long)lim, wsz, (unsigned long long)g_seg_stop[t][w], hx);
+        }
     }
 }
 
