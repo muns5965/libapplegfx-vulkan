@@ -6047,8 +6047,15 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
          * an array texture) the sample reads layer 0 of a plain 2D image, as before, and says so. */
         const bool arr_fn = !is3d && (is1da || strncmp(fn_name, "air.sample_texture_2d_array", 27u) == 0);
         bool use_arr = false;
-        for (uint32_t a = 0; arr_fn && a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++)
-            if (c->arg_resource_var[a] && c->arg_resource_kind[a] == 6u) use_arr = true;
+        {   /* the array-ness is decided by the texture operand THIS call samples (its resource variable), not by any array argument of the function; only when the operand is not one of the
+             * entry-point arguments (a helper's parameter, a value through control flow) does the function-wide scan stand in, as before */
+            uint32_t t0 = inst->num_ops > callee_slot_idx + 1u ? resolve_value_spv(c, resolve_relative((uint32_t)inst->ops[callee_slot_idx + 1u], next_val_id)) : 0u;
+            bool matched = false;
+            for (uint32_t a = 0; arr_fn && t0 && a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++)
+                if (c->arg_resource_var[a] == t0 && (c->arg_resource_kind[a] == 1u || c->arg_resource_kind[a] == 5u || c->arg_resource_kind[a] == 6u)) { matched = true; use_arr = c->arg_resource_kind[a] == 6u; }
+            for (uint32_t a = 0; arr_fn && !matched && a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++)
+                if (c->arg_resource_var[a] && c->arg_resource_kind[a] == 6u) use_arr = true;
+        }
         if (is1da && !use_arr) LAGFX_WARN("sample_texture_1d_array: no texture1d_array argument -- the call keeps its typed-undef result");
         else if (arr_fn && !use_arr) LAGFX_WARN("sample_texture_2d_array: no texture2d_array argument (resource kind 6) -- the array index is dropped and layer 0 of a 2D image is sampled");
         const uint8_t want_tex_kind = is3d ? 5u : use_arr ? 6u : 1u;

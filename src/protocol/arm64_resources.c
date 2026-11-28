@@ -767,6 +767,7 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         if (msg != LAGFX_A64_MSAA_YES && mtype != 1 && mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
         o->samples_req = (uint8_t)ms_req;
         if (mtype == 1 && !o->height) o->height = 1u;   /* 1D array: one row */
+        if (mtype == 1 && o->height != 1u) { MKFAIL(TEXWHY_C_DIMS); goto bad; }   /* the sampler lowering reads v = 0.5 of ONE row: a taller '1D' image would be sampled wrongly, so it is refused (counted) */
         if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         if (mtype == 7) { if (!o->depth || o->depth > 2048) { MKFAIL(TEXWHY_C_DIMS); goto bad; } } else o->depth = 1;
         if (!dmips || dmips > LAGFX_A64_MAX_MIPS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }

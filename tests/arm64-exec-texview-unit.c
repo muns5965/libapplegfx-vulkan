@@ -60,6 +60,7 @@ static uint32_t col(uint32_t layer, uint32_t level) { return 255u << 24 | (40u +
 
 #define TEX_W 8u
 /* A BGRA8 texture of 8 x 8, `mips` levels and `layers` slices (mtype 2 = 2D, 3 = 2D array) in the mirror layout: level l at offset sum(prev) of each slice, slice stride = the whole chain. */
+static uint32_t g_put_h = 0;   /* 0 = square TEX_W x TEX_W; 1 = a one-row image (MTLTextureType 1 test) */
 static void put_tex(uint32_t mtype, uint32_t mips, uint32_t layers) {
     uint32_t lvl_off[8], tot = 0;
     for (uint32_t l = 0; l < mips; l++) { lvl_off[l] = tot; tot += (TEX_W >> l) * (TEX_W >> l) * 4u; }
@@ -73,14 +74,14 @@ static void put_tex(uint32_t mtype, uint32_t mips, uint32_t layers) {
     memcpy(t, &tlen, 8); memcpy(t + 8, &tvp, 4);
     uint16_t m16 = (uint16_t)mips, s16 = (uint16_t)layers; memcpy(t + 12, &m16, 2); memcpy(t + 14, &s16, 2); memcpy(t + 12 + 12, &stride, 8);
     for (uint32_t l = 0; l < mips; l++) {
-        uint8_t *mp = t + 12 + 0x18 + 36u * l; uint64_t off = lvl_off[l], row = (TEX_W >> l) * 4u; uint32_t mw = TEX_W >> l, mh = TEX_W >> l, md = 1;
+        uint8_t *mp = t + 12 + 0x18 + 36u * l; uint64_t off = lvl_off[l], row = (TEX_W >> l) * 4u; uint32_t mw = TEX_W >> l, mh = g_put_h ? g_put_h : TEX_W >> l, md = 1;
         memcpy(mp, &off, 8); memcpy(mp + 0x10, &row, 8); memcpy(mp + 0x18, &mw, 4); memcpy(mp + 0x1c, &mh, 4); memcpy(mp + 0x20, &md, 4);
     }
     uint32_t rec = 12 + 0x18 + 36u * mips, tag = 0x14;
     memcpy(t + rec, &tag, 4);
     uint8_t *d = t + rec + 12;
     d[0] = (uint8_t)mtype; d[2] = 80;
-    uint32_t w = TEX_W, h = TEX_W, dep = 1; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &dep, 4);
+    uint32_t w = TEX_W, h = g_put_h ? g_put_h : TEX_W, dep = 1; memcpy(d + 4, &w, 4); memcpy(d + 8, &h, 4); memcpy(d + 12, &dep, 4);
     uint16_t m2 = (uint16_t)mips, sm = 1, ar = (uint16_t)layers; memcpy(d + 16, &m2, 2); memcpy(d + 18, &sm, 2); memcpy(d + 20, &ar, 2);
     uint32_t tsize = rec + 12 + 28;
     va_write(VA_PAY + 0x600, t, tsize);
@@ -182,16 +183,21 @@ static void test_mip_chain(void) {
  * draw is neither skipped nor refused. (Before this the type was refused: TEXWHY_C_TYPE.) */
 static void test_1d_array_type(void) {
     uint8_t img3[RT_W * RT_H * 4], img1[RT_W * RT_H * 4];
-    lagfx_protocol_t *p3 = tv_run(1, 0x86000000u, 3, 4, 4);
-    g_lo = 0, g_hi = 3; g_clamp_lo = -1.f;
-    tv_exec(p3, img3);
-    lagfx_protocol_t *p1 = tv_run(1, 0x86000000u, 1, 4, 4);
-    g_lo = 0, g_hi = 3; g_clamp_lo = -1.f;
+    /* a 1D array must be ONE row: an 8 x 8 "type 1" image is refused (the lowering reads v = 0.5 of a single row), the draw is skipped and the refusal counted */
+    lagfx_protocol_t *pr = tv_run(1, 0x86000000u, 1, 1, 4);
+    g_lo = 0, g_hi = 0; g_clamp_lo = -1.f;
+    tv_exec(pr, img1);
+    assert(pr->diag2.exec.run.ext_tex_array_views == 0);
+    /* one-row type 1 with 4 layers: accepted, array view used, draw not skipped */
+    g_put_h = 1;
+    lagfx_protocol_t *p1 = tv_run(1, 0x86000000u, 1, 1, 4);
+    g_lo = 0, g_hi = 0; g_clamp_lo = -1.f;
     tv_exec(p1, img1);
+    g_put_h = 0;
     __typeof__(p1->diag2.exec.run) *R = &p1->diag2.exec.run;
     assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex_array_views == 1);
-    assert(memcmp(img1, img3, sizeof img1) == 0);
-    puts("PASS: MTLTextureType 1 (1D array) is accepted as a layered image and reads exactly like type 3 (draw not skipped, array view used)");
+    (void)img3;
+    puts("PASS: MTLTextureType 1 (1D array): a one-row image is mirrored as a 4-layer image (array view, draw not skipped); a taller one is refused");
 }
 
 static void test_array(void) {
