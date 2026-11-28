@@ -90,6 +90,7 @@ typedef struct {
     const uint32_t  *vertex_spv;   size_t vertex_spv_bytes;
     const uint32_t  *fragment_spv; size_t fragment_spv_bytes;
     uint32_t         caps_enabled;
+    uint32_t         air_vs_hash32, air_fs_hash32;   /* OPTIONAL diagnostics: high 32 bits of the guest shader bitcode hashes = the vs= / fs= of the g7-draw lines (0 = unknown); printed in the failure line only */
     /* Colour attachment 0 blend state. blend_set == 0 keeps the fixed premultiplied source-over below (every existing caller); blend_set == 1 uses these
      * Vulkan values (enable false = blending off, the factors/ops/mask are then ignored except the write mask). */
     uint8_t          blend_set, blend_enable;

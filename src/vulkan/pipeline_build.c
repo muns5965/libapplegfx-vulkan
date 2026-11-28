@@ -115,11 +115,11 @@ static void log_build_failure(VkDevice device, const lagfx_pipeline_desc_t *desc
     log_spv_words("fs", fh, desc->fragment_spv, desc->fragment_spv_bytes);
     LAGFX_ERR("pipeline-build-fail: result=%s(%d) vs[bytes=%zu hash=%016llx module=%s entry=%s] fs[bytes=%zu hash=%016llx module=%s entry=%s] "
               "vertex_bindings=%u vertex_attrs=%u[%s] stride=%u color_format=%d topology=%d render_path=%s "
-              "caps_mask=0x%x distinct_failures=%u",
+              "caps_mask=0x%x air[vs=%08x fs=%08x] distinct_failures=%u",
               vr_name(vr), (int)vr, desc->vertex_spv_bytes, (unsigned long long)vh, vm, desc->vertex_entry_point ? desc->vertex_entry_point : "main",
               desc->fragment_spv_bytes, (unsigned long long)fh, fm, desc->fragment_entry_point ? desc->fragment_entry_point : "main",
               vin->vertexBindingDescriptionCount, vin->vertexAttributeDescriptionCount, attrs,
-              vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, legacy_rp ? "legacy_renderpass(VkRenderPass,no VkPipelineRenderingCreateInfo)" : "dynamic_rendering(VkPipelineRenderingCreateInfo,no-renderpass)", desc->caps_enabled, nseen);
+              vin->vertexBindingDescriptionCount ? vin->pVertexBindingDescriptions[0].stride : 0u, (int)color_fmt, (int)topo, legacy_rp ? "legacy_renderpass(VkRenderPass,no VkPipelineRenderingCreateInfo)" : "dynamic_rendering(VkPipelineRenderingCreateInfo,no-renderpass)", desc->caps_enabled, (unsigned)desc->air_vs_hash32, (unsigned)desc->air_fs_hash32, nseen);
 }
 
 /* Failure bundle, informational part: the Vulkan create-info state exactly as built above (one fact per line; the bundle prefixes each line with "# "). */

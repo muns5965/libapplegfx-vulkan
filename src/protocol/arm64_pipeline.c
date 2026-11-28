@@ -642,6 +642,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
     out->desc.layout = r->pl ? r->pl : vk->empty_layout;
     out->dsl = r->dsl;
     out->no_point_size = !spv_writes_point_size(vspv, vsz);
+    out->desc.air_vs_hash32 = (uint32_t)(out->vs_hash >> 32), out->desc.air_fs_hash32 = (uint32_t)(out->fs_hash >> 32);
     out->desc.vertex_spv = (const uint32_t *)vspv, out->desc.vertex_spv_bytes = vsz;   /* ownership moves into r (freed by pres_release) */
     out->desc.fragment_spv = (const uint32_t *)fspv, out->desc.fragment_spv_bytes = fsz;
     out->desc.caps_enabled = vk->caps_enabled;

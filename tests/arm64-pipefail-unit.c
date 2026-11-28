@@ -224,6 +224,7 @@ int main(void) {
     assert(log && count(log, "pipeline-build-fail:") == 0);          /* a success logs nothing */
     free(log);
     d.vertex_entry_point = d.fragment_entry_point = "nonexistent";
+    d.air_vs_hash32 = 0x43d3b13bu, d.air_fs_hash32 = 0x4cd952bbu;
     for (int i = 0; i < 3; i++) { pl = VK_NULL_HANDLE; lagfx_status_t st = lagfx_pipeline_build(vk->device, &d, &pl); assert(st == LAGFX_ERR_BACKEND && !pl); }
     log = slurp(logf);
     assert(count(log, "pipeline-build-fail:") == 1);                  /* three identical failures: one line */
@@ -235,7 +236,7 @@ int main(void) {
         assert(nb == sizeof k_fs_spv && memcmp(w, k_fs_spv, nb) == 0);
     }
     assert(strstr(log, "result=VK_ERROR_") && strstr(log, "vs[bytes=") && strstr(log, "module=accepted") && strstr(log, "vertex_bindings=1 vertex_attrs=1[loc0:fmt103@0]")
-           && strstr(log, "color_format=44") && strstr(log, "render_path=dynamic_rendering(VkPipelineRenderingCreateInfo") && strstr(log, "caps_mask=0x"));
+           && strstr(log, "color_format=44") && strstr(log, "render_path=dynamic_rendering(VkPipelineRenderingCreateInfo") && strstr(log, "caps_mask=0x") && strstr(log, "air[vs=43d3b13b fs=4cd952bb]"));
     {   /* the same failure through the LEGACY render-pass path (S8: no dynamicRendering): the line must say so, not claim dynamic rendering */
         VkAttachmentDescription ad = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
             .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
