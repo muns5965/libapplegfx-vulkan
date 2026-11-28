@@ -567,6 +567,12 @@ static int make_1da_tex(atex_t *out) {
     return 0;
 }
 /* pixel (x, y) = texel x of layer y / 2 of an 8 x 1 x 4 image, nearest. Also: the module must declare a 2D arrayed image (the lowering), not a plain one, and the plain texture1d control must NOT sample. */
+/* count SPIR-V instructions with the given opcode (word0 & 0xffff) */
+static int spv_count_op(const uint8_t *spv, size_t sz, uint32_t op) {
+    const uint32_t *w = (const uint32_t *)spv; size_t n = sz / 4, i = 5; int c = 0;
+    while (i < n) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == op) c++; i += wc; }
+    return c;
+}
 static int test_1d_array(void) {
     atex_t at; if (make_1da_tex(&at)) return 1;
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -585,11 +591,22 @@ static int test_1d_array(void) {
     if (render(spv, sz, at.varr, s, got) || compare("texture1d_array: texel = column, layer = row", got, want, 1e-6f)) return 1;
     {   int distinct = 0; for (int a = 0; a < 4; a++) { int dup = 0; for (int b = 0; b < a; b++) if (!memcmp(got + ((a * 2) * W + 3) * 4, got + ((b * 2) * W + 3) * 4, 16)) dup = 1; distinct += !dup; }
         CHECK(distinct == 4, "the four layers are not all distinct (%d)", distinct); }
+    CHECK(spv_count_op(spv, sz, 87u /* OpImageSampleImplicitLod */) == 1, "arr1d: exactly one image sample is emitted");
+    {   /* mixed: one function samples a texture2d_array AND a texture1d_array; each call is bound to its own texture, both are real samples (no typed undef), the module validates */
+        uint8_t *spvm; size_t szm; if (translate("arr_mixed.air.bc", &spvm, &szm)) return 1;
+        lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spvm, szm, rb, 8); int narr = 0;
+        for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && rb[i].image_arrayed && rb[i].image_dim == 1) narr++;
+        CHECK(narr == 2, "arr_mixed: two arrayed 2D image bindings expected, got %d", narr);
+        CHECK(spv_count_op(spvm, szm, 87u) == 2, "arr_mixed: two image samples expected, got %d", spv_count_op(spvm, szm, 87u));
+        if (spirv_valid(spvm, szm, "arr_mixed")) return 1;
+    }
     {   /* control: a texture argument typed texture1d (not an array) keeps the typed-undef result: translated, but no arrayed image is declared */
         uint8_t *spv2; size_t sz2; if (translate("arr1d_plain.air.bc", &spv2, &sz2)) return 1;
         lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spv2, sz2, rb, 8); int arrd = 0;
         for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && rb[i].image_arrayed) arrd = 1;
         CHECK(!arrd, "arr1d_plain: a non-array texture1d argument must not become an arrayed image");
+        CHECK(spv_count_op(spv2, sz2, 87u) == 0, "arr1d_plain: no image sample is emitted (typed undef instead), got %d", spv_count_op(spv2, sz2, 87u));
+        CHECK(spv_count_op(spv2, sz2, 1u /* OpUndef */) >= 1, "arr1d_plain: the sample result is an OpUndef placeholder");
     }
     printf("PASS: texture1d_array: all %d pixels match (8 texels x 4 layers, via the height-1 2D array lowering)\n", W * H);
     return 0;

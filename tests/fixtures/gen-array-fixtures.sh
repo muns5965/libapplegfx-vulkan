@@ -89,3 +89,33 @@ rt1() {
 }
 rt1 arr1d "$TEX_1DA"
 rt1 arr1d_plain "$TEX_1D"
+
+# mixed: one fragment function samples a texture2d_array (arg 1, location 0) AND a texture1d_array (arg 2, location 1) with the same sampler: each call must pick its OWN texture operand.
+#   arr_mixed      colour = sample_2d_array(tex2, (u, v), layer) + sample_1d_array(tex1, u, layer)
+DECL2='declare { <4 x float>, i8 } @air.sample_texture_2d_array.v4f32(ptr addrspace(1) nocapture readonly, ptr addrspace(2) nocapture readonly, <2 x float>, i32, i1, <2 x i32>, i1, float, float, i32)'
+{ echo "$HDR"; cat <<EOT
+define <4 x float> @Arr(<4 x float> %0, ptr addrspace(1) %1, ptr addrspace(1) %2, ptr addrspace(2) %3) {
+entry:
+  %px = extractelement <4 x float> %0, i64 0
+  %py = extractelement <4 x float> %0, i64 1
+  %u = fmul float %px, 1.250000e-01
+  %v = fmul float %py, 1.250000e-01
+  %uv0 = insertelement <2 x float> zeroinitializer, float %u, i64 0
+  %uv = insertelement <2 x float> %uv0, float %v, i64 1
+  %hy = fmul float %py, 5.000000e-01
+  %layer = fptosi float %hy to i32
+  %ra = call { <4 x float>, i8 } @air.sample_texture_2d_array.v4f32(ptr addrspace(1) %1, ptr addrspace(2) %3, <2 x float> %uv, i32 %layer, i1 false, <2 x i32> zeroinitializer, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %rb = call { <4 x float>, i8 } @air.sample_texture_1d_array.v4f32(ptr addrspace(1) %2, ptr addrspace(2) %3, float %u, i32 %layer, i1 false, i32 0, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %ca = extractvalue { <4 x float>, i8 } %ra, 0
+  %cb = extractvalue { <4 x float>, i8 } %rb, 0
+  %c = fadd <4 x float> %ca, %cb
+  ret <4 x float> %c
+}
+$DECL2
+$DECL1
+EOT
+  echo "$FTR"; echo '!air.fragment = !{!15}'
+  echo '!15 = !{ptr @Arr, !12, !13}'; echo '!12 = !{!16}'; echo '!13 = !{!17, !19, !21, !20}'; echo "$TEX_ARR"
+  echo '!21 = !{i32 2, !"air.texture", !"air.location_index", i32 1, i32 1, !"air.sample", !"air.arg_type_name", !"texture1d_array<float, sample>", !"air.arg_name", !"tex1"}'
+  echo '!20 = !{i32 3, !"air.sampler", !"air.location_index", i32 0, i32 1, !"air.arg_type_name", !"sampler", !"air.arg_name", !"s"}'
+} | llvm-as -o arr_mixed.air.bc -
