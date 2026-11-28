@@ -190,6 +190,7 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
 
 lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBuffer cmd, const lagfx_render_desc_t *d) {
     if (!vk || cmd == VK_NULL_HANDLE || !desc_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
+    if (vk->device_lost) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
 
     struct lagfx_render_cache *rc = cache_get(vk);
@@ -272,7 +273,7 @@ lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageVie
             if (c->fail_waitidle) { c->fail_waitidle--; vr = c->fail_lost ? VK_ERROR_DEVICE_LOST : VK_ERROR_OUT_OF_HOST_MEMORY; }
             else vr = vkDeviceWaitIdle(vk->device);
             if (vr == VK_SUCCESS) idle = true;
-            else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; LAGFX_ERR("render_forget_view: device lost; no work can still be running, destroying the framebuffers"); }
+            else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; vk->device_lost = true; LAGFX_ERR("render_forget_view: device lost; the objects are destroyed (nothing can still run), but no new work is accepted from now on"); }
             else { out = LAGFX_FORGET_DEFERRED; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are deferred to shutdown", (int)vr); }
         }
         if (out == LAGFX_FORGET_DEFERRED) { i++; continue; }

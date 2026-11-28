@@ -35,6 +35,7 @@
 
 #include "render_encoder.h"
 #include "common/log.h"
+#include "vulkan/render_pass.h"
 
 #ifdef LAGFX_HAVE_VULKAN
 #  include "vulkan/instance.h"
@@ -111,7 +112,38 @@ lagfx_status_t lagfx_translate_render_begin(
                                            color_attachments, color_attachment_count, NULL, NULL);
 }
 
-lagfx_status_t lagfx_translate_render_begin_ds(
+/* Legacy backend: the attachment infos become a lagfx_render_desc_t. Records nothing on refusal. */
+static lagfx_status_t begin_legacy(struct lagfx_vk_state *vk, VkCommandBuffer cb, uint32_t w, uint32_t h,
+                                   const VkRenderingAttachmentInfoKHR *ca, uint32_t n,
+                                   const VkRenderingAttachmentInfoKHR *dai, const VkRenderingAttachmentInfoKHR *sai,
+                                   const VkFormat *cf, VkFormat dsf, uint32_t samples) {
+    /* a depth-only pass is passed as ONE colour entry with no view (the dynamic-rendering "unused slot"): in a legacy pass that is no colour attachment at all */
+    const bool depth_only = ca && n == 1u && ca[0].imageView == VK_NULL_HANDLE && (dai || sai);
+    if (depth_only) n = 0u;
+    if (!depth_only && (!ca || n == 0u || n > LAGFX_RENDER_MAX_COLOR || !cf)) { LAGFX_ERR("translate_render_begin: legacy backend needs 1..%u colour attachments with formats (or a depth-only pass)", LAGFX_RENDER_MAX_COLOR); return LAGFX_ERR_BACKEND; }
+    if (samples > 1u) { LAGFX_ERR("translate_render_begin: legacy backend has no multisample resolve yet (samples=%u)", samples); return LAGFX_ERR_BACKEND; }
+    lagfx_render_desc_t d; memset(&d, 0, sizeof d);
+    d.width = w; d.height = h; d.color_count = n;
+    for (uint32_t i = 0; i < n; i++) {
+        if (ca[i].imageView == VK_NULL_HANDLE || cf[i] == VK_FORMAT_UNDEFINED) { LAGFX_ERR("translate_render_begin: legacy backend cannot express an empty colour slot (%u)", i); return LAGFX_ERR_BACKEND; }
+        if (ca[i].resolveImageView != VK_NULL_HANDLE || ca[i].resolveMode != 0) { LAGFX_ERR("translate_render_begin: legacy backend has no resolve attachment yet"); return LAGFX_ERR_BACKEND; }
+        d.color[i] = (lagfx_render_attachment_t){ .view = ca[i].imageView, .format = cf[i], .samples = VK_SAMPLE_COUNT_1_BIT, .layout = ca[i].imageLayout,
+                                                  .load = ca[i].loadOp, .store = ca[i].storeOp, .clear = ca[i].clearValue };
+    }
+    if (dai || sai) {
+        const VkRenderingAttachmentInfoKHR *any = dai ? dai : sai;
+        if (dsf == VK_FORMAT_UNDEFINED || any->imageView == VK_NULL_HANDLE) { LAGFX_ERR("translate_render_begin: legacy backend: depth/stencil attachment without a format or view"); return LAGFX_ERR_BACKEND; }
+        if ((dai && dai->resolveImageView != VK_NULL_HANDLE) || (sai && sai->resolveImageView != VK_NULL_HANDLE)) { LAGFX_ERR("translate_render_begin: legacy backend has no depth/stencil resolve"); return LAGFX_ERR_BACKEND; }
+        d.has_depth_stencil = true;
+        d.depth_stencil = (lagfx_render_attachment_t){ .view = any->imageView, .format = dsf, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = any->imageLayout,
+            .load = dai ? dai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .store = dai ? dai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,   /* an aspect the pass does not name is loaded and stored */
+            .stencil_load = sai ? sai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .stencil_store = sai ? sai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,
+            .clear = { .depthStencil = { dai ? dai->clearValue.depthStencil.depth : 0.0f, sai ? sai->clearValue.depthStencil.stencil : 0u } } };
+    }
+    return lagfx_vk_render_begin_desc(vk, cb, &d);
+}
+
+static lagfx_status_t begin_impl(
     struct lagfx_vk_state *vk,
     lagfx_translate_render_state_t *state,
     VkCommandBuffer vk_cmdbuf,
@@ -122,7 +154,8 @@ lagfx_status_t lagfx_translate_render_begin_ds(
     const VkRenderingAttachmentInfoKHR *color_attachments,
     uint32_t color_attachment_count,
     const VkRenderingAttachmentInfoKHR *depth_attachment,
-    const VkRenderingAttachmentInfoKHR *stencil_attachment) {
+    const VkRenderingAttachmentInfoKHR *stencil_attachment,
+    const VkFormat *color_formats, VkFormat ds_format, uint32_t samples) {
     if (!vk || !state || vk_cmdbuf == VK_NULL_HANDLE
         || target_width == 0u || target_height == 0u) {
         LAGFX_ERR("translate_render_begin: invalid arg");
@@ -132,7 +165,8 @@ lagfx_status_t lagfx_translate_render_begin_ds(
         LAGFX_ERR("translate_render_begin: vk state not initialized");
         return LAGFX_ERR_BACKEND;
     }
-    if (!vk->have_dynamic_rendering) {
+    const bool legacy = lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY;
+    if (!legacy && !vk->have_dynamic_rendering) {
         LAGFX_ERR("translate_render_begin: VK_KHR_dynamic_rendering "
                    "required by Phase 3.A encoder");
         return LAGFX_ERR_BACKEND;
@@ -163,6 +197,14 @@ lagfx_status_t lagfx_translate_render_begin_ds(
                       target_width, target_height);
             return LAGFX_OK;
         }
+    }
+
+    if (legacy) {   /* no fallback attachment here: the legacy backend needs the caller's formats */
+        lagfx_status_t ls = begin_legacy(vk, vk_cmdbuf, target_width, target_height, color_attachments, color_attachment_count,
+                                         depth_attachment, stencil_attachment, color_formats, ds_format, samples);
+        if (ls != LAGFX_OK) { state->in_pass = false; return ls; }
+        state->render_pass_active = true;
+        return LAGFX_OK;
     }
 
     VkRenderingAttachmentInfoKHR fallback_att = {
@@ -211,6 +253,25 @@ lagfx_status_t lagfx_translate_render_begin_ds(
     LAGFX_LOG("translate_render_begin: target=%p %ux%u atts=%u",
               (void *)target, target_width, target_height, n_atts);
     return LAGFX_OK;
+}
+
+lagfx_status_t lagfx_translate_render_begin_ds(
+    struct lagfx_vk_state *vk, lagfx_translate_render_state_t *state, VkCommandBuffer vk_cmdbuf, VkImage target,
+    uint32_t target_width, uint32_t target_height, const float clear_rgba[4],
+    const VkRenderingAttachmentInfoKHR *color_attachments, uint32_t color_attachment_count,
+    const VkRenderingAttachmentInfoKHR *depth_attachment, const VkRenderingAttachmentInfoKHR *stencil_attachment) {
+    return begin_impl(vk, state, vk_cmdbuf, target, target_width, target_height, clear_rgba, color_attachments, color_attachment_count,
+                      depth_attachment, stencil_attachment, NULL, VK_FORMAT_UNDEFINED, 1u);
+}
+
+lagfx_status_t lagfx_translate_render_begin_fmt(
+    struct lagfx_vk_state *vk, lagfx_translate_render_state_t *state, VkCommandBuffer vk_cmdbuf, VkImage target,
+    uint32_t target_width, uint32_t target_height,
+    const VkRenderingAttachmentInfoKHR *color_attachments, uint32_t color_attachment_count,
+    const VkRenderingAttachmentInfoKHR *depth_attachment, const VkRenderingAttachmentInfoKHR *stencil_attachment,
+    const VkFormat *color_formats, VkFormat ds_format, uint32_t samples) {
+    return begin_impl(vk, state, vk_cmdbuf, target, target_width, target_height, NULL, color_attachments, color_attachment_count,
+                      depth_attachment, stencil_attachment, color_formats, ds_format, samples);
 }
 
 lagfx_status_t lagfx_translate_render_bind_pipeline(
@@ -455,7 +516,7 @@ lagfx_status_t lagfx_translate_render_end(
         return LAGFX_ERR_INVALID_ARG;
     }
     if (state->render_pass_active) {
-        vkCmdEndRendering(state->cmdbuf);
+        lagfx_vk_render_end(state->vk, state->cmdbuf);   /* vkCmdEndRendering or vkCmdEndRenderPass, as the device's backend */
     }
     LAGFX_LOG("translate_render_end");
     state->in_pass           = false;

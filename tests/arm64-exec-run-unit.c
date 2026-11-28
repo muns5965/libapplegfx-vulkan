@@ -11,6 +11,7 @@
 #include "libapplegfx-vulkan.h"
 #ifdef LAGFX_HAVE_VULKAN
 #include "vulkan/instance.h"
+#include "vulkan/render_pass.h"
 #include <vulkan/vulkan.h>
 #include "arm64-exec-run-shaders.h"
 #include "arm64-exec-blend-shader.h"
@@ -534,6 +535,13 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
     exec(p, 1, cb_finish(), true);
     uint8_t img[RT_W * RT_H * 8]; uint32_t w, h;
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
+    if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY && !slot0 && slot1) {
+        /* the legacy (VkRenderPass) backend cannot express an empty colour slot 0: the pass is refused, counted, and nothing is drawn (the clear is not executed either) */
+        assert(R->no_target >= 1 && R->draws == 0 && R->submit_failed == 0);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+        g_blend.set = 0, g_blend.mrt = 0, g_res_tex2 = false;
+        (void)name; return;
+    }
     if (slot0) {
         assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, RT_W * RT_H * 4, &w, &h));
         uint32_t v = px(img, 8, 8), want = (mask0 & 1u) ? 0x80000080u : 0xff0000ffu;   /* R mask bit 0: A R G B = 128 128 0 0 vs the blue clear */

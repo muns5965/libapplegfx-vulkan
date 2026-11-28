@@ -86,6 +86,7 @@ struct lagfx_vk_state {
     bool have_shader_object;
     bool have_extended_dynamic_state3;
     bool have_buffer_device_address;  /* M2 host-flattening (PhysicalStorageBuffer) */
+    bool device_lost;     /* sticky: a call saw VK_ERROR_DEVICE_LOST. Objects may still be destroyed, but NO new GPU work is recorded or submitted (render_begin and draw_record refuse with LAGFX_ERR_BACKEND) */
     int render_backend;   /* lagfx_render_backend_t, fixed at init (render_pass.h) */
     struct lagfx_render_cache *render_cache;   /* render_pass.c: cached VkRenderPass / VkFramebuffer for the legacy backend */
     PFN_vkGetBufferDeviceAddress get_buffer_address;   /* core vkGetBufferDeviceAddress (>= 1.2) or the KHR entry point (1.1 + VK_KHR_buffer_device_address); NULL when BDA is unavailable */

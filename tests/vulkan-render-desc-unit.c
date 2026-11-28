@@ -46,6 +46,9 @@ static bool one_shot(struct lagfx_vk_state *vk, bool (*fn)(struct lagfx_vk_state
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
     if (vkQueueSubmit(vk->graphics_queue, 1, &si, f) != VK_SUCCESS) goto out;
     ok = vkWaitForFences(vk->device, 1, &f, VK_TRUE, 5000000000ull) == VK_SUCCESS;
+    if (!ok) {   /* the submission is accepted and may still run: the fence and command buffer are released only once the device is idle; if that cannot be shown they are leaked */
+        if (vkDeviceWaitIdle(vk->device) != VK_SUCCESS) { printf("one_shot: fence wait failed and the device is not idle: command buffer and fence leaked on purpose\n"); return false; }
+    }
 out:
     if (f) vkDestroyFence(vk->device, f, NULL);
     lagfx_vk_cmdbuf_free(vk, cb);
@@ -209,6 +212,13 @@ static void run_backend(int legacy) {
                 (void)v;
             } else {
                 CHECK(lagfx_vk_render_deferred_count(vk) == before, "DEVICE_LOST counts as idle: the target is destroyed, nothing deferred");
+                CHECK(vk->device_lost, "DEVICE_LOST is remembered (sticky)");
+                lagfx_vk_render_target_t r3; memset(&r3, 0, sizeof r3);
+                lagfx_render_color_t cc = { .view = (VkImageView)(uintptr_t)1, .format = VK_FORMAT_B8G8R8A8_UNORM, .width = 8, .height = 8, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                            .load = VK_ATTACHMENT_LOAD_OP_LOAD, .store = VK_ATTACHMENT_STORE_OP_STORE };
+                CHECK(lagfx_vk_render_begin(vk, (VkCommandBuffer)(uintptr_t)1, &cc) == LAGFX_ERR_BACKEND, "after DEVICE_LOST: render_begin refuses new work");
+                CHECK(lagfx_vk_draw_record_and_submit_bound(vk, (VkPipeline)(uintptr_t)1, VK_NULL_HANDLE, VK_NULL_HANDLE, &r3, false, 3, 1, 0, 0, 0, VK_NULL_HANDLE, NULL) == LAGFX_ERR_BACKEND, "after DEVICE_LOST: draw_record refuses new work");
+                vk->device_lost = false;   /* the injected loss was not real: the device itself is fine, the rest of the test goes on */
             }
         }
         /* a second use of the same state after a deferral keeps working */
@@ -222,8 +232,14 @@ static void run_backend(int legacy) {
         lagfx_pipeline_desc_t d; lagfx_render_desc_t rd; memset(&d, 0, sizeof d);
         d.color_format = VK_FORMAT_B8G8R8A8_UNORM;
         CHECK(lagfx_pipeline_render_desc(&d, &rd), "plain pipeline: expressible");
-        d.no_color = 1; CHECK(!lagfx_pipeline_render_desc(&d, &rd), "no_color: refused"); d.no_color = 0;
-        d.dyn_state = 1; CHECK(!lagfx_pipeline_render_desc(&d, &rd), "dyn_state: refused"); d.dyn_state = 0;
+        d.no_color = 1; CHECK(!lagfx_pipeline_render_desc(&d, &rd), "no_color without depth/stencil: refused");
+        d.dyn_state = 1; d.ds_depth_format = VK_FORMAT_D32_SFLOAT; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 0 && rd.has_depth_stencil, "no_color + depth format: depth-only description");
+        d.no_color = 0; d.dyn_state = 0; d.ds_depth_format = VK_FORMAT_UNDEFINED;
+        d.dyn_state = 1; CHECK(lagfx_pipeline_render_desc(&d, &rd) && !rd.has_depth_stencil, "dyn_state without depth/stencil formats: colour only");
+        d.ds_depth_format = VK_FORMAT_D32_SFLOAT; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.has_depth_stencil && rd.depth_stencil.format == VK_FORMAT_D32_SFLOAT, "dyn_state + depth format: depth attachment in the description");
+        d.ds_stencil_format = VK_FORMAT_D24_UNORM_S8_UINT; CHECK(!lagfx_pipeline_render_desc(&d, &rd), "different depth and stencil formats: refused");
+        d.ds_depth_format = VK_FORMAT_UNDEFINED; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.depth_stencil.format == VK_FORMAT_D24_UNORM_S8_UINT, "stencil format only: that format is the attachment");
+        d.ds_stencil_format = VK_FORMAT_UNDEFINED; d.dyn_state = 0;
         d.n_color = 2; d.color_formats[0] = VK_FORMAT_B8G8R8A8_UNORM; d.color_formats[1] = VK_FORMAT_UNDEFINED;
         CHECK(!lagfx_pipeline_render_desc(&d, &rd), "an UNDEFINED colour slot: refused");
         d.color_formats[1] = VK_FORMAT_R8G8B8A8_UNORM; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 2, "two defined colour slots: expressible");

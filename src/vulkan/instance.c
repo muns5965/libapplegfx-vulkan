@@ -941,6 +941,10 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     s->have_dynamic_rendering      = have_dyn_rendering_feature;
     s->render_backend              = (int)lagfx_vk_render_backend_select(have_dyn_rendering_feature);
+    if (s->render_backend == LAGFX_RENDER_LEGACY) {   /* framebuffer fetch needs input attachments inside a VkRenderPass: not implemented, so such draws are refused (counted as stub_fbfetch), never run with the wrong layout */
+        s->have_local_read = false;
+        s->have_local_read_ms = false;
+    }
     s->have_synchronization2       = have_synchronization2;
     s->have_timeline_semaphore     = have_timeline_semaphore_feat;
     s->have_descriptor_indexing    = have_descriptor_indexing;
@@ -977,7 +981,10 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
      * null-derefs inside the driver (SIGSEGV fault_addr=0xe8 right after
      * cmd_pool_create). Refuse cleanly so the caller (lagfx_device_new ->
      * NULL) can fall back to its built-in gfx device. */
-    if (!have_dyn_rendering_feature) {
+    /* Every call site now has a legacy VkRenderPass path (render_pass.c), for a limited set of shapes (colour attachments without gaps, optional depth/stencil, 1x samples,
+     * no resolve, no framebuffer fetch; the rest is refused and counted). That path is verified on lavapipe only, so it stays OFF by default: LAGFX_VK_LEGACY_RENDERPASS_GPU=1
+     * lets a device without dynamic rendering initialise anyway (the test path for such a device). */
+    if (!have_dyn_rendering_feature && !lagfx_env_is_one("LAGFX_VK_LEGACY_RENDERPASS_GPU")) {
         fprintf(stderr, "lagfx: Vulkan dynamicRendering unsupported by this "
                 "GPU/driver; refusing init (LAGFX_ERR_VULKAN_INIT)\n");
         LAGFX_ERR("vk_init: dynamicRendering unsupported; refusing init so "

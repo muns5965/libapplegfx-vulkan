@@ -228,6 +228,25 @@ lagfx_status_t lagfx_translate_render_begin_ds(
     const VkRenderingAttachmentInfoKHR *depth_attachment,
     const VkRenderingAttachmentInfoKHR *stencil_attachment);
 
+/* begin_ds plus the attachment FORMATS and sample count, which a legacy (VkRenderPass) backend needs and the attachment infos do not carry. color_formats[i] is the format
+ * of color_attachments[i]; ds_format the format of the depth / stencil view (VK_FORMAT_UNDEFINED = none). On the dynamic backend this is exactly begin_ds. On the legacy backend
+ * (render_pass.h) a pass the backend does not express is refused with LAGFX_ERR_BACKEND and NOTHING is recorded (state stays outside a pass): an empty colour slot (a gap,
+ * or the unused slot of a depth-only pass), a resolve attachment, samples > 1 (no resolve implemented), more than LAGFX_RENDER_MAX_COLOR attachments. */
+lagfx_status_t lagfx_translate_render_begin_fmt(
+    struct lagfx_vk_state *vk,
+    lagfx_translate_render_state_t *state,
+    VkCommandBuffer vk_cmdbuf,
+    VkImage target,
+    uint32_t target_width,
+    uint32_t target_height,
+    const VkRenderingAttachmentInfoKHR *color_attachments,
+    uint32_t color_attachment_count,
+    const VkRenderingAttachmentInfoKHR *depth_attachment,
+    const VkRenderingAttachmentInfoKHR *stencil_attachment,
+    const VkFormat *color_formats,
+    VkFormat ds_format,
+    uint32_t samples);
+
 /* Bind a pipeline selected by `shader_kind`. At Phase 3.A scaffold
  * we only RECORD the intent — the catalog → VkShader/VkPipeline
  * binding is Phase 3.E's job. `layout` is stored for later

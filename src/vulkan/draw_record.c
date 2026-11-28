@@ -187,6 +187,10 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
         return LAGFX_ERR_BACKEND;
     }
     
+    if (vk->device_lost) {
+        LAGFX_ERR("draw_record_and_submit: device lost earlier; no new work is submitted");
+        return LAGFX_ERR_BACKEND;
+    }
     if (pipeline == VK_NULL_HANDLE || rt == NULL || rt->image == VK_NULL_HANDLE) {
         LAGFX_ERR("draw_record_and_submit: pipeline=%p rt=%p rt->image=%p",
                   (void *)pipeline, (void *)rt, (void *)rt->image);
@@ -312,6 +316,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
      * throughput suspect; aggregated per frame at readback. */
     uint64_t perf_t0 = getenv("LAGFX_PERF") ? lagfx_now_ns() : 0u;
     vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    if (vr == VK_ERROR_DEVICE_LOST) vk->device_lost = true;
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("draw_record_and_submit: vkQueueSubmit failed (%d)", (int)vr);
         rt->layout = prev_layout;   /* not accepted by the queue: the barrier never ran */
@@ -336,6 +341,7 @@ lagfx_status_t lagfx_vk_draw_record_and_submit_bound(
     }
     uint64_t fence_t0 = lagfx_now_ns();
     vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+    if (vr == VK_ERROR_DEVICE_LOST) vk->device_lost = true;
     {
         uint64_t waited_ms = (lagfx_now_ns() - fence_t0) / 1000000ull;
         vk->last_draw_wait_ms = (uint32_t)waited_ms;

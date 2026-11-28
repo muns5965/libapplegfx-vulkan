@@ -54,6 +54,7 @@ bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry
 #include "../translate/render_encoder.h"
 #include "../handlers/compute/render_inner_ops.h"
 #include "render_pass.h"
+#include "vulkan/render_pass.h"
 #include "arm64_capture_rec.h"
 #include "arm64_msaa.h"
 #include "../vulkan/msaa_host.h"
@@ -561,6 +562,12 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
             }
             d.sample_shading = 1u, d.min_sample_shading_permille = lagfx_msaa_inject->min_sample_shading_permille;
         }
+    }
+    if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) {   /* a VkRenderPass device: the pipeline is built against the pass render_begin will start (render_encoder.c begin_legacy), or not at all */
+        lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE;
+        if (lagfx_pipeline_render_desc(&d, &rd)) lrp = lagfx_vk_render_pass_compat(r->vk, &rd);
+        if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
+        d.render_pass = (uint64_t)(uintptr_t)lrp;
     }
     VkPipeline pl = VK_NULL_HANDLE;
     const uint64_t hold_t0 = lagfx_hold_now_ns();
@@ -1211,8 +1218,11 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_depth_only_passes++;
     }
     r->nslots = nslots;
-    if (lagfx_translate_render_begin_ds(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, NULL, ca, nslots,
-                                        dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL) != LAGFX_OK) {
+    VkFormat cfmt[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };   /* the legacy backend (VkRenderPass) needs the formats the infos do not carry */
+    for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) cfmt[q] = r->rts[q]->format;
+    if (lagfx_translate_render_begin_fmt(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, ca, nslots,
+                                         dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL,
+                                         cfmt, dso ? dso->format : VK_FORMAT_UNDEFINED, r->ms.samples > 1u ? r->ms.samples : 1u) != LAGFX_OK) {
         for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
         lagfx_a64_msaa_pass_abort(r->x, &r->ms);
         if (dso) lagfx_a64_res_ds_end(r->x, dso);
@@ -1609,8 +1619,11 @@ static bool tile_resume(void *c) {
         if (lagfx_a64_res_ds_begin(r->x, r->dsobj, &v, &w, &h)) { dbegun = true, dai.imageView = sai.imageView = v, dai.loadOp = sai.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD; }
         else ok = false;
     }
-    if (ok && lagfx_translate_render_begin_ds(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), r->rsnap.img, r->rt_w, r->rt_h, NULL, ca, r->nslots,
-                                              r->rsnap.has_d ? &dai : NULL, r->rsnap.has_s ? &sai : NULL) == LAGFX_OK) {
+    VkFormat cfmt[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
+    for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) cfmt[q] = r->rts[q]->format;
+    if (ok && lagfx_translate_render_begin_fmt(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), r->rsnap.img, r->rt_w, r->rt_h, ca, r->nslots,
+                                               r->rsnap.has_d ? &dai : NULL, r->rsnap.has_s ? &sai : NULL,
+                                               cfmt, r->dsobj ? r->dsobj->format : VK_FORMAT_UNDEFINED, r->ms.samples > 1u ? r->ms.samples : 1u) == LAGFX_OK) {
         r->rendering = true, r->bound_vk = VK_NULL_HANDLE, r->last_fetch = false, r->es.dirty = true;
         return true;
     }

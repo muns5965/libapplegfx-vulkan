@@ -277,7 +277,16 @@ paired:
 bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out) {
     if (!desc || !out) return false;
     memset(out, 0, sizeof *out);
-    if (desc->no_color || desc->dyn_state) return false;
+    if (desc->no_color) {   /* depth-only: a legacy subpass with no colour attachment (the builder then sets the blend attachment count to 0 when render_pass is given) */
+        if (!desc->dyn_state || (desc->ds_depth_format == VK_FORMAT_UNDEFINED && desc->ds_stencil_format == VK_FORMAT_UNDEFINED)) return false;
+        if (desc->ds_depth_format != VK_FORMAT_UNDEFINED && desc->ds_stencil_format != VK_FORMAT_UNDEFINED && desc->ds_depth_format != desc->ds_stencil_format) return false;
+        out->color_count = 0;
+        out->has_depth_stencil = true;
+        out->depth_stencil.format = desc->ds_depth_format != VK_FORMAT_UNDEFINED ? desc->ds_depth_format : desc->ds_stencil_format;
+        out->depth_stencil.samples = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
+        out->depth_stencil.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+        return true;
+    }
     const uint32_t ncol = (desc->n_color >= 2u && desc->n_color <= 4u) ? desc->n_color : 1u;
     const VkSampleCountFlagBits smp = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
     for (uint32_t i = 0; i < ncol; i++) {
@@ -287,6 +296,13 @@ bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_
         out->color[i].format = f; out->color[i].samples = smp; out->color[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     out->color_count = ncol;
+    if (desc->dyn_state && (desc->ds_depth_format != VK_FORMAT_UNDEFINED || desc->ds_stencil_format != VK_FORMAT_UNDEFINED)) {
+        /* the builder names the depth and stencil formats separately (VkPipelineRenderingCreateInfo); a legacy pass has ONE depth/stencil attachment, so they must be the same image format */
+        if (desc->ds_depth_format != VK_FORMAT_UNDEFINED && desc->ds_stencil_format != VK_FORMAT_UNDEFINED && desc->ds_depth_format != desc->ds_stencil_format) return false;
+        out->has_depth_stencil = true;
+        out->depth_stencil.format = desc->ds_depth_format != VK_FORMAT_UNDEFINED ? desc->ds_depth_format : desc->ds_stencil_format;
+        out->depth_stencil.samples = smp; out->depth_stencil.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+    }
     return true;
 }
 
@@ -452,7 +468,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
     VkPipelineColorBlendStateCreateInfo cb = {
         .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO,
         .flags = desc->raster_order_access ? 0x1u /* VK_PIPELINE_COLOR_BLEND_STATE_CREATE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_BIT_EXT (= the ARM bit) */ : 0u,
-        .attachmentCount = ncol,
+        .attachmentCount = (desc->render_pass && desc->no_color) ? 0u : ncol,   /* a legacy depth-only subpass has NO colour attachment (the one unused slot is a dynamic-rendering device) */
         .pAttachments = ncol > 1u ? blend_multi : &blend_att,
     };
 
