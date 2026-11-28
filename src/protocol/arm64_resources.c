@@ -1783,10 +1783,13 @@ void lagfx_a64_res_ds_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
 }
 
+static bool readback_obj(lagfx_protocol_t *p, mgr2_t *m, lagfx_a64_obj_t *o, void *dst, size_t dst_size, uint32_t *w, uint32_t *h);
 bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
     mgr2_t *m = p ? p->a64_res : NULL;
+    return readback_obj(p, m, m ? obj_find(m, task, ref) : NULL, dst, dst_size, w, h);
+}
+static bool readback_obj(lagfx_protocol_t *p, mgr2_t *m, lagfx_a64_obj_t *o, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
     struct lagfx_vk_state *vk = vk_of(p);
-    lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
     if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || o->ds_aspects || o->samples_req > 1u || BUSY(m)) return false;
     size_t need = (size_t)o->width * o->height * o->bpp;
     if (!dst || dst_size < need) return false;
@@ -2017,6 +2020,46 @@ bool lagfx_a64_res_prepare_sampled(lagfx_a64_rexec_t *x, uint32_t ref) {
 
 /* The payload of an ARM64 display command: arg_count_8b barrier words (8 bytes each) first, then the arguments. Henge's decoder (pvg_lite.c) reads op 8 as 10 words
  * with the mapping id in words 2..3; ops 1 / 2 need 8 bytes. The meaning of op 1 / 2 / 8 is taken from there; nothing about Apple's behaviour is assumed here. */
+
+/* g7-gpu-image (diagnostics, sampled): what the GPU image of the surface a swap names actually holds, read back from the Vulkan image (NOT from the guest pages: wbverify only
+ * round-trips guest bytes). Taken at swaps 1, 2, 4, 8, ... (a readback is a queue wait + a full copy). Pixel "non-black" = any colour channel of R,G,B non-zero (RGBA16Float: any of the
+ * three halves with a non-zero magnitude). Reports size / bpp, non-black count, bounding box, the first non-black pixel and its raw channels, a hash of the whole image, and
+ * the number of distinct non-black raw pixel values (capped) so that a single flat colour, a few colours and a many-coloured picture are told apart. */
+static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t swap_no) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    if (!m || mapping_id > 0xffffffffull) return;
+    lagfx_a64_obj_t *o = NULL;
+    for (uint32_t i = 0; i < m->n && !o; i++) { lagfx_a64_obj_t *c = m->objs[i]; if (c && c->kind == LAGFX_A64_TEXTURE && c->ms && c->ms->mapping == (uint32_t)mapping_id) o = c; }
+    if (!o) { LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu no texture object", (unsigned long long)swap_no, (unsigned long long)mapping_id); return; }
+    if (o->bpp != 4u && o->bpp != 8u) return;
+    size_t need = (size_t)o->width * o->height * o->bpp;
+    uint8_t *img = malloc(need);
+    if (!img) return;
+    uint32_t w = 0, h = 0;
+    if (!readback_obj(p, m, o, img, need, &w, &h)) { p->diag2.disp.image_probe_unavail++; LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu readback_unavailable (busy / unsupported)", (unsigned long long)swap_no, (unsigned long long)mapping_id); free(img); return; }
+    uint64_t hash = 1469598103934665603ull, nb = 0, nalpha = 0; uint32_t x0 = w, y0 = h, x1 = 0, y1 = 0, fx = 0, fy = 0; bool first = false; uint8_t fpx[8] = {0};
+    uint64_t seen[16]; uint32_t nseen = 0; bool overflow = false;
+    for (uint32_t y = 0; y < h; y++) for (uint32_t x = 0; x < w; x++) {
+        const uint8_t *q = img + ((size_t)y * w + x) * o->bpp;
+        for (uint32_t k = 0; k < o->bpp; k++) hash = (hash ^ q[k]) * 1099511628211ull;
+        bool black;
+        if (o->bpp == 8u) { uint16_t hr, hg, hb; memcpy(&hr, q, 2); memcpy(&hg, q + 2, 2); memcpy(&hb, q + 4, 2); black = !((hr & 0x7fffu) | (hg & 0x7fffu) | (hb & 0x7fffu)); if (q[7] & 0x7fu || q[6]) nalpha++; }
+        else { black = !(q[0] | q[1] | q[2]); if (q[3]) nalpha++; }
+        if (black) continue;
+        nb++;
+        if (!first) { first = true, fx = x, fy = y; memcpy(fpx, q, o->bpp); }
+        if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y;
+        uint64_t v = 0; memcpy(&v, q, o->bpp);
+        bool dup = false; for (uint32_t k = 0; k < nseen; k++) if (seen[k] == v) { dup = true; break; }
+        if (!dup) { if (nseen < 16u) seen[nseen++] = v; else overflow = true; }
+    }
+    p->diag2.disp.image_probes++, p->diag2.disp.image_probe_nonblack_last = nb;
+    LAGFX_LOG("g7-gpu-image: swap=%llu mapping=%llu %ux%u bpp=%u nonblack=%llu (%.4f%%) alpha_nonzero=%llu bbox=(%u,%u)-(%u,%u) first=(%u,%u) raw=%02x%02x%02x%02x%02x%02x%02x%02x distinct_nonblack=%u%s hash=%016llx (GPU image read back from the Vulkan image)",
+              (unsigned long long)swap_no, (unsigned long long)mapping_id, w, h, o->bpp, (unsigned long long)nb, w && h ? 100.0 * (double)nb / ((double)w * (double)h) : 0.0, (unsigned long long)nalpha,
+              nb ? x0 : 0u, nb ? y0 : 0u, nb ? x1 : 0u, nb ? y1 : 0u, fx, fy, fpx[0], fpx[1], fpx[2], fpx[3], fpx[4], fpx[5], fpx[6], fpx[7], nseen, overflow ? "+" : "", (unsigned long long)hash);
+    free(img);
+}
+
 void lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) {
     if (!p || !hdr) return;
     uint32_t op = hdr->opcode & 0xffu;
@@ -2039,6 +2082,7 @@ void lagfx_a64_display_count(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr)
         p->diag2.disp.surface_resolved++;
         if (!(r & LAGFX_A64_DSP_GPU)) return;
         p->diag2.disp.gpu_content++;
+        { const uint64_t n = p->diag2.disp.gpu_content; if ((n & (n - 1u)) == 0u && !getenv("LAGFX_NO_GPU_IMAGE_PROBE")) probe_swap_image(p, mapping_id, n); }
         if (r & LAGFX_A64_DSP_WRITTEN) p->diag2.disp.written_back++; else p->diag2.disp.gpu_unwritten++;
     }
 }

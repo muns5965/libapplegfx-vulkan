@@ -881,6 +881,8 @@ int main(void) {
       assert(*pa == GREEN && *pb == 0xff0000ffu);                              /* and re-rendering A leaves B alone */
       #undef SWAP_NAME
     }
+    /* GPU-image probe (g7-gpu-image): sampled at swaps 1, 2, 4, 8...; the colours rendered above (blue / green clears) are NOT black, so the last probe must have seen every pixel non-black */
+    assert(p->diag2.disp.image_probes >= 1 && p->diag2.disp.image_probe_unavail == 0 && p->diag2.disp.image_probe_nonblack_last == (uint64_t)SW * SH);
     printf("PASS: two surfaces: each exec's colour lands in its OWN guest pages, a swap names the surface whose pages hold its colour, neither rewrites the other\n");
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);

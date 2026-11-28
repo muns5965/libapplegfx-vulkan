@@ -556,6 +556,7 @@ typedef struct lagfx_protocol {
             uint64_t surface_resolved, surface_unresolved;   /* the swap's mapping id has / has no mirror surface (no exec ever drew into it: no GPU content is possible) */
             uint64_t gpu_content;                      /* resolved and the mirror holds pixels the GPU produced or the guest uploaded */
             uint64_t written_back, gpu_unwritten;      /* of those: the guest's pages are current when the command is handed over / the guest still holds older pixels */
+            uint64_t image_probes, image_probe_unavail, image_probe_nonblack_last;   /* g7-gpu-image: sampled GPU-image readbacks at swaps 1,2,4,8..; unavailable (busy / unsupported); non-black pixel count of the last one */
             uint64_t handed_to_shell, not_handed;      /* display_command callback called / no callback or no payload */
         } disp;
         uint64_t irq_raised;
