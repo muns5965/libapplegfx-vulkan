@@ -1273,6 +1273,63 @@ static bool air_type_has_i64(xlate_ctx_t *c, uint32_t ty, unsigned depth) {
     return false;
 }
 
+/* ---- Int64 narrowing: value ranges. A narrowed i64 lives in 32 bits, so the low 32 bits of add / sub / mul / shl / and / or / xor are always exact; what can differ is
+ * anything that OBSERVES the high bits (compare, convert to float, index, right shift ...). Every scalar i64 value therefore carries a conservative signed interval; an
+ * observation is allowed only when the interval proves the narrowed value equals the real one (fits uint32 for unsigned / equality use, int32 for signed use), otherwise the
+ * module is refused. A value with no recorded interval (function argument, phi, call result ...) is ASSUMED to be in [0, UINT32_MAX] and the assumption is counted. ---- */
+typedef struct { int64_t lo, hi; } nrng_t;
+static _Thread_local nrng_t *t_nr; static _Thread_local uint8_t *t_nr_ok; static _Thread_local uint32_t t_nr_cap; static _Thread_local uint32_t t_nr_assumed;
+static void nr_reset(void) { free(t_nr); free(t_nr_ok); t_nr = NULL; t_nr_ok = NULL; t_nr_cap = 0; t_nr_assumed = 0; }
+static void nr_set(uint32_t id, int64_t lo, int64_t hi) {
+    if (!t_narrow64 || id > (1u << 22)) return;
+    if (id >= t_nr_cap) {
+        uint32_t nc = t_nr_cap ? t_nr_cap : 256u; while (nc <= id) nc *= 2u;
+        nrng_t *a = realloc(t_nr, nc * sizeof *a); uint8_t *b = realloc(t_nr_ok, nc);
+        if (!a || !b) { if (a) t_nr = a; if (b) t_nr_ok = b; narrow_unsafe("range table out of memory"); return; }
+        t_nr = a; t_nr_ok = b; memset(t_nr_ok + t_nr_cap, 0, nc - t_nr_cap); t_nr_cap = nc;
+    }
+    t_nr[id].lo = lo; t_nr[id].hi = hi; t_nr_ok[id] = 1;
+}
+static nrng_t nr_get(uint32_t id) {
+    if (id < t_nr_cap && t_nr_ok[id]) return t_nr[id];
+    t_nr_assumed++;
+    return (nrng_t){ 0, (int64_t)UINT32_MAX };
+}
+static int64_t nr_sat(__int128 v) { return v > (__int128)INT64_MAX ? INT64_MAX : v < (__int128)INT64_MIN ? INT64_MIN : (int64_t)v; }
+static bool nr_u32(nrng_t r) { return r.lo >= 0 && r.hi <= (int64_t)UINT32_MAX; }
+static bool nr_i32(nrng_t r) { return r.lo >= (int64_t)INT32_MIN && r.hi <= (int64_t)INT32_MAX; }
+static bool air_is_scalar_i64(xlate_ctx_t *c, uint32_t ty) {
+    uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
+    return ty != LAGFX_AIR_TYPE_NONE && ty < n && ts[ty].kind == LAGFX_AIR_TYPE_INTEGER && ts[ty].num_op >= 1u && ts[ty].op[0] == 64u;
+}
+static uint32_t air_int_bits(xlate_ctx_t *c, uint32_t ty) {
+    uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
+    return (ty != LAGFX_AIR_TYPE_NONE && ty < n && ts[ty].kind == LAGFX_AIR_TYPE_INTEGER && ts[ty].num_op >= 1u) ? ts[ty].op[0] : 0u;
+}
+/* result range of an i64 binary op (LLVM bitcode subcodes) from its operand ranges */
+static nrng_t nr_binop(int op, nrng_t a, nrng_t b, bool b_const) {
+    nrng_t full = { INT64_MIN, INT64_MAX };
+    switch (op) {
+    case 0: return (nrng_t){ nr_sat((__int128)a.lo + b.lo), nr_sat((__int128)a.hi + b.hi) };
+    case 1: return (nrng_t){ nr_sat((__int128)a.lo - b.hi), nr_sat((__int128)a.hi - b.lo) };
+    case 2: { __int128 p[4] = { (__int128)a.lo * b.lo, (__int128)a.lo * b.hi, (__int128)a.hi * b.lo, (__int128)a.hi * b.hi }; __int128 lo = p[0], hi = p[0];
+              for (int i = 1; i < 4; i++) { if (p[i] < lo) lo = p[i]; if (p[i] > hi) hi = p[i]; } return (nrng_t){ nr_sat(lo), nr_sat(hi) }; }
+    case 7: if (b_const && b.lo == b.hi && b.lo >= 0 && b.lo < 63 && a.lo >= 0) return (nrng_t){ nr_sat((__int128)a.lo << b.lo), nr_sat((__int128)a.hi << b.lo) }; return full;
+    case 10: if (a.lo >= 0 && b.lo >= 0) return (nrng_t){ 0, a.hi < b.hi ? a.hi : b.hi };   /* and of two non-negatives is bounded by the smaller */
+             if (b.lo >= 0) return (nrng_t){ 0, b.hi };
+             if (a.lo >= 0) return (nrng_t){ 0, a.hi };
+             return full;
+    case 11: case 12: if (a.lo >= 0 && b.lo >= 0) { int64_t m = a.hi > b.hi ? a.hi : b.hi; uint64_t p = 1; while (p <= (uint64_t)m && p < (1ull << 62)) p <<= 1; return (nrng_t){ 0, (int64_t)(p - 1) }; } return full;
+    default: return full;
+    }
+}
+/* an observation of the high bits of value `id` */
+static void nr_need(xlate_ctx_t *c, uint32_t id, bool is_signed, const char *what) {
+    (void)c;
+    nrng_t r = nr_get(id);
+    if (is_signed ? !nr_i32(r) : !nr_u32(r)) narrow_unsafe(what);
+}
+
 static uint32_t value_air_type_idx(xlate_ctx_t *c, uint32_t value_id);
 /* Narrowing: a trunc / zext / sext whose two sides have the same SPIR-V width once i64 became 32 bits is an identity (OpUConvert / OpSConvert need differing widths). */
 static bool cast_same_width_narrowed(xlate_ctx_t *c, uint32_t src_value_id, uint32_t dest_air_ty, uint32_t dest_spv) {
@@ -3644,6 +3701,18 @@ static void emit_inst_cast(xlate_ctx_t *c, uint32_t inst_idx,
 
     /* Resolve source operand */
     uint32_t opval_id  = resolve_relative(opval_rel, next_val_id);
+    if (t_narrow64) {   /* Int64 narrowing: ranges through extensions; observations (float conversion, reinterpretation) must be proven in range */
+        uint32_t sty = value_air_type_idx(c, opval_id); bool src64 = air_is_scalar_i64(c, sty), dst64 = air_is_scalar_i64(c, dest_ty); uint32_t sw = air_int_bits(c, sty);
+        if (dst64 && cast_op == 1 && sw >= 1u && sw <= 32u) {
+            int64_t hi = (int64_t)((1ull << sw) - 1ull);
+            if (opval_id < t_nr_cap && t_nr_ok[opval_id] && t_nr[opval_id].lo >= 0 && t_nr[opval_id].hi <= hi) nr_set(result_value_id, t_nr[opval_id].lo, t_nr[opval_id].hi);   /* a masked source keeps its tighter range */
+            else nr_set(result_value_id, 0, hi);
+        }
+        else if (dst64 && cast_op == 2 && sw >= 2u && sw <= 32u) nr_set(result_value_id, -(int64_t)(1ull << (sw - 1u)), (int64_t)((1ull << (sw - 1u)) - 1ull));
+        else if (src64 && cast_op == 5) nr_need(c, opval_id, false, "i64 unsigned convert to float of a value that may exceed 32 bits");
+        else if (src64 && cast_op == 6) nr_need(c, opval_id, true, "i64 signed convert to float of a value that may exceed 32 bits");
+        else if (src64 && (cast_op == 9 || cast_op == 11)) narrow_unsafe("i64 reinterpreted as pointer / other type");
+    }
     
     /* Resolve source to SPIR-V id; use a default type for undef fallback.
      * We delay emitting the dest_ty_spv until we know which opcode path
@@ -6571,6 +6640,10 @@ static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
     uint32_t ptr_rel   = (uint32_t)inst->ops[2];
     uint32_t n_idx_total = inst->num_ops - 3u;
     if (n_idx_total < 1u) return;
+    if (t_narrow64) for (uint32_t gi = 0; gi < n_idx_total; gi++) {   /* an index that may exceed 32 bits would wrap into a valid element instead of being out of range */
+        uint32_t iid = resolve_relative((uint32_t)inst->ops[3u + gi], next_val_id);
+        if (air_is_scalar_i64(c, value_air_type_idx(c, iid))) { nrng_t r = nr_get(iid); if (!nr_u32(r) && !nr_i32(r)) narrow_unsafe("i64 index that may exceed 32 bits"); }
+    }
     uint32_t ptr_id    = resolve_relative(ptr_rel, next_val_id);
     uint32_t ptr_spv   = resolve_value_spv(c, ptr_id);
     if (!ptr_spv) {
@@ -7431,6 +7504,16 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
     bind_value_spv(c, result_value_id, result_spv);
     set_result_air_type(c, result_value_id, result_ty_air);
     set_value_spv_type(c, result_value_id, result_spv_type);
+    if (t_narrow64 && !is_float && llvm_binop == 10 && air_int_bits(c, result_ty_air) >= 2u && air_int_bits(c, result_ty_air) <= 32u) {   /* i8..i32 `and` with a non-negative constant mask: the value stays in [0, mask] (feeds a later zext) */
+        int32_t m = 0;
+        if (resolve_value_lit_i32(c, rhs_id, &m) && m >= 0) nr_set(result_value_id, 0, m);
+        else if (resolve_value_lit_i32(c, lhs_id, &m) && m >= 0) nr_set(result_value_id, 0, m);
+    }
+    if (t_narrow64 && !is_float && air_is_scalar_i64(c, result_ty_air)) {   /* range of the (low-word exact) narrowed result */
+        nrng_t ra = nr_get(lhs_id), rb = nr_get(rhs_id);
+        nrng_t rr = nr_binop((int)llvm_binop, ra, rb, resolve_value_spv(c, rhs_id) != 0u);
+        nr_set(result_value_id, rr.lo, rr.hi);
+    }
 }
 
 /* ===================================================================
@@ -7657,6 +7740,14 @@ static void emit_inst_cmp(xlate_ctx_t *c, uint32_t inst_idx,
      * becomes OpUndef %bool and the OpIEqual gets a bool operand
      * (spirv-val: "operands must be int"). Derive it from the LHS AIR type
      * when known. */
+    if (t_narrow64 && air_is_scalar_i64(c, lhs_ty) && pred >= 32 && pred <= 41) {   /* ICmp: eq 32, ne 33, ugt..ule 34..37, sgt..sle 38..41 */
+        if (pred >= 38) { nr_need(c, lhs_id, true, "i64 signed compare of a value that may exceed 32 bits"); nr_need(c, rhs_id, true, "i64 signed compare of a value that may exceed 32 bits"); }
+        else if (pred >= 34) { nr_need(c, lhs_id, false, "i64 unsigned compare of a value that may exceed 32 bits"); nr_need(c, rhs_id, false, "i64 unsigned compare of a value that may exceed 32 bits"); }
+        else {   /* equality: both sides in the same 32-bit window (unsigned or signed) */
+            nrng_t a = nr_get(lhs_id), b = nr_get(rhs_id);
+            if (!((nr_u32(a) && nr_u32(b)) || (nr_i32(a) && nr_i32(b)))) narrow_unsafe("i64 equality of a value that may exceed 32 bits");
+        }
+    }
     uint32_t operand_spv_type;
     if (lhs_ty != LAGFX_AIR_TYPE_NONE) {
         operand_spv_type = emit_air_type(c, lhs_ty);
@@ -8061,6 +8152,7 @@ static void emit_inst_select(xlate_ctx_t *c, uint32_t inst_idx,
         return;
     }
     uint32_t result_spv_type = emit_air_type(c, result_ty_air);
+    if (t_narrow64 && air_is_scalar_i64(c, result_ty_air)) { nrng_t ta = nr_get(true_id), fb = nr_get(false_id); nr_set(result_value_id, ta.lo < fb.lo ? ta.lo : fb.lo, ta.hi > fb.hi ? ta.hi : fb.hi); }
 
     /* Resolve operands to SPIR-V ids. */
     uint32_t cond_spv   = resolve_or_undef(c, cond_id,  emit_type_bool(c));
@@ -9881,6 +9973,7 @@ static void bind_module_constants(xlate_ctx_t *c) {
                             spv_id = lagfx_spv_builder_alloc_id(c->b);
                             uint64_t bits = (uint64_t)k->payload.i64;
                             emit_int_const_bits(c, ty_spv, spv_id, 64u, bits);
+                            nr_set(vid, (int64_t)bits, (int64_t)bits);
                             /* i64 constants that fit int32 are literal too
                              * (GEP first-index zero detection needs them —
                              * LLVM's pointer-arithmetic index is i64 0). */
@@ -10032,7 +10125,7 @@ static void bind_ce_casts(xlate_ctx_t *c, const lagfx_air_constant_t *tab, uint3
                 } else if (dst_p) { uint32_t o[] = { emit_air_type(c, k->type_index), lagfx_spv_builder_alloc_id(c->b) }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, 46u /* OpConstantNull */, o, 2); }
                 else if (dst_f) { uint32_t o[] = { dw == 32u ? emit_type_float32(c) : emit_type_half(c), lagfx_spv_builder_alloc_id(c->b), (uint32_t)res.bits }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
                 else if (dw == 1u) { uint32_t o[] = { emit_type_bool(c), lagfx_spv_builder_alloc_id(c->b) }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, res.bits ? 41u : 42u, o, 2); }
-                else if (dw == 64u) { uint32_t t64 = emit_type_int_w(c, 64u, 0u), id64 = lagfx_spv_builder_alloc_id(c->b); spv = id64; emit_int_const_bits(c, t64, id64, 64u, res.bits); }
+                else if (dw == 64u) { uint32_t t64 = emit_type_int_w(c, 64u, 0u), id64 = lagfx_spv_builder_alloc_id(c->b); spv = id64; emit_int_const_bits(c, t64, id64, 64u, res.bits); nr_set(vid, (int64_t)res.bits, (int64_t)res.bits); }
                 else { uint32_t o[] = { emit_type_int_w(c, dw, 0u), lagfx_spv_builder_alloc_id(c->b), (uint32_t)res.bits }; spv = o[1]; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
                 fold[i] = res; st[i] = 1; progress = true;
                 if (!spv) continue;
@@ -10126,6 +10219,7 @@ static void bind_local_constants(xlate_ctx_t *c) {
                         spv_id = lagfx_spv_builder_alloc_id(c->b);
                         uint64_t bits = (uint64_t)k->payload.i64;
                         emit_int_const_bits(c, ty_spv, spv_id, 64u, bits);
+                        nr_set(vid, (int64_t)bits, (int64_t)bits);
                     }
                     if (w == 32u) {
                         bind_value_lit_i32(c, vid, (int32_t)(uint64_t)k->payload.i64);
@@ -10821,7 +10915,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     *out_size_bytes = 0u;
 
     xlate_ctx_t c = {0};
-    t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0;
+    t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0; nr_reset();
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
     t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;
     t_unlowered_refused = false; t_unlowered.n = t_unlowered.n_llvm = 0; t_unlowered.first[0] = t_unlowered.first_llvm[0] = 0; t_xlate_serial = atomic_fetch_add(&g_xlate_serial, 1u) + 1u;

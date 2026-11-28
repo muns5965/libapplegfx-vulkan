@@ -291,8 +291,15 @@ static void ref_i64idx(int x, int y, float o[4]) {
     o[0] = (float)(a * b + 1000u); o[1] = (float)((int)a - 32 < (int)b - 32 ? a * 5u : b * 7u); o[2] = (float)(a < b ? (pk & 65535u) : pk); o[3] = (float)((pk + a * b) & 4095u);
 }
 static void neg_i64idx(int x, int y, float o[4]) { ref_i64idx(x, y, o); uint32_t a = (uint32_t)x, b = (uint32_t)y; o[1] = (float)((a - 32u) < (b - 32u) ? a * 5u : b * 7u); }   /* wrong model: unsigned compare of the differences (a 32-bit narrowing that loses the sign would behave like this) */
+/* i64 arithmetic that overflows 2^32 but is observed only through trunc: the low 32 bits are exact, also when narrowed (low 24 bits compared) */
+static void ref_i64wrap(int x, int y, float o[4]) {
+    uint64_t a = (uint64_t)x, b = (uint64_t)y, m = a * 0xFFFFFFFFull, q = a * b, u = b - a;
+    o[0] = (float)(uint32_t)(((uint32_t)(m + b)) & 0xFFFFFFu); o[1] = (float)(uint32_t)(((uint32_t)(q << 31)) & 0xFFFFFFu);
+    o[2] = (float)(uint32_t)(((uint32_t)u) & 0xFFFFFFu); o[3] = (float)(uint32_t)(((uint32_t)((q ^ m) | u)) & 0xFFFFFFu);
+}
 typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); int nanmax; void (*neg)(int x, int y, float o[4]); } case_t;   /* neg: negative control (integ7b): a deliberately WRONG model that the pixels must NOT match, so the comparison is shown to discriminate */   /* nanmax: 0 = default translation; 1 = D2 NMin/NMax/NClamp forced on; 2 = default translation, REPORT only (what FMin/FMax/FClamp do with a NaN on this device is unspecified) */
 static const case_t cases[] = {
+    { "rt_i64wrap_fragment.air.bc",    65, 65, ref_i64wrap },
     { "rt_i64idx_fragment.air.bc",     65, 65, ref_i64idx, 0, neg_i64idx },
     { "rt_bits32_fragment.air.bc",     65, 65, ref_bits32 },
     { "rt_bitsnarrow_fragment.air.bc", 65, 65, ref_narrow },

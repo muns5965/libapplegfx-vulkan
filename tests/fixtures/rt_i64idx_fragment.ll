@@ -10,8 +10,10 @@ entry:
   %py = extractelement <4 x float> %0, i64 1
   %xi = call i32 @air.convert.s.i32.f.f32(float %px)
   %yi = call i32 @air.convert.s.i32.f.f32(float %py)
-  %a = zext i32 %xi to i64
-  %b = zext i32 %yi to i64
+  %xm = and i32 %xi, 127
+  %ym = and i32 %yi, 127
+  %a = zext i32 %xm to i64
+  %b = zext i32 %ym to i64
   ; address-style arithmetic on small positive values: base + a * stride + b
   %m = mul i64 %a, %b
   %s = add i64 %m, 1000

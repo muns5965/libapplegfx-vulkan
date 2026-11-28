@@ -77,6 +77,22 @@ static void sweep(int strict_atomics, int have_val) {
         if (mm) { lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &sp, &sn); lagfx_air2spv_set_narrow_int64(0); CHECK(rr != 0 && !sp, "refused 64-bit fragment fell back to a stub (status %d)", rr); free(sp); lagfx_air_module_free(mm); }
         free(bc);
     }
+    {   /* overflow past 32 bits that is OBSERVED (compare / float convert / equality) must be refused; the same IR translates without narrowing */
+        static const struct { const char *f, *why; } ov[] = { { "rt_i64ovf_cmp_fragment.air.bc", "unsigned compare" }, { "rt_i64ovf_float_fragment.air.bc", "convert to float" },
+            { "rt_i64ovf_eq_fragment.air.bc", "equality" }, { "rt_i64ovf_signed_fragment.air.bc", "signed compare" } };
+        for (unsigned k = 0; k < 4u; k++) {
+            char path[600]; snprintf(path, sizeof path, SRCDIR "/tests/fixtures/%s", ov[k].f);
+            size_t bn = 0; uint8_t *bc = slurp(path, &bn); lagfx_air_module_t *mm = NULL; uint8_t *s0 = NULL, *s1 = NULL; size_t n0 = 0, n1 = 0;
+            CHECK(bc && lagfx_air_module_open(bc, bn, &mm) == LAGFX_OK, "%s: fixture", ov[k].f);
+            if (mm) {
+                lagfx_air2spv_set_narrow_int64(0); CHECK(lagfx_air2spv_translate_module(mm, &s0, &n0) == 0 && s0, "%s: must translate without narrowing", ov[k].f);
+                lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &s1, &n1); lagfx_air2spv_set_narrow_int64(0);
+                CHECK(rr != 0 && !s1, "%s: overflow %s must be refused when narrowed (status %d)", ov[k].f, ov[k].why, rr);
+                free(s0); free(s1); lagfx_air_module_free(mm);
+            }
+            free(bc);
+        }
+    }
     CHECK(refused >= 3, "the 64-bit atomic fixtures must be refused (refused=%d)", refused);
 }
 
