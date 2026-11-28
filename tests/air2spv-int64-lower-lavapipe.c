@@ -205,6 +205,21 @@ int main(void) {
         int bad6 = 0; for (uint64_t i = 0; i < 256; i++) if (q6[i] != 0x1000000000ull + i + 1u) bad6++;
         CHECK(bad6 == 0, "an index of 2^32 + i wrapped onto element i (%d elements changed wrongly)", bad6);
         printf("PASS: a 64-bit index >= 2^32 does not alias a valid element (robustBufferAccess on)\n"); }
+    /* A multi-way switch over 64-bit data (the translator's block-dispatch switch, 32-bit index) lowered and EXECUTED: 256 threads against the C model, cases include a 2^32+1 value and
+     * the 0x807bff0000080092 constant from the device log. This kernel's literals do not collide with 64-bit ids, so it is an execution check, not the reproducer of the opcode-251
+     * refusal: that one is tests/spv-lower-int64-switch-unit.c. */
+    {   uint8_t *s7; size_t n7; lagfx_status_t st7; if (translate("int64_switch.air.bc", &s7, &n7, &st7)) return 1;
+        CHECK(st7 == LAGFX_OK && s7, "switch translate %d", (int)st7);
+        uint8_t *l7 = NULL; size_t ln7 = 0; CHECK(lagfx_spv_lower_int64(s7, n7, &l7, &ln7, why, sizeof why) == 1, "switch lowering: %s", why);
+        CHECK(!has_cap_int64(l7, ln7), "lowered switch still declares Int64");
+        buf_t o7; if (mkbuf(&o7, 256 * 8)) return 1; uint64_t *q7 = (uint64_t *)(void *)o7.p;
+        for (uint64_t i = 0; i < 256; i++) q7[i] = 0xDEADull;
+        CHECK(run(l7, ln7, &o7, 4, 64, 0) == 0, "switch run");
+        static const uint64_t want[8] = { 1000, 2000000000000ull, 7, 7, 7, 4000, 5000, 7 };   /* by i & 7: 0 -> 0, 1 -> 0x100000001, 3 -> 0x300000003 is case 3 below */
+        int bad7 = 0; for (uint64_t i = 0; i < 256; i++) { uint64_t w = want[i & 7]; if ((i & 7) == 3) w = 3000; if (q7[i] != w) { if (bad7++ < 4) printf("  switch mismatch i=%llu got %llu want %llu\n", (unsigned long long)i, (unsigned long long)q7[i], (unsigned long long)w); } }
+        CHECK(bad7 == 0, "64-bit switch: %d mismatches", bad7);
+        if (system("spirv-val --version >/dev/null 2>&1") == 0) { FILE *f = fopen("/tmp/lagfx-sw64.spv", "wb"); if (f) { fwrite(l7, 1, ln7, f); fclose(f); CHECK(system("spirv-val --target-env vulkan1.2 /tmp/lagfx-sw64.spv") == 0, "spirv-val of the lowered switch"); remove("/tmp/lagfx-sw64.spv"); } }
+        printf("PASS: the block-dispatch OpSwitch (case literals that equal 64-bit ids) is no longer refused; 256 threads equal the C model, spirv-val clean\n"); }
     /* a module with no 64-bit integers is returned untouched (rc 0) */
     {   uint8_t *s2; size_t n2; lagfx_status_t st2; if (translate("threadgroup_arg_i32.air.bc", &s2, &n2, &st2)) return 1;
         lagfx_air2spv_set_narrow_int64(1); free(s2); s2 = NULL;

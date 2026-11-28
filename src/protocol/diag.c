@@ -461,9 +461,9 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             fprintf(stderr, "%s\n", ql);
             LAGFX_LOG("%s", ql);
         }
-        if (T->bgra8_dispatches || T->bgra8_variants || T->bgra8_variant_failed) {
+        if (T->bgra8_dispatches || T->bgra8_surr_dispatches || T->bgra8_variants || T->bgra8_variant_failed) {
             char bl[200];
-            snprintf(bl, sizeof bl, "g7-gpu-tile-bgra8: dispatches=%llu variants_built=%llu variant_failed=%llu", (unsigned long long)T->bgra8_dispatches, (unsigned long long)T->bgra8_variants, (unsigned long long)T->bgra8_variant_failed);
+            snprintf(bl, sizeof bl, "g7-gpu-tile-bgra8: surr_dispatches=%llu dispatches=%llu variants_built=%llu variant_failed=%llu", (unsigned long long)T->bgra8_surr_dispatches, (unsigned long long)T->bgra8_dispatches, (unsigned long long)T->bgra8_variants, (unsigned long long)T->bgra8_variant_failed);
             fprintf(stderr, "%s\n", bl);
             LAGFX_LOG("%s", bl);
         }

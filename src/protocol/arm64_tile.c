@@ -350,7 +350,8 @@ static void tile_query_bgra_f3(lagfx_a64_tile_t *t) {
 
 /* The kernel translated with the imageblocks in `mask` (the BGRA8 attachments) as unformatted storage images; built once per mask, a failure is cached (NULL). The result must
  * bind exactly like the base translation (same set 0 bindings, kinds and attachment names), else it is refused: the descriptor set built for the base would not fit. */
-static VkShaderModule tile_variant_module(lagfx_a64_tile_pipe_t *tp, uint32_t mask, lagfx_protocol_t *p) {
+static VkShaderModule tile_variant_module(lagfx_a64_tile_pipe_t *tp, uint32_t umask, uint32_t smask, lagfx_protocol_t *p) {
+    const uint32_t mask = umask | (smask << 16);   /* the cache key: unformatted attachments in the low half, RGBA8-surrogate ones in the high half */
     for (uint32_t i = 0; i < tp->nvar; i++) if (tp->var[i].mask == mask) return tp->var[i].cs;
     if (tp->nvar == TILE_VARIANTS) { TILE(p).bgra8_variant_failed++; return VK_NULL_HANDLE; }
     VkShaderModule cs = VK_NULL_HANDLE;
@@ -358,8 +359,10 @@ static VkShaderModule tile_variant_module(lagfx_a64_tile_pipe_t *tp, uint32_t ma
     lagfx_air_module_t *m = NULL;
     if (tp->bc && lagfx_air_module_open(tp->bc, tp->bc_len, &m) == LAGFX_OK && m) {
         lagfx_air2spv_set_simd_emulation(tp->simd_emul);
-        lagfx_air2spv_set_imageblock_unformatted(mask);
+        lagfx_air2spv_set_imageblock_unformatted(umask);
+        lagfx_air2spv_set_imageblock_rgba8_swizzled(smask);
         lagfx_status_t st = lagfx_air2spv_translate_module(m, &spv, &spv_n);
+        lagfx_air2spv_set_imageblock_rgba8_swizzled(0);
         lagfx_air2spv_set_imageblock_unformatted(0);
         lagfx_air2spv_set_simd_emulation(0);
         lagfx_air_module_free(m);
@@ -473,13 +476,13 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
         }
     }
     /* the imageblock attachments: Rgba16f storage images, or B8G8R8A8_UNORM through the unformatted-image kernel variant (lagfx_a64_tile_rt_classify) */
-    uint32_t bgra_mask = 0;
+    uint32_t bgra_mask = 0, surr_mask = 0;
     for (uint32_t i = 0; i < 4u; i++) {
         if (!(tp->rt_mask & (1u << i))) continue;
         lagfx_a64_obj_t *o = i < e->nslots ? e->rts[i] : NULL;
-        lagfx_a64_tile_rt_probe_t pr = { .present = o != NULL, .format = o ? (uint32_t)o->format : 0u, .usage = o ? (uint32_t)o->usage : 0u, .has_view = o && o->view, .linear = o && o->linear,
+        lagfx_a64_tile_rt_probe_t pr = { .present = o != NULL, .format = o ? (uint32_t)o->format : 0u, .usage = o ? (uint32_t)o->usage : 0u, .has_view = o && o->view, .linear = o && o->linear, .st_surr = o && o->st_surr,
                                          .nofmt_device = vk->have_storage_img_rw_nofmt };
-        if (o && (uint32_t)o->format == LAGFX_A64_TILE_VKFMT_BGRA8) { tile_query_bgra_f3(t); pr.f3_valid = t->f3_valid, pr.f3 = t->f3_bgra8; }
+        if (o && (uint32_t)o->format == LAGFX_A64_TILE_VKFMT_BGRA8 && !o->st_surr) { tile_query_bgra_f3(t); pr.f3_valid = t->f3_valid, pr.f3 = t->f3_bgra8; }
         uint32_t why = 0, cls = lagfx_a64_tile_rt_classify(&pr, &why);
         if (cls == LAGFX_A64_TILE_RT_REFUSED) {
             TILE(p).skip_rt++;
@@ -488,6 +491,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
             return false;
         }
         if (cls == LAGFX_A64_TILE_RT_BGRA8) bgra_mask |= 1u << i;
+        if (cls == LAGFX_A64_TILE_RT_BGRA8_SURR) surr_mask |= 1u << i;
     }
     uint32_t gx0 = 0, gy0 = 0, gx1, gy1;
     if (d->region) {
@@ -504,8 +508,9 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     if (gx1 - gx0 > lim->maxComputeWorkGroupCount[0] || gy1 - gy0 > lim->maxComputeWorkGroupCount[1]) { TILE(p).skip_local++; return false; }
     const uint32_t l[3] = { d->tw, d->th, d->td };
     VkShaderModule cs = tp->cs;
-    if (bgra_mask) { cs = tile_variant_module(tp, bgra_mask, p); if (!cs) { TILE(p).skip_pipe_build++; return false; } }
-    VkPipeline pl = tile_vk_pipeline(tp, l, pin, bgra_mask, cs, p);
+    const uint32_t vkey = bgra_mask | (surr_mask << 16);
+    if (vkey) { cs = tile_variant_module(tp, bgra_mask, surr_mask, p); if (!cs) { TILE(p).skip_pipe_build++; return false; } }
+    VkPipeline pl = tile_vk_pipeline(tp, l, pin, vkey, cs, p);
     if (!pl) { TILE(p).skip_pipe_build++; return false; }
     /* descriptor set: every binding must be fed (Metal leaves unbound arguments undefined) */
     VkDescriptorSet ds = alloc_set(t, tp->dsl);
@@ -550,7 +555,9 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
             ii[i] = (VkDescriptorImageInfo){ t->defsamp, VK_NULL_HANDLE, 0 }, w[i].pImageInfo = &ii[i];
         } else {   /* TB_RT: the imageblock of colour attachment metal_index (the OpName of the variable) */
             lagfx_a64_obj_t *o = e->rts[b->metal_index];
-            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, o->view, VK_IMAGE_LAYOUT_GENERAL }, w[i].pImageInfo = &ii[i];
+            VkImageView iv = ((surr_mask >> b->metal_index) & 1u) ? lagfx_a64_res_storage_view(e->x, o) : o->view;
+            if (!iv) { TILE(p).skip_unbound++; return false; }
+            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL }, w[i].pImageInfo = &ii[i];
         }
     }
     if (tp->n_bind) vkUpdateDescriptorSets(vk->device, tp->n_bind, w, 0, NULL);
@@ -572,6 +579,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
     if (!e->resume(e->ctx)) TILE(p).resume_failed++;
     if (bgra_mask) TILE(p).bgra8_dispatches++;
+    if (surr_mask) TILE(p).bgra8_surr_dispatches++;
     TILE(p).dispatches++, TILE(p).groups += (uint64_t)(gx1 - gx0) * (gy1 - gy0);
     if (d->region) TILE(p).region++; else TILE(p).whole++;
     if (pin && !tp->simd_emul) TILE(p).sg_pinned++;

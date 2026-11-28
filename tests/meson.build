@@ -2608,3 +2608,11 @@ cursor_composite_test = executable('cursor-composite-unit',
   build_by_default : true,
 )
 test('cursor composition over a render target: hotspot, alpha, clipping (unit, lavapipe)', cursor_composite_test)
+
+spv_lower_i64_switch_test = executable('spv-lower-int64-switch-unit',
+  'spv-lower-int64-switch-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('Int64 lowering: OpSwitch literals are not operands (unit)', spv_lower_i64_switch_test)

@@ -274,7 +274,13 @@ int lagfx_spv_lower_int64(const uint8_t *in, size_t in_len, uint8_t **out, size_
             break;
         default: generic: {
             bool touches = res64;
-            if (!is_ptr_or_func_type_op(op) && op >= 19u && !(op >= 71u && op <= 75u)) for (uint32_t k = 1; k < wc && !touches; k++) if (is64(&l, l.w[i + k])) touches = true;
+            /* only ID operands can be 64-bit values: skip the words that are literals (a literal that happens to equal the id of a 64-bit value is not one): OpSwitch case literals and labels
+             * (only the selector, word 1, is a value; the translator's block-dispatch switch is on a 32-bit index with literals 1..N), the OpExtInst instruction number (word 4) */
+            if (!is_ptr_or_func_type_op(op) && op >= 19u && !(op >= 71u && op <= 75u)) for (uint32_t k = 1; k < wc && !touches; k++) {
+                if (op == 251u && k > 1u) break;
+                if (op == 12u && k == 4u) continue;
+                if (is64(&l, l.w[i + k])) touches = true;
+            }
             if (touches) { fail(&l, "unsupported 64-bit integer operation (SPIR-V opcode %u)", op); break; }
             copy_rm(&l, i, wc, op);
         }

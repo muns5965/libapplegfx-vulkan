@@ -22,6 +22,7 @@
 #ifdef LAGFX_HAVE_VULKAN
 #include "vulkan/instance.h"
 #include <vulkan/vulkan.h>
+#include "vulkan/format_caps.h"
 #endif
 #include <assert.h>
 #include <stdio.h>
@@ -332,6 +333,19 @@ static bool vert_cols(uint32_t x, uint32_t y) { (void)y; return (x % g_S) < 4u; 
 static void tile_pass_clear(void) { static const double sent[4] = { SENT, SENT, SENT, SENT }; cb_reset(); cb_pass(REF_DST, 2, sent); }
 static void tile_bind_all(void) { cb_pipeline(REF_TILE); cb_tile_buf(0, REF_UBO, 0); cb_tile_buf(1, REF_WBUF, 0); cb_tile_tex(0, REF_SRC); }
 
+
+/* injected device: B8G8R8A8 has no storage-image feature and refuses STORAGE usage unless the image is the MUTABLE / EXTENDED_USAGE surrogate */
+static VkPhysicalDevice tile_inj_pd;
+static void tile_inj_fp2(void *ctx, VkFormat f, VkFormatProperties2 *out) {
+    (void)ctx; vkGetPhysicalDeviceFormatProperties2(tile_inj_pd, f, out);
+    if (f == VK_FORMAT_B8G8R8A8_UNORM) out->formatProperties.optimalTilingFeatures &= ~(VkFormatFeatureFlags)VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT;
+}
+static VkResult tile_inj_ifp2(void *ctx, const VkPhysicalDeviceImageFormatInfo2 *info, VkImageFormatProperties2 *out) {
+    (void)ctx;
+    if (info->format == VK_FORMAT_B8G8R8A8_UNORM && (info->usage & VK_IMAGE_USAGE_STORAGE_BIT) && !(info->flags & VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT)) return VK_ERROR_FORMAT_NOT_SUPPORTED;
+    return vkGetPhysicalDeviceImageFormatProperties2(tile_inj_pd, info, out);
+}
+
 static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
     setenv("LAGFX_ARM64_EXEC", "1", 1);
     struct lagfx_vk_state *vk = g_dev->vk;
@@ -502,6 +516,46 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         puts("PASS: BGRA8 imageblock without the device's unformatted storage access is refused with its own counter, nothing dispatched");
     }
 
+
+    /* (5b) B8G8R8A8_UNORM attachment on a device WITHOUT storage-image / without-format access for that format (the Adreno 730 case, injected): the image is the MUTABLE |
+     * EXTENDED_USAGE surrogate, the kernel is translated with an Rgba8 imageblock + red/blue swap, bound through the RGBA8 storage view. Same CPU model, same bytes. */
+    {
+        static VkPhysicalDevice s_pd;
+        s_pd = vk->phys_device;
+        static const lagfx_fmtcap_backend_t be = { .ctx = NULL, .format_props2 = tile_inj_fp2, .image_format_props2 = tile_inj_ifp2 };
+        tile_inj_pd = s_pd;
+        lagfx_fmtcap_test_backend = &be;
+        const bool saved_nf = vk->have_storage_img_rw_nofmt;
+        vk->have_storage_img_rw_nofmt = false;
+        g_texscale = 1.0f / 256.0f;
+        lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
+        static const double clr[4] = { 0.2, 0.4, 0.6, 0.8 };
+        cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_all(g_S, 4);
+        exec_refs(p, 1, cb_finish());
+        assert(p->diag2.exec.fmt.st_surr >= 1u);   /* the attachment is a surrogate image */
+        assert(TILE(p).dispatches == 1 && TILE(p).skip_rt == 0 && TILE(p).bgra8_surr_dispatches == 1 && TILE(p).bgra8_dispatches == 0 && TILE(p).bgra8_variants == 1 && TILE(p).bgra8_variant_failed == 0 && TILE(p).resume_failed == 0 && RUNC(p).submit_failed == 0);
+        uint8_t *img = malloc((size_t)g_W * g_H * 4); uint32_t w, h;
+        assert(lagfx_a64_exec_readback_texture(p, t, REF_DSTB, img, (size_t)g_W * g_H * 4, &w, &h) && w == g_W && h == g_H);
+        unsigned bad = 0;
+        for (uint32_t y = 0; y < g_H; y++) for (uint32_t x = 0; x < g_W; x++) for (int ch = 0; ch < 4; ch++) {
+            static const int byte_of[4] = { 2, 1, 0, 3 };
+            float m = model(x, y, ch); if (m > 1.0f) m = 1.0f;
+            int want = (int)(m * 255.0f + 0.5f), got = img[((size_t)y * g_W + x) * 4 + byte_of[ch]];
+            if (got < want - 1 || got > want + 1) { if (bad++ < 6) printf("  BGRA8 surrogate mismatch (%u,%u).%d: got %d expected %d\n", x, y, ch, got, want); }
+        }
+        printf("tile BGRA8 surrogate dispatch: %u mismatches\n", bad);
+        assert(bad == 0);
+        free(img);
+        cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_region(g_S, 4, g_S, 0, g_S, g_H);
+        exec_refs(p, 1, cb_finish());
+        assert(TILE(p).dispatches == 2 && TILE(p).bgra8_surr_dispatches == 2 && TILE(p).bgra8_variants == 1);
+        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
+        vk->have_storage_img_rw_nofmt = saved_nf;
+        lagfx_fmtcap_test_backend = NULL;
+        g_texscale = 1.0f;
+        puts("PASS: B8G8R8A8 imageblock on a device with no BGRA8 storage: RGBA8 storage view + red/blue swap executes, bytes equal the CPU model, variant cached");
+    }
+
     /* (4) fail closed: unbound texture (not set), unbound buffer, and an attachment that is not Rgba16f */
     {
         lagfx_task_entry_t *t; lagfx_protocol_t *p = new_task(&t, lib, libn);
@@ -583,6 +637,9 @@ static void test_rt_classify(void) {
     assert(LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT == (uint64_t)VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT && LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT == (uint64_t)VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT);
     assert(lagfx_a64_tile_rt_classify(&ok16, &why) == LAGFX_A64_TILE_RT_RGBA16F);                   /* the original path: no device feature needed */
     assert(lagfx_a64_tile_rt_classify(&okb, &why) == LAGFX_A64_TILE_RT_BGRA8);
+    { lagfx_a64_tile_rt_probe_t sr = { .present = true, .format = VK_FORMAT_B8G8R8A8_UNORM, .usage = VK_IMAGE_USAGE_STORAGE_BIT, .has_view = true, .st_surr = true };   /* no without-format access, no Vulkan 1.3 */
+      assert(lagfx_a64_tile_rt_classify(&sr, &why) == LAGFX_A64_TILE_RT_BGRA8_SURR);
+      sr.usage = 0; assert(lagfx_a64_tile_rt_classify(&sr, &why) == 0 && why == 2);   /* the surrogate needs its storage usage too */ }
     lagfx_a64_tile_rt_probe_t r;
     r = ok16; r.present = false;                       assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 0);
     r = ok16; r.format = VK_FORMAT_R8G8B8A8_UNORM;     assert(lagfx_a64_tile_rt_classify(&r, &why) == 0 && why == 1);   /* RGBA8 stays refused */

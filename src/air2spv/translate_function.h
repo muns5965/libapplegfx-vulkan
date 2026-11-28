@@ -153,6 +153,10 @@ void lagfx_air2spv_set_simd_emulation(uint32_t width);
  * Read/WriteWithoutFormat capabilities) instead of Rgba16f, for the calling thread's following translations. 0 = all Rgba16f (the default; output unchanged). */
 void lagfx_air2spv_set_imageblock_unformatted(uint32_t rt_mask);
 
+/* Tile kernels: attachments in `rt_mask` are B8G8R8A8 images reached through an R8G8B8A8 storage view: Rgba8 storage images (no without-format capability) with the red and
+ * blue components swapped on every imageblock read and write. Wins over set_imageblock_unformatted for the same bit. 0 = off (default). */
+void lagfx_air2spv_set_imageblock_rgba8_swizzled(uint32_t rt_mask);
+
 /* SIMD-group / quad-group operations (air.simd*, air.quad*, ...) the translator cannot translate (anything but the shuffles / queries listed above). Such a call used to
  * leave an OpUndef behind silently. A COMPUTE translation that meets one now FAILS (LAGFX_ERR_PROTOCOL); graphics stages still build but count them.
  *   lagfx_air2spv_last_unsupported_simd   the calling thread's last translation: number of such calls (0 = none) and the first one's name (first_name may be NULL)

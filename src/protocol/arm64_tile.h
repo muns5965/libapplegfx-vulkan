@@ -71,11 +71,12 @@ static inline bool lagfx_a64_is_tile_tag(uint32_t tag) { return tag >= 155u && t
 #define LAGFX_A64_TILE_USAGE_STORAGE 0x8u
 #define LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT  (1ull << 31)   /* VK_FORMAT_FEATURE_2_STORAGE_READ_WITHOUT_FORMAT_BIT */
 #define LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT (1ull << 32)   /* VK_FORMAT_FEATURE_2_STORAGE_WRITE_WITHOUT_FORMAT_BIT */
-enum { LAGFX_A64_TILE_RT_REFUSED = 0, LAGFX_A64_TILE_RT_RGBA16F = 1, LAGFX_A64_TILE_RT_BGRA8 = 2 };
+enum { LAGFX_A64_TILE_RT_REFUSED = 0, LAGFX_A64_TILE_RT_RGBA16F = 1, LAGFX_A64_TILE_RT_BGRA8 = 2, LAGFX_A64_TILE_RT_BGRA8_SURR = 3 };   /* BGRA8_SURR: RGBA8 storage view + R/B swap (st_surr image) */
 typedef struct {
     bool present;            /* an attachment object is bound at the slot */
     uint32_t format, usage;  /* VkFormat, VkImageUsageFlags of its image */
     bool has_view, linear;
+    bool st_surr;            /* the image was created with the RGBA8 storage-view surrogate (lagfx_a64_res_storage_view works): BGRA8 needs neither without-format access nor Vulkan 1.3 */
     bool nofmt_device;       /* shaderStorageImageReadWithoutFormat and WriteWithoutFormat enabled on the device */
     bool f3_valid; uint64_t f3;   /* VkFormatProperties3::optimalTilingFeatures of the format (f3_valid = it could be queried) */
 } lagfx_a64_tile_rt_probe_t;
@@ -86,6 +87,7 @@ static inline uint32_t lagfx_a64_tile_rt_classify(const lagfx_a64_tile_rt_probe_
     else if (!(r->usage & LAGFX_A64_TILE_USAGE_STORAGE)) w = 2;
     else if (!r->has_view || r->linear) w = 3;
     else if (r->format == LAGFX_A64_TILE_VKFMT_RGBA16F) return LAGFX_A64_TILE_RT_RGBA16F;
+    else if (r->st_surr) return LAGFX_A64_TILE_RT_BGRA8_SURR;
     else if (!r->nofmt_device) w = 4;
     else if (!r->f3_valid || (r->f3 & (LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT | LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT)) != (LAGFX_A64_TILE_F3_STORAGE_READ_NOFMT | LAGFX_A64_TILE_F3_STORAGE_WRITE_NOFMT)) w = 5;
     else return LAGFX_A64_TILE_RT_BGRA8;
