@@ -17,7 +17,7 @@
 
 /* One attachment of a pass, as far as the pass object cares. All 32-bit members, no padding: keys are compared with memcmp after memset(0). */
 typedef struct { VkFormat fmt; VkSampleCountFlagBits samples; VkImageLayout layout; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; VkImageLayout rlayout; } akey_t;   /* rlayout != 0: resolved into a 1x view of the same format */
-typedef struct { uint32_t ncolor, has_ds; akey_t a[MAX_REAL]; } rpkey_t;
+typedef struct { uint32_t ncolor, has_ds; akey_t a[MAX_REAL]; uint32_t fetch_mask; } rpkey_t;
 
 typedef struct { rpkey_t key; VkRenderPass rp; } rp_ent_t;
 typedef struct { VkRenderPass rp; uint32_t nview; VkImageView view[MAX_ATT]; uint32_t w, h; VkFramebuffer fb; } fb_ent_t;
@@ -83,6 +83,12 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
         if (d->color[i].resolve_view != VK_NULL_HANDLE && samples_of(&d->color[i]) == VK_SAMPLE_COUNT_1_BIT) return false;   /* nothing to resolve from a single-sample image */
     }
     if (used == 0u) return false;   /* a pass needs at least one real attachment */
+    for (uint32_t i = 0; i < LAGFX_RENDER_MAX_COLOR; i++) {   /* input-attachment slots (legacy): real, single-sample colour attachments in GENERAL */
+        if (!(d->fetch_mask & (1u << i))) continue;
+        if (i >= d->color_count || d->color[i].format == VK_FORMAT_UNDEFINED || samples_of(&d->color[i]) != VK_SAMPLE_COUNT_1_BIT) return false;
+        if (d->color[i].layout != VK_IMAGE_LAYOUT_UNDEFINED && d->color[i].layout != VK_IMAGE_LAYOUT_GENERAL) return false;
+    }
+    if (d->fetch_mask >> LAGFX_RENDER_MAX_COLOR) return false;
     if (d->has_depth_stencil) {
         if (d->depth_stencil.format == VK_FORMAT_UNDEFINED) return false;
         if (need_views && d->depth_stencil.view == VK_NULL_HANDLE) return false;
@@ -94,10 +100,11 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
 static void make_key(rpkey_t *k, const lagfx_render_desc_t *d, bool compat) {
     memset(k, 0, sizeof *k);
     k->ncolor = d->color_count;
+    k->fetch_mask = d->fetch_mask;
     for (uint32_t i = 0; i < d->color_count; i++) {
         const lagfx_render_attachment_t *a = &d->color[i];
         if (a->format == VK_FORMAT_UNDEFINED) continue;   /* unused slot: all-zero entry, only its position is part of the key */
-        k->a[i] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   /* never UNDEFINED: not valid for an attachment reference or a LOAD */
+        k->a[i] = (akey_t){ a->format, samples_of(a), (d->fetch_mask & (1u << i)) ? VK_IMAGE_LAYOUT_GENERAL : a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   /* never UNDEFINED: not valid for an attachment reference or a LOAD */
                             compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                             compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE, 0 };
         if (!compat && a->resolve_view != VK_NULL_HANDLE) k->a[i].rlayout = a->resolve_layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->resolve_layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
@@ -143,8 +150,16 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
         rref[i] = (VkAttachmentReference){ na, (VkImageLayout)a->rlayout };
         na++; any_resolve = true;
     }
+    VkAttachmentReference iref[LAGFX_RENDER_MAX_COLOR]; uint32_t nin = 0;   /* input attachment k = colour slot k (legacy framebuffer fetch); holes stay UNUSED */
+    for (uint32_t i = 0; i < k->ncolor; i++) {
+        iref[i] = (VkAttachmentReference){ VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED };
+        if (!(k->fetch_mask & (1u << i)) || cref[i].attachment == VK_ATTACHMENT_UNUSED) continue;
+        iref[i] = (VkAttachmentReference){ cref[i].attachment, VK_IMAGE_LAYOUT_GENERAL };
+        nin = i + 1u;
+    }
     VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->ncolor, .pColorAttachments = k->ncolor ? cref : NULL,
-                                .pResolveAttachments = any_resolve ? rref : NULL, .pDepthStencilAttachment = k->has_ds ? &dref : NULL };
+                                .pResolveAttachments = any_resolve ? rref : NULL, .pDepthStencilAttachment = k->has_ds ? &dref : NULL,
+                                .inputAttachmentCount = nin, .pInputAttachments = nin ? iref : NULL };
     /* External dependencies: the caller's barrier covers the layout change; these order the attachment writes against what comes before / after the pass. */
     VkPipelineStageFlags ds_st = k->has_ds ? (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT) : 0;
     VkAccessFlags ds_ac = k->has_ds ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) : 0;
@@ -160,8 +175,13 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
           .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | (ds_ac & VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
           .dstAccessMask = VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | ds_ac, .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT },
     };
+    VkSubpassDependency full[3]; memcpy(full, dep, sizeof dep);
+    if (nin) full[2] = (VkSubpassDependency){ .srcSubpass = 0, .dstSubpass = 0,   /* same-pixel read of an earlier draw's colour write inside the pass (the barrier lagfx records between draws) */
+        .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT };
     VkRenderPassCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = na, .pAttachments = ad,
-                                  .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = 2, .pDependencies = dep };
+                                  .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = nin ? 3u : 2u, .pDependencies = full };
     VkRenderPass rp = VK_NULL_HANDLE;
     VkResult vr = vkCreateRenderPass(vk->device, &ci, NULL, &rp);
     if (vr != VK_SUCCESS) { LAGFX_ERR("render_pass: vkCreateRenderPass failed (%d)", (int)vr); return VK_NULL_HANDLE; }

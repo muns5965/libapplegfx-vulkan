@@ -71,6 +71,12 @@ typedef struct {
     lagfx_render_attachment_t  color[LAGFX_RENDER_MAX_COLOR];
     bool                       has_depth_stencil;                 /* depth, stencil or both, decided by the format */
     lagfx_render_attachment_t  depth_stencil;
+    /* LEGACY backend only (the dynamic backend ignores it: it uses VK_KHR_dynamic_rendering_local_read): bit i = colour slot i is also an INPUT ATTACHMENT of the one subpass, with
+     * InputAttachmentIndex == i (the translator's convention: input attachment n reads colour attachment n). The slot must be a real, single-sample colour attachment, and its image is in
+     * VK_IMAGE_LAYOUT_GENERAL during the pass (layout 0 or GENERAL; the pass declares GENERAL for colour and input reference). The pass gets a framebuffer-local self-dependency
+     * (colour write -> input read / colour read / colour write, BY_REGION), so a vkCmdPipelineBarrier with those masks may be recorded inside it. Part of the pass identity: every pipeline
+     * used inside such a pass must be created against a compatible pass built from the same mask. The caller writes the VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT descriptors. */
+    uint32_t                   fetch_mask;
 } lagfx_render_desc_t;
 
 typedef struct {

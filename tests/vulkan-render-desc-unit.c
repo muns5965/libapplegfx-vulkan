@@ -24,6 +24,7 @@
 #include "arm64-exec-run-shaders.h"   /* k_vs_spv (vec2 pos at location 0), k_fs_spv (constant red) */
 
 static int g_fail;
+#include "legacy-fetch-shaders.h"
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s (line %d)\n", m, __LINE__); g_fail++; } } while (0)
 
 #ifdef LAGFX_HAVE_VULKAN
@@ -127,10 +128,10 @@ static bool rec_load_pass(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *a
 
 /* ---- C3: multisampled colour attachments with resolve: partial resolve, gap + resolve, resolve + depth (legacy: pResolveAttachments; dynamic: resolveImageView) ---- */
 typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; } ms_img_t;
-static bool ms_img_make(struct lagfx_vk_state *vk, VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags asp, ms_img_t *o) {
+static bool ms_img_make(struct lagfx_vk_state *vk, VkFormat fmt, VkSampleCountFlagBits sm, VkImageUsageFlags usage, VkImageAspectFlags asp, ms_img_t *o) {
     memset(o, 0, sizeof *o);
     VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { 16, 16, 1 }, .mipLevels = 1, .arrayLayers = 1,
-                             .samples = VK_SAMPLE_COUNT_4_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+                             .samples = sm, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
     if (vkCreateImage(vk->device, &ii, NULL, &o->img) != VK_SUCCESS) return false;
     VkMemoryRequirements mr; vkGetImageMemoryRequirements(vk->device, o->img, &mr);
     uint32_t mt = memtype(vk->phys_device, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (mt == UINT32_MAX) mt = memtype(vk->phys_device, mr.memoryTypeBits, 0);
@@ -175,6 +176,104 @@ static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
     lagfx_vk_render_end(vk, cb);
     return true;
+}
+
+
+/* ---- C4 (legacy only): input attachment = colour slot 0 of the one subpass (fetch_mask), a descriptor of type INPUT_ATTACHMENT, a same-pixel barrier between two draws ---- */
+typedef struct { ms_img_t *a; lagfx_vk_render_target_t *b; VkPipeline pipe; VkPipelineLayout pl; VkDescriptorSet set; } fetch_t;
+static bool rec_fetch(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
+    fetch_t *g = arg;
+    VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_INPUT_ATTACHMENT_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_GENERAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = g->a->img, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    lagfx_vk_cmd_rt_to_color(cb, g->b);
+    lagfx_render_desc_t d; memset(&d, 0, sizeof d);
+    d.width = 16; d.height = 16; d.color_count = 2; d.fetch_mask = 1u;
+    const VkClearColorValue red = { .float32 = { 1, 0, 0, 1 } }, zero = { .float32 = { 0, 0, 0, 0 } };
+    d.color[0] = (lagfx_render_attachment_t){ .view = g->a->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_GENERAL,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = red } };
+    d.color[1] = (lagfx_render_attachment_t){ .view = g->b->view, .format = g->b->format, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = zero } };
+    if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
+    VkViewport vp = { 0, 0, 16, 16, 0, 1 }; VkRect2D sc = { { 0, 0 }, { 16, 16 } };
+    vkCmdSetViewport(cb, 0, 1, &vp); vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pipe);
+    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pl, 0, 1, &g->set, 0, NULL);
+    vkCmdDraw(cb, 3, 1, 0, 0);   /* draw 1: reads the clear colour (red) of slot 0, writes blue into slot 0 */
+    VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+        .dstAccessMask = VK_ACCESS_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                         VK_DEPENDENCY_BY_REGION_BIT, 1, &mb, 0, NULL, 0, NULL);
+    vkCmdDraw(cb, 3, 1, 0, 0);   /* draw 2: reads what draw 1 wrote (blue) */
+    lagfx_vk_render_end(vk, cb);
+    return true;
+}
+static void test_legacy_fetch(struct lagfx_vk_state *vk, const char *bn) {
+    char m[160];
+    VkDevice dev = vk->device;
+    ms_img_t a; lagfx_vk_render_target_t b; memset(&b, 0, sizeof b);
+    int ok = ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT, &a)
+          && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &b) == LAGFX_OK;
+    snprintf(m, sizeof m, "legacy fetch targets (%s)", bn); CHECK(ok, m);
+    VkDescriptorSetLayout dsl = VK_NULL_HANDLE; VkPipelineLayout pl = VK_NULL_HANDLE; VkDescriptorPool pool = VK_NULL_HANDLE; VkShaderModule vs = VK_NULL_HANDLE, fs = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
+    fetch_t g = { &a, &b, VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE };
+    if (ok) {
+        VkDescriptorSetLayoutBinding lb = { 0, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
+        VkDescriptorSetLayoutCreateInfo dli = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = 1, .pBindings = &lb };
+        VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1 };
+        VkDescriptorPoolSize ps = { VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 1 };
+        VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 1, .poolSizeCount = 1, .pPoolSizes = &ps };
+        VkShaderModuleCreateInfo vsi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs_fbf_spv, .pCode = k_vs_fbf_spv };
+        VkShaderModuleCreateInfo fsi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_fs_fbf_spv, .pCode = k_fs_fbf_spv };
+        ok = vkCreateDescriptorSetLayout(dev, &dli, NULL, &dsl) == VK_SUCCESS;
+        pli.pSetLayouts = &dsl;
+        ok = ok && vkCreatePipelineLayout(dev, &pli, NULL, &pl) == VK_SUCCESS && vkCreateDescriptorPool(dev, &dpi, NULL, &pool) == VK_SUCCESS
+                && vkCreateShaderModule(dev, &vsi, NULL, &vs) == VK_SUCCESS && vkCreateShaderModule(dev, &fsi, NULL, &fs) == VK_SUCCESS;
+        if (ok) {
+            VkDescriptorSetAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, .descriptorPool = pool, .descriptorSetCount = 1, .pSetLayouts = &dsl };
+            ok = vkAllocateDescriptorSets(dev, &ai, &g.set) == VK_SUCCESS;
+        }
+        if (ok) {
+            VkDescriptorImageInfo ii = { VK_NULL_HANDLE, a.view, VK_IMAGE_LAYOUT_GENERAL };
+            VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = g.set, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, .pImageInfo = &ii };
+            vkUpdateDescriptorSets(dev, 1, &w, 0, NULL);
+            lagfx_render_desc_t cd; memset(&cd, 0, sizeof cd);   /* the pass the pipeline is created against: same attachments and the same fetch mask as the pass it is used in */
+            cd.color_count = 2; cd.fetch_mask = 1u;
+            cd.color[0].format = VK_FORMAT_B8G8R8A8_UNORM; cd.color[0].samples = VK_SAMPLE_COUNT_1_BIT; cd.color[1] = cd.color[0];
+            VkRenderPass rp = lagfx_vk_render_pass_compat(vk, &cd);
+            VkPipelineShaderStageCreateInfo st[2] = {
+                { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" },
+                { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = fs, .pName = "main" } };
+            VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+            VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+            VkPipelineViewportStateCreateInfo vps = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+            VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f };
+            VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_1_BIT };
+            VkPipelineColorBlendAttachmentState cba[2] = { { .colorWriteMask = 0xF }, { .colorWriteMask = 0xF } };
+            VkPipelineColorBlendStateCreateInfo cb = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO, .attachmentCount = 2, .pAttachments = cba };
+            VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+            VkPipelineDynamicStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn };
+            VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .stageCount = 2, .pStages = st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+                .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &ms, .pColorBlendState = &cb, .pDynamicState = &ds, .layout = pl, .renderPass = rp, .subpass = 0 };
+            ok = rp != VK_NULL_HANDLE && vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gi, NULL, &pipe) == VK_SUCCESS;
+        }
+        snprintf(m, sizeof m, "legacy fetch pipeline / descriptor objects (%s)", bn); CHECK(ok, m);
+    }
+    if (ok) {
+        g.pipe = pipe; g.pl = pl;
+        snprintf(m, sizeof m, "legacy input attachment: pass with fetch_mask records and runs (%s)", bn); CHECK(one_shot(vk, rec_fetch, &g), m);
+        /* slot 1 = what draw 2 read from slot 0 = what draw 1 wrote there: blue (BGRA b=255 g=0 r=0). A broken read gives black (0,0,0) or draw 1's red clear. */
+        snprintf(m, sizeof m, "legacy input attachment: second draw read the first draw's write (blue), not the clear colour (%s)", bn); CHECK(px_is(vk, &b, 8, 8, 255, 0, 0), m);
+    }
+    if (pipe) vkDestroyPipeline(dev, pipe, NULL);
+    if (fs) vkDestroyShaderModule(dev, fs, NULL);
+    if (vs) vkDestroyShaderModule(dev, vs, NULL);
+    if (pool) vkDestroyDescriptorPool(dev, pool, NULL);
+    if (pl) vkDestroyPipelineLayout(dev, pl, NULL);
+    if (dsl) vkDestroyDescriptorSetLayout(dev, dsl, NULL);
+    lagfx_vk_render_target_destroy(vk, &b);
+    ms_img_free(vk, &a);
 }
 
 static void run_backend(int legacy) {
@@ -330,9 +429,9 @@ static void run_backend(int legacy) {
             ms_img_t m0, m2, dp; memset(&dp, 0, sizeof dp);
             lagfx_vk_render_target_t r0, r2; memset(&r0, 0, sizeof r0); memset(&r2, 0, sizeof r2);
             const VkImageUsageFlags cu = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-            int ok = ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m0) && ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m2)
+            int ok = ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, VK_SAMPLE_COUNT_4_BIT, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m0) && ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, VK_SAMPLE_COUNT_4_BIT, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m2)
                 && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &r0) == LAGFX_OK && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &r2) == LAGFX_OK;
-            if (ok && dep) ok = ms_img_make(vk, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, &dp);
+            if (ok && dep) ok = ms_img_make(vk, VK_FORMAT_D32_SFLOAT, VK_SAMPLE_COUNT_4_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, &dp);
             snprintf(m, sizeof m, "msaa resolve combo %d targets (%s)", variant, bn); CHECK(ok, m);
             if (ok) {
                 msc_t g = { &m0, &m2, dep ? &dp : NULL, &r0, &r2, res2, gap, 0 };
@@ -351,6 +450,8 @@ static void run_backend(int legacy) {
             ms_img_free(vk, &dp); ms_img_free(vk, &m2); ms_img_free(vk, &m0);
         }
     }
+
+    if (legacy) test_legacy_fetch(vk, bn);
 
     /* D. shapes the legacy backend does not express are refused */
     {
