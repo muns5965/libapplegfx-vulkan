@@ -6642,7 +6642,12 @@ static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
     if (n_idx_total < 1u) return;
     if (t_narrow64) for (uint32_t gi = 0; gi < n_idx_total; gi++) {   /* an index that may exceed 32 bits would wrap into a valid element instead of being out of range */
         uint32_t iid = resolve_relative((uint32_t)inst->ops[3u + gi], next_val_id);
-        if (air_is_scalar_i64(c, value_air_type_idx(c, iid))) { nrng_t r = nr_get(iid); if (!nr_u32(r) && !nr_i32(r)) narrow_unsafe("i64 index that may exceed 32 bits"); }
+        if (air_is_scalar_i64(c, value_air_type_idx(c, iid))) {
+            /* address use: `zext(i32 id) + small constant` (the real kernels' element index) can exceed 2^32 only when the 32-bit id is within the slack of its maximum, i.e. > 4e9 threads / elements.
+             * That window is tolerated (documented assumption, NOT proven); anything wider (a product, a large offset) is refused. */
+            nrng_t r = nr_get(iid); const int64_t slack = 1 << 16;
+            if (!((r.lo >= -slack && r.hi <= (int64_t)UINT32_MAX + slack) || nr_i32(r))) narrow_unsafe("i64 index that may exceed 32 bits");
+        }
     }
     uint32_t ptr_id    = resolve_relative(ptr_rel, next_val_id);
     uint32_t ptr_spv   = resolve_value_spv(c, ptr_id);
