@@ -124,6 +124,59 @@ static bool rec_load_pass(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *a
     return true;
 }
 
+
+/* ---- C3: multisampled colour attachments with resolve: partial resolve, gap + resolve, resolve + depth (legacy: pResolveAttachments; dynamic: resolveImageView) ---- */
+typedef struct { VkImage img; VkDeviceMemory mem; VkImageView view; } ms_img_t;
+static bool ms_img_make(struct lagfx_vk_state *vk, VkFormat fmt, VkImageUsageFlags usage, VkImageAspectFlags asp, ms_img_t *o) {
+    memset(o, 0, sizeof *o);
+    VkImageCreateInfo ii = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = fmt, .extent = { 16, 16, 1 }, .mipLevels = 1, .arrayLayers = 1,
+                             .samples = VK_SAMPLE_COUNT_4_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    if (vkCreateImage(vk->device, &ii, NULL, &o->img) != VK_SUCCESS) return false;
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(vk->device, o->img, &mr);
+    uint32_t mt = memtype(vk->phys_device, mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); if (mt == UINT32_MAX) mt = memtype(vk->phys_device, mr.memoryTypeBits, 0);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt };
+    VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = o->img, .viewType = VK_IMAGE_VIEW_TYPE_2D, .format = fmt, .subresourceRange = { asp, 0, 1, 0, 1 } };
+    return mt != UINT32_MAX && vkAllocateMemory(vk->device, &ai, NULL, &o->mem) == VK_SUCCESS && vkBindImageMemory(vk->device, o->img, o->mem, 0) == VK_SUCCESS
+        && vkCreateImageView(vk->device, &vi, NULL, &o->view) == VK_SUCCESS;
+}
+static void ms_img_free(struct lagfx_vk_state *vk, ms_img_t *o) {
+    if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
+    if (o->img) vkDestroyImage(vk->device, o->img, NULL);
+    if (o->mem) vkFreeMemory(vk->device, o->mem, NULL);
+}
+typedef struct { ms_img_t *m0, *m2, *dp; lagfx_vk_render_target_t *r0, *r2; bool res2, gap; } msc_t;
+static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
+    msc_t *g = arg;
+    VkImageMemoryBarrier b[3]; uint32_t nb = 0;
+    ms_img_t *im[3] = { g->m0, g->m2, g->dp };
+    for (int i = 0; i < 3; i++) if (im[i]) {
+        const bool d = i == 2;
+        b[nb++] = (VkImageMemoryBarrier){ .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = d ? VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT : VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = d ? VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = im[i]->img,
+            .subresourceRange = { d ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+    }
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, nb, b);
+    lagfx_vk_cmd_rt_to_color(cb, g->r0);
+    if (g->res2) lagfx_vk_cmd_rt_to_color(cb, g->r2);
+    lagfx_render_desc_t d; memset(&d, 0, sizeof d);
+    d.width = 16; d.height = 16; d.color_count = g->gap ? 3 : 2;
+    const uint32_t s2 = g->gap ? 2 : 1;
+    const VkClearColorValue red = { .float32 = { 1, 0, 0, 1 } }, green = { .float32 = { 0, 1, 0, 1 } };
+    d.color[0] = (lagfx_render_attachment_t){ .view = g->m0->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .clear = { .color = red },
+        .resolve_view = g->r0->view, .resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT };
+    d.color[s2] = (lagfx_render_attachment_t){ .view = g->m2->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = g->res2 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = green } };
+    if (g->res2) { d.color[s2].resolve_view = g->r2->view; d.color[s2].resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; d.color[s2].resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT; }
+    if (g->dp) { d.has_depth_stencil = true;
+        d.depth_stencil = (lagfx_render_attachment_t){ .view = g->dp->view, .format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+            .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencil_store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .clear = { .depthStencil = { 1.0f, 0 } } }; }
+    if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
+    lagfx_vk_render_end(vk, cb);
+    return true;
+}
+
 static void run_backend(int legacy) {
     const char *bn = legacy ? "legacy" : "dynamic";
     char m[160];
@@ -265,6 +318,33 @@ static void run_backend(int legacy) {
         lagfx_vk_render_target_destroy(vk, &c2); lagfx_vk_render_target_destroy(vk, &c0);
     }
 
+
+    /* C3. multisampled colour + resolve combinations. All clear-only passes, so each resolved pixel is exactly the clear colour. */
+    {
+        VkImageFormatProperties fp;
+        const bool ms_ok = vkGetPhysicalDeviceImageFormatProperties(vk->phys_device, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, 0, &fp) == VK_SUCCESS && (fp.sampleCounts & VK_SAMPLE_COUNT_4_BIT);
+        if (!ms_ok) printf("SKIP C3 (%s): 4x not offered for BGRA8\n", bn);
+        else for (int variant = 0; variant < 4; variant++) {
+            /* 0: partial resolve (slot 0 resolves, slot 1 stored only); 1: gap + resolve in both real slots; 2: partial resolve + depth; 3: gap + partial resolve + depth */
+            const bool gap = variant == 1 || variant == 3, dep = variant >= 2, res2 = variant == 1;
+            ms_img_t m0, m2, dp; memset(&dp, 0, sizeof dp);
+            lagfx_vk_render_target_t r0, r2; memset(&r0, 0, sizeof r0); memset(&r2, 0, sizeof r2);
+            const VkImageUsageFlags cu = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+            int ok = ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m0) && ms_img_make(vk, VK_FORMAT_B8G8R8A8_UNORM, cu, VK_IMAGE_ASPECT_COLOR_BIT, &m2)
+                && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &r0) == LAGFX_OK && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &r2) == LAGFX_OK;
+            if (ok && dep) ok = ms_img_make(vk, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, &dp);
+            snprintf(m, sizeof m, "msaa resolve combo %d targets (%s)", variant, bn); CHECK(ok, m);
+            if (ok) {
+                msc_t g = { &m0, &m2, dep ? &dp : NULL, &r0, &r2, res2, gap };
+                snprintf(m, sizeof m, "msaa combo %d (gap=%d depth=%d resolve2=%d): pass records and runs (%s)", variant, gap, dep, res2, bn); CHECK(one_shot(vk, rec_msc, &g), m);
+                snprintf(m, sizeof m, "msaa combo %d: slot 0 resolved to red (%s)", variant, bn); CHECK(px_is(vk, &r0, 8, 8, 0, 0, 255), m);
+                if (res2) { snprintf(m, sizeof m, "msaa combo %d: the second real slot resolved to green, not shifted (%s)", variant, bn); CHECK(px_is(vk, &r2, 8, 8, 0, 255, 0), m); }
+            }
+            lagfx_vk_render_target_destroy(vk, &r2); lagfx_vk_render_target_destroy(vk, &r0);
+            ms_img_free(vk, &dp); ms_img_free(vk, &m2); ms_img_free(vk, &m0);
+        }
+    }
+
     /* D. shapes the legacy backend does not express are refused */
     {
         lagfx_pipeline_desc_t d; lagfx_render_desc_t rd; memset(&d, 0, sizeof d);
@@ -291,6 +371,11 @@ static void run_backend(int legacy) {
           d.no_color = 0; d.dyn_state = 1; d.ds_depth_format = VK_FORMAT_D32_SFLOAT; d.ds_stencil_format = VK_FORMAT_D24_UNORM_S8_UINT;
           CHECK(!lagfx_pipeline_render_desc_why(&d, &rd, &why) && why == LAGFX_LR_DS_MIXED, "different depth and stencil formats: reason DS_MIXED"); }
     }
+    CHECK(lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, VK_RESOLVE_MODE_AVERAGE_BIT) && lagfx_legacy_resolve_mode_ok(VK_FORMAT_R16G16B16A16_SFLOAT, VK_RESOLVE_MODE_AVERAGE_BIT)
+          && lagfx_legacy_resolve_mode_ok(VK_FORMAT_R32_UINT, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) && lagfx_legacy_resolve_mode_ok(VK_FORMAT_R8G8B8A8_SINT, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT)
+          && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_R32_UINT, VK_RESOLVE_MODE_AVERAGE_BIT)
+          && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, 0) && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, VK_RESOLVE_MODE_MIN_BIT),
+          "legacy resolve mode: only the mode the implicit resolve performs is accepted (float/normalised average, integer sample 0)");
     { snprintf(m, sizeof m, "validation: messenger live, control delivered, 0 messages before it (%s)", bn); CHECK(lagfx_test_validation_expect(vk, bn) == 0, m); }
     lagfx_vk_shutdown(vk);   /* after a deferral: the deferred view/image/memory go here, after the framebuffers */
 }

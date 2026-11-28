@@ -131,7 +131,7 @@ static lagfx_status_t begin_legacy(struct lagfx_vk_state *vk, VkCommandBuffer cb
         if (has_view != has_fmt) { *why = LAGFX_LR_SLOT; LAGFX_ERR("translate_render_begin: legacy backend: colour slot %u has %s but no %s", i, has_view ? "a view" : "a format", has_view ? "format" : "view"); return LAGFX_ERR_BACKEND; }
         if (!has_view) continue;   /* a gap: an unused slot of the pass; it keeps its index so fragment output locations stay where the shader put them */
         const bool res = ca[i].resolveImageView != VK_NULL_HANDLE;
-        if (res && (smp == VK_SAMPLE_COUNT_1_BIT || ca[i].resolveMode == 0)) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend: colour %u names a resolve target for a single-sample pass or without a resolve mode", i); return LAGFX_ERR_BACKEND; }
+        if (res && (smp == VK_SAMPLE_COUNT_1_BIT || !lagfx_legacy_resolve_mode_ok(cf[i], ca[i].resolveMode))) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend: colour %u names a resolve target for a single-sample pass or with a resolve mode the legacy implicit resolve does not perform (float/normalised = average, integer = sample 0)", i); return LAGFX_ERR_BACKEND; }
         d.color[i] = (lagfx_render_attachment_t){ .view = ca[i].imageView, .format = cf[i], .samples = smp, .layout = ca[i].imageLayout,
                                                   .load = ca[i].loadOp, .store = ca[i].storeOp, .clear = ca[i].clearValue,
                                                   .resolve_view = ca[i].resolveImageView, .resolve_layout = res ? ca[i].resolveImageLayout : VK_IMAGE_LAYOUT_UNDEFINED, .resolve_mode = res ? ca[i].resolveMode : 0 };

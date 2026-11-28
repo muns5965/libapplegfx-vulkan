@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: MIT */
+#include "vulkan/msaa.h"
 #include "render_pass.h"
 #include "instance.h"
 #include "command.h"
@@ -356,4 +357,8 @@ void lagfx_vk_render_pass_shutdown(struct lagfx_vk_state *vk) {
     free(c->rp); free(c->fb); free(c->def);
     free(c);
     vk->render_cache = NULL;
+}
+
+bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested) {
+    return requested != 0 && requested == lagfx_msaa_resolve_mode(fmt);
 }

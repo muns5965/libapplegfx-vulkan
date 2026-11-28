@@ -2420,7 +2420,7 @@ if fs.is_file(meson.current_source_dir() / 'arm64-msaa-guest-unit.c') and vulkan
     c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"'],   # integ6: the included render-compat harness (spec-audit validation baseline) reads tests/fixtures via SRCDIR
     build_by_default : true,
   )
-  test('arm64 msaa guest path (unit, lavapipe + validation)', msaa_guest_test, env : ['LAGFX_VK_VALIDATION=1'])
+  test('arm64 msaa guest path (unit, lavapipe + validation)', msaa_guest_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1'])
   test('arm64 msaa guest path, legacy VkRenderPass (unit, forced legacy + validation required)', msaa_guest_test,
        env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
 endif

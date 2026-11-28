@@ -18,6 +18,7 @@
 #ifdef LAGFX_HAVE_VULKAN
 #include "protocol/arm64_msaa.h"
 #include "vulkan/msaa_stats.h"
+#include "validation-control.h"
 #include <math.h>
 #include "air2spv/spv_reflect.h"
 extern int lagfx_spv_msfetch_test_force_sample0;
@@ -363,6 +364,8 @@ int main(void) {
     if (!g_dev->vk || !g_dev->vk->initialized) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(g_dev->vk->phys_device, &pr);
     if (!(pr.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) || !pr.limits.standardSampleLocations) { puts("SKIP: needs 4x and standard sample locations"); return 77; }
+    { char bn[64]; snprintf(bn, sizeof bn, "msaa guest, backend=%s", lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy" : "dynamic");
+      if (lagfx_test_validation_expect(g_dev->vk, bn) != 0) { puts("FAIL: validation positive control"); return 1; } }
     static gr_t g;
 
 

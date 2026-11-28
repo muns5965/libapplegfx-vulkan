@@ -90,6 +90,8 @@ typedef enum { LAGFX_FORGET_OK = 0, LAGFX_FORGET_DEFERRED = 1 } lagfx_forget_t;
 /* The backend of a device: fixed at lagfx_vk_init (LAGFX_VK_FORCE_LEGACY_RENDERPASS is read there, once); changing the variable later has no effect on an existing device. */
 lagfx_render_backend_t lagfx_vk_render_backend_select(bool have_dynamic_rendering);
 lagfx_render_backend_t lagfx_vk_render_backend(const struct lagfx_vk_state *vk);
+/* A legacy render pass resolves implicitly: average for float / normalised colour formats, sample 0 for integer ones. A requested mode is honoured only when it is that one (same mapping as lagfx_msaa_resolve_mode). */
+bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested);
 
 /* The (cached) VkRenderPass COMPATIBLE with a description (formats / sample counts / count; load/store/layout come from the pass actually begun); NULL handle on failure. */
 VkRenderPass lagfx_vk_render_pass_compat(struct lagfx_vk_state *vk, const lagfx_render_desc_t *d);
