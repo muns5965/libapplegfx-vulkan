@@ -54,6 +54,7 @@
 #include "command.h"
 #include "pipeline.h"
 #include "composite.h"
+#include "render_pass.h"
 #include "filter_cubic.h"
 #include "common/log.h"
 
@@ -450,6 +451,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     const bool ext_ro_arm = has_ext(dext, dext_n, "VK_ARM_rasterization_order_attachment_access");
     const bool ext_af = has_ext(dext, dext_n, "VK_EXT_shader_atomic_float");   /* float atomics: queried below, enabled per feature only when reported (caps.h LAGFX_VK_CAP_ATOMIC_F32_*) */
     const bool ext_qct_ts = has_ext(dext, dext_n, "VK_QCOM_tile_shading"), ext_qct_tp = has_ext(dext, dext_n, "VK_QCOM_tile_properties"), ext_qct_heap = has_ext(dext, dext_n, "VK_QCOM_tile_memory_heap");
+    const bool ext_f16i8 = has_ext(dext, dext_n, "VK_KHR_shader_float16_int8"), ext_8bit = has_ext(dext, dext_n, "VK_KHR_8bit_storage");
     const bool ext_bda_khr = has_ext(dext, dext_n, "VK_KHR_buffer_device_address"), ext_sync2_khr = has_ext(dext, dext_n, "VK_KHR_synchronization2");   /* for the g7-probe line */
     free(dext);
 
@@ -494,6 +496,46 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     };
     vkGetPhysicalDeviceFeatures2(s->phys_device, &probe2);
 
+    /* Below Vulkan 1.2 the unified Vulkan11/12/13Features structs do not exist for the driver (it may ignore them or leave them at 0 while the
+     * extension features are real). There, ignore their values and query the individual per-feature structs instead (core 1.1 / KHR), then
+     * fold the answers into probe11/probe12 so everything downstream (caps, enable values, diagnostics) keeps one source. Features whose
+     * individual path is not implemented here (dynamic rendering, synchronization2, timeline semaphore, descriptor indexing, subgroup size
+     * control, demote) stay 0 = not requested. Devices >= 1.2 never enter this block. */
+    /* LAGFX_VK_FORCE_LEGACY_FEATURES=1 (test seam): take this < 1.2 path on a newer device, so the individual-struct chain can be exercised on lavapipe / the S26 without a 1.1 driver. */
+    const char *force_legacy_env = getenv("LAGFX_VK_FORCE_LEGACY_FEATURES");
+    const bool legacy_feat = s->phys_props.apiVersion < VK_API_VERSION_1_2 || (force_legacy_env && !strcmp(force_legacy_env, "1"));
+    VkPhysicalDeviceShaderFloat16Int8Features   lq_f16i8 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES };
+    VkPhysicalDevice8BitStorageFeatures         lq_8bit  = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES };
+    VkPhysicalDevice16BitStorageFeatures        lq_16bit = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES };
+    VkPhysicalDeviceVariablePointersFeatures    lq_vptr  = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES };
+    VkPhysicalDeviceBufferDeviceAddressFeatures lq_bda   = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES };
+    if (legacy_feat) {
+        const bool lq_has_f16i8 = ext_f16i8, lq_has_8bit = ext_8bit, lq_has_bda = ext_bda_khr;
+        void *chain = NULL;
+        if (lq_has_f16i8) { lq_f16i8.pNext = chain; chain = &lq_f16i8; }
+        if (lq_has_8bit)  { lq_8bit.pNext  = chain; chain = &lq_8bit; }
+        lq_16bit.pNext = chain; chain = &lq_16bit;
+        lq_vptr.pNext = chain; chain = &lq_vptr;
+        if (lq_has_bda)   { lq_bda.pNext   = chain; chain = &lq_bda; }
+        VkPhysicalDeviceFeatures2 lq = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = chain };
+        vkGetPhysicalDeviceFeatures2(s->phys_device, &lq);
+        { void *pn = probe13.pNext; probe13 = (VkPhysicalDeviceVulkan13Features){ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .pNext = pn }; }
+        { void *pn = probe12.pNext; probe12 = (VkPhysicalDeviceVulkan12Features){ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES, .pNext = pn }; }
+        { void *pn = probe11.pNext; probe11 = (VkPhysicalDeviceVulkan11Features){ .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES, .pNext = pn }; }
+        probe12.shaderFloat16 = lq_has_f16i8 ? lq_f16i8.shaderFloat16 : VK_FALSE;
+        probe12.shaderInt8 = lq_has_f16i8 ? lq_f16i8.shaderInt8 : VK_FALSE;
+        probe12.storageBuffer8BitAccess = lq_has_8bit ? lq_8bit.storageBuffer8BitAccess : VK_FALSE;
+        probe12.uniformAndStorageBuffer8BitAccess = lq_has_8bit ? lq_8bit.uniformAndStorageBuffer8BitAccess : VK_FALSE;
+        probe12.storagePushConstant8 = lq_has_8bit ? lq_8bit.storagePushConstant8 : VK_FALSE;
+        probe12.bufferDeviceAddress = lq_has_bda ? lq_bda.bufferDeviceAddress : VK_FALSE;
+        probe11.storageBuffer16BitAccess = lq_16bit.storageBuffer16BitAccess;
+        probe11.uniformAndStorageBuffer16BitAccess = lq_16bit.uniformAndStorageBuffer16BitAccess;
+        probe11.storagePushConstant16 = lq_16bit.storagePushConstant16;
+        probe11.storageInputOutput16 = lq_16bit.storageInputOutput16;
+        probe11.variablePointers = lq_vptr.variablePointers;
+        probe11.variablePointersStorageBuffer = lq_vptr.variablePointersStorageBuffer;
+    }
+
     /* Re-check ICD-advertised support. The "we'd like" set is fixed;
      * if the ICD says no, we still try to create the device with the
      * remaining features (vkCreateDevice will report which one
@@ -510,7 +552,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
      * (VK_KHR_buffer_device_address would have to be enabled and the KHR entry
      * point used) it is not resolvable, so only report BDA on >= 1.2 devices. */
     bool have_buffer_device_address   = (probe12.bufferDeviceAddress == VK_TRUE) &&
-        (s->phys_props.apiVersion >= VK_API_VERSION_1_2);
+        (s->phys_props.apiVersion >= VK_API_VERSION_1_2 || ext_bda_khr);   /* < 1.2: only through VK_KHR_buffer_device_address (feature queried on its own above) */
     bool have_varptr_storage_buffer   =
         (probe11.variablePointersStorageBuffer == VK_TRUE);
 
@@ -645,6 +687,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             s->sg_full = probe13.computeFullSubgroups == VK_TRUE;
         }
     }
+    if (legacy_feat && have_buffer_device_address && wanted_dev_n < 20) wanted_dev_exts[wanted_dev_n++] = "VK_KHR_buffer_device_address";
     caps_en &= ~caps_off;
     if (!(caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)))   /* 64-bit atomics need shaderInt64 enabled (also when LAGFX_VK_CAPS_OFF turned int64 off) */
         caps_en &= ~(LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF) | LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_SHARED));
@@ -679,13 +722,29 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     feat11.storageInputOutput16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_IO16)) ? VK_TRUE : VK_FALSE;
     feat11.variablePointers = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR)) ? VK_TRUE : VK_FALSE;
     feat11.variablePointersStorageBuffer = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_VARPTR_SB)) ? VK_TRUE : VK_FALSE;
+    /* Below Vulkan 1.2: create the device with the individual feature structs (same values as feat11/feat12 hold) instead of the unified ones. Never both:
+     * a unified struct next to an individual one for the same feature is invalid usage. The shader-atomic-float struct (feat13.pNext) stays at the tail. */
+    VkPhysicalDeviceShaderFloat16Int8Features   le_f16i8 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES, .shaderFloat16 = feat12.shaderFloat16, .shaderInt8 = feat12.shaderInt8 };
+    VkPhysicalDevice8BitStorageFeatures         le_8bit  = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES, .storageBuffer8BitAccess = feat12.storageBuffer8BitAccess,
+                                                             .uniformAndStorageBuffer8BitAccess = feat12.uniformAndStorageBuffer8BitAccess, .storagePushConstant8 = feat12.storagePushConstant8 };
+    VkPhysicalDevice16BitStorageFeatures        le_16bit = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES, .storageBuffer16BitAccess = feat11.storageBuffer16BitAccess,
+                                                             .uniformAndStorageBuffer16BitAccess = feat11.uniformAndStorageBuffer16BitAccess, .storagePushConstant16 = feat11.storagePushConstant16, .storageInputOutput16 = feat11.storageInputOutput16 };
+    VkPhysicalDeviceVariablePointersFeatures    le_vptr  = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES, .variablePointers = feat11.variablePointers, .variablePointersStorageBuffer = feat11.variablePointersStorageBuffer };
+    VkPhysicalDeviceBufferDeviceAddressFeatures le_bda   = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES, .bufferDeviceAddress = have_buffer_device_address ? VK_TRUE : VK_FALSE };
+    void *legacy_head = NULL;
+    if (legacy_feat) {
+        void *tail = feat13.pNext;   /* NULL or af_en */
+        le_bda.pNext = tail; le_vptr.pNext = &le_bda; le_16bit.pNext = &le_vptr;
+        le_8bit.pNext = &le_16bit; le_f16i8.pNext = &le_8bit;
+        legacy_head = &le_f16i8;
+    }
     VkPhysicalDeviceFeatures2 feat2 = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2,
         .features = { .shaderInt64 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) ? VK_TRUE : VK_FALSE,
                       .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE,
                       .independentBlend = probe2.features.independentBlend ? VK_TRUE : VK_FALSE,
                       .depthBiasClamp = probe2.features.depthBiasClamp ? VK_TRUE : VK_FALSE },
-        .pNext = &feat12,
+        .pNext = legacy_feat ? legacy_head : (void *)&feat12,
     };
 
     /* Queue create info — one graphics+compute+transfer queue. */
@@ -886,6 +945,14 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_descriptor_indexing    = have_descriptor_indexing;
     s->have_shader_object          = want_shader_object;
     s->have_extended_dynamic_state3= want_eds3;
+    s->get_buffer_address = NULL;
+    if (have_buffer_device_address) {
+        s->get_buffer_address = (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(s->device, s->phys_props.apiVersion >= VK_API_VERSION_1_2 ? "vkGetBufferDeviceAddress" : "vkGetBufferDeviceAddressKHR");
+        if (!s->get_buffer_address) {
+            LAGFX_WARN("vk_init: bufferDeviceAddress feature enabled but the entry point did not resolve; BDA disabled");
+            have_buffer_device_address = false;
+        }
+    }
     s->have_buffer_device_address  = have_buffer_device_address;
     LAGFX_LOG("vk_init: bufferDeviceAddress=%d (M2 host-flattening %s)",
               (int)have_buffer_device_address,
@@ -993,6 +1060,7 @@ void lagfx_vk_shutdown(struct lagfx_vk_state *state) {
     }
     lagfx_vk_composite_shutdown(state);
     lagfx_vk_pipeline_shutdown(state);
+    lagfx_vk_render_pass_shutdown(state);
     lagfx_vk_command_pool_destroy(state);
     if (state->device != VK_NULL_HANDLE) {
         vkDestroyDevice(state->device, NULL);

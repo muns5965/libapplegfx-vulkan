@@ -42,6 +42,7 @@
  */
 
 #include "render_target.h"
+#include "render_pass.h"
 #include "instance.h"
 #include "command.h"
 #include "common/log.h"
@@ -289,6 +290,7 @@ void lagfx_vk_render_target_destroy(struct lagfx_vk_state *vk,
         memset(rt, 0, sizeof(*rt));
         return;
     }
+    lagfx_vk_render_forget_view(vk, rt->view);   /* a legacy-backend framebuffer may still reference the view */
     if (rt->view != VK_NULL_HANDLE) {
         vkDestroyImageView(vk->device, rt->view, NULL);
     }
@@ -343,11 +345,6 @@ lagfx_status_t lagfx_vk_render_clear_color(struct lagfx_vk_state *vk,
     if (!vk || !rt || !rgba || cmd == VK_NULL_HANDLE) {
         return LAGFX_ERR_INVALID_ARG;
     }
-    if (!vk->have_dynamic_rendering) {
-        LAGFX_ERR("render_clear_color: dynamic_rendering unavailable — "
-                  "Phase 2 requires it");
-        return LAGFX_ERR_BACKEND;
-    }
     if (rt->image == VK_NULL_HANDLE || rt->view == VK_NULL_HANDLE) {
         LAGFX_ERR("render_clear_color: render target not initialized");
         return LAGFX_ERR_INVALID_ARG;
@@ -373,25 +370,19 @@ lagfx_status_t lagfx_vk_render_clear_color(struct lagfx_vk_state *vk,
                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    /* Begin dynamic rendering with one color attachment + clear-load. */
-    VkRenderingAttachmentInfo color_att = {
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = rt->view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = { .color = { .float32 = { rgba[0], rgba[1],
-                                                 rgba[2], rgba[3] } } },
+    /* One colour attachment, clear-load: dynamic rendering, or a legacy render pass on a device without it (render_pass.h picks). */
+    lagfx_render_color_t rc = {
+        .view = rt->view, .format = rt->format, .width = rt->width, .height = rt->height,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE,
+        .clear = { .float32 = { rgba[0], rgba[1], rgba[2], rgba[3] } },
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
-    VkRenderingInfo ri = {
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = { { 0, 0 }, { rt->width, rt->height } },
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &color_att,
-    };
-    vkCmdBeginRendering(cmd, &ri);
-    vkCmdEndRendering(cmd);
+    lagfx_status_t bst = lagfx_vk_render_begin(vk, cmd, &rc);
+    if (bst != LAGFX_OK) {
+        LAGFX_ERR("render_clear_color: render_begin failed (%d)", (int)bst);
+        return bst;
+    }
+    lagfx_vk_render_end(vk, cmd);
 
     LAGFX_LOG("render_clear_color: %ux%u clear=(%.3f,%.3f,%.3f,%.3f)",
               rt->width, rt->height,

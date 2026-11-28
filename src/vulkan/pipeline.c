@@ -303,7 +303,14 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
             .sType  = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO,
             .buffer = buf,
         };
-        *out_addr = vkGetBufferDeviceAddress(vk->device, &dai);
+        PFN_vkGetBufferDeviceAddress get_addr = vk->get_buffer_address;
+        if (!get_addr && vk->phys_props.apiVersion >= VK_API_VERSION_1_2) get_addr = vkGetBufferDeviceAddress;   /* state not built by lagfx_vk_init */
+        if (!get_addr) {
+            vkDestroyBuffer(vk->device, buf, NULL);
+            vkFreeMemory(vk->device, mem, NULL);
+            return LAGFX_ERR_BACKEND;
+        }
+        *out_addr = get_addr(vk->device, &dai);
         if (!*out_addr) {
             vkDestroyBuffer(vk->device, buf, NULL);
             vkFreeMemory(vk->device, mem, NULL);

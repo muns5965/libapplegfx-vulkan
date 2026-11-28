@@ -2161,6 +2161,15 @@ atomic_caps_test = executable('vulkan-atomic-caps-unit',
 )
 test('atomic device capabilities (unit, injected features, lavapipe)', atomic_caps_test, workdir : meson.current_source_dir() / '..')
 
+# Vulkan < 1.2 feature path (individual per-feature structs, clean refusal without dynamic rendering, BDA entry point): forced on the available ICD; skips (77) without one.
+vulkan_legacy_feat_test = executable('vulkan-legacy-feat-unit',
+  'vulkan-legacy-feat-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('vulkan < 1.2 feature path (unit, forced on lavapipe)', vulkan_legacy_feat_test)
+
 # Read-only device diagnostic g7-vkdev (identity, full extension list, feature summary): structure checks on the available ICD, skip (77) without one.
 vkdev_info_test = executable('vkdev-info-unit',
   'vkdev-info-unit.c',

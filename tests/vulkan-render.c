@@ -172,6 +172,10 @@ static int render_and_readback(struct lagfx_vk_state *vk) {
 }
 #endif
 
+#ifdef LAGFX_HAVE_VULKAN
+#include "vulkan/render_pass.h"
+#endif
+
 int main(void) {
     fprintf(stdout, "=== libapplegfx-vulkan render target smoke ===\n");
     fprintf(stdout, "build: %s\n", lagfx_build_info());
@@ -193,6 +197,13 @@ int main(void) {
 #ifdef LAGFX_HAVE_VULKAN
     if (dev->vk && dev->vk->initialized) {
         (void)render_and_readback(dev->vk);
+        /* The same clear + readback through the legacy VkRenderPass backend (what a device without dynamic rendering uses), forced on this ICD. */
+        setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
+        CHECK(lagfx_vk_render_backend(dev->vk) == LAGFX_RENDER_LEGACY, "force knob selects the legacy backend");
+        (void)render_and_readback(dev->vk);
+        (void)render_and_readback(dev->vk);   /* second pass: cached render pass / framebuffer path, after the first target was destroyed */
+        unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+        CHECK(lagfx_vk_render_backend(dev->vk) == LAGFX_RENDER_DYNAMIC, "default backend is dynamic rendering");
     } else {
         SKIP("LAGFX_HAVE_VULKAN set but dev->vk->initialized is false");
     }

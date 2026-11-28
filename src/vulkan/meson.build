@@ -26,6 +26,7 @@ lagfx_sources += files(
   'pipeline_reduce.c',
   'descriptor_layout.c',
   'render_target.c',
+  'render_pass.c',
   'cursor.c',
   'composite.c',
   'iosurface.c',
