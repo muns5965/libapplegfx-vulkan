@@ -8,6 +8,7 @@
 #include "vulkan/render_pass.h"
 #include "vulkan/render_target.h"
 #include "vulkan/command.h"
+#include "vulkan/composite.h"
 #include "libapplegfx-vulkan.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -78,6 +79,72 @@ int main(void) {
         for (int i = 0; i < made; i++) lagfx_vk_render_target_destroy(vk, &rt[i]);
         lagfx_vk_shutdown(vk);
     } else CHECK(0, "init for the load/store test");
+    unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+
+    /* Cache limits (lowered through the test seam): a full cache is a clean error, never an eviction or a crash. */
+    for (int which = 0; which < 2; which++) {
+        setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
+        setenv(which ? "LAGFX_RENDER_CACHE_MAX_RP" : "LAGFX_RENDER_CACHE_MAX_FB", which ? "1" : "2", 1);
+        vk = NULL;
+        if (lagfx_vk_init(&vk, &dd) == LAGFX_OK && vk && vk->initialized) {
+            lagfx_vk_render_target_t t[3]; memset(t, 0, sizeof t);
+            int made = 0; for (; made < 3; made++) if (lagfx_vk_render_target_create(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &t[made]) != LAGFX_OK) break;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            if (made == 3 && lagfx_vk_cmdbuf_alloc(vk, &cb) == LAGFX_OK) {
+                VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+                vkBeginCommandBuffer(cb, &bi);
+                const float c4[4] = { 0, 0, 1, 1 };
+                lagfx_status_t r0 = lagfx_vk_render_clear_color(vk, cb, &t[0], c4);
+                lagfx_status_t r1 = lagfx_vk_render_clear_color(vk, cb, &t[1], c4);
+                lagfx_status_t r2 = lagfx_vk_render_clear_color(vk, cb, &t[2], c4);
+                if (which == 0) CHECK(r0 == LAGFX_OK && r1 == LAGFX_OK && r2 != LAGFX_OK, "framebuffer cache limit 2: third distinct view is refused cleanly");
+                else CHECK(r0 != LAGFX_OK || r1 != LAGFX_OK || r2 != LAGFX_OK, "render pass cache limit 1: the CLEAR variant is refused cleanly (LOAD/STORE one already used by the pipelines)");
+                vkEndCommandBuffer(cb);
+                lagfx_vk_cmdbuf_free(vk, cb);
+            } else CHECK(0, "targets/command buffer for the cache-limit test");
+            for (int i = 0; i < made; i++) lagfx_vk_render_target_destroy(vk, &t[i]);
+            lagfx_vk_shutdown(vk);
+        } else CHECK(0, "init for the cache-limit test");
+        unsetenv("LAGFX_RENDER_CACHE_MAX_RP"); unsetenv("LAGFX_RENDER_CACHE_MAX_FB");
+        unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+    }
+
+    /* Texture composite pixel result: green opaque layer over a red display target, once per backend. */
+    for (int legacy = 0; legacy < 2; legacy++) {
+        if (legacy) setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1); else unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+        vk = NULL;
+        if (lagfx_vk_init(&vk, &dd) == LAGFX_OK && vk && vk->initialized) {
+            lagfx_vk_render_target_t disp, src; memset(&disp, 0, sizeof disp); memset(&src, 0, sizeof src);
+            int okc = lagfx_vk_render_target_create(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &disp) == LAGFX_OK
+                   && lagfx_vk_render_target_create_sampled(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &src) == LAGFX_OK;
+            VkCommandBuffer cb = VK_NULL_HANDLE;
+            if (okc && lagfx_vk_cmdbuf_alloc(vk, &cb) == LAGFX_OK) {
+                VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+                vkBeginCommandBuffer(cb, &bi);
+                const float red[4] = { 1, 0, 0, 1 }, green[4] = { 0, 1, 0, 1 };
+                lagfx_vk_render_clear_color(vk, cb, &disp, red);
+                lagfx_vk_render_clear_color(vk, cb, &src, green);
+                VkImageMemoryBarrier bar = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
+                    .oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                    .image = src.image, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
+                vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &bar);
+                src.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                vkEndCommandBuffer(cb);
+                VkFence f = VK_NULL_HANDLE; VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+                vkCreateFence(vk->device, &fci, NULL, &f);
+                VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+                vkQueueSubmit(vk->graphics_queue, 1, &si, f); vkWaitForFences(vk->device, 1, &f, VK_TRUE, 2000000000ull);
+                vkDestroyFence(vk->device, f, NULL); lagfx_vk_cmdbuf_free(vk, cb);
+                CHECK(lagfx_vk_composite_over(vk, &disp, src.view, 0, 0, 0, 0) == LAGFX_OK, legacy ? "composite_over (legacy backend)" : "composite_over (dynamic backend)");
+                uint8_t px[8 * 8 * 4]; size_t stride = 0;
+                int rd = lagfx_vk_render_target_readback(vk, &disp, px, sizeof px, &stride) == LAGFX_OK;
+                size_t o = 4 * stride + 4 * 4;   /* pixel (4,4), BGRA */
+                CHECK(rd && px[o + 1] == 255 && px[o + 2] == 0 && px[o] == 0, legacy ? "composited pixel is the layer colour (legacy backend)" : "composited pixel is the layer colour (dynamic backend)");
+            } else CHECK(0, "targets for the composite test");
+            lagfx_vk_render_target_destroy(vk, &src); lagfx_vk_render_target_destroy(vk, &disp);
+            lagfx_vk_shutdown(vk);
+        } else CHECK(0, "init for the composite test");
+    }
     unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
 
     char path[] = "/tmp/legacyfeat-XXXXXX"; int fd = mkstemp(path);

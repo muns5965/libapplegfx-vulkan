@@ -6,17 +6,26 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define RP_MAX 16
-#define FB_MAX 1024   /* never evicted: a framebuffer may be referenced by a recorded, not yet submitted command buffer; entries leave only through render_forget_view / shutdown */
+/* Cache limits: render passes 256, framebuffers 1024 (both overridable once per device for tests: LAGFX_RENDER_CACHE_MAX_RP / _MAX_FB). Entries are never evicted: a framebuffer may be
+ * referenced by a recorded, not yet submitted command buffer; they leave only through render_forget_view / shutdown. A full cache is a clean error, not an eviction. */
+#define RP_MAX_DEFAULT 256u
+#define FB_MAX_DEFAULT 1024u
 
 typedef struct { VkFormat fmt; VkImageLayout layout; VkAttachmentLoadOp load; VkAttachmentStoreOp store; VkRenderPass rp; } rp_ent_t;
 typedef struct { VkRenderPass rp; VkImageView view; uint32_t w, h; VkFramebuffer fb; } fb_ent_t;
 
 struct lagfx_render_cache {
     pthread_mutex_t mu;
-    rp_ent_t rp[RP_MAX]; unsigned n_rp;
-    fb_ent_t fb[FB_MAX]; unsigned n_fb;
+    rp_ent_t *rp; unsigned n_rp, cap_rp, max_rp;
+    fb_ent_t *fb; unsigned n_fb, cap_fb, max_fb;
 };
+
+static unsigned env_limit(const char *name, unsigned def) {
+    const char *v = getenv(name);
+    if (!v || !*v) return def;
+    char *end; unsigned long n = strtoul(v, &end, 10);
+    return (*end || n == 0 || n > 1000000ul) ? def : (unsigned)n;
+}
 
 /* Chosen once, when the device is created (lagfx_vk_init), and never changed afterwards: pipelines, begin and end must all see the same backend. */
 lagfx_render_backend_t lagfx_vk_render_backend_select(bool have_dynamic_rendering) {
@@ -35,6 +44,8 @@ static struct lagfx_render_cache *cache_get(struct lagfx_vk_state *vk) {
         struct lagfx_render_cache *c = calloc(1, sizeof *c);
         if (!c) return NULL;
         pthread_mutex_init(&c->mu, NULL);
+        c->max_rp = env_limit("LAGFX_RENDER_CACHE_MAX_RP", RP_MAX_DEFAULT);
+        c->max_fb = env_limit("LAGFX_RENDER_CACHE_MAX_FB", FB_MAX_DEFAULT);
         vk->render_cache = c;   /* a state is used from one thread at a time until the first begin; the mutex guards the rest */
     }
     return vk->render_cache;
@@ -42,7 +53,12 @@ static struct lagfx_render_cache *cache_get(struct lagfx_vk_state *vk) {
 
 static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cache *c, VkFormat fmt, VkImageLayout layout, VkAttachmentLoadOp load, VkAttachmentStoreOp store) {
     for (unsigned i = 0; i < c->n_rp; i++) if (c->rp[i].fmt == fmt && c->rp[i].layout == layout && c->rp[i].load == load && c->rp[i].store == store) return c->rp[i].rp;
-    if (c->n_rp >= RP_MAX) { LAGFX_ERR("render_pass: cache full (%u formats)", c->n_rp); return VK_NULL_HANDLE; }
+    if (c->n_rp >= c->max_rp) { LAGFX_ERR("render_pass: cache full (%u render passes)", c->n_rp); return VK_NULL_HANDLE; }
+    if (c->n_rp == c->cap_rp) {
+        unsigned nc = c->cap_rp ? c->cap_rp * 2u : 8u; if (nc > c->max_rp) nc = c->max_rp;
+        rp_ent_t *n = realloc(c->rp, nc * sizeof *n); if (!n) return VK_NULL_HANDLE;
+        c->rp = n; c->cap_rp = nc;
+    }
     VkAttachmentDescription ad = {
         .format = fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
         .loadOp = load, .storeOp = store,   /* part of the cache key: exactly what the caller asked for */
@@ -103,7 +119,12 @@ lagfx_status_t lagfx_vk_render_begin(struct lagfx_vk_state *vk, VkCommandBuffer 
         for (unsigned i = 0; i < rc->n_fb; i++)
             if (rc->fb[i].rp == rp && rc->fb[i].view == c->view && rc->fb[i].w == c->width && rc->fb[i].h == c->height) { fb = rc->fb[i].fb; break; }
         if (fb == VK_NULL_HANDLE) {
-            if (rc->n_fb >= FB_MAX) { LAGFX_ERR("render_begin: framebuffer cache full (%u): a view is not being forgotten", rc->n_fb); goto fb_done; }
+            if (rc->n_fb >= rc->max_fb) { LAGFX_ERR("render_begin: framebuffer cache full (%u): a view is not being forgotten", rc->n_fb); goto fb_done; }
+            if (rc->n_fb == rc->cap_fb) {
+                unsigned nc = rc->cap_fb ? rc->cap_fb * 2u : 16u; if (nc > rc->max_fb) nc = rc->max_fb;
+                fb_ent_t *n = realloc(rc->fb, nc * sizeof *n); if (!n) goto fb_done;
+                rc->fb = n; rc->cap_fb = nc;
+            }
             VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 1, .pAttachments = &c->view,
                                             .width = c->width, .height = c->height, .layers = 1 };
             VkResult vr = vkCreateFramebuffer(vk->device, &fci, NULL, &fb);
@@ -132,10 +153,14 @@ void lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageView view) {
     if (!vk || !vk->render_cache || view == VK_NULL_HANDLE) return;
     struct lagfx_render_cache *c = vk->render_cache;
     pthread_mutex_lock(&c->mu);
-    bool idle = false;
+    bool idle = false, failed = false;
     for (unsigned i = 0; i < c->n_fb;) {
         if (c->fb[i].view == view) {
-            if (!idle) { if (vkDeviceWaitIdle(vk->device) != VK_SUCCESS) LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed"); idle = true; }
+            if (!idle && !failed) {
+                if (vkDeviceWaitIdle(vk->device) == VK_SUCCESS) idle = true;
+                else { failed = true; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed; the framebuffers of this view are KEPT (leaked until shutdown), not destroyed under possibly running work"); }
+            }
+            if (failed) { i++; continue; }
             vkDestroyFramebuffer(vk->device, c->fb[i].fb, NULL);
             c->fb[i] = c->fb[--c->n_fb];
         } else i++;
@@ -151,6 +176,7 @@ void lagfx_vk_render_pass_shutdown(struct lagfx_vk_state *vk) {
         for (unsigned i = 0; i < c->n_rp; i++) vkDestroyRenderPass(vk->device, c->rp[i].rp, NULL);
     }
     pthread_mutex_destroy(&c->mu);
+    free(c->rp); free(c->fb);
     free(c);
     vk->render_cache = NULL;
 }
