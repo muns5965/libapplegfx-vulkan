@@ -154,6 +154,7 @@ VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+void lagfx_a64_res_note_pass_refused(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);   /* diagnostics: a pass targeting o was refused after target_begin */
 extern VkImageUsageFlags lagfx_a64_test_drop_usage;   /* test hook, see arm64_resources.c */
 VkImageLayout lagfx_a64_res_target_layout(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o);   /* attachment layout of one colour target (legacy: GENERAL only with INPUT_ATTACHMENT usage) */
 bool lagfx_a64_res_target_fetch(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o);   /* legacy fetch: this target is a fetch slot (capable, usage, 1x) */

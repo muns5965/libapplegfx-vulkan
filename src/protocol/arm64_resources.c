@@ -64,6 +64,7 @@ int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload,
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) { (void)p; (void)hdr; return false; }
 /* stub build: no manager */
+void lagfx_a64_res_note_pass_refused(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { (void)x; (void)o; }
 void lagfx_a64_res_test_flush(lagfx_protocol_t *p) { (void)p; }
 void lagfx_a64_res_forget(lagfx_protocol_t *p, uint32_t task, uint32_t ref) { (void)p; (void)task; (void)ref; }
 void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task) { (void)p; (void)task; }
@@ -114,6 +115,7 @@ typedef struct lagfx_a64_msurf {
     VkBuffer stage; VkDeviceMemory stage_mem; uint8_t *stage_map;
     bool host_valid, guest_stale, down_pending, owed, id_set;
     uint8_t wb_retries;   /* consecutive failed write-backs of this surface (re-owed each time, up to WB_RETRY_MAX); reset by a successful one */
+    uint64_t refused_gen;   /* exec generation in which a pass targeting this surface was refused (render_begin failed) */
     uint64_t up_epoch, down_epoch, down_gen;   /* down_gen: the exec / sync / swap copy that recorded the pending image -> staging copy (0 = none) */
     struct lagfx_rb_slot *rb;   /* LAGFX_GPU_READBACK=1 only (LAGFX_WB_VERIFY alone does not allocate it): the independent GPU copy of the image (gpu_readback.h); NULL while off */
     uint64_t id_pl, id_alloc, id_row, id_hash; uint32_t id_first, id_np;   /* which guest pages the mirror was last taken from (the descriptor has no generation): a different page list = the guest re-mapped it */
@@ -588,6 +590,7 @@ static void ms_owe(lagfx_protocol_t *p, msurf_t *ms) {
 /* image -> staging buffer (recorded); only a surface that holds meaningful pixels (host_valid). Once per epoch. */
 static bool ms_record_down(mgr2_t *m, VkCommandBuffer cb, msurf_t *ms, uint64_t gen) {
     if (!ms->host_valid) return false;
+    if (ms->refused_gen == gen && ms->down_gen != gen) MRUN(m->p).wb_after_refused_pass++;   /* once per surface and exec */
     if (ms->down_gen == gen && ms->down_pending) return true;
     barrier(cb);
     VkBufferImageCopy r = { .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { ms->w, ms->h, 1 } };
@@ -1737,6 +1740,8 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
     return true;
 }
 
+/* a pass that targeted this object was refused after target_begin: remember it so a later write-back of the same exec is counted (diagnostics only) */
+void lagfx_a64_res_note_pass_refused(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { if (x && o && o->ms) o->ms->refused_gen = x->gen; }
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     if (!x || !o) return;
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,

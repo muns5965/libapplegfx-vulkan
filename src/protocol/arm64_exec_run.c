@@ -1243,7 +1243,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     if (lagfx_translate_render_begin_fmt(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, ca, nslots,
                                          dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL,
                                          cfmt, dso ? dso->format : VK_FORMAT_UNDEFINED, r->ms.samples > 1u ? r->ms.samples : 1u) != LAGFX_OK) {
-        for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_target_end(r->x, r->rts[q]);
+        for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) lagfx_a64_res_note_pass_refused(r->x, r->rts[q]), lagfx_a64_res_target_end(r->x, r->rts[q]);
         lagfx_a64_msaa_pass_abort(r->x, &r->ms);
         if (dso) lagfx_a64_res_ds_end(r->x, dso);
         memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
