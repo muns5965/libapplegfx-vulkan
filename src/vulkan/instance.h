@@ -93,6 +93,11 @@ struct lagfx_vk_state {
     PFN_vkCreateRenderPass2 create_renderpass2;   /* vkCreateRenderPass2 (>= 1.2) or vkCreateRenderPass2KHR; NULL when have_ds_resolve is false */
     VkResolveModeFlags dsres_depth_modes, dsres_stencil_modes;   /* supportedDepthResolveModes / supportedStencilResolveModes */
     bool dsres_independent_none, dsres_independent;
+    /* Encoder state (cull mode, front face, depth test / write / compare, stencil test / ops) as dynamic state: Vulkan 1.3 core, or VK_EXT_extended_dynamic_state enabled on a device below 1.3
+     * (same commands, same VkDynamicState values). have_eds = all seven entry points resolved; eds_ext = they came from the extension (LAGFX_VK_NO_EDS1=1 refuses the extension). */
+    bool have_eds, eds_ext;
+    struct { PFN_vkCmdSetCullMode cull; PFN_vkCmdSetFrontFace front_face; PFN_vkCmdSetDepthTestEnable depth_test; PFN_vkCmdSetDepthWriteEnable depth_write;
+             PFN_vkCmdSetDepthCompareOp depth_compare; PFN_vkCmdSetStencilTestEnable stencil_test; PFN_vkCmdSetStencilOp stencil_op; } eds;
     bool legacy_fetch;    /* legacy backend: input-attachment framebuffer fetch enabled; decided ONCE at init from LAGFX_VK_LEGACY_FETCH ("0" disables), never re-read per call */
     struct lagfx_render_cache *render_cache;   /* render_pass.c: cached VkRenderPass / VkFramebuffer for the legacy backend */
     PFN_vkGetBufferDeviceAddress get_buffer_address;   /* core vkGetBufferDeviceAddress (>= 1.2) or the KHR entry point (1.1 + VK_KHR_buffer_device_address); NULL when BDA is unavailable */

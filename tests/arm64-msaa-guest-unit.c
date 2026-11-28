@@ -591,8 +591,8 @@ int main(void) {
         assert(full > 40 && partial == 0); }   /* the 1x passes (through the 1x pipeline) have no partial-coverage pixel */
       puts("PASS pipeline cache: same shader / format at 1x and 4x -> 2 pipelines (pipes_built=2, pipes_ms=1), 1x again is a hit; validation: no message in the window"); }
 
-    const bool ds_pass_ok = VK_VERSION_MINOR(g_dev->vk->phys_props.apiVersion) >= 3u || VK_VERSION_MAJOR(g_dev->vk->phys_props.apiVersion) > 1u;   /* the ARM64 exec path attaches depth / stencil on core 1.3+ only (depth state is dynamic there): on a simulated 1.1 device the pass-level depth resolve is not reachable */
-    if (!ds_pass_ok) puts("SKIP: pass-level depth resolve (device below Vulkan 1.3: the ARM64 exec path does not attach depth / stencil there, ds_no_device_support); the library-level resolve is covered by vulkan-render-desc-unit");
+    const bool ds_pass_ok = g_dev->vk->have_eds;   /* the ARM64 exec path attaches depth / stencil on core 1.3+ only (depth state is dynamic there): on a simulated 1.1 device the pass-level depth resolve is not reachable */
+    if (!ds_pass_ok) puts("SKIP: pass-level depth resolve (no dynamic encoder state on this device: neither core 1.3 nor VK_EXT_extended_dynamic_state); the library-level resolve is covered by vulkan-render-desc-unit");
     else {
     /* depth resolve in a 4x pass (store action 3 + a 1x depth resolve texture): the 4x depth (cleared to 0.375, no draw writes depth) is resolved into REF_D32 and read back. Control: with store action 1 the
      * resolve texture is not written (its content is whatever the mirror created: NOT 0.375). Both modes (exact is the default, compat below) resolve identically. */

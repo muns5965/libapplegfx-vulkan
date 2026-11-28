@@ -459,6 +459,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
+    const bool ext_eds1 = has_ext(dext, dext_n, "VK_EXT_extended_dynamic_state");   /* evaluated here: dext is freed below */
     /* Opt-in cubic filtering (filter_cubic.h): only requested with LAGFX_CUBIC=1; the extension has no feature struct. The EXT form is preferred, the IMG alias is used on a device that lacks it. */
     const char *cubic_ext = !lagfx_cubic_optin() ? NULL : has_ext(dext, dext_n, "VK_EXT_filter_cubic") ? "VK_EXT_filter_cubic" : has_ext(dext, dext_n, "VK_IMG_filter_cubic") ? "VK_IMG_filter_cubic" : NULL;
     typedef struct { VkStructureType sType; void *pNext; VkBool32 dynamicRenderingLocalRead; } local_read_feat_t;   /* older headers lack the type */
@@ -794,6 +795,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_depth_bias_clamp = probe2.features.depthBiasClamp == VK_TRUE;
     feat2.features.sampleRateShading = probe2.features.sampleRateShading ? VK_TRUE : VK_FALSE;   /* per-sample shading (sampleShadingEnable / SampleId): src/vulkan/msaa_host.h, unwired from the guest */
     s->have_sample_rate_shading = feat2.features.sampleRateShading == VK_TRUE;
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT eds_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT, .extendedDynamicState = VK_TRUE };
+    bool eds_ext_on = false;
     local_read_feat_t lr_en = { .sType = (VkStructureType)1000232000, .dynamicRenderingLocalRead = VK_TRUE };
     if (cubic_ext) {
         wanted_dev_exts[wanted_dev_n++] = cubic_ext;
@@ -835,6 +838,17 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             wanted_dev_exts[wanted_dev_n++] = ext_ro_ext ? "VK_EXT_rasterization_order_attachment_access" : "VK_ARM_rasterization_order_attachment_access";
             dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
             s->have_raster_order = true;
+        }
+        if (s->phys_props.apiVersion < VK_API_VERSION_1_3 && ext_eds1 && !getenv("LAGFX_VK_NO_EDS1") && wanted_dev_n < 23u) {   /* cull / front face / depth / stencil as dynamic state below 1.3 */
+            VkPhysicalDeviceExtendedDynamicStateFeaturesEXT q1 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT };
+            VkPhysicalDeviceFeatures2 q = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q1 };
+            vkGetPhysicalDeviceFeatures2(s->phys_device, &q);
+            if (q1.extendedDynamicState) {
+                eds_en.pNext = feat13.pNext; feat13.pNext = &eds_en;
+                wanted_dev_exts[wanted_dev_n++] = "VK_EXT_extended_dynamic_state";
+                dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+                eds_ext_on = true;
+            }
         }
         static bool feat_printed;
         if (!feat_printed) {
@@ -966,7 +980,23 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_descriptor_indexing    = have_descriptor_indexing;
     s->have_shader_object          = want_shader_object;
     s->have_extended_dynamic_state3= want_eds3;
-    s->have_ds_resolve = false; s->create_renderpass2 = NULL;
+    s->have_eds = false; s->eds_ext = false; memset(&s->eds, 0, sizeof s->eds);
+    {   /* the dynamic encoder state: core names on >= 1.3, the EXT names when the extension was enabled */
+        const bool core = s->phys_props.apiVersion >= VK_API_VERSION_1_3;
+        if (core || eds_ext_on) {
+            const char *sfx = core ? "" : "EXT";
+            char nm[48];
+#define LAGFX_EDS_LOAD(field, base) do { snprintf(nm, sizeof nm, "%s%s", base, sfx); *(PFN_vkVoidFunction *)&s->eds.field = vkGetDeviceProcAddr(s->device, nm); } while (0)
+            LAGFX_EDS_LOAD(cull, "vkCmdSetCullMode"); LAGFX_EDS_LOAD(front_face, "vkCmdSetFrontFace"); LAGFX_EDS_LOAD(depth_test, "vkCmdSetDepthTestEnable");
+            LAGFX_EDS_LOAD(depth_write, "vkCmdSetDepthWriteEnable"); LAGFX_EDS_LOAD(depth_compare, "vkCmdSetDepthCompareOp"); LAGFX_EDS_LOAD(stencil_test, "vkCmdSetStencilTestEnable");
+            LAGFX_EDS_LOAD(stencil_op, "vkCmdSetStencilOp");
+#undef LAGFX_EDS_LOAD
+            s->have_eds = s->eds.cull && s->eds.front_face && s->eds.depth_test && s->eds.depth_write && s->eds.depth_compare && s->eds.stencil_test && s->eds.stencil_op;
+            s->eds_ext = s->have_eds && !core;
+        }
+    }
+    LAGFX_LOG("vk_init: dynamic encoder state (cull / front face / depth / stencil) %s", s->have_eds ? (s->eds_ext ? "via VK_EXT_extended_dynamic_state" : "via Vulkan 1.3 core") : "unavailable: state ignored, depth / stencil attachments refused");
+    s->have_ds_resolve = false; s->create_renderpass2 = NULL;    s->have_ds_resolve = false; s->create_renderpass2 = NULL;
     if ((s->phys_props.apiVersion >= VK_API_VERSION_1_2 || dsres_ext_on) && !getenv("LAGFX_VK_NO_DS_RESOLVE")) {
         lagfx_msaa_dsres_caps_t dc;
         const bool probed = lagfx_msaa_dsres_probe(s->phys_device, &dc);   /* the shared probe (src/vulkan/msaa_host.c), core 1.2 or KHR on 1.1 */

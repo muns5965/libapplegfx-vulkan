@@ -170,12 +170,10 @@ static struct lagfx_vk_state *get_vk(lagfx_protocol_t *p) {
     return (vk && vk->initialized && vk->device != VK_NULL_HANDLE) ? vk : NULL;
 }
 
-/* The depth / stencil and raster state is applied with the Vulkan 1.3 core dynamic-state commands (cull mode, front face, depth test / write / compare, stencil
- * test / op). A device below 1.3 keeps the previous behaviour (state ignored, counted). */
-static bool vk_core13(const struct lagfx_vk_state *vk) {
-    uint32_t v = vk->phys_props.apiVersion;
-    return VK_VERSION_MAJOR(v) > 1u || (VK_VERSION_MAJOR(v) == 1u && VK_VERSION_MINOR(v) >= 3u);
-}
+/* The depth / stencil and raster state is applied with dynamic-state commands (cull mode, front face, depth test / write / compare, stencil test / op): Vulkan 1.3 core, or
+ * VK_EXT_extended_dynamic_state on an older device (instance.c resolves the entry points once: vk->eds). Without either the previous behaviour stays (state ignored, counted).
+ * The name is kept from the 1.3-only version. */
+static bool vk_core13(const struct lagfx_vk_state *vk) { return vk->have_eds; }
 
 /* ---- destruction (parked while the GPU may still use the object: a command buffer being recorded or a submission in flight) ---- */
 
@@ -1326,21 +1324,21 @@ static VkStencilOp vk_sop(uint32_t m) {
 static void apply_encoder_state(a64_run_t *r, lagfx_protocol_t *p) {
     if (!r->es.dirty || !vk_core13(r->vk)) return;
     VkCommandBuffer cb = lagfx_a64_res_cmdbuf(r->x);
-    vkCmdSetCullMode(cb, r->es.cull == 1u ? VK_CULL_MODE_FRONT_BIT : r->es.cull == 2u ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
-    vkCmdSetFrontFace(cb, r->es.winding == 1u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
+    r->vk->eds.cull(cb, r->es.cull == 1u ? VK_CULL_MODE_FRONT_BIT : r->es.cull == 2u ? VK_CULL_MODE_BACK_BIT : VK_CULL_MODE_NONE);
+    r->vk->eds.front_face(cb, r->es.winding == 1u ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE);
     float clamp = r->es.bias[2];
     if (clamp != 0.0f && !r->vk->have_depth_bias_clamp) { clamp = 0.0f; CNT(p).bias_clamp_dropped++; }
     vkCmdSetDepthBias(cb, r->es.bias[0], clamp, r->es.bias[1]);
     if (r->dsobj) {
         const lagfx_a64_dss_t *d = &r->es.dss;
-        vkCmdSetDepthTestEnable(cb, lagfx_a64_dss_depth_test(d) ? VK_TRUE : VK_FALSE);
-        vkCmdSetDepthWriteEnable(cb, d->depth_write ? VK_TRUE : VK_FALSE);
-        vkCmdSetDepthCompareOp(cb, vk_cmp(d->depth_compare));
-        vkCmdSetStencilTestEnable(cb, lagfx_a64_dss_stencil_test(d) ? VK_TRUE : VK_FALSE);
+        r->vk->eds.depth_test(cb, lagfx_a64_dss_depth_test(d) ? VK_TRUE : VK_FALSE);
+        r->vk->eds.depth_write(cb, d->depth_write ? VK_TRUE : VK_FALSE);
+        r->vk->eds.depth_compare(cb, vk_cmp(d->depth_compare));
+        r->vk->eds.stencil_test(cb, lagfx_a64_dss_stencil_test(d) ? VK_TRUE : VK_FALSE);
         const VkStencilFaceFlags fc[2] = { VK_STENCIL_FACE_FRONT_BIT, VK_STENCIL_FACE_BACK_BIT };
         const lagfx_a64_ds_face_t *f[2] = { &d->front, &d->back };
         for (int i = 0; i < 2; i++) {
-            vkCmdSetStencilOp(cb, fc[i], vk_sop(f[i]->fail_op), vk_sop(f[i]->pass_op), vk_sop(f[i]->depth_fail_op), vk_cmp(f[i]->compare));
+            r->vk->eds.stencil_op(cb, fc[i], vk_sop(f[i]->fail_op), vk_sop(f[i]->pass_op), vk_sop(f[i]->depth_fail_op), vk_cmp(f[i]->compare));
             vkCmdSetStencilCompareMask(cb, fc[i], f[i]->read_mask);
             vkCmdSetStencilWriteMask(cb, fc[i], f[i]->write_mask);
             vkCmdSetStencilReference(cb, fc[i], r->es.sref[i]);
@@ -1426,7 +1424,7 @@ static lagfx_status_t fbf_draw_split(a64_run_t *r, lagfx_protocol_t *p, const la
             if (!first) fetch_barrier(r);
             first = false;
             const bool odd = d->prim == 4u && (k & 1u);
-            if (odd != flipped && vk_core13(r->vk)) vkCmdSetFrontFace(cb, odd ? (base == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE) : base), flipped = odd;
+            if (odd != flipped && vk_core13(r->vk)) r->vk->eds.front_face(cb, odd ? (base == VK_FRONT_FACE_CLOCKWISE ? VK_FRONT_FACE_COUNTER_CLOCKWISE : VK_FRONT_FACE_CLOCKWISE) : base), flipped = odd;
             const uint32_t off = (uint32_t)(k * step), fi = (uint32_t)d->base_instance + (uint32_t)inst;
             if (p->diag2.exec.fmt.fbf_split_subdraws++ == 0u || k + inst == 0u) {   /* the first sub-draw of the draw goes through the encoder (dummy vertex buffer / log); the rest record directly: no per-sub-draw log line */
                 st = d->indexed ? lagfx_translate_render_draw_indexed(&r->rs, nv, 1u, index_start + off, (int32_t)d->base_vertex, fi)
@@ -1434,7 +1432,7 @@ static lagfx_status_t fbf_draw_split(a64_run_t *r, lagfx_protocol_t *p, const la
             } else if (d->indexed) vkCmdDrawIndexed(cb, nv, 1u, index_start + off, (int32_t)d->base_vertex, fi);
             else vkCmdDraw(cb, nv, 1u, (uint32_t)d->first_vertex + off, fi);
         }
-    if (flipped) vkCmdSetFrontFace(cb, base);
+    if (flipped) r->vk->eds.front_face(cb, base);
     return st;
 }
 
