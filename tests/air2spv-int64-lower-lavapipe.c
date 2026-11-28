@@ -109,6 +109,17 @@ static int has_cap_int64(const uint8_t *b, size_t n) {
     return 0;
 }
 
+
+/* every OpAccessChain / InBoundsAccessChain index that is not a constant must be defined by an OpSelect (the "high word is zero ? low word : 0xFFFFFFFF" guard), never by a bare low-word extract */
+static int chain_indices_guarded(const uint8_t *b, size_t n, int *chains) {
+    const uint32_t *w = (const uint32_t *)(const void *)b; uint32_t bound = w[3]; uint8_t *def = calloc(bound, 1); if (!def) return 0; int ok = 1; *chains = 0;
+    for (size_t i = 5; i < n / 4;) { uint32_t wc = w[i] >> 16, op = w[i] & 0xffff; if (!wc) break;
+        if (op >= 43 && op <= 52) { } else if (wc >= 3 && op != 62 && op != 5 && op != 71 && w[i + 2] < bound && op >= 61 && op != 249 && op != 250 && op != 247 && op != 248) def[w[i + 2]] = (uint8_t)(op == 169 ? 1 : 2);
+        if (op == 65 || op == 66) { for (uint32_t k = 5; k < wc; k++) { (*chains)++; uint32_t id = w[i + k]; if (id < bound && def[id] == 2) ok = 0; } }
+        i += wc; }
+    free(def); return ok;
+}
+
 #define NOUT 25
 static uint64_t ref(uint64_t i, int j) {
     uint64_t a = i * 0x9E3779B97F4A7C15ull, b = ((a ^ (a >> 29)) * 0xBF58476D1CE4E5B9ull) + 12345ull; uint32_t bt = (uint32_t)b; uint64_t amt = bt & 63u; int64_t sa = (int64_t)a, sb = (int64_t)b;
@@ -151,6 +162,8 @@ int main(void) {
     {   FILE *f = fopen("/tmp/int64_lowered.spv", "wb"); if (f) { fwrite(lo, 1, ln, f); fclose(f); }
         if (system("command -v spirv-val >/dev/null 2>&1") == 0) CHECK(system("spirv-val --target-env vulkan1.2 /tmp/int64_lowered.spv") == 0, "spirv-val rejected the lowered module"); }
 
+    { int nch = 0; CHECK(chain_indices_guarded(lo, ln, &nch) && nch > 0, "64-bit access-chain indices must be guarded against a non-zero high word (chains seen: %d)", nch);
+      printf("PASS: %d access-chain indices are high-word guarded (not truncated to the low word)\n", nch); }
     buf_t o; if (mkbuf(&o, 256 * NOUT * 8)) return 1;
     CHECK(run(lo, ln, &o, 4, 64, 0) == 0, "lowered kernel must run on a device without shaderInt64");
     int bad = 0; const uint64_t *p = (const uint64_t *)(const void *)o.p;
@@ -172,6 +185,16 @@ int main(void) {
         for (uint64_t i = 0; i < 256; i++) for (int j = 0; j < NOUT; j++) if (p4[i * NOUT + j] != ref(i, j)) bad4++;
         CHECK(bad4 == 0, "translator narrowing->lowering path: %d mismatches", bad4);
         printf("PASS: narrowing refusal falls back to Int64 lowering inside lagfx_air2spv_translate_module (results match the CPU model)\n"); }
+    /* i64 INPUT loads: read-modify-write of a pre-filled 64-bit array (load -> mul -> add -> store) */
+    {   uint8_t *s5; size_t n5; lagfx_status_t st5; if (translate("int64_rmw.air.bc", &s5, &n5, &st5)) return 1;
+        CHECK(st5 == LAGFX_OK && s5, "rmw translate %d", (int)st5);
+        uint8_t *l5 = NULL; size_t ln5 = 0; CHECK(lagfx_spv_lower_int64(s5, n5, &l5, &ln5, why, sizeof why) == 1, "rmw lowering: %s", why);
+        buf_t o5; if (mkbuf(&o5, 256 * 8)) return 1; uint64_t *q = (uint64_t *)(void *)o5.p;
+        for (uint64_t i = 0; i < 256; i++) q[i] = 0xFEDCBA9876543210ull * (i + 1u) + (i << 33);
+        CHECK(run(l5, ln5, &o5, 4, 64, 0) == 0, "rmw run");
+        int bad5 = 0; for (uint64_t i = 0; i < 256; i++) { uint64_t in = 0xFEDCBA9876543210ull * (i + 1u) + (i << 33); if (q[i] != in * 3u + i) bad5++; }
+        CHECK(bad5 == 0, "i64 load/store round trip: %d mismatches", bad5);
+        printf("PASS: 64-bit values LOADED from a buffer (including high words) survive load -> arithmetic -> store\n"); }
     /* a module with no 64-bit integers is returned untouched (rc 0) */
     {   uint8_t *s2; size_t n2; lagfx_status_t st2; if (translate("threadgroup_arg_i32.air.bc", &s2, &n2, &st2)) return 1;
         lagfx_air2spv_set_narrow_int64(1); free(s2); s2 = NULL;

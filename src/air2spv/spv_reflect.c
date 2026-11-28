@@ -542,28 +542,34 @@ static const uint32_t *wg_words(const uint8_t *spv, size_t len, size_t *nw) {
 /* Size and natural alignment of a Workgroup-storage type. Scalars: width/8; vectors: component size times count, aligned to the power of two >= their size (3-vectors round up to 4); arrays: element
  * size times length (the element's size is its own stride, no extra padding); structs: members laid out in order at their natural alignment, the total rounded up to the largest member alignment.
  * Drivers may add more (std430 rounding of an array stride, 16-byte vec3): the figure is an estimate that includes alignment padding, not a guarantee of a device's allocation. */
+/* checked arithmetic: any size past 2^40 bytes (far beyond every device limit) or an overflow makes the type unsizeable, i.e. the caller refuses */
+#define WG_MAX (1ull << 40)
+static bool wg_mul(uint64_t a, uint64_t b, uint64_t *r) { return !__builtin_mul_overflow(a, b, r) && *r <= WG_MAX; }
+static bool wg_add(uint64_t a, uint64_t b, uint64_t *r) { return !__builtin_add_overflow(a, b, r) && *r <= WG_MAX; }
+static bool wg_round(uint64_t v, uint64_t a, uint64_t *r) { uint64_t t; return a && wg_add(v, a - 1u, &t) && (*r = t / a * a, true); }
 static uint64_t wg_ceil_pow2(uint64_t v) { uint64_t p = 1; while (p < v) p <<= 1; return p; }
 static bool wg_size_of(const wg_info_t *in, const uint32_t *w, uint32_t t, const uint32_t (*spec)[2], size_t nspec, uint64_t *out, uint64_t *align, int depth) {
     if (t == 0 || t >= MAXID || depth > 8) return false;
     uint64_t al = 1;
     switch (in->kind[t]) {
     case 1: case 2: if (in->a[t] == 0 || in->a[t] > 64u || (in->a[t] & 7u)) return false; *out = in->a[t] / 8u; if (align) *align = *out; return true;
-    case 3: { uint64_t e, ea; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, &ea, depth + 1)) return false; *out = e * in->b[t]; if (align) *align = wg_ceil_pow2(*out); return true; }
+    case 3: { uint64_t e, ea; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, &ea, depth + 1)) return false; if (!wg_mul(e, in->b[t], out)) return false; if (align) *align = wg_ceil_pow2(*out); return true; }
     case 4: {
         uint64_t e, ea; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, &ea, depth + 1)) return false;
         uint32_t lid = in->b[t]; if (lid >= MAXID || !in->has_val[lid]) return false;
         uint32_t n = in->val[lid];
         if (in->is_spec[lid]) for (size_t i = 0; i < nspec; i++) if (spec[i][0] == in->spec_id[lid]) n = spec[i][1];
         if (n == 0) return false;                 /* a zero-length array is not a valid type */
-        *out = e * n; if (align) *align = ea; return true;
+        uint64_t stride; if (!wg_round(e, ea, &stride) || !wg_mul(stride, n, out)) return false;   /* the element stride is its size rounded up to its alignment (vec3 -> 16) */
+        if (align) *align = ea; return true;
     }
     case 5: {
         uint64_t off = 0;
         for (uint32_t i = 0; i < in->nmembers[t]; i++) {
             uint64_t e, ea; if (!wg_size_of(in, w, w[in->members_at[t] + i], spec, nspec, &e, &ea, depth + 1)) return false;
-            off = (off + ea - 1u) / ea * ea + e; if (ea > al) al = ea;
+            uint64_t o2; if (!wg_round(off, ea, &o2) || !wg_add(o2, e, &off)) return false; if (ea > al) al = ea;
         }
-        *out = (off + al - 1u) / al * al; if (align) *align = al; return true;
+        if (!wg_round(off, al, out)) return false; if (align) *align = al; return true;
     }
     default: return false;
     }
@@ -606,7 +612,7 @@ bool lagfx_spv_reflect_workgroup_bytes(const uint8_t *spv, size_t spv_len, const
     for (size_t k = 0; ok && k < nv; k++) {   /* vars[] holds the RESULT TYPE (pointer) ids: recorded as o[0] of OpVariable */
         uint64_t s; uint32_t pt = vars[k];
         if (pt >= MAXID || in->kind[pt] != 6 || !wg_size_of(in, w, in->a[pt], spec, nspec, &s, NULL, 0)) { ok = false; break; }
-        total += s;
+        if (!wg_add(total, s, &total)) { ok = false; break; }
     }
     free(in);
     if (ok) *bytes = total;

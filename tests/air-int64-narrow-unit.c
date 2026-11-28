@@ -11,6 +11,12 @@
 #include <stdlib.h>
 #include <string.h>
 
+static int has_int64_cap(const uint8_t *b, size_t n) {
+    const uint32_t *w = (const uint32_t *)(const void *)b;
+    for (size_t i = 5; i < n / 4;) { uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu; if (!wc) return 0; if (op == 17 && w[i + 1] == 11u) return 1; i += wc; }
+    return 0;
+}
+
 static int fails;
 #define CHECK(c, ...) do { if (!(c)) { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 
@@ -74,7 +80,12 @@ static void sweep(int strict_atomics, int have_val) {
     {   /* a fragment/vertex function refused for 64-bit data must FAIL the translation: it used to fall back to the flat-colour reference stub (a red fragment) and look 'narrowed' */
         size_t bn = 0; uint8_t *bc = slurp(SRCDIR "/tests/fixtures/rt_bits32_fragment.air.bc", &bn); lagfx_air_module_t *mm = NULL; uint8_t *sp = NULL; size_t sn = 0;
         CHECK(bc && lagfx_air_module_open(bc, bn, &mm) == LAGFX_OK, "rt_bits32 fixture");
-        if (mm) { lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &sp, &sn); lagfx_air2spv_set_narrow_int64(0); CHECK(rr != 0 && !sp, "refused 64-bit fragment fell back to a stub (status %d)", rr); free(sp); lagfx_air_module_free(mm); }
+        if (mm) {
+            lagfx_air2spv_set_narrow_int64(0); int r0 = lagfx_air2spv_translate_module(mm, &sp, &sn); uint8_t *s1 = NULL; size_t n1 = 0;
+            lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &s1, &n1); lagfx_air2spv_set_narrow_int64(0);
+            /* either refused, or translated by the Int64 LOWERING: no Int64 capability and at least as large as the unnarrowed translation (a reference stub is far smaller) */
+            CHECK(rr != 0 ? !s1 : (r0 == 0 && s1 && !has_int64_cap(s1, n1) && n1 >= sn), "refused 64-bit fragment fell back to a stub (status %d, %zu vs %zu bytes)", rr, n1, sn);
+            free(sp); free(s1); lagfx_air_module_free(mm); }
         free(bc);
     }
     {   /* overflow past 32 bits that is OBSERVED (compare / float convert / equality) must be refused; the same IR translates without narrowing */
@@ -87,7 +98,8 @@ static void sweep(int strict_atomics, int have_val) {
             if (mm) {
                 lagfx_air2spv_set_narrow_int64(0); CHECK(lagfx_air2spv_translate_module(mm, &s0, &n0) == 0 && s0, "%s: must translate without narrowing", ov[k].f);
                 lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &s1, &n1); lagfx_air2spv_set_narrow_int64(0);
-                CHECK(rr != 0 && !s1, "%s: overflow %s must be refused when narrowed (status %d)", ov[k].f, ov[k].why, rr);
+                /* narrowing cannot represent it: refused, or lowered to word pairs (no Int64 capability, not smaller than the wide translation); a float conversion is still refused */
+                CHECK(rr != 0 ? !s1 : (k != 1u && s1 && !has_int64_cap(s1, n1) && n1 >= n0), "%s: overflow %s must be refused or lowered when narrowed (status %d)", ov[k].f, ov[k].why, rr);
                 free(s0); free(s1); lagfx_air_module_free(mm);
             }
             free(bc);

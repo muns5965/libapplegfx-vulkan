@@ -9,7 +9,7 @@
  *
  *   lowered:   OpConstant / OpConstantNull / OpUndef, OpIAdd, OpISub, OpIMul, OpSNegate, OpBitwiseAnd / Or / Xor, OpNot, OpShiftLeftLogical / RightLogical / RightArithmetic (amount = low 6 bits),
  *              OpIEqual / INotEqual / U|S GreaterThan(Equal) / LessThan(Equal), OpSelect, OpUConvert / OpSConvert (to / from 8..32 bit), OpPhi, OpLoad / OpStore, OpCopyObject,
- *              function parameters / calls / returns, pointer types to any of these, and 64-bit access-chain INDICES (the low word is the index: an index >= 2^32 is out of range anyway)
+ *              function parameters / calls / returns, pointer types to any of these, and 64-bit access-chain INDICES (index: low word when the high word is 0, else 0xFFFFFFFF, i.e. still out of range - never wrapped onto another element)
  *   refused:   OpUDiv / SDiv / UMod / SRem / SMod, conversions to or from floating point, OpBitcast, bit counting, atomics, vectors of 64-bit integers, OpSpecConstant of a 64-bit integer,
  *              and any other instruction that has a 64-bit integer operand or result. The pass then returns -1 with a reason; it never emits a module it did not fully lower.
  */

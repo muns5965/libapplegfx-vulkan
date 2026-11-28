@@ -9,7 +9,7 @@ enum {
     OP_UNDEF = 1, OP_NAME = 5, OP_CAPABILITY = 17, OP_TYPE_BOOL = 20, OP_TYPE_INT = 21, OP_TYPE_FLOAT = 22, OP_TYPE_POINTER = 32, OP_TYPE_VECTOR = 23, OP_TYPE_MATRIX = 24, OP_TYPE_ARRAY = 28, OP_TYPE_STRUCT = 30,
     OP_CONSTANT = 43, OP_CONSTANT_COMPOSITE = 44, OP_CONSTANT_NULL = 46, OP_SPEC_CONSTANT = 50, OP_FUNCTION_PARAMETER = 55, OP_FUNCTION_CALL = 57, OP_VARIABLE = 59, OP_LOAD = 61, OP_STORE = 62,
     OP_ACCESS_CHAIN = 65, OP_IN_BOUNDS_ACCESS_CHAIN = 66, OP_PTR_ACCESS_CHAIN = 67, OP_IN_BOUNDS_PTR_ACCESS_CHAIN = 70,
-    OP_COMPOSITE_CONSTRUCT = 80, OP_COMPOSITE_EXTRACT = 81, OP_COMPOSITE_INSERT = 82, OP_COPY_OBJECT = 83, OP_U_CONVERT = 113, OP_S_CONVERT = 114,
+    OP_VECTOR_EXTRACT_DYNAMIC = 77, OP_VECTOR_INSERT_DYNAMIC = 78, OP_COMPOSITE_CONSTRUCT = 80, OP_COMPOSITE_EXTRACT = 81, OP_COMPOSITE_INSERT = 82, OP_COPY_OBJECT = 83, OP_U_CONVERT = 113, OP_S_CONVERT = 114,
     OP_S_NEGATE = 126, OP_I_ADD = 128, OP_I_SUB = 130, OP_I_MUL = 132, OP_U_MUL_EXTENDED = 151, OP_SELECT = 169, OP_PHI = 245, OP_RETURN_VALUE = 254,
     OP_LOGICAL_OR = 166, OP_LOGICAL_AND = 167, OP_I_EQUAL = 170, OP_I_NOT_EQUAL = 171, OP_UGT = 172, OP_SGT = 173, OP_UGE = 174, OP_SGE = 175, OP_ULT = 176, OP_SLT = 177, OP_ULE = 178, OP_SLE = 179,
     OP_SHR_LOGICAL = 194, OP_SHR_ARITH = 195, OP_SHL = 196, OP_BIT_OR = 197, OP_BIT_XOR = 198, OP_BIT_AND = 199, OP_NOT = 200,
@@ -237,10 +237,23 @@ int lagfx_spv_lower_int64(const uint8_t *in, size_t in_len, uint8_t **out, size_
                 else { uint32_t x[3] = { rty, o[1], lo }; wins(&l.o, OP_U_CONVERT, x, 3); }
             } else goto generic;
             break;
+        case OP_VECTOR_EXTRACT_DYNAMIC: case OP_VECTOR_INSERT_DYNAMIC: {   /* a 64-bit dynamic index: the same high-word guard as access chains (out of range stays out of range) */
+            uint32_t nw3[8]; const uint32_t ix = op == OP_VECTOR_EXTRACT_DYNAMIC ? 4u : 5u;
+            if (wc > 8u || wc <= ix || res64) { fail(&l, "unsupported 64-bit integer operation (SPIR-V opcode %u)", op); break; }
+            memcpy(nw3, &l.w[i], wc * 4u);
+            if (is64(&l, nw3[ix])) { uint32_t idx = nw3[ix], lo = Ex(&l, idx, 0), hi = Ex(&l, idx, 1); nw3[ix] = Sel(&l, B(&l, OP_I_EQUAL, hi, l.c0), lo, nid_all_ones(&l)); }
+            for (uint32_t k = 0; k < wc; k++) wput(&l.o, nw3[k]);
+            break;
+        }
         case OP_ACCESS_CHAIN: case OP_IN_BOUNDS_ACCESS_CHAIN: case OP_PTR_ACCESS_CHAIN: case OP_IN_BOUNDS_PTR_ACCESS_CHAIN: {
             uint32_t nw2[32]; if (wc > 32u) { fail(&l, "access chain too long (id %u)", o[1]); break; }
             memcpy(nw2, &l.w[i], wc * 4u);
-            for (uint32_t k = 4; k < wc; k++) if (is64(&l, nw2[k])) nw2[k] = Ex(&l, nw2[k], 0);   /* the low word is the index */
+            for (uint32_t k = 4; k < wc; k++) if (is64(&l, nw2[k])) {
+                /* a 64-bit index with a non-zero high word is out of range for any buffer (< 2^32 bytes); keeping only the low word would wrap it onto a DIFFERENT valid element.
+                 * So it becomes 0xFFFFFFFF (still out of range: the driver's robust-access rules apply, as for the original index). */
+                uint32_t idx = nw2[k], lo = Ex(&l, idx, 0), hi = Ex(&l, idx, 1);
+                nw2[k] = Sel(&l, B(&l, OP_I_EQUAL, hi, l.c0), lo, nid_all_ones(&l));
+            }
             if (l.X && nw2[1] == l.I64) nw2[1] = l.X;
             for (uint32_t k = 0; k < wc; k++) wput(&l.o, nw2[k]);
             break;
