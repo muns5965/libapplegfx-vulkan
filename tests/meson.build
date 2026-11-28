@@ -1722,6 +1722,17 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-threadgroup-arg-lavapipe.c')
   test('threadgroup [[threadgroup(n)]] arguments: translate + execute vs CPU model (lavapipe)', tga_test, timeout : 120)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'air2spv-int64-lower-lavapipe.c') and vulkan_dep.found()
+  i64l_test = executable('air2spv-int64-lower-lavapipe',
+    'air2spv-int64-lower-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"', '-D_GNU_SOURCE'],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('Int64 lowering (uvec2 words): translate + lower + execute without shaderInt64 vs CPU u64 model (lavapipe)', i64l_test, timeout : 120)
+endif
+
 # Tile kernel subgroup plan (pure decision table; the Adreno 64..128 range is emulated as logical 32-lane groups in a pinned subgroup).
 if fs.is_file(meson.current_source_dir() / 'tile-simd-plan-unit.c') and vulkan_dep.found()
   tsp_test = executable('tile-simd-plan-unit',

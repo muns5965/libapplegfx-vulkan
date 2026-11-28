@@ -203,6 +203,10 @@ void lagfx_air2spv_atomic_totals(lagfx_atomic_totals_t *out);
 /* Int64 narrowing for devices without shaderInt64 (process-wide, default off): every LLVM i64 is translated as a 32-bit integer (index / address arithmetic); a module with genuine
  * 64-bit data (64-bit load / store / atomic / bit-count helpers) is refused (LAGFX_ERR_PROTOCOL). lagfx_air2spv_last_narrowed_int64(): the last translation of this thread narrowed an i64. */
 void lagfx_air2spv_set_narrow_int64(int on);
+/* this thread only: translate with 64-bit integers kept wide even while the global narrowing mode is on (the caller then lowers them with lagfx_spv_lower_int64) */
+void lagfx_air2spv_force_wide_int64_thread(int on);
+/* re-install the narrowing refusal reason of the failed first attempt after a retry (so callers still see why narrowing was refused) */
+void lagfx_air2spv_restore_narrow_refusal(const char *why);
 bool lagfx_air2spv_last_narrowed_int64(void);
 const char *lagfx_air2spv_last_narrow_refusal(void);   /* why the last translation was refused while narrowing ("" if it was not) */
 void lagfx_air2spv_set_atomic_lenient(int mode);   /* tests: 1 / 0 force lenient on / off, -1 back to the LAGFX_ATOMIC_LENIENT environment (default off) */

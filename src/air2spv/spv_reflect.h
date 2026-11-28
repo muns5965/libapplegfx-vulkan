@@ -68,9 +68,12 @@ size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
 typedef struct { uint32_t metal_index, elem_bytes, spec_id; } lagfx_spv_tgarg_t;
 size_t lagfx_spv_reflect_threadgroup_args(const uint8_t *spv, size_t spv_len, lagfx_spv_tgarg_t *out, size_t cap);
 /* Total bytes of Workgroup-storage-class variables (static threadgroup statics + threadgroup arguments), with the specialization-constant overrides `spec[i] = {SpecId, value}` applied to
- * array lengths. false when a Workgroup variable's type cannot be sized (the caller must then not trust a limit check). Scalars / vectors / arrays / structs without padding: a LOWER
- * bound of what a driver allocates. */
+ * array lengths. false when a Workgroup variable's type cannot be sized, an array length is 0, or the module has more than 256 Workgroup variables (the caller must then not trust a limit check; an incomplete total
+ * is never returned). Members are laid out at natural alignment; a driver may round further, so this is an estimate, not a guarantee. */
 bool lagfx_spv_reflect_workgroup_bytes(const uint8_t *spv, size_t spv_len, const uint32_t (*spec)[2], size_t nspec, uint64_t *bytes);
+
+/* Default value of the specialization constant with SpecId `spec_id` declared by the module (OpSpecConstant); false when the module declares none. */
+bool lagfx_spv_reflect_spec_default(const uint8_t *spv, size_t spv_len, uint32_t spec_id, uint32_t *value);
 
 /* A constexpr sampler of the module: the Binding of its sampler variable and the raw i64 sampler word of the AIR (decode with lagfx_constexpr_sampler_decode). The
  * translator names such variables "lagfx.cxs.<16 hex>" (OpName; LAGFX_CXS_NAME_PREFIX). Returns the TOTAL found; writes up to `cap` (ascending id order). */

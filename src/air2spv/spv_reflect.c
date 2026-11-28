@@ -539,19 +539,32 @@ static const uint32_t *wg_words(const uint8_t *spv, size_t len, size_t *nw) {
     *nw = len / 4u; return (const uint32_t *)(const void *)spv;
 }
 
-static bool wg_size_of(const wg_info_t *in, const uint32_t *w, uint32_t t, const uint32_t (*spec)[2], size_t nspec, uint64_t *out, int depth) {
+/* Size and natural alignment of a Workgroup-storage type. Scalars: width/8; vectors: component size times count, aligned to the power of two >= their size (3-vectors round up to 4); arrays: element
+ * size times length (the element's size is its own stride, no extra padding); structs: members laid out in order at their natural alignment, the total rounded up to the largest member alignment.
+ * Drivers may add more (std430 rounding of an array stride, 16-byte vec3): the figure is an estimate that includes alignment padding, not a guarantee of a device's allocation. */
+static uint64_t wg_ceil_pow2(uint64_t v) { uint64_t p = 1; while (p < v) p <<= 1; return p; }
+static bool wg_size_of(const wg_info_t *in, const uint32_t *w, uint32_t t, const uint32_t (*spec)[2], size_t nspec, uint64_t *out, uint64_t *align, int depth) {
     if (t == 0 || t >= MAXID || depth > 8) return false;
+    uint64_t al = 1;
     switch (in->kind[t]) {
-    case 1: case 2: if (in->a[t] == 0 || in->a[t] > 64u || (in->a[t] & 7u)) return false; *out = in->a[t] / 8u; return true;
-    case 3: { uint64_t e; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, depth + 1)) return false; *out = e * in->b[t]; return true; }
+    case 1: case 2: if (in->a[t] == 0 || in->a[t] > 64u || (in->a[t] & 7u)) return false; *out = in->a[t] / 8u; if (align) *align = *out; return true;
+    case 3: { uint64_t e, ea; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, &ea, depth + 1)) return false; *out = e * in->b[t]; if (align) *align = wg_ceil_pow2(*out); return true; }
     case 4: {
-        uint64_t e; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, depth + 1)) return false;
+        uint64_t e, ea; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, &ea, depth + 1)) return false;
         uint32_t lid = in->b[t]; if (lid >= MAXID || !in->has_val[lid]) return false;
         uint32_t n = in->val[lid];
         if (in->is_spec[lid]) for (size_t i = 0; i < nspec; i++) if (spec[i][0] == in->spec_id[lid]) n = spec[i][1];
-        *out = e * n; return true;
+        if (n == 0) return false;                 /* a zero-length array is not a valid type */
+        *out = e * n; if (align) *align = ea; return true;
     }
-    case 5: { uint64_t sum = 0; for (uint32_t i = 0; i < in->nmembers[t]; i++) { uint64_t e; if (!wg_size_of(in, w, w[in->members_at[t] + i], spec, nspec, &e, depth + 1)) return false; sum += e; } *out = sum; return true; }
+    case 5: {
+        uint64_t off = 0;
+        for (uint32_t i = 0; i < in->nmembers[t]; i++) {
+            uint64_t e, ea; if (!wg_size_of(in, w, w[in->members_at[t] + i], spec, nspec, &e, &ea, depth + 1)) return false;
+            off = (off + ea - 1u) / ea * ea + e; if (ea > al) al = ea;
+        }
+        *out = (off + al - 1u) / al * al; if (align) *align = al; return true;
+    }
     default: return false;
     }
 }
@@ -576,7 +589,7 @@ static bool wg_scan(const uint8_t *spv, size_t len, wg_info_t *in, uint32_t *var
         case 43: if (wc >= 4 && o[1] < MAXID) { in->has_val[o[1]] = 1; in->val[o[1]] = o[2]; } break;
         case 50: if (wc >= 4 && o[1] < MAXID) { in->has_val[o[1]] = 1; in->val[o[1]] = o[2]; in->is_spec[o[1]] = 1; } break;
         case 71: if (wc >= 4 && o[0] < MAXID && o[1] == 1u /* SpecId */) in->spec_id[o[0]] = o[2]; break;
-        case 59: if (wc >= 4 && o[0] < MAXID && o[2] == 4u /* Workgroup */ && *nvars < vcap) vars[(*nvars)++] = o[0]; break;
+        case 59: if (wc >= 4 && o[0] < MAXID && o[2] == 4u /* Workgroup */ ) { if (*nvars >= vcap) return false; vars[(*nvars)++] = o[0]; } break;
         default: break;
         }
         i += wc;
@@ -592,7 +605,7 @@ bool lagfx_spv_reflect_workgroup_bytes(const uint8_t *spv, size_t spv_len, const
     uint64_t total = 0;
     for (size_t k = 0; ok && k < nv; k++) {   /* vars[] holds the RESULT TYPE (pointer) ids: recorded as o[0] of OpVariable */
         uint64_t s; uint32_t pt = vars[k];
-        if (pt >= MAXID || in->kind[pt] != 6 || !wg_size_of(in, w, in->a[pt], spec, nspec, &s, 0)) { ok = false; break; }
+        if (pt >= MAXID || in->kind[pt] != 6 || !wg_size_of(in, w, in->a[pt], spec, nspec, &s, NULL, 0)) { ok = false; break; }
         total += s;
     }
     free(in);
@@ -614,4 +627,14 @@ size_t lagfx_spv_reflect_threadgroup_args(const uint8_t *spv, size_t spv_len, la
     }
     free(in);
     return total;
+}
+
+bool lagfx_spv_reflect_spec_default(const uint8_t *spv, size_t spv_len, uint32_t spec_id, uint32_t *value) {
+    wg_info_t *in = calloc(1, sizeof *in); uint32_t vars[256]; size_t nv = 0; bool found = false;
+    if (!in) return false;
+    if (wg_scan(spv, spv_len, in, vars, &nv, 256) || nv >= 256u) {
+        for (uint32_t id = 1; id < MAXID && !found; id++) if (in->is_spec[id] && in->spec_id[id] == spec_id && in->has_val[id]) { if (value) *value = in->val[id]; found = true; }
+    }
+    free(in);
+    return found;
 }

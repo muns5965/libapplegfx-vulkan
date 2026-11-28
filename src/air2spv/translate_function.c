@@ -652,7 +652,10 @@ static _Thread_local bool t_narrow_used;       /* at least one i64 was narrowed 
 static _Thread_local bool t_narrow_unsafe;     /* genuine 64-bit data seen while narrowing: module refused */
 static _Thread_local char t_narrow_reason[64]; /* first reason */
 static void narrow_unsafe(const char *why) { if (!t_narrow_unsafe) snprintf(t_narrow_reason, sizeof t_narrow_reason, "%s", why); t_narrow_unsafe = true; }
+void lagfx_air2spv_restore_narrow_refusal(const char *why) { snprintf(t_narrow_reason, sizeof t_narrow_reason, "%s", why ? why : ""); t_narrow_unsafe = why && why[0]; }
 const char *lagfx_air2spv_last_narrow_refusal(void) { return t_narrow_unsafe ? t_narrow_reason : ""; }
+static _Thread_local int t_force_wide64;
+void lagfx_air2spv_force_wide_int64_thread(int on) { t_force_wide64 = on ? 1 : 0; }
 void lagfx_air2spv_set_narrow_int64(int on) { atomic_store(&g_narrow_i64_global, on ? 1 : 0); }
 bool lagfx_air2spv_last_narrowed_int64(void) { return t_narrow_used; }
 static uint32_t narrow_w(uint32_t w) { return (w == 64u && t_narrow64) ? 32u : w; }
@@ -11026,7 +11029,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     *out_size_bytes = 0u;
 
     xlate_ctx_t c = {0};
-    t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0; nr_reset();
+    t_narrow64 = !t_force_wide64 && atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0; nr_reset();
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
     t_unsup_tg.n = 0; t_unsup_tg.first[0] = 0;
     t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;

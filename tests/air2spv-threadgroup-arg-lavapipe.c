@@ -146,6 +146,9 @@ static int check_two(void) {
     const uint32_t dup[6][2] = { { 0, 64 }, { 1, 1 }, { 2, 1 }, { 5, 64 }, { 8, 64 }, { 5, 32 } };
     CHECK(!lagfx_cx_pipe_create_ex(g_dev, w, sn, NULL, &bd, 1, 0, nob, 4, &pp.limits), "a threadgroup argument without a length must not build (no silent default)");
     CHECK(!lagfx_cx_pipe_create_ex(g_dev, w, sn, NULL, &bd, 1, 0, dup, 6, &pp.limits), "a duplicate SpecId must be refused");
+    {   const uint32_t zlen[5][2] = { { 0, 64 }, { 1, 1 }, { 2, 1 }, { 5, 0 }, { 8, 64 } }, zwg[5][2] = { { 0, 0 }, { 1, 1 }, { 2, 1 }, { 5, 64 }, { 8, 64 } };
+        CHECK(!lagfx_cx_pipe_create_ex(g_dev, w, sn, NULL, &bd, 1, 0, zlen, 5, &pp.limits), "a threadgroup length of 0 must be refused");
+        CHECK(!lagfx_cx_pipe_create_ex(g_dev, w, sn, NULL, &bd, 1, 0, zwg, 5, &pp.limits), "a workgroup size of 0 must be refused"); }
     VkPhysicalDeviceLimits small = pp.limits; small.maxComputeSharedMemorySize = 500;
     CHECK(!lagfx_cx_pipe_create_ex(g_dev, w, sn, NULL, &bd, 1, 0, full, 5, &small), "512 bytes of workgroup memory on a 500-byte device must be refused");
     VkPhysicalDeviceLimits tiny = pp.limits; tiny.maxComputeWorkGroupInvocations = 32;

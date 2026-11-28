@@ -15,6 +15,7 @@
 
 #include "translate.h"
 #include "msaa_air_scan.h"
+#include "spv_lower_int64.h"
 #include <string.h>
 #include "emit_position.h"
 #include "emit_render_target.h"
@@ -469,6 +470,28 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
             if (*out_blob) { free(*out_blob); *out_blob = NULL; *out_size_bytes = 0u; }
             if (lagfx_air2spv_last_unlowered_refused()) {   /* refused BY NAME because a call has no lowering: no reference-stub fallback (a stub would silently draw the wrong thing) */
                 LAGFX_WARN("air2spv: translate_function refused (st=%d): an unlowered call; no stub fallback", (int)bst);
+                return LAGFX_ERR_PROTOCOL;
+            }
+            if (lagfx_air2spv_last_narrow_refusal()[0]) {
+                /* narrowing to 32 bits was refused: translate again with the 64-bit integers kept wide and lower them to 32-bit word pairs (semantics preserved, unlike narrowing) */
+                char nr[160]; snprintf(nr, sizeof nr, "%s", lagfx_air2spv_last_narrow_refusal());
+                lagfx_air2spv_force_wide_int64_thread(1);
+                uint8_t *wide = NULL; size_t wide_n = 0;
+                lagfx_status_t wst = lagfx_air2spv_translate_function_ex(m, body_fn, xs, have_own ? &own : NULL, (have_own && xs != LAGFX_XLATE_STAGE_COMPUTE) ? vs_out : NULL, &wide, &wide_n);
+                lagfx_air2spv_force_wide_int64_thread(0);
+                if (wst == LAGFX_OK && wide) {
+                    uint8_t *low = NULL; size_t low_n = 0; char why[160];
+                    int lr = lagfx_spv_lower_int64(wide, wide_n, &low, &low_n, why, sizeof why);
+                    free(wide);
+                    if (lr == 1 && low && lagfx_spv_declare_used_caps(&low, &low_n)) {
+                        LAGFX_LOG("air2spv: narrowing refused (%s); 64-bit integers lowered to 32-bit word pairs instead", nr);
+                        *out_blob = low; *out_size_bytes = low_n; return LAGFX_OK;
+                    }
+                    if (lr == 1) free(low);
+                    if (lr == -1) LAGFX_WARN("air2spv: int64 lowering refused after narrowing refusal (%s): %s", nr, why);
+                } else free(wide);
+                lagfx_air2spv_restore_narrow_refusal(nr);
+                LAGFX_WARN("air2spv: translate_function refused (st=%d): 64-bit data (%s) cannot be narrowed or lowered; no stub fallback", (int)bst, nr);
                 return LAGFX_ERR_PROTOCOL;
             }
             if (lagfx_air2spv_last_narrow_refusal()[0]) {   /* 64-bit data on a device without shaderInt64: NOT replaced by the reference stub (it would draw a flat colour instead of the shader); the caller sees a failed translation */

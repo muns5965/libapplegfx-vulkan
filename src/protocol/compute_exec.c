@@ -37,14 +37,18 @@ lagfx_cx_pipe_t *lagfx_cx_pipe_create_ex(VkDevice dev, const uint32_t *spv, size
     for (uint32_t i = 0; i < nbind; i++) for (uint32_t j = i + 1; j < nbind; j++) if (bind[i].binding == bind[j].binding) return NULL;   /* one descriptor per binding */
     if ((nspec && !spec) || nspec > 64u) return NULL;
     for (uint32_t i = 0; i < nspec; i++) for (uint32_t j = i + 1; j < nspec; j++) if (spec[i][0] == spec[j][0]) return NULL;   /* one value per SpecId */
-    {   /* every threadgroup argument of the kernel needs an explicit length */
+    for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] < 3u && spec[i][1] == 0u) return NULL;   /* a workgroup size of 0 */
+    {   /* every threadgroup argument of the kernel needs an explicit length (and 0 is not a length) */
         lagfx_spv_tgarg_t tg[32]; const size_t ntg = lagfx_spv_reflect_threadgroup_args((const uint8_t *)spv, spv_bytes, tg, 32);
         if (ntg > 32u) return NULL;
-        for (size_t t = 0; t < ntg; t++) { bool given = false; for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] == tg[t].spec_id) given = true; if (!given) return NULL; }
+        for (size_t t = 0; t < ntg; t++) { bool given = false; for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] == tg[t].spec_id) given = true; if (!given) return NULL; for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] == tg[t].spec_id && spec[i][1] == 0u) return NULL; }
         if (lim) {   /* shared memory and workgroup size against the device */
             uint64_t bytes = 0;
             if (!lagfx_spv_reflect_workgroup_bytes((const uint8_t *)spv, spv_bytes, spec, nspec, &bytes) || bytes > lim->maxComputeSharedMemorySize) return NULL;
             uint64_t wg[3] = { 1, 1, 1 }; bool any = false;
+            for (uint32_t q = 0; q < 3u; q++) {   /* an axis the caller does not specialize keeps the module's own default (not an assumed 1) */
+                uint32_t dv = 0; if (lagfx_spv_reflect_spec_default((const uint8_t *)spv, spv_bytes, q, &dv)) { wg[q] = dv; any = true; }
+            }
             for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] < 3u) { wg[spec[i][0]] = spec[i][1]; any = true; }
             if (any) {
                 if (wg[0] > lim->maxComputeWorkGroupSize[0] || wg[1] > lim->maxComputeWorkGroupSize[1] || wg[2] > lim->maxComputeWorkGroupSize[2] || wg[0] * wg[1] * wg[2] > lim->maxComputeWorkGroupInvocations) return NULL;
