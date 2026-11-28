@@ -16,7 +16,20 @@ static lagfx_status_t decode_impl(const uint8_t *desc, size_t len, lagfx_guest_s
     uint32_t list = lagfx_le32(desc), fourcc = lagfx_le32(desc + 4), first = lagfx_le32(desc + 0x60);
     uint64_t alloc = lagfx_le64(desc + 0x18), sw = lagfx_le64(desc + 0x20), sh = lagfx_le64(desc + 0x28), row = lagfx_le64(desc + 0x30);
     uint32_t bpp = fourcc == LAGFX_FOURCC_BGRA ? 4u : (allow_rgha && fourcc == LAGFX_FOURCC_RGHA) ? 8u : 0u;
-    if (!bpp) { LAGFX_WARN("guest surface: fourcc %08x refused (%s)", fourcc, allow_rgha ? "only BGRA / RGhA" : "only BGRA"); return LAGFX_ERR_INVALID_ARG; }
+    if (!bpp) {
+        /* a refused fourcc is logged once per distinct (fourcc, size, row, alloc): the descriptor header is what is needed to implement the format (the 0x34323266 surfaces of the S8 log) */
+        static struct { uint32_t f; uint64_t w, h, r, a; } seen[8]; static unsigned nseen;
+        bool dup = false;
+        for (unsigned k = 0; k < nseen && !dup; k++) dup = seen[k].f == fourcc && seen[k].w == sw && seen[k].h == sh && seen[k].r == row && seen[k].a == alloc;
+        if (!dup && nseen < 8u) {
+            seen[nseen].f = fourcc, seen[nseen].w = sw, seen[nseen].h = sh, seen[nseen].r = row, seen[nseen].a = alloc, nseen++;
+            LAGFX_WARN("guest surface: fourcc %08x refused (%s): %llux%llu row %llu alloc %llu first %u list 0x%x; desc[0x08..0x17]=%08x %08x %08x %08x desc[0x38..0x5f]=%08x %08x %08x %08x %08x %08x %08x %08x %08x %08x", fourcc, allow_rgha ? "only BGRA / RGhA" : "only BGRA",
+                       (unsigned long long)sw, (unsigned long long)sh, (unsigned long long)row, (unsigned long long)alloc, first, list,
+                       lagfx_le32(desc + 8), lagfx_le32(desc + 12), lagfx_le32(desc + 16), lagfx_le32(desc + 20),
+                       lagfx_le32(desc + 0x38), lagfx_le32(desc + 0x3c), lagfx_le32(desc + 0x40), lagfx_le32(desc + 0x44), lagfx_le32(desc + 0x48), lagfx_le32(desc + 0x4c), lagfx_le32(desc + 0x50), lagfx_le32(desc + 0x54), lagfx_le32(desc + 0x58), lagfx_le32(desc + 0x5c));
+        }
+        return LAGFX_ERR_INVALID_ARG;
+    }
     if (!(list & 1u) || !sw || !sh || sw > 8192 || sh > 8192 || row < sw * bpp || row > 0x10000 || alloc > 64ull * 1024 * 1024) return LAGFX_ERR_INVALID_ARG;
     uint64_t length = (alloc + first + 0x3fffull) & ~0x3fffull, npages = length >> LAGFX_SURF_PAGE_SHIFT;
     if (!npages || npages > 4096) return LAGFX_ERR_INVALID_ARG;
