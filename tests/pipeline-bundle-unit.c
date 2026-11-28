@@ -49,6 +49,18 @@ static char *slurp(const char *dir, const char *name, size_t *n) {
 }
 
 int main(void) {
+    {   /* selective capture: LAGFX_AIR_CAPTURE_DIR alone selects the bundle directory (no full dump needed); LAGFX_PIPEFAIL_BUNDLE_DIR still wins */
+        unsetenv("LAGFX_PIPEFAIL_BUNDLE_DIR"); unsetenv("LAGFX_AIR_CAPTURE_DIR");
+        const char *none = lagfx_pipeline_bundle_dir();
+        setenv("LAGFX_AIR_CAPTURE_DIR", "/tmp/air-cap-unit", 1);
+        const char *cap = lagfx_pipeline_bundle_dir();
+        setenv("LAGFX_PIPEFAIL_BUNDLE_DIR", "/tmp/bundle-unit", 1);
+        const char *both = lagfx_pipeline_bundle_dir();
+        CHECK(none == NULL, "no env -> no bundle dir");
+        CHECK(cap && strcmp(cap, "/tmp/air-cap-unit") == 0, "LAGFX_AIR_CAPTURE_DIR selects the dir");
+        CHECK(both && strcmp(both, "/tmp/bundle-unit") == 0, "explicit bundle dir wins");
+        unsetenv("LAGFX_PIPEFAIL_BUNDLE_DIR"); unsetenv("LAGFX_AIR_CAPTURE_DIR");
+    }
     struct lagfx_vk_state *vk = NULL;
     lagfx_device_descriptor_t desc;
     memset(&desc, 0, sizeof desc);

@@ -53,6 +53,8 @@ const char *lagfx_vk_result_name(VkResult r) {
 const char *lagfx_pipeline_bundle_dir(void) {
     const char *d = getenv("LAGFX_PIPEFAIL_BUNDLE_DIR");
     if (d && d[0]) return d;
+    d = getenv("LAGFX_AIR_CAPTURE_DIR");   /* selective capture: failure bundles (+ rejected AIR, arm64_pipeline.c) without the full dump */
+    if (d && d[0]) return d;
     if (lagfx_a64_dump_enabled() && lagfx_a64_dump_dir_fd() >= 0) {   /* the existing dump option: same directory */
         d = getenv("LAGFX_ARM64_DUMP_DIR");
         if (d && d[0]) return d;

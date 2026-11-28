@@ -2058,7 +2058,7 @@ static void probe_swap_image(lagfx_protocol_t *p, uint64_t mapping_id, uint64_t 
         nb++;
         {
             float c0, c1, c2;
-            if (o->bpp == 8u) { uint16_t hr, hg, hb; memcpy(&hr, q, 2); memcpy(&hg, q + 2, 2); memcpy(&hb, q + 4, 2); c0 = probe_half(hr & 0x7fffu), c1 = probe_half(hg & 0x7fffu), c2 = probe_half(hb & 0x7fffu); }
+            if (o->bpp == 8u) { uint16_t hr, hg, hb; memcpy(&hr, q, 2); memcpy(&hg, q + 2, 2); memcpy(&hb, q + 4, 2); c0 = (hr & 0x8000u) ? 0.0f : probe_half(hr), c1 = (hg & 0x8000u) ? 0.0f : probe_half(hg), c2 = (hb & 0x8000u) ? 0.0f : probe_half(hb);   /* negative = shown as 0 (pvg_half.h clamps to [0,1]); NaN/Inf: probe_half caps */ }
             else c0 = q[0] / 255.0f, c1 = q[1] / 255.0f, c2 = q[2] / 255.0f;
             float mv = c0 > c1 ? c0 : c1; if (c2 > mv) mv = c2;
             if (mv >= 0.25f) nbright++;

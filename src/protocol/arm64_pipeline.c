@@ -481,6 +481,7 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     if (st != LAGFX_OK || !*spv || !*sz) {
         const char *why = lagfx_air2spv_last_narrow_refusal();
         const char *dd = getenv("LAGFX_ARM64_DUMP_DIR");
+        if (!dd || !dd[0]) dd = getenv("LAGFX_AIR_CAPTURE_DIR");   /* selective capture (rejected AIR + pipeline-failure bundles only), independent of the full dump option */
         unsigned long long h = (unsigned long long)lagfx_a64_hash64(f->bitcode, f->bitcode_len);
         LAGFX_WARN("arm64 translate: '%s' (bitcode hash %016llx) not translated (status %d%s%s)", f->name, h, (int)st, why[0] ? ", Int64 narrowing refusal: " : "", why);
         if (dd && dd[0] && f->bitcode) {   /* the AIR that failed, named by its content hash (a pipeline ref can be reused by another guest task) */
