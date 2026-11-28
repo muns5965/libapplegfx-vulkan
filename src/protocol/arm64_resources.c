@@ -811,6 +811,7 @@ static void gpu_wrote(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *b) {
 
 static bool lin_pull_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 static bool lin_push_x(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+struct lagfx_vk_state *lagfx_a64_res_vk(lagfx_a64_rexec_t *x) { return x ? x->vk : NULL; }
 VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x) { return x ? x->cb : VK_NULL_HANDLE; }
 
 static void memo_fail(mgr2_t *m, uint32_t task, uint32_t ref, const uint32_t e[3], uint32_t why) {
@@ -1752,6 +1753,30 @@ bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, vo
     }
     if (ok) { memcpy(dst, mp, need); if (w) *w = o->width; if (h) *h = o->height; free_buf(vk, b, bm); }
     return ok;   /* on a timeout the staging buffer is leaked: the copy may still run */
+}
+
+bool lagfx_a64_res_readback_ds(lagfx_protocol_t *p, uint32_t task, uint32_t ref, uint32_t aspect, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
+    mgr2_t *m = p ? p->a64_res : NULL;
+    struct lagfx_vk_state *vk = vk_of(p);
+    lagfx_a64_obj_t *o = m ? obj_find(m, task, ref) : NULL;
+    if (!vk || !o || o->kind != LAGFX_A64_TEXTURE || !o->ds_aspects || !(o->ds_aspects & aspect) || (aspect != 1u && aspect != 2u) || o->samples_req > 1u || BUSY(m)) return false;
+    if (aspect == 1u && o->format != VK_FORMAT_D32_SFLOAT && o->format != VK_FORMAT_D32_SFLOAT_S8_UINT) return false;
+    const size_t need = (size_t)o->width * o->height * (aspect == 1u ? 4u : 1u);
+    if (!dst || dst_size < need) return false;
+    VkBuffer b; VkDeviceMemory bm; uint8_t *mp;
+    if (!make_buf(vk, need, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &b, &bm, &mp)) return false;
+    VkCommandBuffer cb;
+    bool ok = cb_begin(vk, &cb);
+    if (ok) {
+        VkBufferImageCopy r = { .imageSubresource = { aspect == 1u ? VK_IMAGE_ASPECT_DEPTH_BIT : VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { o->width, o->height, 1 } };
+        lagfx_translate_blit_cmd_buffer_image(cb, b, o->img, &r, false);
+        host_barrier(m, cb);
+        barrier(cb);
+        ok = vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, m, &cb) == LAGFX_A64_DONE;
+        if (cb) lagfx_vk_cmdbuf_free(vk, cb);
+    }
+    if (ok) { memcpy(dst, mp, need); if (w) *w = o->width; if (h) *h = o->height; free_buf(vk, b, bm); }
+    return ok;
 }
 
 /* ---- explicit resource commands (Henge pvg_metal.m synchronize: / invalidate:) ---- */

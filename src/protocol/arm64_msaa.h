@@ -62,10 +62,20 @@ typedef struct {
     lagfx_a64_obj_t *res[4];                   /* resolve targets begun for this pass, by attachment slot (ended at the end of the pass) */
     lagfx_a64_obj_t *copy_src[4];              /* slot's 1x-fallback attachment whose "resolve" is a copy into res[slot] at the end of the pass */
     uint32_t nres;
+    lagfx_a64_obj_t *ds_res;                   /* depth / stencil resolve target begun for this pass (ended with the pass) */
     const char *fail;                          /* EXACT mode: set by lagfx_a64_msaa_color when a resolve the store action requires could not be set up (static string; NULL = fine) */
 } lagfx_a64_msaa_pass_t;
 
 void lagfx_a64_msaa_pass_reset(lagfx_a64_msaa_pass_t *ms);
+
+/* Depth / stencil resolve of a multisampled depth/stencil attachment `dso`. The plan returns NULL when the pass either asks for no resolve (*want = 0) or the resolve can be recorded
+ * (*want = 1, *rt = the resolve texture, *dm / *sm = the Vulkan modes, 0 = that aspect not resolved); otherwise the static reason it cannot (*want = 1): unknown store action, split
+ * depth/stencil resolve textures, missing / mismatched / not attachable target, filter the device cannot do (lagfx_msaa_dsres_choose, same checks as lagfx_vk_ds_resolve_ok). Store action
+ * 2 = resolve, 3 = store and resolve. Both backends: dynamic -> resolveImageView, legacy -> vkCreateRenderPass2 (src/vulkan/render_pass.c). */
+const char *lagfx_a64_msaa_ds_plan(lagfx_a64_rexec_t *x, const lagfx_render_pass_full_desc_t *d, const lagfx_a64_obj_t *dso, int *want, lagfx_a64_obj_t **rt, uint32_t *dm, uint32_t *sm);
+/* Applies the plan: begins the resolve target, fills resolveMode / resolveImageView / resolveImageLayout of dai / sai (through lagfx_msaa_dsres_attachments), remembers it in ms->ds_res.
+ * false = nothing resolved (counted, the attachment stays stored). */
+bool lagfx_a64_msaa_ds_resolve(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms, const lagfx_render_pass_full_desc_t *d, lagfx_a64_obj_t *dso, VkRenderingAttachmentInfo *dai, VkRenderingAttachmentInfo *sai);
 
 /* Reads the records after a tag 26 up to the next tag 26 (or `lim`): tags 0x66 (SetColorStoreAction {u32 action, u32 index}) and 0x96 (SetColorResolveTexture {u32 ref, u32 slot,
  * ...}) are collected by colour index. The payload layouts are those of the x86-era table in render_inner_ops.c; NOT verified on ARM64 [I]. Metal applies the last call, so does this. */

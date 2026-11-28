@@ -16,7 +16,7 @@
 #define MAX_REAL (LAGFX_RENDER_MAX_COLOR + 1u)   /* colours + depth/stencil (the slots of the key) */
 
 /* One attachment of a pass, as far as the pass object cares. All 32-bit members, no padding: keys are compared with memcmp after memset(0). */
-typedef struct { VkFormat fmt; VkSampleCountFlagBits samples; VkImageLayout layout; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; VkImageLayout rlayout; } akey_t;   /* rlayout != 0: resolved into a 1x view of the same format */
+typedef struct { VkFormat fmt; VkSampleCountFlagBits samples; VkImageLayout layout; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; VkImageLayout rlayout; VkResolveModeFlagBits dmode, smode; } akey_t;   /* rlayout != 0: resolved into a 1x view of the same format */
 typedef struct { uint32_t ncolor, has_ds; akey_t a[MAX_REAL]; uint32_t fetch_mask; } rpkey_t;
 
 typedef struct { rpkey_t key; VkRenderPass rp; } rp_ent_t;
@@ -69,6 +69,18 @@ static bool fmt_has_depth(VkFormat f) { return f != VK_FORMAT_S8_UINT; }   /* on
 
 static VkSampleCountFlagBits samples_of(const lagfx_render_attachment_t *a) { return a->samples ? a->samples : VK_SAMPLE_COUNT_1_BIT; }
 
+bool lagfx_vk_ds_resolve_ok(const struct lagfx_vk_state *vk, VkFormat fmt, VkResolveModeFlagBits dm, VkResolveModeFlagBits sm) {
+    if (!vk || !vk->have_ds_resolve) return false;
+    const bool hd = fmt_has_depth(fmt), hs = fmt_has_stencil(fmt);
+    if ((!hd && dm) || (!hs && sm) || (!dm && !sm)) return false;
+    if (dm && ((vk->dsres_depth_modes & dm) != dm || (dm & (dm - 1u)))) return false;      /* one mode, in the supported set */
+    if (sm && ((vk->dsres_stencil_modes & sm) != sm || (sm & (sm - 1u)))) return false;
+    if (hd && hs && dm != sm) {   /* both aspects, different modes (NONE counts as a mode): independentResolve, or independentResolveNone when one of them is NONE */
+        if (!(dm && sm) ? !(vk->dsres_independent_none || vk->dsres_independent) : !vk->dsres_independent) return false;
+    }
+    return true;
+}
+
 static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
     if (!d || d->color_count > LAGFX_RENDER_MAX_COLOR) return false;
     if (need_views && (!d->width || !d->height)) return false;
@@ -86,6 +98,7 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
 
     if (d->has_depth_stencil) {
         if (d->depth_stencil.format == VK_FORMAT_UNDEFINED) return false;
+        if (d->depth_stencil.resolve_view != VK_NULL_HANDLE && samples_of(&d->depth_stencil) == VK_SAMPLE_COUNT_1_BIT) return false;   /* nothing to resolve from a single-sample image */
         if (need_views && d->depth_stencil.view == VK_NULL_HANDLE) return false;
     }
     return true;
@@ -113,7 +126,7 @@ static void make_key(rpkey_t *k, const lagfx_render_desc_t *d, bool compat) {
         if (a->format == VK_FORMAT_UNDEFINED) continue;   /* unused slot: all-zero entry, only its position is part of the key */
         k->a[i] = (akey_t){ a->format, samples_of(a), (d->fetch_mask & (1u << i)) ? VK_IMAGE_LAYOUT_GENERAL : a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   /* never UNDEFINED: not valid for an attachment reference or a LOAD */
                             compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                            compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE, 0 };
+                            compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE, 0, 0, 0 };
         if (!compat && a->resolve_view != VK_NULL_HANDLE) k->a[i].rlayout = a->resolve_layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->resolve_layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     if (d->has_depth_stencil) {
@@ -121,7 +134,11 @@ static void make_key(rpkey_t *k, const lagfx_render_desc_t *d, bool compat) {
         k->has_ds = 1;
         k->a[d->color_count] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                          compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->stencil_load,
-                                         compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, compat ? VK_ATTACHMENT_STORE_OP_STORE : a->stencil_store, 0 };
+                                         compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, compat ? VK_ATTACHMENT_STORE_OP_STORE : a->stencil_store, 0, 0, 0 };
+        if (!compat && a->resolve_view != VK_NULL_HANDLE) {   /* depth / stencil resolve: the resolve attachment's layout and the two modes are part of the pass */
+            k->a[d->color_count].rlayout = a->resolve_layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->resolve_layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
+            k->a[d->color_count].dmode = a->resolve_mode, k->a[d->color_count].smode = a->stencil_resolve_mode;
+        }
     }
 }
 
@@ -157,6 +174,17 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
         rref[i] = (VkAttachmentReference){ na, (VkImageLayout)a->rlayout };
         na++; any_resolve = true;
     }
+    VkAttachmentReference dsres_ref = { VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED };   /* depth / stencil resolve target: the very last attachment (the framebuffer lists its view last) */
+    const bool ds_resolve = k->has_ds && k->a[k->ncolor].rlayout != 0;
+    if (ds_resolve) {
+        const akey_t *a = &k->a[k->ncolor];
+        ad[na] = (VkAttachmentDescription){ .format = a->fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
+                                            .loadOp = a->dmode ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,   /* an aspect that is not resolved (mode NONE) keeps its contents */
+                                            .stencilLoadOp = a->smode ? VK_ATTACHMENT_LOAD_OP_DONT_CARE : VK_ATTACHMENT_LOAD_OP_LOAD, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                            .initialLayout = (VkImageLayout)a->rlayout, .finalLayout = (VkImageLayout)a->rlayout };
+        dsres_ref = (VkAttachmentReference){ na, (VkImageLayout)a->rlayout };
+        na++;
+    }
     VkAttachmentReference iref[LAGFX_RENDER_MAX_COLOR]; uint32_t nin = 0;   /* input attachment k = colour slot k (legacy framebuffer fetch); holes stay UNUSED */
     for (uint32_t i = 0; i < k->ncolor; i++) {
         iref[i] = (VkAttachmentReference){ VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED };
@@ -190,8 +218,38 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
     VkRenderPassCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = na, .pAttachments = ad,
                                   .subpassCount = 1, .pSubpasses = &sp, .dependencyCount = nin ? 3u : 2u, .pDependencies = full };
     VkRenderPass rp = VK_NULL_HANDLE;
-    VkResult vr = vkCreateRenderPass(vk->device, &ci, NULL, &rp);
-    if (vr != VK_SUCCESS) { LAGFX_ERR("render_pass: vkCreateRenderPass failed (%d)", (int)vr); return VK_NULL_HANDLE; }
+    VkResult vr;
+    if (!ds_resolve) vr = vkCreateRenderPass(vk->device, &ci, NULL, &rp);
+    else {
+        /* depth / stencil resolve exists only in VkRenderPassCreateInfo2 (VkSubpassDescriptionDepthStencilResolve): convert the one-subpass pass built above. Only passes that need it take this path. */
+        if (!vk->have_ds_resolve || !vk->create_renderpass2) { LAGFX_ERR("render_pass: depth/stencil resolve requested but the device has no vkCreateRenderPass2 + VK_KHR_depth_stencil_resolve"); return VK_NULL_HANDLE; }
+        VkAttachmentDescription2 ad2[MAX_ATT]; VkAttachmentReference2 cref2[LAGFX_RENDER_MAX_COLOR], rref2[LAGFX_RENDER_MAX_COLOR], iref2[LAGFX_RENDER_MAX_COLOR], dref2 = { 0 }, dsres2 = { 0 };
+        for (uint32_t i = 0; i < na; i++)
+            ad2[i] = (VkAttachmentDescription2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_DESCRIPTION_2, .format = ad[i].format, .samples = ad[i].samples, .loadOp = ad[i].loadOp, .storeOp = ad[i].storeOp,
+                                                 .stencilLoadOp = ad[i].stencilLoadOp, .stencilStoreOp = ad[i].stencilStoreOp, .initialLayout = ad[i].initialLayout, .finalLayout = ad[i].finalLayout };
+        for (uint32_t i = 0; i < k->ncolor; i++) {
+            cref2[i] = (VkAttachmentReference2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = cref[i].attachment, .layout = cref[i].layout, .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
+            rref2[i] = (VkAttachmentReference2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = rref[i].attachment, .layout = rref[i].layout, .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };
+            iref2[i] = (VkAttachmentReference2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = iref[i].attachment, .layout = iref[i].layout, .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT };   /* v2 requires the aspect of an input attachment */
+        }
+        dref2 = (VkAttachmentReference2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = dref.attachment, .layout = dref.layout, .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT };
+        dsres2 = (VkAttachmentReference2){ .sType = VK_STRUCTURE_TYPE_ATTACHMENT_REFERENCE_2, .attachment = dsres_ref.attachment, .layout = dsres_ref.layout, .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT };
+        VkSubpassDescriptionDepthStencilResolve dsr = { .sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_DEPTH_STENCIL_RESOLVE,
+            .depthResolveMode = k->a[k->ncolor].dmode ? k->a[k->ncolor].dmode : VK_RESOLVE_MODE_NONE, .stencilResolveMode = k->a[k->ncolor].smode ? k->a[k->ncolor].smode : VK_RESOLVE_MODE_NONE,
+            .pDepthStencilResolveAttachment = &dsres2 };
+        VkSubpassDescription2 sp2 = { .sType = VK_STRUCTURE_TYPE_SUBPASS_DESCRIPTION_2, .pNext = &dsr, .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      .inputAttachmentCount = nin, .pInputAttachments = nin ? iref2 : NULL, .colorAttachmentCount = k->ncolor, .pColorAttachments = k->ncolor ? cref2 : NULL,
+                                      .pResolveAttachments = any_resolve ? rref2 : NULL, .pDepthStencilAttachment = &dref2 };
+        VkSubpassDependency2 dep2[3];
+        for (uint32_t i = 0; i < ci.dependencyCount; i++)
+            dep2[i] = (VkSubpassDependency2){ .sType = VK_STRUCTURE_TYPE_SUBPASS_DEPENDENCY_2, .srcSubpass = full[i].srcSubpass, .dstSubpass = full[i].dstSubpass, .srcStageMask = full[i].srcStageMask,
+                                              .dstStageMask = full[i].dstStageMask, .srcAccessMask = full[i].srcAccessMask, .dstAccessMask = full[i].dstAccessMask, .dependencyFlags = full[i].dependencyFlags };
+        /* the resolve happens at the end of the subpass (colour-attachment-output stage for the colour resolve, the late fragment-test stage for depth/stencil): the existing subpass->external dependency already covers both stages and the attachments' writes */
+        VkRenderPassCreateInfo2 ci2 = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO_2, .attachmentCount = na, .pAttachments = ad2, .subpassCount = 1, .pSubpasses = &sp2,
+                                        .dependencyCount = ci.dependencyCount, .pDependencies = dep2 };
+        vr = vk->create_renderpass2(vk->device, &ci2, NULL, &rp);
+    }
+    if (vr != VK_SUCCESS) { LAGFX_ERR("render_pass: %s failed (%d)", ds_resolve ? "vkCreateRenderPass2" : "vkCreateRenderPass", (int)vr); return VK_NULL_HANDLE; }
     c->rp[c->n_rp].key = *k; c->rp[c->n_rp].rp = rp; c->n_rp++;
     return rp;
 }
@@ -231,11 +289,13 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
         if (fmt_has_depth(a->format)) {
             dep = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = a->view, .imageLayout = a->layout,
                                                .loadOp = a->load, .storeOp = a->store, .clearValue = a->clear };
+            if (a->resolve_view != VK_NULL_HANDLE && a->resolve_mode) { dep.resolveMode = a->resolve_mode; dep.resolveImageView = a->resolve_view; dep.resolveImageLayout = a->resolve_layout ? a->resolve_layout : a->layout; }
             ri.pDepthAttachment = &dep;
         }
         if (fmt_has_stencil(a->format)) {
             ste = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = a->view, .imageLayout = a->layout,
                                                .loadOp = a->stencil_load, .storeOp = a->stencil_store, .clearValue = a->clear };
+            if (a->resolve_view != VK_NULL_HANDLE && a->stencil_resolve_mode) { ste.resolveMode = a->stencil_resolve_mode; ste.resolveImageView = a->resolve_view; ste.resolveImageLayout = a->resolve_layout ? a->resolve_layout : a->layout; }
             ri.pStencilAttachment = &ste;
         }
     }
@@ -246,6 +306,13 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
 lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBuffer cmd, const lagfx_render_desc_t *d) {
     if (!vk || cmd == VK_NULL_HANDLE || !desc_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
     if (lagfx_vk_device_lost(vk)) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
+    if (d->has_depth_stencil && d->depth_stencil.resolve_view != VK_NULL_HANDLE) {
+        const lagfx_render_attachment_t *a = &d->depth_stencil;
+        if (!lagfx_vk_ds_resolve_ok(vk, a->format, fmt_has_depth(a->format) ? a->resolve_mode : 0, fmt_has_stencil(a->format) ? a->stencil_resolve_mode : 0)) {
+            LAGFX_ERR("render_begin: depth/stencil resolve (depth mode 0x%x, stencil mode 0x%x) not supported by the device", (unsigned)a->resolve_mode, (unsigned)a->stencil_resolve_mode);
+            return LAGFX_ERR_BACKEND;
+        }
+    }
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
 
     if (!fetch_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
@@ -281,6 +348,7 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
         if (d->color[i].format == VK_FORMAT_UNDEFINED || d->color[i].resolve_view == VK_NULL_HANDLE) continue;
         views[na] = d->color[i].resolve_view; memset(&cv[na], 0, sizeof cv[na]); na++;
     }
+    if (d->has_depth_stencil && d->depth_stencil.resolve_view != VK_NULL_HANDLE) { views[na] = d->depth_stencil.resolve_view; memset(&cv[na], 0, sizeof cv[na]); na++; }   /* last, as in rp_locked */
     rpkey_t k; make_key(&k, d, false);
     pthread_mutex_lock(&rc->mu);
     VkRenderPass rp = rp_locked(vk, rc, &k);

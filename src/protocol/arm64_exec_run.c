@@ -43,6 +43,9 @@ void lagfx_a64_exec_object_counts(const lagfx_protocol_t *p, uint32_t *live, uin
 bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
     (void)p; (void)task; (void)ref; (void)dst; (void)dst_size; (void)w; (void)h; return false;
 }
+bool lagfx_a64_exec_readback_ds(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t aspect, void *dst, size_t dst_size, uint32_t *w, uint32_t *h) {
+    (void)p; (void)task; (void)ref; (void)aspect; (void)dst; (void)dst_size; (void)w; (void)h; return false;
+}
 
 #else  /* LAGFX_HAVE_VULKAN */
 
@@ -390,6 +393,9 @@ uint32_t lagfx_a64_exec_deferred_count(const lagfx_protocol_t *p) { a64_run_t *r
 
 bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, void *dst, size_t dst_size, uint32_t *width, uint32_t *height) {
     return p && task && lagfx_a64_res_readback(p, task->id, ref, dst, dst_size, width, height);
+}
+bool lagfx_a64_exec_readback_ds(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t aspect, void *dst, size_t dst_size, uint32_t *width, uint32_t *height) {
+    return p && task && lagfx_a64_res_readback_ds(p, task->id, ref, aspect, dst, dst_size, width, height);
 }
 
 
@@ -1204,7 +1210,6 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
             else {
                 dso = o;
                 if (!first) r->ms.samples = lagfx_a64_msaa_obj_samples(o);   /* a depth-only multisampled pass */
-                if (r->ms.samples > 1u && (d.depth_resolve_texture_ref || d.stencil_resolve_texture_ref || d.depth_store_action >= 2u || d.stencil_store_action >= 2u)) p->diag2.exec.msaa.ds_resolve_unsupported++;   /* depth / stencil resolve: stored only */
             }
         } else if (o) { if (strict) { reject_pass(r, p, NULL, dref ? "depth" : "stencil", -1, "ds_begin_failed", dref ? dref : sref); return; } CNT(p).ds_attach_unsupported++; }
     }
@@ -1224,6 +1229,10 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
             sai.clearValue.depthStencil.stencil = d.stencil_clear_value;
         }
         if (!first) { fw = dw, fh = dh; }
+        if (r->ms.samples > 1u && !lagfx_a64_msaa_ds_resolve(p, r->x, &r->ms, &d, dso, &dai, &sai) && strict && r->ms.fail) {   /* depth / stencil resolve the store action asks for (the gate already vetted it in exact mode) */
+            lagfx_a64_res_ds_end(r->x, dso);
+            reject_pass(r, p, dso, "depth", -1, r->ms.fail, d.depth_texture_ref ? d.depth_texture_ref : d.stencil_texture_ref); return;
+        }
     }
     if (!first) {   /* depth / stencil only: one unused colour slot keeps the pipeline and rendering-info counts consistent */
         nslots = 1u;

@@ -145,12 +145,21 @@ static lagfx_status_t begin_legacy(struct lagfx_vk_state *vk, VkCommandBuffer cb
         if (dai && sai && (dai->imageView != sai->imageView || dai->imageLayout != sai->imageLayout)) { *why = LAGFX_LR_DS; LAGFX_ERR("translate_render_begin: legacy backend: depth and stencil attachments are different views / layouts"); return LAGFX_ERR_BACKEND; }
         const VkRenderingAttachmentInfoKHR *any = dai ? dai : sai;
         if (dsf == VK_FORMAT_UNDEFINED || any->imageView == VK_NULL_HANDLE) { *why = LAGFX_LR_DS; LAGFX_ERR("translate_render_begin: legacy backend: depth/stencil attachment without a format or view"); return LAGFX_ERR_BACKEND; }
-        if ((dai && dai->resolveImageView != VK_NULL_HANDLE) || (sai && sai->resolveImageView != VK_NULL_HANDLE)) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend has no depth/stencil resolve"); return LAGFX_ERR_BACKEND; }
+        /* depth / stencil resolve: one resolve view for the ONE attachment; an aspect that names no resolve view is not resolved (mode NONE) */
+        const bool dres = dai && dai->resolveImageView != VK_NULL_HANDLE, sres = sai && sai->resolveImageView != VK_NULL_HANDLE;
+        if (dres && sres && (dai->resolveImageView != sai->resolveImageView || dai->resolveImageLayout != sai->resolveImageLayout)) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend: depth and stencil name different resolve views / layouts"); return LAGFX_ERR_BACKEND; }
+        if ((dres || sres) && smp == VK_SAMPLE_COUNT_1_BIT) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend: depth/stencil resolve target for a single-sample pass"); return LAGFX_ERR_BACKEND; }
         d.has_depth_stencil = true;
         d.depth_stencil = (lagfx_render_attachment_t){ .view = any->imageView, .format = dsf, .samples = smp, .layout = any->imageLayout,
             .load = dai ? dai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .store = dai ? dai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,   /* an aspect the pass does not name is loaded and stored */
             .stencil_load = sai ? sai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .stencil_store = sai ? sai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,
             .clear = { .depthStencil = { dai ? dai->clearValue.depthStencil.depth : 0.0f, sai ? sai->clearValue.depthStencil.stencil : 0u } } };
+        if (dres || sres) {
+            const VkRenderingAttachmentInfoKHR *r = dres ? dai : sai;
+            d.depth_stencil.resolve_view = r->resolveImageView; d.depth_stencil.resolve_layout = r->resolveImageLayout;
+            d.depth_stencil.resolve_mode = dres ? (VkResolveModeFlagBits)dai->resolveMode : 0;
+            d.depth_stencil.stencil_resolve_mode = sres ? (VkResolveModeFlagBits)sai->resolveMode : 0;
+        }
     }
     lagfx_status_t st = lagfx_vk_render_begin_desc(vk, cb, &d);
     *why = st == LAGFX_OK ? LAGFX_LR_NONE : st == LAGFX_ERR_INVALID_ARG ? LAGFX_LR_ARGS : LAGFX_LR_BEGIN;

@@ -59,6 +59,7 @@ typedef struct lagfx_msaa_stats {
     uint64_t sample_shading_pipes;     /* pipelines built with sampleShadingEnable (injected / future decoded flag) */
     uint64_t fbfetch_ms_no_local_read_ms;   /* multisampled fetch refused: dynamicRenderingLocalReadMultisampledAttachments is false / unknown on the device */
     uint64_t sample_shading_refused;   /* sample shading asked for on a device without the sampleRateShading feature: pipeline refused */
+    uint64_t ds_resolves;              /* depth / stencil resolves recorded into the pass (RenderPass2 on the legacy backend, resolveImageView on the dynamic one) */
     uint64_t ds_resolve_refused;       /* depth / stencil resolve modes refused by lagfx_msaa_dsres_choose (mode not offered, independent modes, unknown filter) */
     /* device info */
     uint64_t devinfo_clamped;          /* MSAASamples lowered to the largest count exact mode grants for the common colour + depth formats */
@@ -89,7 +90,7 @@ static inline int lagfx_msaa_stats_line(const lagfx_msaa_stats_t *s, char *buf, 
         lagfx_msaa_compat_env() ? "compat" : "exact",
         LU(ms_images_created), LU(ms_exact_refused), LU(ms_compat_clamped), LU(ms_compat_1x), LU(ms_tex_refused), LU(ms_tex_bad_shape), LU(ms_passes), LU(ms_attach), LU(resolves), LU(resolves_by_copy),
         LU(store_unknown), LU(resolve_no_target), LU(resolve_on_1x), LU(deferred_store_tags), LU(attach_mixed_ignored), LU(ds_mismatch_ignored), LU(ms_pass_refused), LU(pipes_ms), LU(draws_ms),
-        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped), LU(devinfo_gap), LU(a2c_pipes), LU(sample_shading_pipes), LU(sample_shading_refused), LU(ms_fetch_views), LU(ms_fetch_refused), LU(ds_resolve_refused), LU(fbfetch_ms_variants), LU(fbfetch_ms_reads), LU(fbfetch_ms_no_local_read_ms));
+        LU(ds_resolve_unsupported), LU(sampled_ms_refused), LU(fbfetch_ms_refused), LU(tile_ms_refused), LU(blit_ms_refused), LU(capture_ms_skipped), LU(air_ms_ops), LU(air_sample_builtins), LU(devinfo_clamped), LU(devinfo_gap), LU(a2c_pipes), LU(sample_shading_pipes), LU(sample_shading_refused), LU(ms_fetch_views), LU(ms_fetch_refused), LU(ds_resolve_refused), LU(ds_resolves), LU(fbfetch_ms_variants), LU(fbfetch_ms_reads), LU(fbfetch_ms_no_local_read_ms));
 #undef LU
 }
 

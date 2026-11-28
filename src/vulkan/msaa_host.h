@@ -62,7 +62,7 @@ typedef struct {
     VkResolveModeFlags depth_modes, stencil_modes;   /* supportedDepthResolveModes / supportedStencilResolveModes */
     bool independent_none, independent;              /* independentResolveNone / independentResolve */
 } lagfx_msaa_dsres_caps_t;
-/* Queries the physical device (vkGetPhysicalDeviceProperties2). Returns caps->probed. Needs apiVersion >= 1.2 (the struct is core there). */
+/* Queries the physical device (vkGetPhysicalDeviceProperties2). Returns caps->probed. Core 1.2, or 1.1 with VK_KHR_depth_stencil_resolve advertised (otherwise false: not probed, nothing guessed). */
 bool lagfx_msaa_dsres_probe(VkPhysicalDevice pd, lagfx_msaa_dsres_caps_t *caps);
 
 /* Metal filters (numbering of the MTL enums, [I] for the guest wire): depth 0 Sample0, 1 Min, 2 Max; stencil 0 Sample0, 1 DepthResolvedSample. */

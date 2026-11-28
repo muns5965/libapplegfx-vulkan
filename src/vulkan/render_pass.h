@@ -63,6 +63,9 @@ typedef struct {
     VkImageView            resolve_view;
     VkImageLayout          resolve_layout;
     VkResolveModeFlagBits  resolve_mode;
+    /* DEPTH / STENCIL attachment with samples > 1: resolve_view is a single-sample view of the same format (both aspects), resolve_mode the DEPTH mode, stencil_resolve_mode the STENCIL mode (0 = NONE
+     * for an aspect that is not resolved). Needs lagfx_vk_ds_resolve_ok (core 1.2 / KHR extensions, the modes in the device's supported sets); the legacy backend builds that pass with vkCreateRenderPass2. */
+    VkResolveModeFlagBits  stencil_resolve_mode;
 } lagfx_render_attachment_t;
 
 typedef struct {
@@ -107,6 +110,8 @@ bool          lagfx_vk_raster_order(const struct lagfx_vk_state *vk);
 bool          lagfx_vk_fetch_ms_capable(const struct lagfx_vk_state *vk);   /* multisampled fetch: dynamic backend with multisampled local read only */
 /* The fetch_mask a legacy pass / its compatible pipeline pass uses for this descriptor: every real single-sample colour slot below 4 (InputAttachmentIndex <= 3). Both sides compute it
  * from the same function, so pass and pipelines stay render-pass compatible. */
+/* Depth / stencil resolve: true when the device can resolve the given modes (depth_mode / stencil_mode 0 = that aspect not resolved) for a format with the given aspects. */
+bool          lagfx_vk_ds_resolve_ok(const struct lagfx_vk_state *vk, VkFormat fmt, VkResolveModeFlagBits depth_mode, VkResolveModeFlagBits stencil_mode);
 uint32_t      lagfx_legacy_fetch_mask(const lagfx_render_desc_t *d);
 /* A legacy render pass resolves implicitly: average for float / normalised colour formats, sample 0 for integer ones. A requested mode is honoured only when it is that one (same mapping as lagfx_msaa_resolve_mode). */
 bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested);

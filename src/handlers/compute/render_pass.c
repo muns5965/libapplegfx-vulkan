@@ -77,6 +77,7 @@ int lagfx_parse_render_pass_descriptor(const uint8_t *payload,
         out->depth_slice               = rd16(wire.depth_slice);
         out->depth_load_action         = rd16(wire.depth_load_action);
         out->depth_store_action        = rd16(wire.depth_store_action);
+        out->depth_resolve_filter      = rd16(wire.depth_resolve_filter);
         out->depth_clear_value         = rdf64(wire.depth_clear_depth);
     }
 
@@ -86,6 +87,7 @@ int lagfx_parse_render_pass_descriptor(const uint8_t *payload,
         out->stencil_resolve_texture_ref = rd32(wire.stencil_resolve_texture_ref);
         out->stencil_load_action         = rd16(wire.stencil_load_action);
         out->stencil_store_action        = rd16(wire.stencil_store_action);
+        out->stencil_resolve_filter      = rd16(wire.stencil_resolve_filter);
         out->stencil_clear_value         = rd32(wire.stencil_clear_stencil);
     }
 

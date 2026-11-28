@@ -55,6 +55,7 @@
 #include "pipeline.h"
 #include "composite.h"
 #include "render_pass.h"
+#include "msaa_host.h"
 #include "filter_cubic.h"
 #include "common/log.h"
 
@@ -383,6 +384,12 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         return LAGFX_ERR_VULKAN_INIT;
     }
     vkGetPhysicalDeviceProperties(s->phys_device, &s->phys_props);
+    {   /* TEST KNOB (host tests only, never set in production): LAGFX_VK_TEST_API_MINOR=1 reports Vulkan 1.1 from here on, so the pre-1.2 init paths run (extension enabling, KHR entry points) on a host
+         * driver that is really newer. It approximates, it does not replace, a real 1.1 driver. */
+        const char *cap = getenv("LAGFX_VK_TEST_API_MINOR");
+        if (cap && cap[0] >= '0' && cap[0] <= '9' && VK_VERSION_MINOR(s->phys_props.apiVersion) > (uint32_t)(cap[0] - '0') && VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u)
+            s->phys_props.apiVersion = VK_MAKE_API_VERSION(0, 1, (uint32_t)(cap[0] - '0'), 128);
+    }
     LAGFX_LOG("vk_init: phys device '%s' type=%s api=%u.%u.%u qf=%u",
               s->phys_props.deviceName,
               phys_type_str(s->phys_props.deviceType),
@@ -441,6 +448,14 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         static const char *const khr11[] = { "VK_KHR_shader_float16_int8", "VK_KHR_8bit_storage", "VK_KHR_16bit_storage", "VK_KHR_variable_pointers", "VK_KHR_storage_buffer_storage_class" };
         for (size_t i = 0; i < sizeof khr11 / sizeof khr11[0]; i++)
             if (has_ext(dext, dext_n, khr11[i]) && wanted_dev_n < 20) wanted_dev_exts[wanted_dev_n++] = khr11[i];
+    }
+    /* Depth / stencil resolve below Vulkan 1.2 needs both extensions enabled (their dependencies, multiview and maintenance2, are core 1.1). Properties only: no feature struct. */
+    bool dsres_ext_on = false;
+    if (s->phys_props.apiVersion < VK_API_VERSION_1_2 && has_ext(dext, dext_n, "VK_KHR_depth_stencil_resolve") && has_ext(dext, dext_n, "VK_KHR_create_renderpass2")
+        && wanted_dev_n + 2u <= 20u && !getenv("LAGFX_VK_NO_DS_RESOLVE")) {
+        wanted_dev_exts[wanted_dev_n++] = "VK_KHR_create_renderpass2";
+        wanted_dev_exts[wanted_dev_n++] = "VK_KHR_depth_stencil_resolve";
+        dsres_ext_on = true;
     }
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
@@ -951,6 +966,17 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     s->have_descriptor_indexing    = have_descriptor_indexing;
     s->have_shader_object          = want_shader_object;
     s->have_extended_dynamic_state3= want_eds3;
+    s->have_ds_resolve = false; s->create_renderpass2 = NULL;
+    if ((s->phys_props.apiVersion >= VK_API_VERSION_1_2 || dsres_ext_on) && !getenv("LAGFX_VK_NO_DS_RESOLVE")) {
+        lagfx_msaa_dsres_caps_t dc;
+        const bool probed = lagfx_msaa_dsres_probe(s->phys_device, &dc);   /* the shared probe (src/vulkan/msaa_host.c), core 1.2 or KHR on 1.1 */
+        s->create_renderpass2 = (PFN_vkCreateRenderPass2)vkGetDeviceProcAddr(s->device, s->phys_props.apiVersion >= VK_API_VERSION_1_2 ? "vkCreateRenderPass2" : "vkCreateRenderPass2KHR");
+        s->dsres_depth_modes = probed ? dc.depth_modes : 0, s->dsres_stencil_modes = probed ? dc.stencil_modes : 0;
+        s->dsres_independent_none = probed && dc.independent_none, s->dsres_independent = probed && dc.independent;
+        s->have_ds_resolve = s->create_renderpass2 != NULL && (s->dsres_depth_modes | s->dsres_stencil_modes) != 0;
+        LAGFX_LOG("vk_init: depth/stencil resolve %s (%s) depth_modes=0x%x stencil_modes=0x%x independent_none=%d independent=%d", s->have_ds_resolve ? "available" : "unavailable",
+                  s->phys_props.apiVersion >= VK_API_VERSION_1_2 ? "core" : "KHR", (unsigned)s->dsres_depth_modes, (unsigned)s->dsres_stencil_modes, (int)s->dsres_independent_none, (int)s->dsres_independent);
+    }
     s->get_buffer_address = NULL;
     if (have_buffer_device_address) {
         s->get_buffer_address = (PFN_vkGetBufferDeviceAddress)vkGetDeviceProcAddr(s->device, s->phys_props.apiVersion >= VK_API_VERSION_1_2 ? "vkGetBufferDeviceAddress" : "vkGetBufferDeviceAddressKHR");

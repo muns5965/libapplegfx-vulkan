@@ -205,7 +205,17 @@ bool lagfx_msaa_dsres_probe(VkPhysicalDevice pd, lagfx_msaa_dsres_caps_t *c) {
     memset(c, 0, sizeof *c);
     VkPhysicalDeviceProperties base;
     vkGetPhysicalDeviceProperties(pd, &base);
-    if (base.apiVersion < VK_API_VERSION_1_2) return false;   /* the properties struct is core from 1.2; a 1.1 device with the extension is reported as not probed (no guessing) */
+    if (base.apiVersion < VK_API_VERSION_1_2) {   /* 1.1 (Adreno 730 on the S8): the struct is the KHR one, valid only when the device advertises VK_KHR_depth_stencil_resolve (and vkGetPhysicalDeviceProperties2 is core 1.1) */
+        if (base.apiVersion < VK_API_VERSION_1_1) return false;
+        uint32_t n = 0; bool found = false;
+        if (vkEnumerateDeviceExtensionProperties(pd, NULL, &n, NULL) != VK_SUCCESS || !n) return false;
+        VkExtensionProperties *e = calloc(n, sizeof *e);
+        if (!e) return false;
+        if (vkEnumerateDeviceExtensionProperties(pd, NULL, &n, e) == VK_SUCCESS)
+            for (uint32_t i = 0; i < n; i++) if (!strcmp(e[i].extensionName, VK_KHR_DEPTH_STENCIL_RESOLVE_EXTENSION_NAME)) found = true;
+        free(e);
+        if (!found) return false;
+    }
     VkPhysicalDeviceDepthStencilResolveProperties ds = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_STENCIL_RESOLVE_PROPERTIES };
     VkPhysicalDeviceProperties2 p2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &ds };
     vkGetPhysicalDeviceProperties2(pd, &p2);

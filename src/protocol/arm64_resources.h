@@ -113,6 +113,7 @@ struct lagfx_a64_obj {
 };
 
 VkCommandBuffer lagfx_a64_res_cmdbuf(lagfx_a64_rexec_t *x);
+struct lagfx_vk_state *lagfx_a64_res_vk(lagfx_a64_rexec_t *x);   /* the device the pass records for */
 /* Render targets: the Render executor draws into the SAME mirror texture the blits use. target_begin records the image-layout transition GENERAL ->
  * COLOR_ATTACHMENT_OPTIMAL (+ memory barrier: earlier transfer/shader writes -> attachment access) and returns the view and the level-0 extent; false if the
  * texture cannot be a colour target (3D, no attachment usage). target_end records COLOR_ATTACHMENT_OPTIMAL -> GENERAL (attachment write -> transfer / shader
@@ -178,6 +179,8 @@ void lagfx_a64_res_set_finish_hook(lagfx_a64_rexec_t *x, void (*fn)(void *ctx, b
 lagfx_a64_obj_t *lagfx_a64_res_lookup(lagfx_protocol_t *p, uint32_t task, uint32_t ref);
 /* Test / debug: level 0, layer 0 of a mirrored texture as linear rows (width*bpp) via a one-shot copy; false while an exec records / is pending. */
 bool lagfx_a64_res_readback(lagfx_protocol_t *p, uint32_t task, uint32_t ref, void *dst, size_t dst_size, uint32_t *w, uint32_t *h);
+/* Test / debug aid: reads one aspect of a single-sample depth / stencil mirror texture back (aspect 1 = depth: 4 bytes per texel, D32_SFLOAT or D32_SFLOAT_S8_UINT only; aspect 2 = stencil: 1 byte per texel). */
+bool lagfx_a64_res_readback_ds(lagfx_protocol_t *p, uint32_t task, uint32_t ref, uint32_t aspect, void *dst, size_t dst_size, uint32_t *w, uint32_t *h);
 #endif
 
 /* Why a texture handle (task, ref) given to setFragmentTexture / setVertexTexture has no usable mirror texture. Classified from the guest's object table entry

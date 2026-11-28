@@ -158,6 +158,7 @@ typedef struct {
     uint16_t depth_slice;
     uint16_t depth_load_action;
     uint16_t depth_store_action;
+    uint16_t depth_resolve_filter;     /* Metal MTLMultisampleDepthResolveFilter: 0 Sample0, 1 Min, 2 Max */
     double   depth_clear_value;
 
     bool     has_stencil;
@@ -165,6 +166,7 @@ typedef struct {
     uint32_t stencil_resolve_texture_ref;
     uint16_t stencil_load_action;
     uint16_t stencil_store_action;
+    uint16_t stencil_resolve_filter;   /* MTLMultisampleStencilResolveFilter: 0 Sample0, 1 DepthResolvedSample */
     uint32_t stencil_clear_value;
 
     uint32_t color_attachment_count;   /* compacted: entries with a null texture_ref are skipped; `slot` keeps the ORIGINAL index (the fragment output location) */

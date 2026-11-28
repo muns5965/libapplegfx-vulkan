@@ -25,6 +25,7 @@
 
 static int g_fail;
 #include "legacy-fetch-shaders.h"
+#include "dsres-shaders.h"
 #define CHECK(c, m) do { if (!(c)) { printf("FAIL: %s (line %d)\n", m, __LINE__); g_fail++; } } while (0)
 
 #ifdef LAGFX_HAVE_VULKAN
@@ -277,6 +278,137 @@ static void test_legacy_fetch(struct lagfx_vk_state *vk, const char *bn) {
     ms_img_free(vk, &a);
 }
 
+
+/* ---- C5: depth / stencil resolve (dynamic: resolveImageView; legacy: vkCreateRenderPass2 + VkSubpassDescriptionDepthStencilResolve). A 4x depth image is cleared to 1.0, a triangle at z = 0.25 covers the lower-left half
+ * (its diagonal edge crosses pixels), then the pass resolves into a 1x image that is read back: pixels fully inside = 0.25, fully outside = 1.0, edge pixels = 0.25 for MIN and 1.0 for MAX; SAMPLE_ZERO is one of the two. ---- */
+typedef struct { ms_img_t *ms, *res; VkFormat fmt; VkResolveModeFlagBits dmode, smode; VkPipeline pipe; VkImageAspectFlags asp; VkBuffer buf; uint32_t stencil_clear; } dsr_t;
+static bool rec_dsres(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
+    dsr_t *g = arg;
+    VkImageMemoryBarrier b[2];
+    ms_img_t *im[2] = { g->ms, g->res };
+    for (int i = 0; i < 2; i++)
+        b[i] = (VkImageMemoryBarrier){ .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT,
+            .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, .newLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = im[i]->img, .subresourceRange = { g->asp, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, 0, 0, NULL, 0, NULL, 2, b);
+    lagfx_render_desc_t d; memset(&d, 0, sizeof d);
+    d.width = 16; d.height = 16; d.has_depth_stencil = true;
+    d.depth_stencil = (lagfx_render_attachment_t){ .view = g->ms->view, .format = g->fmt, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .stencil_load = VK_ATTACHMENT_LOAD_OP_CLEAR, .stencil_store = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+        .clear = { .depthStencil = { 1.0f, g->stencil_clear } },
+        .resolve_view = g->res->view, .resolve_layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .resolve_mode = g->dmode, .stencil_resolve_mode = g->smode };
+    if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
+    VkViewport vp = { 0, 0, 16, 16, 0, 1 }; VkRect2D sc = { { 0, 0 }, { 16, 16 } };
+    vkCmdSetViewport(cb, 0, 1, &vp); vkCmdSetScissor(cb, 0, 1, &sc);
+    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g->pipe);
+    vkCmdDraw(cb, 3, 1, 0, 0);
+    lagfx_vk_render_end(vk, cb);
+    VkImageMemoryBarrier tb = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT,
+        .oldLayout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, .newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+        .image = g->res->img, .subresourceRange = { g->asp, 0, 1, 0, 1 } };
+    vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &tb);
+    VkBufferImageCopy cp[2]; uint32_t ncp = 0;
+    if (g->asp & VK_IMAGE_ASPECT_DEPTH_BIT) cp[ncp++] = (VkBufferImageCopy){ .bufferOffset = 0, .imageSubresource = { VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1 }, .imageExtent = { 16, 16, 1 } };
+    if (g->asp & VK_IMAGE_ASPECT_STENCIL_BIT) cp[ncp++] = (VkBufferImageCopy){ .bufferOffset = 2048, .imageSubresource = { VK_IMAGE_ASPECT_STENCIL_BIT, 0, 0, 1 }, .imageExtent = { 16, 16, 1 } };
+    vkCmdCopyImageToBuffer(cb, g->res->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, g->buf, ncp, cp);
+    return true;
+}
+static void test_ds_resolve(struct lagfx_vk_state *vk, const char *bn, bool combined) {
+    char m[200]; VkDevice dev = vk->device;
+    const VkFormat fmt = combined ? VK_FORMAT_D32_SFLOAT_S8_UINT : VK_FORMAT_D32_SFLOAT;
+    const VkImageAspectFlags asp = combined ? (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT) : VK_IMAGE_ASPECT_DEPTH_BIT;
+    VkImageFormatProperties fp;
+    if (vkGetPhysicalDeviceImageFormatProperties(vk->phys_device, fmt, VK_IMAGE_TYPE_2D, VK_IMAGE_TILING_OPTIMAL, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, 0, &fp) != VK_SUCCESS || !(fp.sampleCounts & VK_SAMPLE_COUNT_4_BIT)) {
+        printf("SKIP C5 (%s, %s): 4x depth image not offered\n", bn, combined ? "D32S8" : "D32"); return;
+    }
+    printf("NOTE C5 (%s): device depth modes 0x%x stencil modes 0x%x independent_none=%d independent=%d\n", bn, (unsigned)vk->dsres_depth_modes, (unsigned)vk->dsres_stencil_modes, (int)vk->dsres_independent_none, (int)vk->dsres_independent);
+    snprintf(m, sizeof m, "depth/stencil resolve available on the device (%s)", bn); CHECK(vk->have_ds_resolve && vk->create_renderpass2, m);
+    if (!vk->have_ds_resolve) return;
+    float out[3][256]; unsigned nmodes = 0; VkResolveModeFlagBits mode_of[3];
+    const VkResolveModeFlagBits want[3] = { VK_RESOLVE_MODE_SAMPLE_ZERO_BIT, VK_RESOLVE_MODE_MIN_BIT, VK_RESOLVE_MODE_MAX_BIT };
+    VkShaderModuleCreateInfo vsi = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof k_vs_dsres_spv, .pCode = k_vs_dsres_spv };
+    VkShaderModule vs = VK_NULL_HANDLE; VkPipelineLayout pl = VK_NULL_HANDLE; VkPipeline pipe = VK_NULL_HANDLE;
+    VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO };
+    int ok = vkCreateShaderModule(dev, &vsi, NULL, &vs) == VK_SUCCESS && vkCreatePipelineLayout(dev, &pli, NULL, &pl) == VK_SUCCESS;
+    if (ok) {
+        lagfx_render_desc_t cd; memset(&cd, 0, sizeof cd);
+        cd.has_depth_stencil = true; cd.depth_stencil.format = fmt; cd.depth_stencil.samples = VK_SAMPLE_COUNT_4_BIT;
+        VkRenderPass rp = lagfx_vk_render_pass_compat(vk, &cd);   /* the pass the pipeline is created against: 4x depth(/stencil), no resolve (compatible with the resolving pass) */
+        VkPipelineShaderStageCreateInfo st = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vs, .pName = "main" };
+        VkPipelineVertexInputStateCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia = { .sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO, .topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST };
+        VkPipelineViewportStateCreateInfo vps = { .sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO, .viewportCount = 1, .scissorCount = 1 };
+        VkPipelineRasterizationStateCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO, .polygonMode = VK_POLYGON_MODE_FILL, .cullMode = VK_CULL_MODE_NONE, .lineWidth = 1.0f };
+        VkPipelineMultisampleStateCreateInfo ms = { .sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO, .rasterizationSamples = VK_SAMPLE_COUNT_4_BIT };
+        VkPipelineDepthStencilStateCreateInfo dss = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO, .depthTestEnable = VK_TRUE, .depthWriteEnable = VK_TRUE, .depthCompareOp = VK_COMPARE_OP_LESS };
+        VkPipelineColorBlendStateCreateInfo cbs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+        VkDynamicState dyn[2] = { VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR };
+        VkPipelineDynamicStateCreateInfo ds = { .sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO, .dynamicStateCount = 2, .pDynamicStates = dyn };
+        VkPipelineRenderingCreateInfo ri = { .sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO, .depthAttachmentFormat = fmt, .stencilAttachmentFormat = combined ? fmt : VK_FORMAT_UNDEFINED };
+        const bool dynamic = lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC;
+        VkGraphicsPipelineCreateInfo gi = { .sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO, .pNext = dynamic ? &ri : NULL, .stageCount = 1, .pStages = &st, .pVertexInputState = &vi, .pInputAssemblyState = &ia,
+            .pViewportState = &vps, .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &dss, .pColorBlendState = &cbs, .pDynamicState = &ds, .layout = pl, .renderPass = dynamic ? VK_NULL_HANDLE : rp, .subpass = 0 };
+        ok = (dynamic || rp != VK_NULL_HANDLE) && vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gi, NULL, &pipe) == VK_SUCCESS;
+    }
+    snprintf(m, sizeof m, "depth/stencil resolve pipeline (%s, %s)", bn, combined ? "D32S8" : "D32"); CHECK(ok, m);
+    VkBuffer buf = VK_NULL_HANDLE; VkDeviceMemory bmem = VK_NULL_HANDLE; void *map = NULL;
+    if (ok) {
+        VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 4096, .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT };
+        VkMemoryRequirements mr;
+        ok = vkCreateBuffer(dev, &bi, NULL, &buf) == VK_SUCCESS;
+        if (ok) { vkGetBufferMemoryRequirements(dev, buf, &mr); const uint32_t mt = memtype(vk->phys_device, mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mt };
+            ok = mt != UINT32_MAX && vkAllocateMemory(dev, &ai, NULL, &bmem) == VK_SUCCESS && vkBindBufferMemory(dev, buf, bmem, 0) == VK_SUCCESS && vkMapMemory(dev, bmem, 0, VK_WHOLE_SIZE, 0, &map) == VK_SUCCESS; }
+    }
+    for (int k = 0; ok && k < 3; k++) {
+        if (!lagfx_vk_ds_resolve_ok(vk, fmt, want[k], combined ? want[k] : 0)) continue;   /* a mode the device does not list is covered by the refusal checks below */
+        ms_img_t ms, res;
+        const VkImageUsageFlags u = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+        int ok2 = ms_img_make(vk, fmt, VK_SAMPLE_COUNT_4_BIT, u, asp, &ms) && ms_img_make(vk, fmt, VK_SAMPLE_COUNT_1_BIT, u | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, asp, &res);
+        snprintf(m, sizeof m, "depth/stencil resolve images (%s)", bn); CHECK(ok2, m);
+        if (ok2) {
+            memset(map, 0xAB, 4096);
+            dsr_t g = { &ms, &res, fmt, want[k], combined ? want[k] : 0, pipe, asp, buf, 7u };
+            snprintf(m, sizeof m, "depth/stencil resolve mode 0x%x %s: pass records and runs (%s)", (unsigned)want[k], combined ? "D32S8" : "D32", bn); CHECK(one_shot(vk, rec_dsres, &g), m);
+            memcpy(out[nmodes], map, 256 * sizeof(float)); mode_of[nmodes++] = want[k];
+            if (combined) { const uint8_t *sp = (const uint8_t *)map + 2048; unsigned bad = 0; for (int i = 0; i < 256; i++) bad += sp[i] != 7u;
+                snprintf(m, sizeof m, "stencil aspect resolved (SAMPLE_ZERO of the cleared 7) in all 256 pixels, %u wrong (%s)", bad, bn); CHECK(bad == 0, m); }
+        }
+        ms_img_free(vk, &res); ms_img_free(vk, &ms);
+    }
+    float *mn = NULL, *mx = NULL, *sz = NULL;
+    for (unsigned i = 0; i < nmodes; i++) { if (mode_of[i] == VK_RESOLVE_MODE_MIN_BIT) mn = out[i]; if (mode_of[i] == VK_RESOLVE_MODE_MAX_BIT) mx = out[i]; if (mode_of[i] == VK_RESOLVE_MODE_SAMPLE_ZERO_BIT) sz = out[i]; }
+    snprintf(m, sizeof m, "depth resolve: at least SAMPLE_ZERO ran (%s)", bn); CHECK(sz != NULL, m);
+    if (sz) { unsigned inside = 0, outside = 0, other = 0; for (int i = 0; i < 256; i++) { if (sz[i] == 0.25f) inside++; else if (sz[i] == 1.0f) outside++; else other++; }
+        snprintf(m, sizeof m, "depth SAMPLE_ZERO: %u inside (0.25), %u outside (1.0), %u other (%s)", inside, outside, other, bn); CHECK(other == 0 && inside > 60 && outside > 60, m); }
+    if (mn && mx) {
+        unsigned edge = 0, bad = 0, inside = 0, outside = 0;
+        for (int i = 0; i < 256; i++) {
+            if (mn[i] == 0.25f && mx[i] == 1.0f) edge++;
+            else if (mn[i] == 0.25f && mx[i] == 0.25f) inside++;
+            else if (mn[i] == 1.0f && mx[i] == 1.0f) outside++;
+            else bad++;
+            if (sz && !(sz[i] == mn[i] || sz[i] == mx[i])) bad++;
+        }
+        snprintf(m, sizeof m, "depth MIN vs MAX: %u edge pixels (min 0.25, max 1.0), %u inside, %u outside, %u inconsistent (%s)", edge, inside, outside, bad, bn); CHECK(bad == 0 && edge >= 8 && inside > 40 && outside > 40, m);
+    } else printf("NOTE C5 (%s): device offers %s%s%s -- MIN/MAX comparison not run\n", bn, mn ? "MIN " : "", mx ? "MAX " : "", (mn || mx) ? "" : "neither");
+    /* refusals: a mode the device does not list, a resolve view on a single-sample attachment, a missing stencil mode on D32S8 without independent resolve */
+    { ms_img_t ms, res; int ok2 = ms_img_make(vk, fmt, VK_SAMPLE_COUNT_4_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, asp, &ms) && ms_img_make(vk, fmt, VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, asp, &res);
+      if (ok2) {
+        dsr_t g = { &ms, &res, fmt, (VkResolveModeFlagBits)0x40000000, combined ? VK_RESOLVE_MODE_SAMPLE_ZERO_BIT : 0, pipe, asp, buf, 0 };
+        snprintf(m, sizeof m, "direct begin_desc: a depth resolve mode no device lists is refused (%s)", bn); CHECK(!one_shot(vk, rec_dsres, &g), m);
+        g.dmode = 0; g.smode = 0;
+        snprintf(m, sizeof m, "direct begin_desc: a resolve view with no resolve mode is refused (%s)", bn); CHECK(!one_shot(vk, rec_dsres, &g), m);
+      }
+      ms_img_free(vk, &res); ms_img_free(vk, &ms); }
+    if (map) vkUnmapMemory(dev, bmem);
+    if (buf) vkDestroyBuffer(dev, buf, NULL);
+    if (bmem) vkFreeMemory(dev, bmem, NULL);
+    if (pipe) vkDestroyPipeline(dev, pipe, NULL);
+    if (pl) vkDestroyPipelineLayout(dev, pl, NULL);
+    if (vs) vkDestroyShaderModule(dev, vs, NULL);
+}
+
 static void run_backend(int legacy) {
     const char *bn = legacy ? "legacy" : "dynamic";
     char m[160];
@@ -465,6 +597,8 @@ static void run_backend(int legacy) {
     }
 
     if (legacy) test_legacy_fetch(vk, bn);
+    test_ds_resolve(vk, bn, false);
+    test_ds_resolve(vk, bn, true);
 
     /* D. shapes the legacy backend does not express are refused */
     {
@@ -539,6 +673,18 @@ int main(void) {
     printf("no Vulkan build: skip\n"); return 77;
 #else
     struct lagfx_vk_state *vk = NULL; lagfx_device_descriptor_t dd; memset(&dd, 0, sizeof dd);
+    if (getenv("LAGFX_VK_TEST_API_MINOR")) {   /* simulated Vulkan 1.1 (instance.c test knob): only the depth/stencil resolve through the pre-1.2 path (VK_KHR_depth_stencil_resolve + vkCreateRenderPass2KHR), legacy backend */
+        setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1); setenv("LAGFX_VK_LEGACY_RENDERPASS_GPU", "1", 1);
+        if (lagfx_vk_init(&vk, &dd) != LAGFX_OK || !vk || !vk->initialized) { printf("no usable Vulkan device: skip\n"); return 77; }
+        CHECK(VK_VERSION_MAJOR(vk->phys_props.apiVersion) == 1 && VK_VERSION_MINOR(vk->phys_props.apiVersion) < 2, "simulated device reports below Vulkan 1.2");
+        CHECK(lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY, "legacy backend");
+        test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", false);
+        test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", true);
+        CHECK(lagfx_test_validation_expect(vk, "simulated 1.1") == 0, "validation: control delivered, 0 messages before it (simulated 1.1)");
+        lagfx_vk_shutdown(vk);
+        printf(g_fail ? "FAILED: %d\n" : "OK\n", g_fail);
+        return g_fail ? 1 : 0;
+    }
     unsetenv("LAGFX_VK_FORCE_LEGACY_FEATURES"); unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
     if (lagfx_vk_init(&vk, &dd) != LAGFX_OK || !vk || !vk->initialized) { printf("no usable Vulkan device: skip\n"); return 77; }
     lagfx_vk_shutdown(vk);

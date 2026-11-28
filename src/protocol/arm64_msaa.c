@@ -2,6 +2,8 @@
 #include "arm64_msaa.h"
 #include "../common/le.h"
 #include "../common/log.h"
+#include "../vulkan/msaa_host.h"
+#include "../vulkan/render_pass.h"
 
 #ifdef LAGFX_HAVE_VULKAN
 #include <stdio.h>
@@ -172,6 +174,56 @@ static const char *named_why(lagfx_a64_rexec_t *x, uint32_t ref, lagfx_a64_obj_t
     return NULL;
 }
 
+static lagfx_msaa_dsres_caps_t ds_caps(const struct lagfx_vk_state *vk) {
+    lagfx_msaa_dsres_caps_t c; memset(&c, 0, sizeof c);
+    if (vk && vk->have_ds_resolve) c.probed = true, c.depth_modes = vk->dsres_depth_modes, c.stencil_modes = vk->dsres_stencil_modes, c.independent_none = vk->dsres_independent_none, c.independent = vk->dsres_independent;
+    return c;
+}
+
+const char *lagfx_a64_msaa_ds_plan(lagfx_a64_rexec_t *x, const lagfx_render_pass_full_desc_t *d, const lagfx_a64_obj_t *dso, int *want, lagfx_a64_obj_t **rt, uint32_t *dm, uint32_t *sm) {
+    *want = 0, *rt = NULL, *dm = *sm = 0;
+    if (!dso || lagfx_a64_msaa_obj_samples(dso) <= 1u) return NULL;
+    const bool hd = d->has_depth && d->depth_texture_ref && (dso->ds_aspects & 1u);
+    const bool hs = d->has_stencil && (dso->ds_aspects & 2u) && d->stencil_texture_ref == (hd ? d->depth_texture_ref : d->stencil_texture_ref);
+    const uint32_t da = hd ? d->depth_store_action : 0u, sa = hs ? d->stencil_store_action : 0u;
+    const bool rd = hd && (da == 2u || da == 3u), rs = hs && (sa == 2u || sa == 3u);
+    if ((hd && da > 3u) || (hs && sa > 3u)) { *want = 1; return "depth_stencil_store_action_unknown"; }
+    if (!rd && !rs) return NULL;
+    *want = 1;
+    const uint32_t rref = rd ? d->depth_resolve_texture_ref : d->stencil_resolve_texture_ref;
+    if (rd && rs && d->depth_resolve_texture_ref != d->stencil_resolve_texture_ref) return "depth_stencil_resolve_split";
+    if (!rref) return "resolve_texture_none";
+    lagfx_a64_obj_t *r = lagfx_a64_res_object(x, rref);
+    if (!r) return "resolve_texture_missing";
+    if (r->kind != LAGFX_A64_TEXTURE || !r->ds_aspects) return "resolve_not_depth_stencil";
+    if (r == dso) return "resolve_is_attachment";
+    if (r->format != dso->format || r->width != dso->width || r->height != dso->height || lagfx_a64_msaa_obj_samples(r) != 1u) return "resolve_shape_mismatch";
+    if (!(r->usage & VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT)) return "resolve_not_attachable";
+    const lagfx_msaa_dsres_caps_t caps = ds_caps(lagfx_a64_res_vk(x));
+    VkResolveModeFlagBits m1 = 0, m2 = 0;
+    if (lagfx_msaa_dsres_choose(&caps, rd, d->depth_resolve_filter, rs, d->stencil_resolve_filter, &m1, &m2) != LAGFX_MSAA_DSRES_OK) return "resolve_mode_unsupported";
+    if (!lagfx_vk_ds_resolve_ok(lagfx_a64_res_vk(x), dso->format, rd ? m1 : 0, rs ? m2 : 0)) return "resolve_mode_unsupported";
+    *rt = r, *dm = rd ? m1 : 0, *sm = rs ? m2 : 0;
+    return NULL;
+}
+
+bool lagfx_a64_msaa_ds_resolve(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms, const lagfx_render_pass_full_desc_t *d, lagfx_a64_obj_t *dso, VkRenderingAttachmentInfo *dai, VkRenderingAttachmentInfo *sai) {
+    int want; lagfx_a64_obj_t *r; uint32_t dm, sm;
+    const char *why = lagfx_a64_msaa_ds_plan(x, d, dso, &want, &r, &dm, &sm);
+    if (!want) return false;
+    if (why) { MS(p).ds_resolve_refused++; MS(p).ds_resolve_unsupported++; ms->fail = why; return false; }
+    VkImageView rv; uint32_t w, h;
+    if (!lagfx_a64_res_ds_begin(x, r, &rv, &w, &h)) { MS(p).ds_resolve_refused++; ms->fail = "resolve_target_begin"; return false; }
+    /* the plan already ran the shared chooser; the shared attachment filler sets the modes (a mode of 0 = aspect not resolved leaves its info untouched) */
+    const lagfx_msaa_dsres_caps_t caps = ds_caps(lagfx_a64_res_vk(x));
+    const bool rd = dm != 0, rs = sm != 0;
+    if (lagfx_msaa_dsres_attachments(&caps, rd, d->depth_resolve_filter, rs, d->stencil_resolve_filter, rv, VK_IMAGE_LAYOUT_GENERAL, dai, sai, &MS(p)) != LAGFX_MSAA_DSRES_OK) {
+        lagfx_a64_res_ds_end(x, r); ms->fail = "resolve_mode_unsupported"; return false;
+    }
+    ms->ds_res = r; MS(p).ds_resolves++;
+    return true;
+}
+
 bool lagfx_a64_msaa_pass_gate(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, const lagfx_a64_msaa_pass_t *ms, const lagfx_render_pass_full_desc_t *d, bool ds_ok, lagfx_a64_msaa_look_t *look, bool *strict, lagfx_a64_msaa_veto_t *v) {
     lagfx_a64_obj_t **co = look->c, *dobj = NULL;
     const uint32_t nc = d->color_attachment_count < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS ? d->color_attachment_count : LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS;
@@ -222,9 +274,10 @@ bool lagfx_a64_msaa_pass_gate(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, const l
         if (samples && ns != samples) return veto_set(v, what, -1, "mixed_sample_counts", dsref);
         if (samples && (dobj->width < w0 || dobj->height < h0)) return veto_set(v, what, -1, "extent_smaller_than_colour", dsref);
         samples = ns;
-        if (ns > 1u && (d->depth_resolve_texture_ref || d->stencil_resolve_texture_ref || d->depth_store_action >= 2u || d->stencil_store_action >= 2u)) {
-            MS(p).ds_resolve_unsupported++;   /* not wired into the pass path (see vulkan/msaa_ds.h): exact mode does not store-only instead */
-            return veto_set(v, what, -1, "depth_stencil_resolve_unsupported", dsref);
+        if (ns > 1u) {   /* depth / stencil resolve: planned by the same function the pass uses (a refusal is a whole-pass refusal in exact mode) */
+            int want; lagfx_a64_obj_t *rt; uint32_t dm, sm;
+            const char *dwhy = lagfx_a64_msaa_ds_plan(x, d, dobj, &want, &rt, &dm, &sm);
+            if (dwhy) { MS(p).ds_resolve_refused++; return veto_set(v, what, -1, dwhy, dsref); }
         }
     }
     /* resolve targets the store actions require (deferred tags 0x66 / 0x96 override the descriptor, as lagfx_a64_msaa_color does) */
@@ -262,11 +315,13 @@ void lagfx_a64_msaa_pass_end(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a6
             barrier_mem(cb, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT);
         } else lagfx_a64_res_target_end(x, r);
     }
+    if (ms->ds_res) lagfx_a64_res_ds_end(x, ms->ds_res);
     lagfx_a64_msaa_pass_reset(ms);
 }
 
 void lagfx_a64_msaa_pass_abort(lagfx_a64_rexec_t *x, lagfx_a64_msaa_pass_t *ms) {
     for (uint32_t i = 0; i < 4u; i++) if (ms->res[i] && !ms->copy_src[i]) lagfx_a64_res_target_end(x, ms->res[i]);
+    if (ms->ds_res) lagfx_a64_res_ds_end(x, ms->ds_res);
     lagfx_a64_msaa_pass_reset(ms);
 }
 #endif

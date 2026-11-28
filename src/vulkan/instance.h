@@ -88,6 +88,11 @@ struct lagfx_vk_state {
     bool have_buffer_device_address;  /* M2 host-flattening (PhysicalStorageBuffer) */
     bool device_lost;     /* sticky: a call saw VK_ERROR_DEVICE_LOST. Objects may still be destroyed, but NO new GPU work is recorded or submitted (render_begin and draw_record refuse with LAGFX_ERR_BACKEND) */
     int render_backend;   /* lagfx_render_backend_t, fixed at init (render_pass.h) */
+    /* depth / stencil resolve (render_pass.c): core 1.2, or VK_KHR_depth_stencil_resolve + VK_KHR_create_renderpass2 enabled on a 1.1 device. Probed once at init. */
+    bool have_ds_resolve;
+    PFN_vkCreateRenderPass2 create_renderpass2;   /* vkCreateRenderPass2 (>= 1.2) or vkCreateRenderPass2KHR; NULL when have_ds_resolve is false */
+    VkResolveModeFlags dsres_depth_modes, dsres_stencil_modes;   /* supportedDepthResolveModes / supportedStencilResolveModes */
+    bool dsres_independent_none, dsres_independent;
     bool legacy_fetch;    /* legacy backend: input-attachment framebuffer fetch enabled; decided ONCE at init from LAGFX_VK_LEGACY_FETCH ("0" disables), never re-read per call */
     struct lagfx_render_cache *render_cache;   /* render_pass.c: cached VkRenderPass / VkFramebuffer for the legacy backend */
     PFN_vkGetBufferDeviceAddress get_buffer_address;   /* core vkGetBufferDeviceAddress (>= 1.2) or the KHR entry point (1.1 + VK_KHR_buffer_device_address); NULL when BDA is unavailable */

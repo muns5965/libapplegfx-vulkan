@@ -106,5 +106,7 @@ uint32_t lagfx_a64_exec_deferred_count(const lagfx_protocol_t *p);
 /* Reads a texture object's pixels back (linear, width*4 bytes per row for the 4-byte formats). Test and debug aid. */
 bool lagfx_a64_exec_readback_texture(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, void *dst, size_t dst_size,
                                      uint32_t *width, uint32_t *height);
+/* Test / debug aid: one aspect (1 depth, 2 stencil) of a single-sample depth / stencil texture (see lagfx_a64_res_readback_ds). */
+bool lagfx_a64_exec_readback_ds(lagfx_protocol_t *p, const lagfx_task_entry_t *task, uint32_t ref, uint32_t aspect, void *dst, size_t dst_size, uint32_t *width, uint32_t *height);
 
 #endif

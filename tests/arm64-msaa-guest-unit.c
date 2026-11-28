@@ -222,14 +222,15 @@ static void cb_pass_gen(uint32_t ref, uint16_t load, uint16_t store, uint32_t re
     uint8_t *c = r + 0x4c; memcpy(c, &ref, 4); memcpy(c + 4, &res, 4); memcpy(c + 20, &load, 2); memcpy(c + 22, &store, 2);
     cb_cmd(26, r, sizeof r);
 }
-static void cb_pass_ms_depth(uint32_t cref, uint32_t dref, uint16_t dstore) {   /* colour 4x (clear, store) + depth attachment with depth store action `dstore` (depth load clear 1.0) */
+static uint32_t g_ds_rref; static uint16_t g_ds_filter; static double g_ds_clear = 1.0;   /* depth resolve texture / Metal depth resolve filter / depth clear value of cb_pass_ms_depth */
+static void cb_pass_ms_depth(uint32_t cref, uint32_t dref, uint16_t dstore) {   /* colour 4x (clear, store) + depth attachment with depth store action `dstore` (depth load clear g_ds_clear) */
     uint8_t r[584]; memset(r, 0, sizeof r);
-    uint16_t load = 2, store = 1, dload = 2; const double one = 1.0;
+    uint16_t load = 2, store = 1, dload = 2; const double one = g_ds_clear;
     uint8_t *c = r + 0x4c; memcpy(c, &cref, 4); memcpy(c + 20, &load, 2); memcpy(c + 22, &store, 2);
-    memcpy(r, &dref, 4); memcpy(r + 0x14, &dload, 2); memcpy(r + 0x16, &dstore, 2); memcpy(r + 0x1c, &one, 8);
+    memcpy(r, &dref, 4); memcpy(r + 4, &g_ds_rref, 4); memcpy(r + 0x14, &dload, 2); memcpy(r + 0x16, &dstore, 2); memcpy(r + 0x1c, &one, 8); memcpy(r + 0x24, &g_ds_filter, 2);
     cb_cmd(26, r, sizeof r);
 }
-typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_stats_t ms; uint64_t draws, skipped, no_target, pipes_built, ds_unsup, val; char line[1100]; char rej[96]; } mp_t;
+typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_stats_t ms; uint64_t draws, skipped, no_target, pipes_built, ds_unsup, val; char line[1100]; char rej[96]; float dsr[RT_W * RT_H]; bool dsr_ok; } mp_t;
 #define REF_MSD8 34u   /* multisampled depth texture asked with 8 samples: refused in exact mode on a 1|4 device */
 static unsigned g_mp_extra;   /* bit 0: REF_MS16 as a 8-sample colour texture (refused); bit 1: REF_MSD8 (refused 8-sample depth) */
 static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
@@ -241,6 +242,7 @@ static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     put_ms_tex(REF_MSX, VPN_MSX, 80, 4, 2, 1);
     if (with_depth) {   /* Depth32Float, type 4, 4 samples (descriptor +0 type, +18 samples) */
         put_ds_tex(REF_MSD, 0xe00, 252);
+        put_ds_tex(REF_D32, 0x600, 252); put_ds_tex(REF_D16, 0x900, 250);   /* 1x depth textures: the depth resolve target, and a resolve target of another format */
         const uint32_t rec = 12 + 0x18 + 36; const uint8_t ty = 4, ns = 4;
         va_write(VA_PAY + 0xe00 + rec + 12, &ty, 1); va_write(VA_PAY + 0xe00 + rec + 12 + 18, &ns, 1);
     }
@@ -259,6 +261,7 @@ static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
     memset(o, 0, sizeof *o); uint32_t w, h;
     if (!lagfx_a64_exec_readback_texture(p, t, REF_TEX, o->tex, sizeof o->tex, &w, &h)) memset(o->tex, 0xee, sizeof o->tex);
     if (!lagfx_a64_exec_readback_texture(p, t, REF_MSX, o->msx, sizeof o->msx, &w, &h)) memset(o->msx, 0xee, sizeof o->msx);
+    o->dsr_ok = with_depth && lagfx_a64_exec_readback_ds(p, t, REF_D32, 1u, o->dsr, sizeof o->dsr, &w, &h);   /* the 1x depth texture a depth resolve targets */
     o->ms = p->diag2.exec.msaa, o->draws = p->diag2.exec.run.draws, o->skipped = p->diag2.exec.run.draws_skipped, o->no_target = p->diag2.exec.run.no_target, o->pipes_built = p->diag2.exec.pipe.pipes_built, o->ds_unsup = p->diag2.exec.run.ds_attach_unsupported;
     lagfx_msaa_stats_line(&p->diag2.exec.msaa, o->line, sizeof o->line);
     if (o->ms.ms_pass_refused) snprintf(o->rej, sizeof o->rej, "%s", lagfx_a64_msaa_last_reject());
@@ -295,6 +298,7 @@ static void b_rej_resolve_missing(void) { cb_pass_full(REF_MS8, 3, 77, 0, 0, 0, 
 static void b_rej_mixed(void) { cb_pass_full(REF_MS8, 2, REF_MSX, REF_TEX2, 1, 0, 0, 0, 0); draw_tri(); }                      /* second colour attachment is a plain 1x texture */
 static void b_ok_two_colour_ms(void) { cb_pass_full(REF_MS8, 2, REF_MSX, 0, 0, 0, 0, 0, 0); draw_tri(); }                       /* control: a valid exact pass of the same shape */
 static void b_ds_resolve(void) { cb_pass_ms_depth(REF_MS8, REF_MSD, 3); draw_tri(); }
+static void b_ds_store_only(void) { cb_pass_ms_depth(REF_MS8, REF_MSD, 1); draw_tri(); }
 static bool msx_matches(const mp_t *m, bool flip) { gr_t g; memset(&g, 0, sizeof g); memcpy(g.bgra, m->msx, sizeof g.bgra); return resolved_matches(&g, false, flip, NULL); }
 static bool tex_matches(const mp_t *m, bool flip) { gr_t g; memset(&g, 0, sizeof g); memcpy(g.bgra, m->tex, sizeof g.bgra); return resolved_matches(&g, false, flip, NULL); }
 
@@ -587,13 +591,39 @@ int main(void) {
         assert(full > 40 && partial == 0); }   /* the 1x passes (through the 1x pipeline) have no partial-coverage pixel */
       puts("PASS pipeline cache: same shader / format at 1x and 4x -> 2 pipelines (pipes_built=2, pipes_ms=1), 1x again is a hit; validation: no message in the window"); }
 
-    /* depth / stencil resolve in a 4x pass: not wired. COMPAT: stored only, counted and printed under unsupported[ds_resolve=..]; EXACT (below): the whole pass is rejected */
-    setenv("LAGFX_MSAA_COMPAT", "1", 1);
-    { static mp_t m; mp_run(b_ds_resolve, &m, true);
-      assert(m.ms.ms_passes == 1 && m.ms.ds_resolve_unsupported == 1 && m.draws == 1 && m.ms.ms_pass_refused == 0);
-      assert(strstr(m.line, "unsupported[ds_resolve=1 "));
-      puts("PASS compat: depth resolve (store action 3 on a 4x depth attachment): not implemented, counted ds_resolve_unsupported and printed under unsupported[], pass stored-only"); }
-    unsetenv("LAGFX_MSAA_COMPAT");
+    const bool ds_pass_ok = VK_VERSION_MINOR(g_dev->vk->phys_props.apiVersion) >= 3u || VK_VERSION_MAJOR(g_dev->vk->phys_props.apiVersion) > 1u;   /* the ARM64 exec path attaches depth / stencil on core 1.3+ only (depth state is dynamic there): on a simulated 1.1 device the pass-level depth resolve is not reachable */
+    if (!ds_pass_ok) puts("SKIP: pass-level depth resolve (device below Vulkan 1.3: the ARM64 exec path does not attach depth / stencil there, ds_no_device_support); the library-level resolve is covered by vulkan-render-desc-unit");
+    else {
+    /* depth resolve in a 4x pass (store action 3 + a 1x depth resolve texture): the 4x depth (cleared to 0.375, no draw writes depth) is resolved into REF_D32 and read back. Control: with store action 1 the
+     * resolve texture is not written (its content is whatever the mirror created: NOT 0.375). Both modes (exact is the default, compat below) resolve identically. */
+    { static mp_t m, c;
+      g_ds_clear = 0.375; g_ds_rref = REF_D32; g_ds_filter = 0;
+      mp_run(b_ds_resolve, &m, true);
+      if (!m.dsr_ok) printf("DEBUG ds resolve: ds_resolves=%llu refused=%llu unsupported=%llu pass_refused=%llu draws=%llu rej='%s'\n", (unsigned long long)m.ms.ds_resolves, (unsigned long long)m.ms.ds_resolve_refused, (unsigned long long)m.ms.ds_resolve_unsupported, (unsigned long long)m.ms.ms_pass_refused, (unsigned long long)m.draws, m.rej);
+      assert(m.dsr_ok);
+      { unsigned good = 0; for (unsigned i = 0; i < RT_W * RT_H; i++) good += m.dsr[i] == 0.375f; assert(good == RT_W * RT_H); }
+      assert(m.ms.ds_resolves == 1 && m.ms.ds_resolve_refused == 0 && m.ms.ds_resolve_unsupported == 0 && m.ms.ms_pass_refused == 0 && m.ms.ms_passes == 1 && m.draws == 1 && m.val == 0);
+      puts("PASS depth resolve (store action 3, 1x D32 resolve texture, filter Sample0): the resolve texture holds the 4x depth (0.375 in all 256 texels), ds_resolves=1, no refusal, validation 0");
+      mp_run(b_ds_store_only, &c, true);
+      assert(c.ms.ds_resolves == 0 && c.ms.ms_pass_refused == 0 && c.draws == 1);
+      { unsigned good = 0; for (unsigned i = 0; c.dsr_ok && i < RT_W * RT_H; i++) good += c.dsr[i] == 0.375f; assert(good == 0); }   /* the texture is not even created when no pass resolves into it */
+      puts("PASS control: depth store action 1 (store only) with a resolve texture named: nothing resolved (the resolve texture is never made or does not hold 0.375), ds_resolves=0");
+      setenv("LAGFX_MSAA_COMPAT", "1", 1);
+      mp_run(b_ds_resolve, &c, true);
+      unsetenv("LAGFX_MSAA_COMPAT");
+      assert(c.dsr_ok && c.ms.ds_resolves == 1 && c.ms.ms_pass_refused == 0 && c.draws == 1);
+      { unsigned good = 0; for (unsigned i = 0; i < RT_W * RT_H; i++) good += c.dsr[i] == 0.375f; assert(good == RT_W * RT_H); }
+      puts("PASS compat mode resolves depth the same way (ds_resolves=1)");
+      /* compat mode with a resolve that cannot be recorded: stored only, counted (ds_resolve_refused + ds_resolve_unsupported), the pass still draws */
+      g_ds_rref = REF_D16;   /* another format */
+      setenv("LAGFX_MSAA_COMPAT", "1", 1);
+      mp_run(b_ds_resolve, &c, true);
+      unsetenv("LAGFX_MSAA_COMPAT");
+      assert(c.ms.ds_resolves == 0 && c.ms.ds_resolve_refused == 1 && c.ms.ds_resolve_unsupported == 1 && c.ms.ms_pass_refused == 0 && c.draws == 1);
+      assert(strstr(c.line, "unsupported[ds_resolve=1 "));
+      puts("PASS compat: depth resolve texture of another format: stored only, counted ds_resolve_refused / ds_resolve_unsupported (printed under unsupported[]), the pass still draws");
+      g_ds_rref = REF_D32; }
+    }
 
     /* ===== EXACT whole-pass rejection (task 1): ANY refused / inconsistent attachment or required resolve target rejects the WHOLE pass ===== */
     { static mp_t ok, m;
@@ -632,10 +662,34 @@ int main(void) {
       mp_run(b_rej_mixed, &m, false);
       assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && m.ms.attach_mixed_ignored == 0 && m.ms.ms_attach == 0 && is_untouched(m.msx, sizeof m.msx) && !strcmp(m.rej, "colour1: mixed_sample_counts") && m.val == 0);
       puts("PASS exact: resolve target refused (wrong format / none / missing ref) and a mixed-sample second attachment: whole pass rejected with the specific reason, no draw, nothing written");
-      /* (d) depth / stencil resolve (not wired): the pass is rejected, not stored-only */
+      /* (d) depth / stencil resolve that cannot be recorded: the whole pass is rejected, with the specific reason (nothing is stored-only) */
+      if (ds_pass_ok) {
+      g_ds_clear = 0.375;
+      g_ds_rref = 0;
       mp_run(b_ds_resolve, &m, true);
-      assert(m.ms.ms_pass_refused == 1 && m.ms.ds_resolve_unsupported == 1 && m.draws == 0 && m.ms.ms_passes == 0 && !strcmp(m.rej, "depth: depth_stencil_resolve_unsupported") && m.val == 0);
-      puts("PASS exact: depth store action 3 (resolve) on a 4x depth attachment: whole pass rejected (depth_stencil_resolve_unsupported), counted ds_resolve_unsupported"); }
+      assert(m.ms.ms_pass_refused == 1 && m.ms.ds_resolve_refused == 1 && m.draws == 0 && m.ms.ms_passes == 0 && !strcmp(m.rej, "depth: resolve_texture_none") && m.val == 0);
+      g_ds_rref = 77;
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_texture_missing") && m.val == 0);
+      g_ds_rref = REF_TEX;   /* a colour texture */
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_not_depth_stencil") && m.val == 0);
+      g_ds_rref = REF_D16;
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_shape_mismatch") && m.val == 0);
+      g_ds_rref = REF_MSD;   /* the attachment itself */
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_is_attachment") && m.val == 0);
+      g_ds_rref = REF_D32; g_ds_filter = 2;   /* Max: the lavapipe device offers SAMPLE_ZERO only (0x1), so Max is refused, not replaced by another mode */
+      mp_run(b_ds_resolve, &m, true);
+      if (g_dev->vk->dsres_depth_modes & VK_RESOLVE_MODE_MAX_BIT) assert(m.ms.ms_pass_refused == 0 && m.ms.ds_resolves == 1);
+      else assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_mode_unsupported") && m.val == 0);
+      g_ds_filter = 7;
+      mp_run(b_ds_resolve, &m, true);
+      assert(m.ms.ms_pass_refused == 1 && m.draws == 0 && !strcmp(m.rej, "depth: resolve_mode_unsupported") && m.val == 0);   /* an unknown Metal filter value */
+      g_ds_filter = 0; g_ds_rref = REF_D32; g_ds_clear = 1.0;
+      }
+      puts("PASS exact: depth resolve that cannot be recorded (no / missing / colour / other-format / self resolve texture, a filter the device lacks, an unknown filter): whole pass rejected with the specific reason, no draw"); }
 
     /* the unsupported[] group names every unimplemented multisample feature */
     { lagfx_msaa_stats_t z; memset(&z, 0, sizeof z); z.ds_resolve_unsupported = 1, z.sampled_ms_refused = 2, z.air_ms_ops = 3, z.air_sample_builtins = 4, z.fbfetch_ms_refused = 5, z.tile_ms_refused = 6, z.blit_ms_refused = 7, z.capture_ms_skipped = 8;

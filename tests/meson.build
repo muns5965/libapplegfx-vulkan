@@ -2184,6 +2184,7 @@ vulkan_render_desc_test = executable('vulkan-render-desc-unit',
 )
 test('vulkan render desc + draw path, both backends (unit, lavapipe)', vulkan_render_desc_test)
 test('vulkan render desc + draw path, both backends (unit, lavapipe + validation)', vulkan_render_desc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1'])
+test('vulkan depth/stencil resolve, simulated Vulkan 1.1 legacy path (unit, lavapipe + validation)', vulkan_render_desc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_TEST_API_MINOR=1'])
 
 # Read-only device diagnostic g7-vkdev (identity, full extension list, feature summary): structure checks on the available ICD, skip (77) without one.
 vkdev_info_test = executable('vkdev-info-unit',
