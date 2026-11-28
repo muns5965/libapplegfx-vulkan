@@ -19,7 +19,7 @@ Total 198 cells = 6 V + 104 N + 88 refused. Full per-cell table: `docs/evidence/
 | i32 load/store/xchg/add/sub/and/or/xor/min/max, global (StorageBuffer, Device scope) and local (Workgroup) | supported; only 6 spellings are V, the rest N |
 | memory order | **only literal 0 (relaxed)**; any other order refused (`order`), also in lenient mode |
 | scope operand | strict: literal 2 only; SPIR-V scope follows the checked storage class, not the operand |
-| i64 store / rmw (void-declared) | **partial**: accepted for every op and for local memory too, which is wider than MSL (MSL has `atomic_ulong` min/max in device memory only). Harmless superset today, spelling unverified |
+| i64 store / rmw (void-declared) | **partial**: accepted for every op and for local memory too, which is wider than MSL (MSL has `atomic_ulong` min/max in device memory only). Whether the superset is harmless is **not established**: it needs the official 64-bit atomic rules and execution conditions (Int64Atomics support per device) checked; spelling unverified |
 | i64 load or non-void i64 rmw | refused (`i64_return`): real AIR return type unknown |
 | f32 add | refused in strict (`float`); accepted under `LAGFX_ATOMIC_LENIENT=1` with `AtomicFloat32AddEXT` (needs the device feature) |
 | f32 load/store/xchg/sub/min/max | unimplemented (`spelling`), never emulated |
@@ -28,6 +28,10 @@ Total 198 cells = 6 V + 104 N + 88 refused. Full per-cell table: `docs/evidence/
 | cmpxchg f32 | unimplemented |
 | `air.atomic.fence` and any other name | unimplemented (`spelling`) |
 | atomic in a helper whose call cannot be wired | refused (`helper`) |
+
+## What this classification is not
+
+The commit that added it changed tests and docs only; `translate_function.c` (the lowering) is unchanged, so no atomic capability was added. The 88 refused cells are **not** all missing features: many are spellings Metal never produces. A real work list needs the operations actual shaders use. Translation success, SPIR-V validity and GPU execution are separate levels: this matrix proves translation outcome only.
 
 ## Not covered by this matrix (separate tests)
 
