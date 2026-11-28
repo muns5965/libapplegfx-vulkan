@@ -849,10 +849,14 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             VkPhysicalDeviceFeatures2 q = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = chain };
             vkGetPhysicalDeviceFeatures2(s->phys_device, &q);
         }
-        if (ext_lr && lr.dynamicRenderingLocalRead && !getenv("LAGFX_VK_NO_LOCAL_READ")) {   /* framebuffer fetch (input attachment reads of the colour attachments) */
+        /* The feature is the same struct whether it comes from the extension or from Vulkan 1.4 core (Mesa Turnip on the Tab S8: core1.4=1, extension NOT listed, feature 1; the old
+           condition required the extension name and left framebuffer fetch off: 11 pipelines "no_local_read"). The extension NAME is only requested when the device lists it. */
+        if ((ext_lr || lr_core) && lr.dynamicRenderingLocalRead && !getenv("LAGFX_VK_NO_LOCAL_READ")) {   /* framebuffer fetch (input attachment reads of the colour attachments) */
             lr_en.pNext = feat13.pNext; feat13.pNext = &lr_en;
-            wanted_dev_exts[wanted_dev_n++] = "VK_KHR_dynamic_rendering_local_read";
-            dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+            if (ext_lr) {
+                wanted_dev_exts[wanted_dev_n++] = "VK_KHR_dynamic_rendering_local_read";
+                dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
+            }
             s->have_local_read = true;
         }
         if (s->have_local_read && lr_core) {   /* Vulkan 1.4 reports whether local reads also work on MULTISAMPLED attachments (VkPhysicalDeviceVulkan14Properties::dynamicRenderingLocalReadMultisampledAttachments).
