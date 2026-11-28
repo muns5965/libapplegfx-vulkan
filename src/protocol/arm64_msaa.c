@@ -138,7 +138,7 @@ bool lagfx_a64_msaa_color(lagfx_protocol_t *p, lagfx_a64_rexec_t *x, lagfx_a64_m
     }
     VkImageView rv; uint32_t w, h;
     if (slot >= 4u || !lagfx_a64_res_target_begin(x, r, &rv, &w, &h)) { MS(p).resolve_no_target++; ca->storeOp = VK_ATTACHMENT_STORE_OP_STORE; ms->fail = "resolve_target_begin"; return false; }
-    ca->resolveMode = lagfx_msaa_resolve_mode(t->format), ca->resolveImageView = rv, ca->resolveImageLayout = ca->imageLayout;
+    ca->resolveMode = lagfx_msaa_resolve_mode(t->format), ca->resolveImageView = rv, ca->resolveImageLayout = lagfx_a64_res_target_layout(x, r);   /* the layout target_begin put the resolve target in */
     ms->res[slot] = r, ms->nres++;
     MS(p).resolves++;
     return true;

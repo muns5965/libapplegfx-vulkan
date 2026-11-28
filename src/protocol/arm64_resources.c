@@ -1657,6 +1657,16 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { return tex_view(x, o, VK_IMAGE_USAGE_STORAGE_BIT); }
 
+/* Layout of ONE colour target while it is an attachment. Dynamic backend: unchanged (RENDERING_LOCAL_READ). Legacy backend: GENERAL ONLY for a 1x target whose image really carries
+ * INPUT_ATTACHMENT usage (the usage is optional at create_image and may have been dropped), COLOR_ATTACHMENT_OPTIMAL otherwise - a fetch slot without the usage would be invalid. */
+VkImageLayout lagfx_a64_res_target_layout(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o) {
+    if (lagfx_vk_render_backend(x->vk) == LAGFX_RENDER_DYNAMIC) return lagfx_vk_fetch_layout(x->vk);
+    return lagfx_a64_res_target_fetch(x, o) ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+}
+bool lagfx_a64_res_target_fetch(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o) {
+    return x && o && lagfx_vk_fetch_capable(x->vk) && (o->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) && (o->samples <= 1u);
+}
+
 bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImageView *view, uint32_t *w, uint32_t *h) {
     if (!x || !o || o->kind != LAGFX_A64_TEXTURE || is_tex3d(o) || !(o->usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) return false;
     if (o->linear && !lin_pull_x(x, o)) return false;   /* Load / blend reads the buffer's bytes: counted linear_unsupported when the backing buffer is unusable */
@@ -1665,13 +1675,14 @@ bool lagfx_a64_res_target_begin(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o, VkImag
             .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1 } };
         if (vkCreateImageView(x->vk->device, &vi, NULL, &o->view) != VK_SUCCESS) { o->view = VK_NULL_HANDLE; return false; }
     }
+    const bool fetch = lagfx_vk_fetch_capable(x->vk) && (o->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);   /* the fragment shader may read it as an input attachment: order that stage / access too (dynamic path as well) */
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = lagfx_vk_fetch_layout(x->vk), /* RENDERING_LOCAL_READ (dynamic) / GENERAL (legacy): attachment AND input-attachment readable */
+        .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | (fetch ? VK_ACCESS_INPUT_ATTACHMENT_READ_BIT : 0u),
+        .oldLayout = VK_IMAGE_LAYOUT_GENERAL, .newLayout = lagfx_a64_res_target_layout(x, o), /* RENDERING_LOCAL_READ (dynamic) / GENERAL (legacy, input-attachment usage only) */
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS } };
-    vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1, &ib);
+    vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | (fetch ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0u), 0, 0, NULL, 0, NULL, 1, &ib);
     *view = o->view, *w = o->width, *h = o->height;
     return true;
 }
@@ -1681,7 +1692,7 @@ void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) {
     VkImageMemoryBarrier ib = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
         .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
         .dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-        .oldLayout = lagfx_vk_fetch_layout(x->vk), .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+        .oldLayout = lagfx_a64_res_target_layout(x, o), .newLayout = VK_IMAGE_LAYOUT_GENERAL,
         .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = o->img,
         .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS } };
     vkCmdPipelineBarrier(x->cb, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, NULL, 0, NULL, 1, &ib);

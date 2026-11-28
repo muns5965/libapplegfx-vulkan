@@ -90,7 +90,7 @@ typedef struct { objhdr_t h; lagfx_a64_dss_t d; } a64_dss_t;   /* a decoded dept
 typedef struct {
     objhdr_t h;
     lagfx_a64_pipeline_src_t src;
-    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo, samples; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | (1 + variant index) << 4 for an unnormalized-sampler shader variant */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
+    struct { VkPipeline pl; VkFormat fmt[4]; VkFormat dfmt[2]; uint8_t topo, samples, fmask; uint64_t lkey; } cache[A64_PIPE_CACHE];   /* topo: topology | (1 + variant index) << 4 for an unnormalized-sampler shader variant */   /* one VkPipeline per (colour formats of slots 0..3, depth / stencil attachment formats, topology, descriptor binding table key), owned by THIS object only */
     uint32_t ncache;
     /* Shader variants for draws that bind an unnormalized-coordinates sampler (spv_unnorm.c): keyed by the set of unnormalized sampler slots of the vertex / fragment table. rc 0 = the shader never
      * samples through them (original shader), 1 = rewritten module(s), -1 = an unsupported use (draw skipped). Built lazily at the first such draw, owned by this object. */
@@ -462,10 +462,19 @@ static a64_pipe_t *pipeline_current(a64_run_t *r, lagfx_protocol_t *p, uint32_t 
     return pp;
 }
 
+/* Legacy backend: the colour slots that are framebuffer-fetch slots in the CURRENT pass (1x target carrying INPUT_ATTACHMENT usage). Part of the pipeline cache key, because a legacy
+ * pipeline is built against a render pass with exactly this input-attachment set. 0 on the dynamic backend (no render pass object). */
+static uint32_t run_fetch_mask(const a64_run_t *r) {
+    uint32_t m = 0;
+    if (lagfx_vk_render_backend(r->vk) != LAGFX_RENDER_LEGACY) return 0;
+    for (uint32_t i = 0; i < 4u; i++) if (r->rts[i] && lagfx_a64_res_target_fetch(r->x, r->rts[i])) m |= 1u << i;
+    return m;
+}
+
 /* pl == VK_NULL_HANDLE records a failed build (looked up like a hit, returns NULL). */
 static void cache_put(a64_pipe_t *pp, const VkFormat fmts[4], const VkFormat dfm[2], uint32_t topo, VkPipeline pl, a64_run_t *r) {
     if (pp->ncache == A64_PIPE_CACHE) { defer(r, 1, NULL, pp->cache[0].pl); memmove(&pp->cache[0], &pp->cache[1], (A64_PIPE_CACHE - 1u) * sizeof pp->cache[0]); pp->ncache--; }
-    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo, pp->cache[pp->ncache].samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u), pp->cache[pp->ncache].lkey = pp->src.layout_key;
+    pp->cache[pp->ncache].pl = pl, memcpy(pp->cache[pp->ncache].fmt, fmts, 4 * sizeof(VkFormat)), memcpy(pp->cache[pp->ncache].dfmt, dfm, 2 * sizeof(VkFormat)), pp->cache[pp->ncache].topo = (uint8_t)topo, pp->cache[pp->ncache].samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u), pp->cache[pp->ncache].fmask = (uint8_t)run_fetch_mask(r), pp->cache[pp->ncache].lkey = pp->src.layout_key;
     pp->ncache++;
 }
 
@@ -519,7 +528,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     const VkFormat dfm[2] = { r->ds_dfmt, r->ds_sfmt };
     const uint32_t key = topo; topo &= 15u;   /* bits 4..6 of the key: 1 + index of the unnormalized-sampler shader variant of the pipeline (0 = the shaders as resolved) */
     for (uint32_t i = 0; i < pp->ncache; i++)
-        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].samples == (r->ms.samples > 1u ? r->ms.samples : 1u) && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
+        if (!memcmp(pp->cache[i].fmt, fmts, 4 * sizeof(VkFormat)) && !memcmp(pp->cache[i].dfmt, dfm, sizeof dfm) && pp->cache[i].topo == key && pp->cache[i].samples == (r->ms.samples > 1u ? r->ms.samples : 1u) && pp->cache[i].fmask == run_fetch_mask(r) && pp->cache[i].lkey == pp->src.layout_key) return pp->cache[i].pl;
     lagfx_pipeline_desc_t d = pp->src.desc;
     if (key >> 4) {
         const uint32_t vi = (key >> 4) - 1u;
@@ -565,7 +574,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     }
     if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) {   /* a VkRenderPass device: the pipeline is built against the pass render_begin will start (render_encoder.c begin_legacy), or not at all */
         lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE; lagfx_legacy_refuse_t why = LAGFX_LR_NONE;
-        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { rd.fetch_mask = lagfx_vk_fetch_capable(r->vk) ? lagfx_legacy_fetch_mask(&rd) : 0u; lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
+        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { rd.fetch_mask = lagfx_legacy_fetch_mask(&rd) & run_fetch_mask(r); lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
         if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++, p->diag2.exec.pipe.legacy_pipe_why[why]++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
         d.render_pass = (uint64_t)(uintptr_t)lrp;
     }
@@ -1155,7 +1164,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         if (!first) first = t, fw = w, fh = h, r->ms.samples = lagfx_a64_msaa_obj_samples(t);
         r->rts[slot] = t;
         cap_load[slot] = load; for (int c = 0; c < 4; c++) cap_clear[slot][c] = d.colors[k].clear_color[c];
-        ca[slot].imageView = view, ca[slot].loadOp = lop, ca[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE, ca[slot].clearValue = cv;
+        ca[slot].imageView = view, ca[slot].imageLayout = lagfx_a64_res_target_layout(r->x, t), ca[slot].loadOp = lop, ca[slot].storeOp = VK_ATTACHMENT_STORE_OP_STORE, ca[slot].clearValue = cv;
         {   /* multisampled texture: store action / resolve texture (arm64_msaa.c); a plain texture keeps STORE (a resolve action on it is counted) */
             const lagfx_a64_obj_t *att[4] = { r->rts[0], r->rts[1], r->rts[2], r->rts[3] };
             lagfx_a64_msaa_color(p, r->x, &r->ms, slot, slot, t, d.colors[k].store_action, d.colors[k].resolve_texture_ref, d.colors[k].resolve_level || d.colors[k].resolve_slice, att, &ca[slot]);

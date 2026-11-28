@@ -216,6 +216,8 @@ static void cb_viewport(double w, double h) { double v[6] = { 0, 0, w, h, 0, 1 }
 static void cb_pipeline(uint32_t ref) { cb_cmd(116, &ref, 4); }
 static void cb_vbuf(uint32_t ref, uint64_t off) { uint8_t r[20]; uint32_t idx = 0, cnt = 1; memcpy(r, &idx, 4); memcpy(r + 4, &cnt, 4); memcpy(r + 8, &ref, 4); memcpy(r + 12, &off, 8); cb_cmd(125, r, 20); }
 static void cb_draw(uint32_t start, uint32_t count) { uint8_t r[8]; uint32_t prim = 3; uint16_t s = (uint16_t)start, c = (uint16_t)count; memcpy(r, &prim, 4); memcpy(r + 4, &s, 2); memcpy(r + 6, &c, 2); cb_cmd(1, r, 8); }
+static void cb_draw_inst(uint32_t start, uint32_t count, uint32_t inst, uint32_t prim) { uint8_t r[8]; uint16_t v[4] = { (uint16_t)start, (uint16_t)count, (uint16_t)inst, (uint16_t)prim }; memcpy(r, v, 8); cb_cmd(3, r, 8); }
+static void cb_draw_indexed_prim(uint32_t ref, uint32_t count, uint32_t prim_) { uint8_t r[12] = {0}; uint16_t prim = (uint16_t)prim_, it = 0, c = (uint16_t)count; memcpy(r, &prim, 2); memcpy(r + 2, &it, 2); memcpy(r + 4, &ref, 4); memcpy(r + 8, &c, 2); cb_cmd(7, r, 12); }
 static void cb_draw_indexed(uint32_t ref, uint32_t count) { uint8_t r[12] = {0}; uint16_t prim = 3, it = 0, c = (uint16_t)count; memcpy(r, &prim, 2); memcpy(r + 2, &it, 2); memcpy(r + 4, &ref, 4); memcpy(r + 8, &c, 2); cb_cmd(7, r, 12); }
 static uint32_t cb_finish(void) {
     uint32_t seglen = g_cbn, info = 0;      /* seglen = the whole buffer incl. the 8-byte header, as the real guest writes it; type 0 render */
@@ -641,6 +643,31 @@ static void test_exec_fetch(void) {
         printf("PASS: framebuffer fetch, one draw of overlapping primitives (%s): %llu split draw(s), %llu sub-draw(s), second fragment read the first one's write\n", lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy, no rasterization order" : "dynamic", (unsigned long long)q->diag2.exec.fmt.fbf_split_draws, (unsigned long long)q->diag2.exec.fmt.fbf_split_subdraws);
         lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
         g_blend.fetch = 0;
+    }
+    {   /* split edge cases (fbf_split_plan): instanced, triangle strip (indexed), and over the split cap. Pixel results hold on both backends (lavapipe executes in order); the COUNTERS pin the legacy behaviour. */
+        struct { const char *nm; int kind; uint64_t min_sub; } cs[3] = { { "instanced x2", 0, 2 }, { "indexed triangle strip (4 prims)", 1, 4 }, { "over cap (16385 instances)", 2, 0 } };
+        for (int ci = 0; ci < 3; ci++) {
+            lagfx_protocol_t *q = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+            lagfx_task_entry_t *tq = def_task(q, 1);
+            build_objects();
+            lagfx_a64_exec_set_pipeline_resolver(q, resolver, NULL);
+            g_blend.fetch = 1;
+            cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0);
+            if (cs[ci].kind == 0) cb_draw_inst(0, 3, 2, 3); else if (cs[ci].kind == 1) cb_draw_indexed_prim(REF_IB, 6, 4); else cb_draw_inst(0, 3, 16385, 3);
+            exec(q, 1, cb_finish(), true);
+            assert(q->diag2.exec.run.submit_failed == 0 && q->diag2.exec.run.draws == 1 && q->diag2.exec.run.draws_skipped == 0);
+            assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX, img, sizeof img, &w, &h));
+            uint32_t vv = px(img, 8, 8);
+            assert(((vv >> 16) & 255) == 255 && (vv & 255) == 255);   /* blue kept, red saturated by the overlapping fragments */
+            assert(px(img, 0, 15) == 0xff0000ffu);
+            if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {
+                if (cs[ci].kind == 2) assert(q->diag2.exec.fmt.fbf_split_capped == 1 && q->diag2.exec.fmt.fbf_split_draws == 0);
+                else assert(q->diag2.exec.fmt.fbf_split_draws == 1 && q->diag2.exec.fmt.fbf_split_subdraws == cs[ci].min_sub && q->diag2.exec.fmt.fbf_split_capped == 0);
+            }
+            printf("PASS: framebuffer fetch split edge case \"%s\": split_draws=%llu subdraws=%llu capped=%llu\n", cs[ci].nm, (unsigned long long)q->diag2.exec.fmt.fbf_split_draws, (unsigned long long)q->diag2.exec.fmt.fbf_split_subdraws, (unsigned long long)q->diag2.exec.fmt.fbf_split_capped);
+            lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
+            g_blend.fetch = 0;
+        }
     }
     /* two attachments: BGRA8 slot 0 + RGBA16F slot 1, FS reads BOTH (dest_0 / dest_1 told apart) and writes both */
     {

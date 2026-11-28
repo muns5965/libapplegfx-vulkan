@@ -941,7 +941,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     }
     s->have_dynamic_rendering      = have_dyn_rendering_feature;
     s->render_backend              = (int)lagfx_vk_render_backend_select(have_dyn_rendering_feature);
-    if (s->render_backend == LAGFX_RENDER_LEGACY) {   /* framebuffer fetch needs input attachments inside a VkRenderPass: not implemented, so such draws are refused (counted as stub_fbfetch), never run with the wrong layout */
+    { const char *lf = getenv("LAGFX_VK_LEGACY_FETCH"); s->legacy_fetch = !(lf && !strcmp(lf, "0")); }
+    if (s->render_backend == LAGFX_RENDER_LEGACY) {   /* dynamic local read is not used on the legacy backend; legacy fetch uses input attachments (render_pass.c). Framebuffer fetch needs input attachments inside a VkRenderPass: not implemented, so such draws are refused (counted as stub_fbfetch), never run with the wrong layout */
         s->have_local_read = false;
         s->have_local_read_ms = false;
     }

@@ -173,9 +173,9 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
     VkSubpassDependency dep[2] = {
         { .srcSubpass = VK_SUBPASS_EXTERNAL, .dstSubpass = 0,
           .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | ds_st,
-          .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | ds_st,
+          .dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | ds_st | (nin ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT : 0u),
           .srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_TRANSFER_READ_BIT | VK_ACCESS_TRANSFER_WRITE_BIT | (ds_ac & VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT),
-          .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | ds_ac, .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT },
+          .dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT | (nin ? VK_ACCESS_INPUT_ATTACHMENT_READ_BIT : 0u) | ds_ac, .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT },
         { .srcSubpass = 0, .dstSubpass = VK_SUBPASS_EXTERNAL,
           .srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | ds_st,
           .dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | ds_st,
@@ -406,8 +406,7 @@ bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested)
 bool lagfx_vk_fetch_capable(const struct lagfx_vk_state *vk) {
     if (!vk) return false;
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return vk->have_local_read;
-    const char *e = getenv("LAGFX_VK_LEGACY_FETCH");
-    return !(e && !strcmp(e, "0"));
+    return vk->legacy_fetch;
 }
 VkImageLayout lagfx_vk_fetch_layout(const struct lagfx_vk_state *vk) {
     if (!lagfx_vk_fetch_capable(vk)) return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;

@@ -152,6 +152,8 @@ VkImageView lagfx_a64_res_sample_view3d(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o
 bool lagfx_a64_res_is_3d(const lagfx_a64_obj_t *o);
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
 void lagfx_a64_res_target_end(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o);
+VkImageLayout lagfx_a64_res_target_layout(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o);   /* attachment layout of one colour target (legacy: GENERAL only with INPUT_ATTACHMENT usage) */
+bool lagfx_a64_res_target_fetch(const lagfx_a64_rexec_t *x, const lagfx_a64_obj_t *o);   /* legacy fetch: this target is a fetch slot (capable, usage, 1x) */
 /* A host-visible storage buffer (zeroed, persistently mapped) owned by the exec and freed with it, e.g. an aligned copy of a misaligned buffer range. */
 bool lagfx_a64_res_scratch(lagfx_a64_rexec_t *x, VkDeviceSize size, VkBuffer *buf, uint8_t **map);
 /* A write to buffer b was recorded into THIS exec's command buffer (blit fill / copy, linear push, texture->buffer copy, shader-writable bind, tile kernel): at record time
