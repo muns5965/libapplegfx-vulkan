@@ -88,6 +88,7 @@ lagfx_status_t lagfx_air2spv_translate_function(
 typedef struct {
     uint32_t n;
     char     key[LAGFX_STAGE_KEYS_MAX][LAGFX_STAGE_KEY_LEN];
+    int16_t  loc[LAGFX_STAGE_KEYS_MAX];   /* KERNEL keys only: the argument's "air.location_index" (the Metal [[buffer/texture/threadgroup(n)]] index), -1 when absent */
     /* VERTEX OUTPUT keys only (lagfx_air_stage_keys(outputs=true)): the shape of
      * the Output variable the vertex translator declares for member i, used by
      * the stage linker. `typed` = 0 -> shapes absent/disabled, the linker is off
@@ -159,9 +160,9 @@ void lagfx_air2spv_set_imageblock_unformatted(uint32_t rt_mask);
 typedef struct { uint64_t modules, calls, kernels_rejected; } lagfx_simd_unsupported_totals_t;
 uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap);
 /* `threadgroup T *p [[threadgroup(n)]]` kernel arguments (metadata key "air.threadgroup_buffer"; the key spelling is the translator's reading of Apple's AIR, NOT yet seen in a captured
- * module): modelled as a Workgroup array T[N] with N a SpecConstant, SpecId 3 + k (k = rank among the threadgroup arguments in argument order), unit = elements, default 1024;
- * the constant is OpName'd "lagfx.tgarg.<k>.<element bytes>". An argument the translator cannot model (element not a 32/64-bit integer / float, a bare dereference, mixed
- * access types) makes the COMPUTE translation fail (LAGFX_ERR_PROTOCOL); this returns the calling thread's last translation's count (0 = none) and the first reason. */
+ * module): modelled as a Workgroup array T[N] with N a SpecConstant, SpecId 3 + n (n = the Metal [[threadgroup(n)]] index = air.location_index, 0..30), unit = elements, default 1024 (a
+ * dispatcher must give every one an explicit length: lagfx_spv_reflect_threadgroup_args); the constant is OpName'd "lagfx.tgarg.<n>.<element bytes>". An argument the translator cannot model (element not a 32/64-bit integer / float, a bare dereference, declared and accessed element types that differ, no or
+ * duplicate location index) makes the COMPUTE translation fail (LAGFX_ERR_PROTOCOL); this returns the calling thread's last translation's count (0 = none) and the first reason. */
 uint32_t lagfx_air2spv_last_unsupported_threadgroup_arg(char *first_reason, size_t cap);
 void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out);
 

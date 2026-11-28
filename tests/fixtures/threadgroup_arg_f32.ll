@@ -16,8 +16,9 @@ entry:
   %nm64 = zext i32 %nm to i64
   %rp = getelementptr float, ptr addrspace(3) %scratch, i64 %nm64
   %r = load float, ptr addrspace(3) %rp
-  %gb = mul i64 %g64, 64
-  %oi = add i64 %gb, %l64
+  %gb32 = mul i32 %gid, 64
+  %oi32 = add i32 %gb32, %lid
+  %oi = zext i32 %oi32 to i64
   %op = getelementptr float, ptr addrspace(1) %o, i64 %oi
   store float %r, ptr addrspace(1) %op
   ret void

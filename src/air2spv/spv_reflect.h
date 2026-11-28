@@ -62,6 +62,16 @@ uint32_t lagfx_spv_reflect_exec_model(const uint8_t *spv, size_t spv_len);
 size_t lagfx_spv_reflect_bindings(const uint8_t *spv, size_t spv_len,
                                   lagfx_spv_binding_t *out, size_t cap);
 
+/* Threadgroup-memory arguments of a compute kernel (translator output of `threadgroup T *p [[threadgroup(n)]]`): the Metal index n, the element size in bytes and the SpecId of the
+ * array-length specialization constant (unit: ELEMENTS). A dispatcher must supply every one of them explicitly (length = setThreadgroupMemoryLength(n) / elem_bytes); the in-module default
+ * is a placeholder. Returns the TOTAL found; writes up to `cap` in ascending SpecId order. */
+typedef struct { uint32_t metal_index, elem_bytes, spec_id; } lagfx_spv_tgarg_t;
+size_t lagfx_spv_reflect_threadgroup_args(const uint8_t *spv, size_t spv_len, lagfx_spv_tgarg_t *out, size_t cap);
+/* Total bytes of Workgroup-storage-class variables (static threadgroup statics + threadgroup arguments), with the specialization-constant overrides `spec[i] = {SpecId, value}` applied to
+ * array lengths. false when a Workgroup variable's type cannot be sized (the caller must then not trust a limit check). Scalars / vectors / arrays / structs without padding: a LOWER
+ * bound of what a driver allocates. */
+bool lagfx_spv_reflect_workgroup_bytes(const uint8_t *spv, size_t spv_len, const uint32_t (*spec)[2], size_t nspec, uint64_t *bytes);
+
 /* A constexpr sampler of the module: the Binding of its sampler variable and the raw i64 sampler word of the AIR (decode with lagfx_constexpr_sampler_decode). The
  * translator names such variables "lagfx.cxs.<16 hex>" (OpName; LAGFX_CXS_NAME_PREFIX). Returns the TOTAL found; writes up to `cap` (ascending id order). */
 typedef struct { uint32_t binding; uint64_t raw; } lagfx_spv_cxs_t;

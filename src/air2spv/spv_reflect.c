@@ -10,6 +10,7 @@
 #include "common/le.h"
 
 #include <stdbool.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -519,5 +520,98 @@ size_t lagfx_spv_reflect_constexpr_samplers(const uint8_t *spv, size_t spv_len, 
     }
 done:
     free(raw); free(bind); free(has_raw); free(has_bind);
+    return total;
+}
+
+
+/* ---- workgroup memory reflection ---- */
+typedef struct {
+    uint8_t  kind[MAXID];            /* 1 int, 2 float, 3 vector, 4 array, 5 struct, 6 pointer */
+    uint32_t a[MAXID], b[MAXID];     /* int/float: width; vector: component type / count; array: element / length id; pointer: pointee */
+    uint8_t  has_val[MAXID];  uint32_t val[MAXID];     /* OpConstant / OpSpecConstant value */
+    uint8_t  is_spec[MAXID];  uint32_t spec_id[MAXID];
+    uint32_t members_at[MAXID], nmembers[MAXID];       /* struct: word offset of the member list */
+    char     name[MAXID][24];        /* OpName, only "lagfx.tgarg." names are kept */
+} wg_info_t;
+
+static const uint32_t *wg_words(const uint8_t *spv, size_t len, size_t *nw) {
+    if (!spv || len < 20u || (len & 3u) || *(const uint32_t *)(const void *)spv != SPV_MAGIC) return NULL;
+    *nw = len / 4u; return (const uint32_t *)(const void *)spv;
+}
+
+static bool wg_size_of(const wg_info_t *in, const uint32_t *w, uint32_t t, const uint32_t (*spec)[2], size_t nspec, uint64_t *out, int depth) {
+    if (t == 0 || t >= MAXID || depth > 8) return false;
+    switch (in->kind[t]) {
+    case 1: case 2: if (in->a[t] == 0 || in->a[t] > 64u || (in->a[t] & 7u)) return false; *out = in->a[t] / 8u; return true;
+    case 3: { uint64_t e; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, depth + 1)) return false; *out = e * in->b[t]; return true; }
+    case 4: {
+        uint64_t e; if (!wg_size_of(in, w, in->a[t], spec, nspec, &e, depth + 1)) return false;
+        uint32_t lid = in->b[t]; if (lid >= MAXID || !in->has_val[lid]) return false;
+        uint32_t n = in->val[lid];
+        if (in->is_spec[lid]) for (size_t i = 0; i < nspec; i++) if (spec[i][0] == in->spec_id[lid]) n = spec[i][1];
+        *out = e * n; return true;
+    }
+    case 5: { uint64_t sum = 0; for (uint32_t i = 0; i < in->nmembers[t]; i++) { uint64_t e; if (!wg_size_of(in, w, w[in->members_at[t] + i], spec, nspec, &e, depth + 1)) return false; sum += e; } *out = sum; return true; }
+    default: return false;
+    }
+}
+
+/* One pass over the module: types, constants, spec constants, names, and the Workgroup variables (appended to vars[]). */
+static bool wg_scan(const uint8_t *spv, size_t len, wg_info_t *in, uint32_t *vars, size_t *nvars, size_t vcap) {
+    size_t nw; const uint32_t *w = wg_words(spv, len, &nw);
+    if (!w) return false;
+    *nvars = 0;
+    for (size_t i = 5; i < nw;) {
+        uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu;
+        if (wc == 0 || i + wc > nw) return false;
+        const uint32_t *o = &w[i + 1];
+        switch (op) {
+        case 5: if (wc >= 3 && o[0] < MAXID && !strncmp((const char *)&o[1], "lagfx.tgarg.", 12)) { strncpy(in->name[o[0]], (const char *)&o[1], sizeof in->name[0] - 1); } break;
+        case 21: if (wc >= 4 && o[0] < MAXID) { in->kind[o[0]] = 1; in->a[o[0]] = o[1]; } break;
+        case 22: if (wc >= 3 && o[0] < MAXID) { in->kind[o[0]] = 2; in->a[o[0]] = o[1]; } break;
+        case 23: if (wc >= 4 && o[0] < MAXID) { in->kind[o[0]] = 3; in->a[o[0]] = o[1]; in->b[o[0]] = o[2]; } break;
+        case 28: if (wc >= 4 && o[0] < MAXID) { in->kind[o[0]] = 4; in->a[o[0]] = o[1]; in->b[o[0]] = o[2]; } break;
+        case 30: if (wc >= 2 && o[0] < MAXID) { in->kind[o[0]] = 5; in->members_at[o[0]] = (uint32_t)(i + 2); in->nmembers[o[0]] = wc - 2u; } break;
+        case 32: if (wc >= 4 && o[0] < MAXID) { in->kind[o[0]] = 6; in->a[o[0]] = o[2]; in->b[o[0]] = o[1]; } break;
+        case 43: if (wc >= 4 && o[1] < MAXID) { in->has_val[o[1]] = 1; in->val[o[1]] = o[2]; } break;
+        case 50: if (wc >= 4 && o[1] < MAXID) { in->has_val[o[1]] = 1; in->val[o[1]] = o[2]; in->is_spec[o[1]] = 1; } break;
+        case 71: if (wc >= 4 && o[0] < MAXID && o[1] == 1u /* SpecId */) in->spec_id[o[0]] = o[2]; break;
+        case 59: if (wc >= 4 && o[0] < MAXID && o[2] == 4u /* Workgroup */ && *nvars < vcap) vars[(*nvars)++] = o[0]; break;
+        default: break;
+        }
+        i += wc;
+    }
+    return true;
+}
+
+bool lagfx_spv_reflect_workgroup_bytes(const uint8_t *spv, size_t spv_len, const uint32_t (*spec)[2], size_t nspec, uint64_t *bytes) {
+    wg_info_t *in = calloc(1, sizeof *in); uint32_t vars[256]; size_t nv = 0;
+    if (!in || !bytes) { free(in); return false; }
+    size_t nw; const uint32_t *w = wg_words(spv, spv_len, &nw);
+    bool ok = w && wg_scan(spv, spv_len, in, vars, &nv, 256);
+    uint64_t total = 0;
+    for (size_t k = 0; ok && k < nv; k++) {   /* vars[] holds the RESULT TYPE (pointer) ids: recorded as o[0] of OpVariable */
+        uint64_t s; uint32_t pt = vars[k];
+        if (pt >= MAXID || in->kind[pt] != 6 || !wg_size_of(in, w, in->a[pt], spec, nspec, &s, 0)) { ok = false; break; }
+        total += s;
+    }
+    free(in);
+    if (ok) *bytes = total;
+    return ok;
+}
+
+size_t lagfx_spv_reflect_threadgroup_args(const uint8_t *spv, size_t spv_len, lagfx_spv_tgarg_t *out, size_t cap) {
+    wg_info_t *in = calloc(1, sizeof *in); uint32_t vars[256]; size_t nv = 0, total = 0;
+    if (!in) return 0;
+    if (wg_scan(spv, spv_len, in, vars, &nv, 256)) {
+        for (uint32_t id = 1; id < MAXID; id++) {
+            unsigned n, b;
+            if (!in->name[id][0] || sscanf(in->name[id], "lagfx.tgarg.%u.%u", &n, &b) != 2) continue;
+            if (total < cap && out) out[total] = (lagfx_spv_tgarg_t){ n, b, in->spec_id[id] };
+            total++;
+        }
+        if (out) for (size_t i = 1; i < total && i < cap; i++) for (size_t j = i; j > 0 && out[j].spec_id < out[j - 1].spec_id; j--) { lagfx_spv_tgarg_t t = out[j]; out[j] = out[j - 1]; out[j - 1] = t; }
+    }
+    free(in);
     return total;
 }

@@ -1,6 +1,7 @@
 #ifdef LAGFX_HAVE_VULKAN
 /* libapplegfx-vulkan — common Vulkan compute execution base (see compute_exec.h) */
 #include "compute_exec.h"
+#include "air2spv/spv_reflect.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,6 +23,11 @@ void lagfx_cx_pipe_destroy(lagfx_cx_pipe_t *p) {
 }
 
 lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes) {
+    return lagfx_cx_pipe_create_ex(dev, spv, spv_bytes, entry, bind, nbind, push_bytes, NULL, 0, NULL);
+}
+
+lagfx_cx_pipe_t *lagfx_cx_pipe_create_ex(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes,
+                                         const uint32_t (*spec)[2], uint32_t nspec, const VkPhysicalDeviceLimits *lim) {
     if (!dev || !spv || !spv_bytes || (spv_bytes & 3u) || nbind > LAGFX_CX_MAX_BIND || (nbind && !bind) || (push_bytes & 3u) || push_bytes > 128u) return NULL;
     for (uint32_t i = 0; i < nbind; i++) {   /* only the descriptor types record() knows how to write */
         const VkDescriptorType t = bind[i].type;
@@ -29,6 +35,22 @@ lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t 
             t != VK_DESCRIPTOR_TYPE_SAMPLER && t != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) return NULL;
     }
     for (uint32_t i = 0; i < nbind; i++) for (uint32_t j = i + 1; j < nbind; j++) if (bind[i].binding == bind[j].binding) return NULL;   /* one descriptor per binding */
+    if ((nspec && !spec) || nspec > 64u) return NULL;
+    for (uint32_t i = 0; i < nspec; i++) for (uint32_t j = i + 1; j < nspec; j++) if (spec[i][0] == spec[j][0]) return NULL;   /* one value per SpecId */
+    {   /* every threadgroup argument of the kernel needs an explicit length */
+        lagfx_spv_tgarg_t tg[32]; const size_t ntg = lagfx_spv_reflect_threadgroup_args((const uint8_t *)spv, spv_bytes, tg, 32);
+        if (ntg > 32u) return NULL;
+        for (size_t t = 0; t < ntg; t++) { bool given = false; for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] == tg[t].spec_id) given = true; if (!given) return NULL; }
+        if (lim) {   /* shared memory and workgroup size against the device */
+            uint64_t bytes = 0;
+            if (!lagfx_spv_reflect_workgroup_bytes((const uint8_t *)spv, spv_bytes, spec, nspec, &bytes) || bytes > lim->maxComputeSharedMemorySize) return NULL;
+            uint64_t wg[3] = { 1, 1, 1 }; bool any = false;
+            for (uint32_t i = 0; i < nspec; i++) if (spec[i][0] < 3u) { wg[spec[i][0]] = spec[i][1]; any = true; }
+            if (any) {
+                if (wg[0] > lim->maxComputeWorkGroupSize[0] || wg[1] > lim->maxComputeWorkGroupSize[1] || wg[2] > lim->maxComputeWorkGroupSize[2] || wg[0] * wg[1] * wg[2] > lim->maxComputeWorkGroupInvocations) return NULL;
+            }
+        }
+    }
     lagfx_cx_pipe_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
     p->dev = dev, p->nbind = nbind, p->push_bytes = push_bytes;
@@ -49,9 +71,16 @@ lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t 
     if (vkCreateShaderModule(dev, &ci, NULL, &p->cs) != VK_SUCCESS) goto fail;
     VkComputePipelineCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = p->pl,
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = p->cs, .pName = entry ? entry : "main" } };
+    VkSpecializationMapEntry sme[64]; uint32_t sdata[64]; VkSpecializationInfo sinfo;
+    if (nspec) {
+        for (uint32_t i = 0; i < nspec; i++) { sme[i] = (VkSpecializationMapEntry){ spec[i][0], i * 4u, 4u }; sdata[i] = spec[i][1]; }
+        sinfo = (VkSpecializationInfo){ nspec, sme, nspec * 4u, sdata };
+        cpi.stage.pSpecializationInfo = &sinfo;
+    }
     if (vkCreateComputePipelines(dev, VK_NULL_HANDLE, 1, &cpi, NULL, &p->pipe) != VK_SUCCESS) goto fail;
     VkDescriptorPoolCreateInfo dpi = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = LAGFX_CX_SET_POOL, .poolSizeCount = nps, .pPoolSizes = nps ? ps : NULL };
     if (nbind && vkCreateDescriptorPool(dev, &dpi, NULL, &p->pool) != VK_SUCCESS) goto fail;
+    if (lim) lagfx_cx_set_limits(p, lim);
     return p;
 fail:
     lagfx_cx_pipe_destroy(p);

@@ -30,6 +30,13 @@ typedef struct lagfx_cx_pipe lagfx_cx_pipe_t;
 
 /* NULL on failure (shader module / layout / pipeline creation). entry NULL = "main". push_bytes = size of the push-constant block (0 = none). */
 lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes);
+/* The same with specialization constants and an up-front check against the device. spec[i] = {SpecId, value} (SpecId 0..2 = the workgroup size; 3 + n = the length in ELEMENTS of the
+ * `[[threadgroup(n)]]` argument n). Refused (NULL): a duplicate SpecId; a threadgroup argument of the kernel (lagfx_spv_reflect_threadgroup_args) without an explicit value - the
+ * in-module default is never used silently; with `lim` non-NULL, a total Workgroup-storage size (static threadgroup variables + the specialized threadgroup arguments) above
+ * maxComputeSharedMemorySize, or a workgroup size above maxComputeWorkGroupInvocations / maxComputeWorkGroupSize (when SpecId 0..2 are given), or a Workgroup variable whose size
+ * cannot be determined. `lim` is also installed as lagfx_cx_set_limits would. */
+lagfx_cx_pipe_t *lagfx_cx_pipe_create_ex(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes,
+                                         const uint32_t (*spec)[2], uint32_t nspec, const VkPhysicalDeviceLimits *lim);
 /* Descriptor types this module binds: STORAGE_BUFFER, UNIFORM_BUFFER, STORAGE_IMAGE, SAMPLED_IMAGE, SAMPLER, COMBINED_IMAGE_SAMPLER; any other type fails lagfx_cx_pipe_create.
  * Optional: the device limits, checked at record time (workgroup count per axis, push-constant size). Without them only the zero checks apply. Buffer ranges: a buffer binding
  * needs a non-null VkBuffer and an offset that satisfies the caller's alignment (minStorageBufferOffsetAlignment / minUniformBufferOffsetAlignment, checked when the limits are

@@ -317,6 +317,16 @@ static void md_kernel_key(const lagfx_air_module_t *m, const lagfx_air_metadata_
     }
 }
 
+/* The argument's "air.location_index" value, -1 when the node has none. */
+static int16_t md_kernel_loc(const lagfx_air_module_t *m, const lagfx_air_metadata_t *node) {
+    for (uint32_t j = 0; j + 1u < node->num_operands; j++) {
+        if (node->operands[j] == 0u || node->operands[j + 1u] == 0u) continue;
+        const char *s = md_string(m, node->operands[j] - 1u);
+        if (s && !strcmp(s, "air.location_index")) { int64_t v = md_value_int(m, md_record(m, node->operands[j + 1u] - 1u)); return (v >= 0 && v < 0x7fff) ? (int16_t)v : (int16_t)-1; }
+    }
+    return -1;
+}
+
 /* The entry function of a module: the first non-prototype function that is not a C++ static initializer. (uint32_t)-1 when there is none. */
 static uint32_t pick_body_fn(const lagfx_air_module_t *m) {
     uint32_t n_fns = 0;
@@ -371,6 +381,7 @@ bool
 lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys_t *out) {
     if (!m || !out) return false;
     memset(out, 0, sizeof *out);
+    for (uint32_t i = 0; i < LAGFX_STAGE_KEYS_MAX; i++) out->loc[i] = -1;
     const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
     if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
     bool kernel = false;
@@ -386,7 +397,7 @@ lagfx_air_stage_keys(const lagfx_air_module_t *m, bool outputs, lagfx_stage_keys
     for (uint32_t a = 0; a < list->num_operands && out->n < LAGFX_STAGE_KEYS_MAX; a++) {
         const lagfx_air_metadata_t *e = list->operands[a] ? md_record(m, list->operands[a] - 1u) : NULL;
         if (e && e->kind == LAGFX_AIR_MD_NODE) {
-            if (kernel) md_kernel_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN);
+            if (kernel) { md_kernel_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN); out->loc[out->n] = md_kernel_loc(m, e); }
             else        md_iface_key(m, e, out->key[out->n], LAGFX_STAGE_KEY_LEN);
         }
         out->n++;

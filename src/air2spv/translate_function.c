@@ -358,9 +358,11 @@ typedef struct {
      * semantics). 0 = no override. */
     uint32_t                  arg_pointee_override[LAGFX_MAX_VERTEX_ARGS];
     /* `threadgroup T *p [[threadgroup(n)]]` kernel arguments (key "air.threadgroup_buffer"): arg_tg[a] = 1 when modelled. The allocation is a Workgroup array T[N] whose length N
-     * is a SpecConstant (SpecId LAGFX_TG_ARG_SPEC_BASE + k, k = the argument's rank among the threadgroup arguments, in argument order; unit = ELEMENTS, default
-     * LAGFX_TG_ARG_DEFAULT_ELEMS; the spec constant is OpName'd "lagfx.tgarg.<k>.<element bytes>"). The dispatcher sets N = setThreadgroupMemoryLength / element bytes. */
+     * is a SpecConstant (SpecId LAGFX_TG_ARG_SPEC_BASE + n, n = the Metal [[threadgroup(n)]] index = the argument's air.location_index, 0..30; unit = ELEMENTS, default
+     * LAGFX_TG_ARG_DEFAULT_ELEMS, which a dispatcher must NOT rely on: lagfx_spv_reflect_threadgroup_args lists the arguments so every one gets an explicit length; the spec
+     * constant is OpName'd "lagfx.tgarg.<n>.<element bytes>"). The dispatcher sets N = setThreadgroupMemoryLength(n) / element bytes. */
     uint8_t                   arg_tg[LAGFX_MAX_VERTEX_ARGS];
+    uint8_t                   arg_tg_idx[LAGFX_MAX_VERTEX_ARGS];   /* the Metal threadgroup index (air.location_index) */
     uint32_t                  arg_tg_var[LAGFX_MAX_VERTEX_ARGS], arg_tg_len[LAGFX_MAX_VERTEX_ARGS];
     /* Byte-buffer VIEW variables (descriptor aliasing). Metal code takes a
      * `device uchar *blob` arg and BITCASTs it to several typed views
@@ -2556,7 +2558,7 @@ static void cs_prologue(xlate_ctx_t *c) {
         if (c->arg_cs_kind[i]) continue;
         if (c->arg_tg[i]) {   /* `threadgroup T *p [[threadgroup(n)]]`: the length is a specialization constant (elements) */
             uint32_t u32t = emit_type_int_w(c, 32u, 0u);
-            uint32_t k_rank = 0; for (uint32_t j = 0; j < i; j++) k_rank += c->arg_tg[j];
+            const uint32_t k_rank = c->arg_tg_idx[i];   /* the Metal index */
             c->arg_tg_len[i] = lagfx_spv_builder_alloc_id(c->b);
             uint32_t so[] = { u32t, c->arg_tg_len[i], LAGFX_TG_ARG_DEFAULT_ELEMS };
             lagfx_spv_builder_emit_op(c->b, 50u /* OpSpecConstant */, so, 3);
@@ -9846,11 +9848,15 @@ static void prescan_buffer_arg_access_types(xlate_ctx_t *c) {
             uint32_t aty0 = c->arg_air_type_ids[a];
             uint32_t declared = (aty0 < n_types && ts[aty0].kind == LAGFX_AIR_TYPE_POINTER && ts[aty0].num_op >= 1u) ? ts[aty0].op[0] : n_types;
             uint32_t el = 0;
-            if (declared < n_types && tg_elem_ok(ts, n_types, declared)) el = declared;
-            else if (access_ty[a] && !mixed[a] && tg_elem_ok(ts, n_types, access_ty[a])) el = access_ty[a];
-            if (tg_direct[a]) note_unsupported_tg("a threadgroup argument is dereferenced directly, not through an indexed access");
-            else if (!el) note_unsupported_tg("threadgroup argument element type is not a 32/64-bit integer or float, or the accesses disagree");
-            else { c->arg_pointee_override[a] = el; c->arg_tg[a] = 1u; }
+            const int tg_loc = (a < c->iface_own_in->n) ? c->iface_own_in->loc[a] : -1;
+            bool dup = false; for (uint32_t j = 0; j < a; j++) if (c->arg_tg[j] && c->arg_tg_idx[j] == tg_loc) dup = true;
+            if (declared < n_types && tg_elem_ok(ts, n_types, declared)) { if (!mixed[a] && (!access_ty[a] || access_ty[a] == declared)) el = declared; }   /* a declared element type that the body accesses with ANOTHER type is refused, not guessed */
+            else if (declared >= n_types && access_ty[a] && !mixed[a] && tg_elem_ok(ts, n_types, access_ty[a])) el = access_ty[a];
+            if (tg_loc < 0 || tg_loc > 30) note_unsupported_tg("a threadgroup argument has no usable air.location_index (0..30)");
+            else if (dup) note_unsupported_tg("two threadgroup arguments share one air.location_index");
+            else if (tg_direct[a]) note_unsupported_tg("a threadgroup argument is dereferenced directly, not through an indexed access");
+            else if (!el) note_unsupported_tg("threadgroup argument element type is not a 32/64-bit integer or float, or the declared and accessed types disagree");
+            else { c->arg_pointee_override[a] = el; c->arg_tg[a] = 1u; c->arg_tg_idx[a] = (uint8_t)tg_loc; }
             continue;
         }
         {   /* `device atomic_T*` (Apple: pointer to struct.metal::_atomic { T }): model the buffer as `device T*` */
