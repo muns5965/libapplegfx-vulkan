@@ -41,16 +41,16 @@ static lagfx_protocol_t *select_table(void) {
 
 
 /* two present paths missing the cache at the same time (display.c and display_blit.c): the scratch of a table build is per call, so every pixel is one of the two tables' results */
-static lagfx_protocol_t *g_cp; static volatile int g_stop; static volatile int g_bad;
-static void *cworker(void *a) { (void)a; while (!g_stop) { uint8_t px[4] = { 40, 128, 40, 255 }; lagfx_gamma_apply_present(px, 1, 0);
-    if (!((px[0] == 215 || px[0] == 6) && px[3] == 255)) g_bad = 1; } return NULL; }
+static lagfx_protocol_t *g_cp; static int g_stop; static int g_bad;
+static void *cworker(void *a) { (void)a; while (!__atomic_load_n(&g_stop, __ATOMIC_RELAXED)) { uint8_t px[4] = { 40, 128, 40, 255 }; lagfx_gamma_apply_present(px, 1, 0);
+    if (!((px[0] == 215 || px[0] == 6) && px[3] == 255)) __atomic_store_n(&g_bad, 1, __ATOMIC_RELAXED); } return NULL; }
 static int concurrency_and_cap(void) {
     int k[3] = { 2, 2, 2 }; fill(k); lagfx_protocol_t *p = select_table(); g_cp = p;
     setenv("LAGFX_GAMMA_APPLY", "1", 1); lagfx_gamma_test_reset();
     pthread_t th[4]; for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, cworker, NULL);
     for (int i = 0; i < 12; i++) { int kk[3] = { (i & 1) ? 1 : 2, (i & 1) ? 1 : 2, (i & 1) ? 1 : 2 }; fill(kk); op8_table(p, tab_sum()); }   /* each change bumps the generation: concurrent cache misses */
-    g_stop = 1; for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
-    assert(!g_bad);
+    __atomic_store_n(&g_stop, 1, __ATOMIC_RELAXED); for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
+    assert(!__atomic_load_n(&g_bad, __ATOMIC_RELAXED));
     /* the re-validation budget (GD_MAX_REREADS = 16 accepted re-reads) is a diagnostic limit: once spent, a changed table is ignored AND counted */
     { lagfx_gd_stats_t gs; lagfx_gd_stats_get(&gs); const uint64_t r0 = gs.rereads, c0 = gs.reread_capped;
       for (int i = 0; i < 12; i++) { int kk[3] = { (i & 1) ? 1 : 2, (i & 1) ? 1 : 2, (i & 1) ? 1 : 2 }; fill(kk); op8_table(p, tab_sum()); }
