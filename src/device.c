@@ -375,6 +375,7 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
      * state (see src/vulkan/instance.c). We still surface real Vulkan
      * init failures as LAGFX_ERR_BACKEND so the shell can route them to
      * a clean error path rather than a cryptic later-stage crash. */
+    LAGFX_STAGE("device_new:vk_init");
     lagfx_status_t vk_st = lagfx_vk_init(&dev->vk, desc);
     if (vk_st != LAGFX_OK) {
         set_err(errp_out, "lagfx_device_new: Vulkan backend init failed");
@@ -396,6 +397,7 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
      * does NOT unwind the device — the catalog is a scaffold and
      * downstream consumers fall back cleanly (shader-catalog-plan.md
      * §7). */
+    LAGFX_STAGE("device_new:shader_catalog");
     lagfx_status_t cat_st = lagfx_device_register_shader_catalog(dev);
     if (cat_st != LAGFX_OK) {
         LAGFX_WARN("device_new: shader catalog registration returned %d "
@@ -418,6 +420,7 @@ lagfx_device_t *lagfx_device_new(const lagfx_device_descriptor_t *desc,
     }
 #endif
 
+    LAGFX_STAGE("device_new:done");
     LAGFX_LOG("device_new: dev=%p mmio_size=%zu shell_opaque=%p vk=%p",
               (void *)dev, dev->mmio_region_size, dev->desc.shell.opaque,
               (void *)dev->vk);

@@ -98,6 +98,9 @@ static inline bool lagfx_is_opcode_traced(uint32_t opcode) {
         } \
     } while (0)
 
+/* Start-up breadcrumb on stderr (unbuffered, always on, a handful of lines per process): when a device start-up ends in a crash, the last "g7-stage:" line tells the stage even if the log file was not collected. */
+#include <stdio.h>
+#define LAGFX_STAGE(name) do { fprintf(stderr, "g7-stage: %s\n", (name)); fflush(stderr); } while (0)
 #define LAGFX_LOG(fmt, ...) \
     do { \
         if (lagfx_log_level() >= LAGFX_LOG_LVL_INFO) { \

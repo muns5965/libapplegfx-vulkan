@@ -1460,41 +1460,49 @@ lagfx_status_t lagfx_vk_pipeline_init(struct lagfx_vk_state *vk) {
         return LAGFX_ERR_INVALID_ARG;
     }
 
+    LAGFX_STAGE("pipeline_init:pipeline_layout");
     lagfx_status_t st = create_pipeline_layout(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:passthrough_pipeline");
     st = create_passthrough_pipeline(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:frame_image");
     st = create_frame_image(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:dummy_vb");
     st = create_dummy_vb(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:fallback_ds");
     st = create_fallback_ds(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:cursor_pipeline_layout");
     st = create_cursor_pipeline_layout(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:cursor_pipeline");
     st = create_cursor_pipeline(vk);
     if (st != LAGFX_OK) {
         return st;
     }
 
+    LAGFX_STAGE("pipeline_init:cursor_resources");
     st = create_cursor_resources(vk);
     if (st != LAGFX_OK) {
         return st;

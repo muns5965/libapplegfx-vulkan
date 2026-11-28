@@ -872,10 +872,29 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
               (int)have_buffer_device_address,
               have_buffer_device_address ? "available" : "UNAVAILABLE");
 
+    LAGFX_STAGE("vk_init:get_queue");
     vkGetDeviceQueue(s->device, s->graphics_queue_family, 0,
                      &s->graphics_queue);
     if (s->graphics_queue == VK_NULL_HANDLE) {
         LAGFX_ERR("vk_init: failed to retrieve queue");
+        vkDestroyDevice(s->device, NULL);
+        vkDestroyInstance(s->instance, NULL);
+        free(s);
+        return LAGFX_ERR_VULKAN_INIT;
+    }
+
+    /* Every render/pipeline path (passthrough, cursor, draw) builds
+     * pipelines with VkPipelineRenderingCreateInfo + renderPass=NULL and
+     * records via vkCmdBeginRendering. On a driver without dynamic
+     * rendering (e.g. Adreno 730 / Vulkan 1.1.128 on Galaxy Tab S8) that
+     * null-derefs inside the driver (SIGSEGV fault_addr=0xe8 right after
+     * cmd_pool_create). Refuse cleanly so the caller (lagfx_device_new ->
+     * NULL) can fall back to its built-in gfx device. */
+    if (!have_dyn_rendering_feature) {
+        fprintf(stderr, "lagfx: Vulkan dynamicRendering unsupported by this "
+                "GPU/driver; refusing init (LAGFX_ERR_VULKAN_INIT)\n");
+        LAGFX_ERR("vk_init: dynamicRendering unsupported; refusing init so "
+                  "the host can fall back to its built-in gfx device");
         vkDestroyDevice(s->device, NULL);
         vkDestroyInstance(s->instance, NULL);
         free(s);
@@ -892,6 +911,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     /* Phase 1.B.2: create the command pool AFTER the device + queue are
      * live. Failure here unwinds the whole Vulkan state — a device
      * without a command pool can't make progress in Phase 2. */
+    LAGFX_STAGE("vk_init:command_pool");
     lagfx_status_t cp_st = lagfx_vk_command_pool_create(s);
     if (cp_st != LAGFX_OK) {
         LAGFX_ERR("vk_init: lagfx_vk_command_pool_create failed (status=%d)",
@@ -905,6 +925,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     /* Phase 3.E: create the passthrough pipeline, frame image, and
      * dummy vertex buffer. Failure is non-fatal for device init but
      * draw calls will lack a real pipeline. */
+    LAGFX_STAGE("vk_init:pipeline_init");
     lagfx_status_t pp_st = lagfx_vk_pipeline_init(s);
     if (pp_st != LAGFX_OK) {
         LAGFX_WARN("vk_init: lagfx_vk_pipeline_init failed (status=%d) "
@@ -930,6 +951,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         }
     }
 
+    LAGFX_STAGE("vk_init:done");
     *out = s;
     return LAGFX_OK;
 }
