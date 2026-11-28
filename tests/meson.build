@@ -1712,6 +1712,17 @@ if fs.is_file(meson.current_source_dir() / 'tile-simd-plan-unit.c') and vulkan_d
   test('tile subgroup plan: Adreno range emulated + pinned (unit)', tsp_test, timeout : 30)
 endif
 
+# Census of compute / information segments (framing assumption, stop reasons, truncation, table overflow, verified deduplicated dumps). No Vulkan needed.
+if fs.is_file(meson.current_source_dir() / 'seg-census-unit.c')
+  sc_test = executable('seg-census-unit',
+    'seg-census-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('segment census: framing, stop reasons, truncation, overflow, dumps (unit)', sc_test, timeout : 30)
+endif
+
 # ARM64 pipeline resolver + descriptor binding + topology + cache invalidation + real-data capture (lavapipe; honest SKIP without fixtures / ICD).
 if fs.is_file(meson.current_source_dir() / 'arm64-pipe-unit.c')
   pu_deps = [libapplegfx_vulkan_dep]
