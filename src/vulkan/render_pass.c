@@ -83,16 +83,23 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
         if (d->color[i].resolve_view != VK_NULL_HANDLE && samples_of(&d->color[i]) == VK_SAMPLE_COUNT_1_BIT) return false;   /* nothing to resolve from a single-sample image */
     }
     if (used == 0u) return false;   /* a pass needs at least one real attachment */
-    for (uint32_t i = 0; i < LAGFX_RENDER_MAX_COLOR; i++) {   /* input-attachment slots (legacy): real, single-sample colour attachments in GENERAL */
-        if (!(d->fetch_mask & (1u << i))) continue;
-        if (i >= d->color_count || d->color[i].format == VK_FORMAT_UNDEFINED || samples_of(&d->color[i]) != VK_SAMPLE_COUNT_1_BIT) return false;
-        if (d->color[i].layout != VK_IMAGE_LAYOUT_UNDEFINED && d->color[i].layout != VK_IMAGE_LAYOUT_GENERAL) return false;
-    }
-    if (d->fetch_mask >> LAGFX_RENDER_MAX_COLOR) return false;
+
     if (d->has_depth_stencil) {
         if (d->depth_stencil.format == VK_FORMAT_UNDEFINED) return false;
         if (need_views && d->depth_stencil.view == VK_NULL_HANDLE) return false;
     }
+    return true;
+}
+
+/* Legacy-only: the input-attachment slots (fetch_mask) must be real, single-sample colour attachments in GENERAL. Kept out of desc_valid so the dynamic backend, which ignores the mask,
+ * is never constrained by it. */
+static bool fetch_valid(const lagfx_render_desc_t *d, bool real_layouts) {
+    for (uint32_t i = 0; i < LAGFX_RENDER_MAX_COLOR; i++) {   /* input-attachment slots (legacy): real, single-sample colour attachments in GENERAL */
+        if (!(d->fetch_mask & (1u << i))) continue;
+        if (i >= d->color_count || d->color[i].format == VK_FORMAT_UNDEFINED || samples_of(&d->color[i]) != VK_SAMPLE_COUNT_1_BIT) return false;
+        if (real_layouts && d->color[i].layout != VK_IMAGE_LAYOUT_UNDEFINED && d->color[i].layout != VK_IMAGE_LAYOUT_GENERAL) return false;   /* a compatible pass for pipeline creation names no real layout */
+    }
+    if (d->fetch_mask >> LAGFX_RENDER_MAX_COLOR) return false;
     return true;
 }
 
@@ -190,7 +197,7 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
 }
 
 VkRenderPass lagfx_vk_render_pass_compat(struct lagfx_vk_state *vk, const lagfx_render_desc_t *d) {
-    if (!vk || vk->device == VK_NULL_HANDLE || !desc_valid(d, false)) return VK_NULL_HANDLE;
+    if (!vk || vk->device == VK_NULL_HANDLE || !desc_valid(d, false) || !fetch_valid(d, false)) return VK_NULL_HANDLE;
     struct lagfx_render_cache *c = cache_get(vk);
     if (!c) return VK_NULL_HANDLE;
     rpkey_t k; make_key(&k, d, true);
@@ -240,6 +247,8 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
     if (!vk || cmd == VK_NULL_HANDLE || !desc_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
     if (lagfx_vk_device_lost(vk)) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
+
+    if (!fetch_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
 
     /* the legacy resolve is implicit: a resolve_mode (0 = average) it would not perform is refused here, for every caller of the descriptor entry point, not only the encoder */
     for (uint32_t i = 0; i < d->color_count; i++) {
@@ -392,4 +401,24 @@ void lagfx_vk_render_pass_shutdown(struct lagfx_vk_state *vk) {
 
 bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested) {
     return requested != 0 && requested == lagfx_msaa_resolve_mode(fmt);
+}
+
+bool lagfx_vk_fetch_capable(const struct lagfx_vk_state *vk) {
+    if (!vk) return false;
+    if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return vk->have_local_read;
+    const char *e = getenv("LAGFX_VK_LEGACY_FETCH");
+    return !(e && !strcmp(e, "0"));
+}
+VkImageLayout lagfx_vk_fetch_layout(const struct lagfx_vk_state *vk) {
+    if (!lagfx_vk_fetch_capable(vk)) return VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    return lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC ? (VkImageLayout)1000232000 /* VK_IMAGE_LAYOUT_RENDERING_LOCAL_READ_KHR */ : VK_IMAGE_LAYOUT_GENERAL;
+}
+bool lagfx_vk_raster_order(const struct lagfx_vk_state *vk) { return vk && vk->have_raster_order && lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC; }
+bool lagfx_vk_fetch_ms_capable(const struct lagfx_vk_state *vk) { return vk && lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC && vk->have_local_read && vk->have_local_read_ms; }
+uint32_t lagfx_legacy_fetch_mask(const lagfx_render_desc_t *d) {
+    uint32_t m = 0;
+    if (!d) return 0;
+    for (uint32_t i = 0; i < d->color_count && i < 4u; i++)
+        if (d->color[i].format != VK_FORMAT_UNDEFINED && samples_of(&d->color[i]) == VK_SAMPLE_COUNT_1_BIT) m |= 1u << i;
+    return m;
 }

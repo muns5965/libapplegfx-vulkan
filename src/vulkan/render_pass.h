@@ -96,6 +96,18 @@ typedef enum { LAGFX_FORGET_OK = 0, LAGFX_FORGET_DEFERRED = 1 } lagfx_forget_t;
 /* The backend of a device: fixed at lagfx_vk_init (LAGFX_VK_FORCE_LEGACY_RENDERPASS is read there, once); changing the variable later has no effect on an existing device. */
 lagfx_render_backend_t lagfx_vk_render_backend_select(bool have_dynamic_rendering);
 lagfx_render_backend_t lagfx_vk_render_backend(const struct lagfx_vk_state *vk);
+/* Framebuffer fetch (a colour attachment read back by the fragment shader as an input attachment) per backend:
+ *   DYNAMIC: VK_KHR_dynamic_rendering_local_read (vk->have_local_read); attachments in the RENDERING_LOCAL_READ layout; rasterization order from the EXT when present.
+ *   LEGACY : input attachments of the one subpass (fetch_mask below); attachments in GENERAL; NO rasterization-order guarantee (callers split overlapping draws); single-sample only.
+ *            On by default, LAGFX_VK_LEGACY_FETCH=0 turns it off (all colour attachments of an ARM64 pass are then in COLOR_ATTACHMENT_OPTIMAL again).
+ * lagfx_vk_fetch_layout is the layout a colour attachment of an ARM64 pass is kept in. lagfx_vk_raster_order says whether the EXT ordering is available to the CURRENT backend. */
+bool          lagfx_vk_fetch_capable(const struct lagfx_vk_state *vk);
+VkImageLayout lagfx_vk_fetch_layout(const struct lagfx_vk_state *vk);
+bool          lagfx_vk_raster_order(const struct lagfx_vk_state *vk);
+bool          lagfx_vk_fetch_ms_capable(const struct lagfx_vk_state *vk);   /* multisampled fetch: dynamic backend with multisampled local read only */
+/* The fetch_mask a legacy pass / its compatible pipeline pass uses for this descriptor: every real single-sample colour slot below 4 (InputAttachmentIndex <= 3). Both sides compute it
+ * from the same function, so pass and pipelines stay render-pass compatible. */
+uint32_t      lagfx_legacy_fetch_mask(const lagfx_render_desc_t *d);
 /* A legacy render pass resolves implicitly: average for float / normalised colour formats, sample 0 for integer ones. A requested mode is honoured only when it is that one (same mapping as lagfx_msaa_resolve_mode). */
 bool lagfx_legacy_resolve_mode_ok(VkFormat fmt, VkResolveModeFlagBits requested);
 

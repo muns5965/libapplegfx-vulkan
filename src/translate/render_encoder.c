@@ -136,6 +136,10 @@ static lagfx_status_t begin_legacy(struct lagfx_vk_state *vk, VkCommandBuffer cb
                                                   .load = ca[i].loadOp, .store = ca[i].storeOp, .clear = ca[i].clearValue,
                                                   .resolve_view = ca[i].resolveImageView, .resolve_layout = res ? ca[i].resolveImageLayout : VK_IMAGE_LAYOUT_UNDEFINED, .resolve_mode = res ? ca[i].resolveMode : 0 };
     }
+    if (lagfx_vk_fetch_capable(vk)) {   /* legacy framebuffer fetch: a real single-sample colour slot the caller keeps in GENERAL is also input attachment <slot> of the subpass (the caller opts in by the layout) */
+        const uint32_t m = lagfx_legacy_fetch_mask(&d);
+        for (uint32_t i = 0; i < n && i < 4u; i++) if ((m & (1u << i)) && ca[i].imageLayout == VK_IMAGE_LAYOUT_GENERAL) d.fetch_mask |= 1u << i;
+    }
     if (dai || sai) {
         /* ONE depth/stencil attachment: when both aspects are named they must be the same view in the same layout */
         if (dai && sai && (dai->imageView != sai->imageView || dai->imageLayout != sai->imageLayout)) { *why = LAGFX_LR_DS; LAGFX_ERR("translate_render_begin: legacy backend: depth and stencil attachments are different views / layouts"); return LAGFX_ERR_BACKEND; }

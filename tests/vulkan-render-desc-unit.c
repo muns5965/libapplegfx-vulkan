@@ -83,13 +83,13 @@ static bool rec_mrt(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     return true;
 }
 
-typedef struct { lagfx_vk_render_target_t *c0, *c2; uint32_t w, h; } gap_t;
+typedef struct { lagfx_vk_render_target_t *c0, *c2; uint32_t w, h; uint32_t fetch_mask; } gap_t;
 static bool rec_gap(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     gap_t *g = arg;
     lagfx_vk_cmd_rt_to_color(cb, g->c0);
     lagfx_vk_cmd_rt_to_color(cb, g->c2);
     lagfx_render_desc_t d; memset(&d, 0, sizeof d);
-    d.width = g->w; d.height = g->h; d.color_count = 3;
+    d.width = g->w; d.height = g->h; d.color_count = 3; d.fetch_mask = g->fetch_mask;
     const VkClearColorValue red = { .float32 = { 1, 0, 0, 1 } }, green = { .float32 = { 0, 1, 0, 1 } };
     d.color[0] = (lagfx_render_attachment_t){ .view = g->c0->view, .format = g->c0->format, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                                               .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = red } };
@@ -404,8 +404,12 @@ static void run_backend(int legacy) {
         int ok = lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &c0) == LAGFX_OK && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &c2) == LAGFX_OK;
         snprintf(m, sizeof m, "gap pass targets (%s)", bn); CHECK(ok, m);
         if (ok) {
-            gap_t g = { &c0, &c2, 16u, 16u };
+            gap_t g = { &c0, &c2, 16u, 16u, 0 };
             snprintf(m, sizeof m, "colour 0 + unused slot 1 + colour 2: pass records and runs (%s)", bn); CHECK(one_shot(vk, rec_gap, &g), m);
+            g.fetch_mask = 1u << 1;   /* the unused slot 1 named as an input attachment: the legacy backend refuses it, the dynamic backend ignores the mask (it must never be constrained by it) */
+            { const bool acc = one_shot(vk, rec_gap, &g);
+              snprintf(m, sizeof m, "fetch_mask on an unused slot: legacy refuses, dynamic ignores (%s)", bn); CHECK(legacy ? !acc : acc, m); }
+            g.fetch_mask = 0;
             snprintf(m, sizeof m, "slot 0 holds red (%s)", bn); CHECK(px_is(vk, &c0, 8, 8, 0, 0, 255), m);
             snprintf(m, sizeof m, "slot 2 holds green, not shifted onto slot 1 (%s)", bn); CHECK(px_is(vk, &c2, 8, 8, 0, 255, 0), m);
             VkRenderPass a, b2; lagfx_render_desc_t d1; memset(&d1, 0, sizeof d1);

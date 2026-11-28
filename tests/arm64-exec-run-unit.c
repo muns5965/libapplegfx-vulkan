@@ -585,7 +585,7 @@ static void test_exec_fail_cache(void) {
 }
 
 static void test_exec_fetch(void) {
-    if (!g_dev->vk->have_local_read) {   /* LAGFX_VK_NO_LOCAL_READ=1 run: the draw is refused and counted, the clear survives */
+    if (!lagfx_vk_fetch_capable(g_dev->vk)) {   /* LAGFX_VK_NO_LOCAL_READ=1 run: the draw is refused and counted, the clear survives */
         setenv("LAGFX_ARM64_EXEC", "1", 1);
         lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
         lagfx_task_entry_t *t = def_task(p, 1);
@@ -636,6 +636,9 @@ static void test_exec_fetch(void) {
         assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX, img, sizeof img, &w, &h));
         uint32_t v2 = px(img, 8, 8);
         assert(((v2 >> 16) & 255) == 255 && (v2 & 255) == 255);
+        /* the split is what makes the overlap correct without the EXT ordering: a legacy pass never has it (lagfx_vk_raster_order), so the draw MUST have been split into ordered sub-draws */
+        if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) assert(q->diag2.exec.fmt.fbf_split_draws >= 1 && q->diag2.exec.fmt.fbf_split_subdraws >= 2);
+        printf("PASS: framebuffer fetch, one draw of overlapping primitives (%s): %llu split draw(s), %llu sub-draw(s), second fragment read the first one's write\n", lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy, no rasterization order" : "dynamic", (unsigned long long)q->diag2.exec.fmt.fbf_split_draws, (unsigned long long)q->diag2.exec.fmt.fbf_split_subdraws);
         lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
         g_blend.fetch = 0;
     }

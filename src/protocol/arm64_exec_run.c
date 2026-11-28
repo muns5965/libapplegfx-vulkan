@@ -549,7 +549,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
         }
     }
     blend_for_formats(r, p, &d, fmts, nslots);
-    if (r->vk->have_raster_order) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
+    if (lagfx_vk_raster_order(r->vk)) for (uint32_t i = 0; i < pp->src.n_bind; i++) if (pp->src.bind[i].kind == LAGFX_A64_BIND_INPUT) d.raster_order_access = 1;
     d.topology_plus1 = (uint8_t)(topo + 1u);
     d.raster_samples = (uint8_t)(r->ms.samples > 1u ? r->ms.samples : 1u);   /* must equal the attachments' count; the pipeline descriptor's own count field is not decoded [N]: taken from the pass (Metal requires them equal) */
     if (lagfx_msaa_inject) {   /* UNWIRED test / injection hook (msaa_host.h): the pipeline descriptor's alpha-to-coverage and sample-shading bits are not decoded [N] */
@@ -565,7 +565,7 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     }
     if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) {   /* a VkRenderPass device: the pipeline is built against the pass render_begin will start (render_encoder.c begin_legacy), or not at all */
         lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE; lagfx_legacy_refuse_t why = LAGFX_LR_NONE;
-        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
+        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { rd.fetch_mask = lagfx_vk_fetch_capable(r->vk) ? lagfx_legacy_fetch_mask(&rd) : 0u; lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
         if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++, p->diag2.exec.pipe.legacy_pipe_why[why]++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
         d.render_pass = (uint64_t)(uintptr_t)lrp;
     }
@@ -845,7 +845,7 @@ static bool bind_descriptors(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp) 
             lagfx_a64_obj_t *t = mi < 4u ? r->rts[mi] : NULL;
             if (!t || !t->view || !r->rendering) { p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; DDM(3); return false; }
             if (!(t->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT)) { if (t->samples_req > 1u) p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; DDM(3); return false; }   /* the view's usage must include it (a descriptor of an image without it is invalid) */
-            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, (VkImageLayout)1000232000 /* RENDERING_LOCAL_READ */ };
+            ii[i] = (VkDescriptorImageInfo){ VK_NULL_HANDLE, t->view, lagfx_vk_fetch_layout(r->vk) /* RENDERING_LOCAL_READ (dynamic) / GENERAL (legacy) */ };
             w[i].descriptorType = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, w[i].pImageInfo = &ii[i];
             MIX(t->gen), MIX(0x1f0u);
         } else if (s->bind[i].kind == LAGFX_A64_BIND_STORAGE_IMAGE) {   /* texture2d<T, access::write>: the mirror texture itself, GENERAL layout */
@@ -1008,8 +1008,8 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) msfetch = true;
     if (msfetch && !r->vk->have_sample_rate_shading) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.sample_shading_refused++; CNT(p).draws_skipped++; return false; }   /* no per-sample shading on this device: refused, counted */
-    if (msfetch && !r->vk->have_local_read_ms) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.fbfetch_ms_no_local_read_ms++; CNT(p).draws_skipped++; return false; }   /* the device does not offer local reads of multisampled attachments (Vulkan 1.4 property): refused, counted */
-    if (!r->vk->have_local_read)   /* a pipeline that reads the attachments cannot run without the device feature */
+    if (msfetch && !lagfx_vk_fetch_ms_capable(r->vk)) { p->diag2.exec.msaa.fbfetch_ms_refused++; p->diag2.exec.msaa.fbfetch_ms_no_local_read_ms++; CNT(p).draws_skipped++; return false; }   /* the device does not offer local reads of multisampled attachments (Vulkan 1.4 property): refused, counted */
+    if (!lagfx_vk_fetch_capable(r->vk))   /* a pipeline that reads the attachments cannot run without the device feature */
         for (uint32_t i = 0; i < r->pipe->src.n_bind; i++)
             if (r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT) { p->diag2.exec.pipe.stub_fbfetch++, p->diag2.exec.pipe.stub_fbfetch_why[LAGFX_A64_FBF_NO_LOCAL_READ]++; CNT(p).draws_skipped++; return false; }
     VkFormat fmts[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
@@ -1120,7 +1120,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     VkRenderingAttachmentInfo ca[4];
     memset(ca, 0, sizeof ca);
     for (int k = 0; k < 4; k++) ca[k] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = VK_NULL_HANDLE,
-        .imageLayout = r->vk->have_local_read ? (VkImageLayout)1000232000 : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
+        .imageLayout = lagfx_vk_fetch_layout(r->vk), .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE };
     lagfx_a64_obj_t *first = NULL;
     uint32_t fw = 0, fh = 0, nslots = 0;
     uint32_t cap_load[4] = {0}; double cap_clear[4][4]; memset(cap_clear, 0, sizeof cap_clear);
@@ -1368,7 +1368,7 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
  * same). Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
 #define A64_FBF_SPLIT_MAX 16384ull
 static bool fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint64_t *nprim, uint32_t *nv, uint32_t *step) {
-    if (r->vk->have_raster_order) return false;
+    if (lagfx_vk_raster_order(r->vk)) return false;   /* the legacy backend never has it: overlapping primitives of a fetch draw are split */
     bool fetch = false;
     for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) fetch |= r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT;
     if (!fetch) return false;

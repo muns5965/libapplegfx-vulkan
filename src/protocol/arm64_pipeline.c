@@ -1,6 +1,7 @@
 /*
  * libapplegfx-vulkan — ARM64 pipeline-state resolver. See arm64_pipeline.h.
  */
+#include "vulkan/render_pass.h"
 #include "arm64_pipeline.h"
 #include "arm64_objects.h"
 #include "arm64_exec_decode.h"
@@ -587,7 +588,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
      * gets metal_index -1 = the default sampler. */
     for (int st = 0; st < 2; st++) {
         int why = 0;
-        int mr = lagfx_a64_map_stage_bindings(blobs[st], lens[st], st, st ? fab : vab, st ? nfab : nvab, vk->have_local_read, vk->have_storage_img_write, out->bind, &out->n_bind, &why);
+        int mr = lagfx_a64_map_stage_bindings(blobs[st], lens[st], st, st ? fab : vab, st ? nfab : nvab, lagfx_vk_fetch_capable(vk), vk->have_storage_img_write, out->bind, &out->n_bind, &why);
         if (mr == LAGFX_A64_MAP_FBFETCH) {
             CNTP(p).stub_fbfetch++;
             if (CNTP(p).stub_fbfetch_why[why]++ == 0)
