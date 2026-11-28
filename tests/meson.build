@@ -2524,3 +2524,12 @@ air_int64_narrow_test = executable('air-int64-narrow-unit',
   build_by_default : true,
 )
 test('air2spv Int64 narrowing sweep (unit, all AIR fixtures, spirv-val)', air_int64_narrow_test, workdir : meson.current_source_dir() / '..', env : {'LAGFX_REQUIRE_SPIRV_VAL' : '1'})
+
+# Cursor composition: glyph upload + draw over a cleared target, read back; hotspot, alpha blend, clipping (lavapipe, both render backends). Test glyph only: Apple's glyph format is still unknown.
+cursor_composite_test = executable('cursor-composite-unit',
+  'cursor-composite-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  build_by_default : true,
+)
+test('cursor composition over a render target: hotspot, alpha, clipping (unit, lavapipe)', cursor_composite_test)

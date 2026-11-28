@@ -1146,7 +1146,7 @@ static lagfx_status_t create_cursor_pipeline(struct lagfx_vk_state *vk) {
         .srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
         .dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .colorBlendOp        = VK_BLEND_OP_ADD,
-        .srcAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA,
+        .srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE,   /* alpha "over": a translucent cursor over an opaque frame leaves alpha 1 (SRC_ALPHA here darkened the target alpha: 191 for a half-alpha pixel) */
         .dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA,
         .alphaBlendOp        = VK_BLEND_OP_ADD,
         .colorWriteMask      = VK_COLOR_COMPONENT_R_BIT

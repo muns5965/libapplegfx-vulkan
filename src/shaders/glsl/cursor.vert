@@ -46,8 +46,8 @@ void main() {
                        float((gl_VertexIndex & 2) == 0));
     gl_Position = vec4(u_params.ndc_pos + corner * u_params.ndc_size,
                        0.0, 1.0);
-    /* Glyph uv: flip y so the uploaded BGRA top-left origin maps
-     * onto our Vulkan y-down NDC output (the encoder applies a
-     * negative-height viewport via VK_KHR_maintenance1). */
-    v_uv        = vec2(corner.x, 1.0 - corner.y);
+    /* Glyph uv. The cursor is drawn with a normal (positive-height) viewport (src/vulkan/cursor.c), so NDC +y is DOWN the screen: corner.y = 1 is the BOTTOM
+     * edge of the quad and must read the BOTTOM of the glyph image (v = 1); corner.y = 0 is the top edge and reads v = 0. The earlier `1.0 - corner.y` assumed a
+     * negative-height viewport that cursor.c never sets and drew the glyph upside down (found by tests/cursor-composite-unit.c). */
+    v_uv        = vec2(corner.x, corner.y);
 }
