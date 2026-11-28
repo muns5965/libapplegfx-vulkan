@@ -498,7 +498,11 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
      * real device addresses for the resources a Metal argument buffer points
      * to (via SPIR-V PhysicalStorageBuffer), so arg-buffer [[id(n)]] pointer
      * members can be dereferenced. Core 1.2; lavapipe advertises it. */
-    bool have_buffer_device_address   = (probe12.bufferDeviceAddress == VK_TRUE);
+    /* vkGetBufferDeviceAddress is a Vulkan 1.2 core entry point; on a 1.1 device
+     * (VK_KHR_buffer_device_address would have to be enabled and the KHR entry
+     * point used) it is not resolvable, so only report BDA on >= 1.2 devices. */
+    bool have_buffer_device_address   = (probe12.bufferDeviceAddress == VK_TRUE) &&
+        (s->phys_props.apiVersion >= VK_API_VERSION_1_2);
     bool have_varptr_storage_buffer   =
         (probe11.variablePointersStorageBuffer == VK_TRUE);
 
