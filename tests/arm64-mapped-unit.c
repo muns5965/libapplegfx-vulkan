@@ -63,13 +63,15 @@ static lagfx_device_t *g_dev;
 #define PFN_LIST   60u    /* page list of the surfaces (u32 per 16 KiB page) */
 #define PFN_SURF0  64u    /* surface pages */
 #define PFN_LIST2  61u
+#define PFN_LISTB  62u    /* a SECOND surface: its own page list and pages (scanout-selection test) */
+#define PFN_SURFB  72u
 #define SW 64u
 #define SH 80u
 #define SROW 320u         /* > SW * 4 = 256: 64 bytes of row padding */
 #define SFIRST 0x100u     /* first-byte offset; 0x100 + 320 * 80 spans two 16 KiB pages */
 #define SENT 0xabu
 #define HROW 640u         /* RGhA: 64 * 8 = 512 bytes of pixels + 128 of padding; 0x100 + 640 * 80 spans four pages */
-enum { MAP_OK = 7, MAP_OK2 = 17, MAP_RGHA = 8, MAP_HALF = 12, MAP_HOLE = 9, MAP_BADLIST = 10, MAP_BADGEOM = 11, MAP_NONE = 99 };
+enum { MAP_OK = 7, MAP_OK2 = 17, MAP_RGHA = 8, MAP_HALF = 12, MAP_HOLE = 9, MAP_BADLIST = 10, MAP_BADGEOM = 11, MAP_NONE = 99, MAP_B = 20 };
 static int g_get_calls;
 static void mkdesc(uint8_t *d, uint32_t list_gpa, uint32_t fourcc, uint64_t row, uint32_t first) {
     memset(d, 0, 0x70);
@@ -87,6 +89,7 @@ static bool get_desc(void *o, uint32_t id, uint8_t *out, size_t cap, size_t *len
     case MAP_OK: case MAP_OK2: mkdesc(d, PFN_LIST << 14, 0x42475241u, SROW, SFIRST); break;
     case MAP_RGHA: mkdesc(d, PFN_LIST << 14, 0x58585858u, SROW, SFIRST); break;                       /* an unknown fourcc: refused */
     case MAP_HALF: mkdesc(d, PFN_LIST << 14, 0x52476841u, HROW, SFIRST); break;                        /* 'RGhA': RGBA16Float, 8 bytes per pixel */
+    case MAP_B: mkdesc(d, PFN_LISTB << 14, 0x42475241u, SROW, SFIRST); break;                          /* surface B: other pages */
     case MAP_HOLE: mkdesc(d, PFN_LIST2 << 14, 0x42475241u, SROW, SFIRST); break;                       /* second page not present */
     case MAP_BADLIST: mkdesc(d, (uint32_t)(MEM_SIZE + 0x10000u), 0x42475241u, SROW, SFIRST); break;   /* page list outside guest memory */
     case MAP_BADGEOM: mkdesc(d, PFN_LIST << 14, 0x42475241u, 0x20000u, SFIRST); break;                 /* row pitch beyond Henge's bound */
@@ -102,6 +105,7 @@ static void surf_fill(uint8_t v) { memset(surf_page(0), v, 2u << 14); }
 static void surf_lists(void) {
     uint32_t *l = (uint32_t *)(g_mem + ((uint64_t)PFN_LIST << 14)), *l2 = (uint32_t *)(g_mem + ((uint64_t)PFN_LIST2 << 14));
     l[0] = ((PFN_SURF0 + 0u) << 2) | 1u; l[1] = ((PFN_SURF0 + 1u) << 2) | 1u; l[2] = ((PFN_SURF0 + 2u) << 2) | 1u; l[3] = ((PFN_SURF0 + 3u) << 2) | 1u;   /* (pfn << 14) >> 12 = pfn << 2, bit 0 present */
+    { uint32_t *lb = (uint32_t *)(g_mem + ((uint64_t)PFN_LISTB << 14)); for (uint32_t i = 0; i < 4u; i++) lb[i] = ((PFN_SURFB + i) << 2) | 1u; }
     l2[0] = ((PFN_SURF0 + 0u) << 2) | 1u; l2[1] = ((PFN_SURF0 + 1u) << 2);     /* page 1: not present */
 }
 /* byte offset of pixel (x, y) in the surface's page run */
@@ -176,6 +180,7 @@ static lagfx_task_entry_t *def_task(lagfx_protocol_t *p, uint32_t task) {
 #define REF_M6   15u    /* MAP_BADLIST */
 #define REF_M7   16u    /* MAP_BADGEOM */
 #define REF_M9   18u    /* MAP_HALF ('RGhA') */
+#define REF_MB   19u    /* MAP_B: a second, independent surface */
 #define REF_M8   17u    /* MAP_OK2: another mapping id, same size */
 #define RED   0xffff0000u
 #define GREEN 0xff00ff00u
@@ -209,6 +214,7 @@ static void build_objects(void) {
     put_mapped(REF_M6, 0x680, MAP_BADLIST, 0x39);
     put_mapped(REF_M7, 0x700, MAP_BADGEOM, 0x39);
     put_mapped(REF_M8, 0x780, MAP_OK2, 0x39);
+    put_mapped(REF_MB, 0x880, MAP_B, 0x39);
     put_mapped(REF_M9, 0x800, MAP_HALF, 0x2f);   /* the real guest's tag 0x2f, desc_size 48 (v1 layout) */
 }
 
@@ -842,6 +848,40 @@ int main(void) {
         assert(checked >= 65536u && nan_seen >= 2u * 1023u);
         printf("PASS: all 65536 binary16 patterns (%llu NaN channel values among %llu checked) round-trip guest -> image -> guest bit for bit\n", (unsigned long long)nan_seen, (unsigned long long)checked);
     }
+
+    /* (3d3) SCANOUT SELECTION across two surfaces: A (REF_M1) is rendered blue, B (REF_MB) green, each into its OWN guest pages. The display swap names one mapping; the
+     * surface it resolves to must be the one whose pages hold that surface's colour (never the other's), and a swap naming B must not touch A's pages. */
+    { const uint32_t resA[1][2] = { { REF_M1, 2 } }, resB[1][2] = { { REF_MB, 2 } };
+      uint8_t pl[48]; lagfx_cmd_header_t h;
+      #define SWAP_NAME(map) do { memset(pl, 0, sizeof pl); memcpy(pl + 8, &(uint64_t){ (map) }, 8); memset(&h, 0, sizeof h); h.opcode = 8; h.payload = pl; h.payload_size = 40; lagfx_a64_display_count(p, &h); } while (0)
+      uint32_t *pa = (uint32_t *)(surf_page(0) + SFIRST + 40u * SROW + 32u * 4u), *pb = (uint32_t *)(g_mem + ((uint64_t)PFN_SURFB << 14) + SFIRST + 40u * SROW + 32u * 4u);
+      surf_fill(SENT); memset(g_mem + ((uint64_t)PFN_SURFB << 14), SENT, 2u << 14);
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 130, REF_M1, 2, blue, false, resA, 1, true);
+      run_exec(p, 131, REF_MB, 2, green, false, resB, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      lagfx_a64_obj_t *oa = lagfx_a64_res_lookup(p, 1, REF_M1), *ob = lagfx_a64_res_lookup(p, 1, REF_MB);
+      assert(oa && ob && oa->mapping != ob->mapping);                         /* two surfaces, two mapping ids */
+      assert(*pa == 0xff0000ffu && *pb == GREEN);                              /* A's pages hold A's colour, B's pages hold B's: no crossing */
+      assert(*surf_px(0, 0) == 0xff0000ffu && *(uint32_t *)(g_mem + ((uint64_t)PFN_SURFB << 14) + SFIRST) == GREEN);
+      __typeof__(p->diag2.disp) d0 = p->diag2.disp;
+      SWAP_NAME(ob->mapping);
+      assert(p->diag2.disp.surface_resolved == d0.surface_resolved + 1 && p->diag2.disp.gpu_content == d0.gpu_content + 1 && p->diag2.disp.surface_unresolved == d0.surface_unresolved);
+      SWAP_NAME(oa->mapping);
+      assert(p->diag2.disp.surface_resolved == d0.surface_resolved + 2 && p->diag2.disp.gpu_content == d0.gpu_content + 2);
+      assert(*pa == 0xff0000ffu && *pb == GREEN);                              /* naming a surface never rewrites either one */
+      /* re-render B only (clear blue): A's pages must stay as they were */
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 132, REF_MB, 2, blue, false, resB, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      assert(*pb == 0xff0000ffu && *pa == 0xff0000ffu);
+      setenv("LAGFX_ARM64_MAPPED_WRITEBACK", "1", 1);
+      run_exec(p, 133, REF_M1, 2, green, false, resA, 1, true);
+      unsetenv("LAGFX_ARM64_MAPPED_WRITEBACK");
+      assert(*pa == GREEN && *pb == 0xff0000ffu);                              /* and re-rendering A leaves B alone */
+      #undef SWAP_NAME
+    }
+    printf("PASS: two surfaces: each exec's colour lands in its OWN guest pages, a swap names the surface whose pages hold its colour, neither rewrites the other\n");
 
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);

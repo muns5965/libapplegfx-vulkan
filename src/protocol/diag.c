@@ -269,7 +269,7 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                                       (unsigned long long)R->tag_partial[g], (unsigned long long)R->tag_unsup[g]);
         snprintf(rl, sizeof rl,
                  "g7-gpu-run: execs=%llu passes=%llu draws=%llu draws_skipped=%llu submits=%llu submit_failed=%llu submit_pending=%llu seg_render=%llu seg_unsupported=%llu no_vulkan=%llu "
-                 "bad_rec=%llu no_pass=%llu no_target=%llu(pass=%llu draw=%llu) no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu multi_attach=%llu indep_mismatch=%llu "
+                 "bad_rec=%llu no_pass=%llu no_target=%llu(pass_events=%llu draw_skipped=%llu) no_pipeline=%llu no_vertex_buf=%llu no_index_buf=%llu prim_unsupported=%llu extra_attach_ignored=%llu multi_attach=%llu indep_mismatch=%llu "
                  "load_uninit_cleared=%llu pipeline_unresolved=%llu obj_unsupported=%llu tag_over=%llu "
                  "mapped_created=%llu mapped_shared=%llu mapped_uploaded=%llu mapped_written_back=%llu mapped_unsupported=%llu mapped_no_desc=%llu mapped_bytes_up=%llu mapped_bytes_down=%llu mapped_pages_skipped=%llu swap_events=%llu swap_flushed=%llu swap_deferred=%llu swap_failed=%llu swap_dropped=%llu mapped_remapped=%llu swap_partial=%llu "
                  "tags(done/partial/unsupported)[%s]",
