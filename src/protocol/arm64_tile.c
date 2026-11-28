@@ -43,7 +43,7 @@ struct lagfx_a64_tile_pipe {
     uint32_t rt_mask;               /* bit n: the kernel writes the imageblock of colour attachment n (a STORAGE_IMAGE named lagfx.imageblock.n) */
     uint32_t simd_emul;             /* 0 = native simdgroup; W = the kernel was translated for logical W-lane simdgroups inside a wider subgroup */
     bool lane_mapped;               /* uses subgroup operations: Metal's 32-lane simdgroup semantics are assumed */
-    struct { uint32_t l[3]; bool pin; uint32_t vmask; VkPipeline pl; } cache[TILE_PIPE_CACHE]; uint32_t ncache;
+    struct { uint32_t l[3]; uint32_t pin; uint32_t vmask; VkPipeline pl; } cache[TILE_PIPE_CACHE]; uint32_t ncache;
 };
 
 struct lagfx_a64_tile {
@@ -57,7 +57,7 @@ struct lagfx_a64_tile {
 
 /* The logical simdgroup width to translate tile kernels for: 0 = native (the device's own 32-lane subgroup, or one pinned to 32 by the dispatch); 32 on a device whose
  * subgroup is wider (a multiple of 32) and cannot be pinned; the LAGFX_TILE_SIMD_EMULATE test hook forces any power of two <= the subgroup size. */
-static uint32_t tile_simd_emul_width(const struct lagfx_vk_state *vk) {
+uint32_t lagfx_a64_tile_simd_emul_width(const struct lagfx_vk_state *vk) {
     const char *ov = getenv("LAGFX_TILE_SIMD_EMULATE");
     if (ov && ov[0]) {
         char *end = NULL; unsigned long w = strtoul(ov, &end, 10);
@@ -66,7 +66,8 @@ static uint32_t tile_simd_emul_width(const struct lagfx_vk_state *vk) {
     }
     if (vk->sg_size == 32u && vk->sg_min == vk->sg_max) return 0;
     if (lagfx_vk_can_pin_subgroup32(vk)) return 0;
-    if (vk->sg_size > 32u && !(vk->sg_size % 32u) && vk->sg_min == vk->sg_max) return 32u;   /* a fixed wide size; a range the driver may change per pipeline is not assumed */
+    if (vk->sg_size > 32u && !(vk->sg_size % 32u) && vk->sg_min == vk->sg_max) return 32u;   /* a fixed wide size */
+    if (vk->sg_size > 32u && lagfx_vk_wide_pin_subgroup(vk)) return 32u;   /* a range (Adreno 64..128): the dispatch PINS the pipeline to the smallest size, so it is as good as fixed */
     return 0;
 }
 
@@ -156,7 +157,7 @@ bool lagfx_a64_tile_resolve(lagfx_protocol_t *p, const lagfx_task_entry_t *task,
     uint32_t emul = 0;
     uint8_t *bc_copy = NULL; size_t bc_len = 0;   /* the kernel's bitcode, kept on the pipeline for the BGRA8 variant */
     if (!vk || !vk->initialized || vk->device == VK_NULL_HANDLE) { p->diag2.exec.pipe.rf_no_vulkan++; return false; }
-    emul = tile_simd_emul_width(vk);
+    emul = lagfx_a64_tile_simd_emul_width(vk);
     /* the kernel: the first kernel-stage function of the libraries the descriptor's function tokens name */
     lagfx_air_module_t *m = NULL;
     uint8_t *lib = NULL;
@@ -379,13 +380,13 @@ static VkShaderModule tile_variant_module(lagfx_a64_tile_pipe_t *tp, uint32_t ma
     return cs;
 }
 
-static VkPipeline tile_vk_pipeline(lagfx_a64_tile_pipe_t *tp, const uint32_t l[3], bool pin, uint32_t vmask, VkShaderModule cs, lagfx_protocol_t *p) {
+static VkPipeline tile_vk_pipeline(lagfx_a64_tile_pipe_t *tp, const uint32_t l[3], uint32_t pin, uint32_t vmask, VkShaderModule cs, lagfx_protocol_t *p) {
     for (uint32_t i = 0; i < tp->ncache; i++)
         if (tp->cache[i].pin == pin && tp->cache[i].vmask == vmask && !memcmp(tp->cache[i].l, l, 12)) return tp->cache[i].pl;
     if (tp->ncache == TILE_PIPE_CACHE) return VK_NULL_HANDLE;   /* more distinct tile sizes than a kernel ever uses: not built (counted by the caller) */
     VkSpecializationMapEntry sme[3] = { { 0, 0, 4 }, { 1, 4, 4 }, { 2, 8, 4 } };
     VkSpecializationInfo si = { 3, sme, 12, l };
-    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = 32u };
+    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo rs = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO, .requiredSubgroupSize = pin };
     VkComputePipelineCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .flags = VK_PIPELINE_CREATE_DISPATCH_BASE_BIT, .layout = tp->pl,
         .stage = { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .pNext = pin ? &rs : NULL, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = cs,
                    .pName = tp->entry, .pSpecializationInfo = &si } };
@@ -458,12 +459,13 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     if (d->tw > lim->maxComputeWorkGroupSize[0] || d->th > lim->maxComputeWorkGroupSize[1] || d->td > lim->maxComputeWorkGroupSize[2] ||
         (uint64_t)d->tw * d->th * d->td > lim->maxComputeWorkGroupInvocations) { TILE(p).skip_local++; return false; }
     /* simd lanes: a 32-wide subgroup or nothing (see the header) */
-    bool pin = false;
+    uint32_t pin = 0;   /* requiredSubgroupSize of the pipeline (0 = none) */
     if (tp->simd_emul) {
-        /* the kernel carries its own logical-group lane mapping: no subgroup size requirement */
+        /* the kernel carries its own logical-group lane mapping: no subgroup size requirement, except that a RANGE of sizes (64..128) is pinned to its smallest so the logical groups line up */
         if (tp->lane_mapped && tp->simd_emul > vk->sg_size) { TILE(p).skip_no_sg32++; return false; }
+        if (tp->lane_mapped && vk->sg_min != vk->sg_max) pin = lagfx_vk_wide_pin_subgroup(vk);
     } else if (tp->lane_mapped && !(vk->sg_size == 32u && vk->sg_min == vk->sg_max)) {
-        if (lagfx_vk_can_pin_subgroup32(vk)) pin = true;
+        if (lagfx_vk_can_pin_subgroup32(vk)) pin = 32u;
         else {
             const char *ov = getenv("LAGFX_TILE_ANY_SUBGROUP");
             if (ov && ov[0] == '1' && !ov[1]) TILE(p).sg_override++;
@@ -572,7 +574,7 @@ bool lagfx_a64_tile_dispatch(lagfx_a64_tile_t *t, lagfx_a64_tile_pipe_t *tp, con
     if (bgra_mask) TILE(p).bgra8_dispatches++;
     TILE(p).dispatches++, TILE(p).groups += (uint64_t)(gx1 - gx0) * (gy1 - gy0);
     if (d->region) TILE(p).region++; else TILE(p).whole++;
-    if (pin) TILE(p).sg_pinned++;
+    if (pin && !tp->simd_emul) TILE(p).sg_pinned++;
     if (tp->simd_emul && tp->lane_mapped) TILE(p).sg_emulated++;
     p->diag2.exec.qcomtile.emul_dispatches++;
     if (vk->qcomtile.enabled) p->diag2.exec.qcomtile.emul_while_enabled++;

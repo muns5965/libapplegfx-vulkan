@@ -296,6 +296,14 @@ bool lagfx_vk_can_pin_subgroup32(const struct lagfx_vk_state *vk) {
     return vk->sg_control && vk->sg_min <= 32u && vk->sg_max >= 32u;
 }
 
+/* A device whose subgroup is wider than 32 and NOT fixed (Adreno 7xx: 64..128): a compute pipeline can still be given requiredSubgroupSize through VK_EXT_subgroup_size_control, so
+ * the size is known (the smallest, a multiple of 32) and the Metal 32-lane simdgroup can be emulated as a logical group inside it. 0 = not possible. */
+uint32_t lagfx_vk_wide_pin_subgroup(const struct lagfx_vk_state *vk) {
+    if (!vk || !vk->sg_control) return 0u;
+    if (vk->sg_min <= 32u || vk->sg_min > vk->sg_max || (vk->sg_min % 32u) || (vk->sg_min & (vk->sg_min - 1u))) return 0u;
+    return vk->sg_min;
+}
+
 void lagfx_spv_int64_report(const void *spv, size_t bytes, char *out, size_t out_n) {
     const uint32_t *w = spv; const size_t n = bytes / 4u;
     if (!out || !out_n) return;

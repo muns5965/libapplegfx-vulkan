@@ -278,6 +278,8 @@ lagfx_status_t lagfx_vk_make_device_address_buffer(struct lagfx_vk_state *vk,
  * VK_EXT_subgroup_size_control is enabled, COMPUTE accepts a required size and 32 lies in [min, max]. Kernels that map simd lanes to pixels (simd_shuffle on
  * a tile) are only built when this holds. Fallback documented in arm64_tile.c: otherwise the tile dispatch is skipped and counted (tile_no_sg32). */
 bool lagfx_vk_can_pin_subgroup32(const struct lagfx_vk_state *vk);
+/* Wide non-fixed subgroup (e.g. 64..128): the size a compute pipeline can be pinned to (requiredSubgroupSize = the minimum, a power-of-two multiple of 32), else 0. */
+uint32_t lagfx_vk_wide_pin_subgroup(const struct lagfx_vk_state *vk);
 const char *lagfx_vk_caps_line(const struct lagfx_vk_state *vk, char *buf, size_t n);
 /* TEST SEAM ('feature missing'): marks caps as missing on an existing device (the Vulkan device itself is not changed; only the gate sees it).
  * At init the same is possible through LAGFX_VK_CAPS_OFF=int64,int8,... which also keeps those features OFF at vkCreateDevice. */

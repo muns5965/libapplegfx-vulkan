@@ -38,6 +38,10 @@
 #include "state.h"
 #include "arm64_pipeline.h"
 
+struct lagfx_vk_state;
+/* The logical simdgroup width tile kernels are translated for on this device: 0 native/pinned-32, 32 emulated inside a wider subgroup (fixed, or a range pinned to its smallest size), test hook LAGFX_TILE_SIMD_EMULATE. */
+uint32_t lagfx_a64_tile_simd_emul_width(const struct lagfx_vk_state *vk);
+
 #define LAGFX_A64_TILE_TAG 0x33u          /* serialized tile pipeline descriptor */
 #define LAGFX_A64_TILE_MAX_SLOTS 31u      /* Metal buffer / texture argument table size */
 
