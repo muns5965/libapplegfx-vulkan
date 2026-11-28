@@ -397,8 +397,8 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             size_t po = strlen(pl);
             {   /* legacy backend framebuffer cache (render_pass.c): live must stay near the number of live attachment views; full > 0 = passes were refused */
                 lagfx_device_t *fd = (lagfx_device_t *)p->dev; lagfx_render_cache_stats_t fs; lagfx_vk_render_cache_stats(fd ? fd->vk : NULL, &fs);
-                if (fs.fb_created && po + 160 < sizeof pl) { po += (size_t)snprintf(pl + po, sizeof pl - po, " fb_cache[created=%llu destroyed=%llu hits=%llu live=%u peak=%llu full=%llu rp=%u forget_waits=%llu forget_wait_ms=%llu forget_deferred=%llu]",
-                    (unsigned long long)fs.fb_created, (unsigned long long)fs.fb_destroyed, (unsigned long long)fs.fb_hits, fs.fb_live, (unsigned long long)fs.fb_peak, (unsigned long long)fs.fb_full, fs.rp_live, (unsigned long long)fs.forget_waits, (unsigned long long)(fs.forget_wait_us / 1000u), (unsigned long long)fs.forget_deferred); }
+                if (fs.fb_created && po + 160 < sizeof pl) { po += (size_t)snprintf(pl + po, sizeof pl - po, " fb_cache[created=%llu destroyed=%llu hits=%llu live=%u peak=%llu full=%llu rp=%u forget_waits=%llu forget_wait_ms=%llu forget_wait_max_ms=%llu forget_deferred=%llu]",
+                    (unsigned long long)fs.fb_created, (unsigned long long)fs.fb_destroyed, (unsigned long long)fs.fb_hits, fs.fb_live, (unsigned long long)fs.fb_peak, (unsigned long long)fs.fb_full, fs.rp_live, (unsigned long long)fs.forget_waits, (unsigned long long)(fs.forget_wait_us / 1000u), (unsigned long long)(fs.forget_wait_max_us / 1000u), (unsigned long long)fs.forget_deferred); }
             }
             if (po + 200 < sizeof pl)
                 snprintf(pl + po, sizeof pl - po, " obj_table[created=%llu destroyed=%llu reused=%llu live=%llu peak_live=%llu high_water=%llu full=%llu lookup_miss=%llu deferred=%llu]",

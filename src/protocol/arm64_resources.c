@@ -83,6 +83,8 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) { (void)p; }
 
 typedef struct { lagfx_protocol_t *p; lagfx_a64_stats_t st; lagfx_a64_obj_t **objs; uint32_t n, cap; lagfx_a64_rexec_t *cur;      /* recording */
     lagfx_a64_rexec_t *pending;  /* submitted, fence not signalled yet: its resources stay alive and untouched */
+    lagfx_a64_obj_t **limbo; uint32_t nlimbo, caplimbo;   /* whole objects whose framebuffers could not be proven idle (vkDeviceWaitIdle failed): kept intact, retried later, never half-destroyed */
+    uint64_t limbo_parked, limbo_reclaimed, limbo_leaked;
     lagfx_a64_obj_t **dead; uint32_t ndead, capdead;   /* replaced / forgotten / dropped while an exec was recording or in flight: freed after its fence signalled */
     bool quiet_kinds;            /* begin(): refs of the resource list that are not buffers/textures (pipelines...) are not 'bad objects' */
     struct lagfx_a64_msurf **ms; uint32_t nms;   /* shared surface images of type 11 mapped textures, newest last (not owning: an entry leaves when its last object is freed) */
@@ -277,7 +279,7 @@ static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
 
 /* A view the legacy backend used as a framebuffer attachment is referenced by the render-pass cache's VkFramebuffers: they must be forgotten BEFORE the view (and the image / memory behind it) is
  * destroyed, or the cache fills up (framebuffer cache full (1024) -> every later pass refused, S8: 749 draws) and a recycled view handle could match a stale framebuffer.
- * When the device cannot be proven idle for one of the views (forget DEFERRED) the WHOLE object is leaked until shutdown: its views, image, memory and shared surface stay alive together;
+ * When the device cannot be proven idle for one of the views (forget DEFERRED) the WHOLE object is parked in limbo (retried on later flushes and at shutdown, leaked only if still not provable): its views, image, memory and shared surface stay alive together;
  * destroying the image under a kept view / framebuffer would be worse than the leak. Returns false in that case. */
 static bool forget_views(struct lagfx_vk_state *vk, const lagfx_a64_obj_t *o) {
     const VkImageView v[5] = { o->view, o->sview, o->view3, o->mview, o->aview };
@@ -286,14 +288,15 @@ static bool forget_views(struct lagfx_vk_state *vk, const lagfx_a64_obj_t *o) {
     return ok;
 }
 
-static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
-    if (!o) return;
-    if (!forget_views(vk, o)) { LAGFX_ERR("arm64 res: object task=%u ref=%u leaked: its framebuffers could not be proven idle", o->task, o->ref); free(o); return; }
+/* Returns false (object untouched, still fully valid) when its framebuffers could not be proven idle: the caller parks it in the limbo list. */
+static bool obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
+    if (!o) return true;
+    if (!forget_views(vk, o)) return false;
     if (o->ms) {   /* the image belongs to the shared surface */
         if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
         msurf_unref(vk, o->ms);
         free(o);
-        return;
+        return true;
     }
     if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
     if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
@@ -304,8 +307,33 @@ static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);
     free(o);
+    return true;
 }
 
+/* free, or park in limbo when the device could not be proven idle */
+static void obj_free_m(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
+    if (!o || obj_free(vk, o)) return;
+    if (m->nlimbo == m->caplimbo) {
+        uint32_t nc = m->caplimbo ? m->caplimbo * 2u : 8u;
+        lagfx_a64_obj_t **n = realloc(m->limbo, nc * sizeof *n);
+        if (!n) { m->limbo_leaked++; LAGFX_ERR("arm64 res: object task=%u ref=%u leaked (cannot park it)", o->task, o->ref); free(o); return; }
+        m->limbo = n, m->caplimbo = nc;
+    }
+    m->limbo[m->nlimbo++] = o; m->limbo_parked++; m->st.limbo_parked = m->limbo_parked; m->st.limbo_live = m->nlimbo;
+    LAGFX_ERR("arm64 res: object task=%u ref=%u parked (framebuffers not proven idle); retried later", o->task, o->ref);
+}
+/* retry parked objects; stops at the first failure (the device is still not idle-able: do not pay a WaitIdle per object) */
+static void limbo_retry(mgr2_t *m, struct lagfx_vk_state *vk) {
+    if (!m->nlimbo || !vk) return;
+    uint32_t keep = 0; bool failed = false;
+    for (uint32_t i = 0; i < m->nlimbo; i++) {
+        lagfx_a64_obj_t *o = m->limbo[i];
+        if (!failed && obj_free(vk, o)) { m->limbo_reclaimed++; continue; }
+        failed = true; m->limbo[keep++] = o;
+    }
+    m->nlimbo = keep;
+    m->st.limbo_parked = m->limbo_parked; m->st.limbo_reclaimed = m->limbo_reclaimed; m->st.limbo_leaked = m->limbo_leaked; m->st.limbo_live = m->nlimbo;
+}
 static bool pending_wait(struct lagfx_vk_state *vk, mgr2_t *m);
 void lagfx_a64_res_destroy(lagfx_protocol_t *p) {
     if (!p || !p->a64_res) return;
@@ -318,8 +346,11 @@ void lagfx_a64_res_destroy(lagfx_protocol_t *p) {
     }
     if (!busy && vk) vkDeviceWaitIdle(vk->device);
     if (!busy && vk && m->sw_fence) { vkDestroyFence(vk->device, m->sw_fence, NULL); if (m->sw_cb) lagfx_vk_cmdbuf_free(vk, m->sw_cb); m->sw_fence = VK_NULL_HANDLE, m->sw_cb = VK_NULL_HANDLE; }   /* an abandoned swap copy (its fence was waited for above) */
-    for (uint32_t i = 0; i < m->n; i++) { if (vk && !busy) obj_free(vk, m->objs[i]); else if (!vk) free(m->objs[i]); }
-    for (uint32_t i = 0; i < m->ndead; i++) { if (vk && !busy) obj_free(vk, m->dead[i]); else if (!vk) free(m->dead[i]); }
+    for (uint32_t i = 0; i < m->n; i++) { if (vk && !busy) obj_free_m(m, vk, m->objs[i]); else if (!vk) free(m->objs[i]); }
+    for (uint32_t i = 0; i < m->ndead; i++) { if (vk && !busy) obj_free_m(m, vk, m->dead[i]); else if (!vk) free(m->dead[i]); }
+    if (vk && !busy) limbo_retry(m, vk);
+    for (uint32_t i = 0; i < m->nlimbo; i++) { m->limbo_leaked++; LAGFX_ERR("arm64 res: object task=%u ref=%u leaked at shutdown (device could not be proven idle)", m->limbo[i]->task, m->limbo[i]->ref); free(m->limbo[i]); }
+    free(m->limbo);
     free(m->dead);
     free(m->objs);
     free(m->ms);
@@ -350,13 +381,14 @@ static void obj_release(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o
         m->st.deferred_frees++;
         return;
     }
-    obj_free(vk, o);
+    obj_free_m(m, vk, o);
     m->st.destroyed++;
 }
 static void dead_flush(mgr2_t *m, struct lagfx_vk_state *vk) {
     if (BUSY(m)) return;
-    for (uint32_t i = 0; i < m->ndead; i++) { obj_free(vk, m->dead[i]); m->st.destroyed++; }
+    for (uint32_t i = 0; i < m->ndead; i++) { obj_free_m(m, vk, m->dead[i]); m->st.destroyed++; }
     m->ndead = 0;
+    limbo_retry(m, vk);
 }
 
 static bool is_tex3d(const lagfx_a64_obj_t *o) { return o->img_type == VK_IMAGE_TYPE_3D; }
@@ -791,7 +823,7 @@ bad_linear:
     m->st.linear_unsupported++;
 bad:
     m->st.bad_object++;
-    if (!o->leak) obj_free(vk, o);
+    if (!o->leak) obj_free_m(m, vk, o);
     return NULL;
 }
 
@@ -860,7 +892,7 @@ static lagfx_a64_obj_t *obj_resolve(lagfx_protocol_t *p, mgr2_t *m, struct lagfx
         if (m->n == m->cap) {
             uint32_t nc = m->cap ? m->cap * 2 : 64;
             lagfx_a64_obj_t **nn = realloc(m->objs, nc * sizeof *nn);
-            if (!nn) { obj_free(vk, o); return NULL; }
+            if (!nn) { obj_free_m(m, vk, o); return NULL; }
             m->objs = nn, m->cap = nc;
         }
         m->n++;

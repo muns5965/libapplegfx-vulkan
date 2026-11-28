@@ -421,11 +421,12 @@ lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageVie
                 struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
                 vr = vkDeviceWaitIdle(vk->device);
                 clock_gettime(CLOCK_MONOTONIC, &t1);
-                c->st.forget_waits++; c->st.forget_wait_us += (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000ll + (t1.tv_nsec - t0.tv_nsec) / 1000ll);
+                uint64_t us = (uint64_t)((t1.tv_sec - t0.tv_sec) * 1000000ll + (t1.tv_nsec - t0.tv_nsec) / 1000ll);
+                c->st.forget_waits++; c->st.forget_wait_us += us; if (us > c->st.forget_wait_max_us) c->st.forget_wait_max_us = us;
             }
             if (vr == VK_SUCCESS) idle = true;
             else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; lagfx_vk_mark_device_lost(vk); LAGFX_ERR("render_forget_view: device lost; the objects are destroyed (nothing can still run), but no new work is accepted from now on"); }
-            else { out = LAGFX_FORGET_DEFERRED; c->st.forget_deferred++; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are deferred to shutdown", (int)vr); }
+            else { out = LAGFX_FORGET_DEFERRED; c->st.forget_deferred++; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are kept whole and retried later", (int)vr); }
         }
         if (out == LAGFX_FORGET_DEFERRED) { i++; continue; }
         vkDestroyFramebuffer(vk->device, c->fb[i].fb, NULL);

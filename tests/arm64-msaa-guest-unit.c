@@ -234,11 +234,13 @@ typedef struct { uint8_t tex[RT_W * RT_H * 4], msx[RT_W * RT_H * 4]; lagfx_msaa_
 #define REF_MSD8 34u   /* multisampled depth texture asked with 8 samples: refused in exact mode on a 1|4 device */
 static void (*g_mp_after)(lagfx_protocol_t *p);   /* called after the readbacks, before the task is dropped */
 static unsigned g_mp_extra;   /* bit 0: REF_MS16 as a 8-sample colour texture (refused); bit 1: REF_MSD8 (refused 8-sample depth) */
-static uint64_t g_leak_val0, g_leak_val1;
+static uint64_t g_leak_val0, g_leak_val1, g_leak_parked, g_leak_leaked, g_leak_fbd;
 static void leak_after(lagfx_protocol_t *p) {
     lagfx_vk_render_test_fail_waitidle(g_dev->vk, 1, false);   /* the next vkDeviceWaitIdle of a view forget fails */
     lagfx_a64_res_forget(p, 1, REF_TEX);
     g_leak_val1 = lagfx_vk_validation_msg_count;
+    { const lagfx_a64_stats_t *as = lagfx_a64_res_stats(p); g_leak_parked = as->limbo_parked; g_leak_leaked = as->limbo_leaked; }
+    { lagfx_render_cache_stats_t cs; lagfx_vk_render_cache_stats(g_dev->vk, &cs); g_leak_fbd = cs.fb_destroyed; }
     lagfx_vk_render_test_fail_waitidle(g_dev->vk, 0, false);
 }
 static void mp_run(void (*build)(void), mp_t *o, bool with_depth) {
@@ -660,8 +662,10 @@ int main(void) {
           mp_run(b_pipe_key_1x_only, &m, false);
           g_mp_after = NULL; lagfx_vk_render_cache_stats(g_dev->vk, &c1);
           assert(c1.forget_deferred >= c0.forget_deferred + 1u && g_leak_val1 == g_leak_val0 && c1.fb_full == c0.fb_full);
+          assert(g_leak_parked >= 1u && g_leak_leaked == 0u);   /* parked whole, not leaked */
+          { lagfx_render_cache_stats_t cr; lagfx_vk_render_cache_stats(g_dev->vk, &cr); assert(cr.fb_destroyed > g_leak_fbd); }   /* the parked object was reclaimed (WaitIdle works again) when the manager was torn down: its framebuffers are gone */
           { lagfx_render_cache_stats_t c2; mp_run(b_pipe_key_1x_only, &m, false); lagfx_vk_render_cache_stats(g_dev->vk, &c2); assert(m.draws == 2 && c2.fb_full == c1.fb_full); }   /* the device keeps rendering afterwards */
-          puts("PASS legacy: a failed WaitIdle while releasing a mirror object keeps the whole object (forget_deferred counted, no validation message), later passes still render");
+          puts("PASS legacy: a failed WaitIdle while releasing a mirror object parks the whole object in limbo, reclaims it later (forget_deferred counted, no validation message), later passes still render");
       }
       /* (b) depth attachment refused (8x depth not offered) with a valid 4x colour attachment */
       g_mp_extra = 2u;
