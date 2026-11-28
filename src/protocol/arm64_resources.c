@@ -421,7 +421,7 @@ static bool create_image(struct lagfx_vk_state *vk, mgr2_t *m, lagfx_a64_obj_t *
      * depth / stencil attachment only needs to be an attachment). input attachment = framebuffer fetch reads of a colour attachment (VUID 00338: the view usage must include
      * it); it rides on COLOR_ATTACHMENT. */
     const VkImageUsageFlags req = ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT : (VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT);
-    const VkImageUsageFlags opt = ds ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT);
+    const VkImageUsageFlags opt = (ds ? VK_IMAGE_USAGE_TRANSFER_DST_BIT : (VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT | VK_IMAGE_USAGE_STORAGE_BIT)) & ~lagfx_a64_test_drop_usage;
     lagfx_fmtcap_usage_t cu;
     VkSampleCountFlagBits ns = VK_SAMPLE_COUNT_1_BIT;   /* the image's sample count: more than one only for a guest multisample texture (arm64_msaa.c), granted by the device's answer */
     if (o->samples_req > 1u) {
@@ -1656,6 +1656,9 @@ VkImageView lagfx_a64_res_sample_view_for(lagfx_a64_rexec_t *x, lagfx_a64_obj_t 
 
 /* The same whole-image view, for a storage-image (shader write) descriptor: needs the image created with STORAGE usage (formats without storage support get none). */
 VkImageView lagfx_a64_res_storage_view(lagfx_a64_rexec_t *x, lagfx_a64_obj_t *o) { return tex_view(x, o, VK_IMAGE_USAGE_STORAGE_BIT); }
+
+/* TEST HOOK: optional usage bits removed from textures created while it is non-zero (simulates a device / format that refuses them). Always 0 in production. */
+VkImageUsageFlags lagfx_a64_test_drop_usage = 0;
 
 /* Layout of ONE colour target while it is an attachment. Dynamic backend: unchanged (RENDERING_LOCAL_READ). Legacy backend: GENERAL ONLY for a 1x target whose image really carries
  * INPUT_ATTACHMENT usage (the usage is optional at create_image and may have been dropped), COLOR_ATTACHMENT_OPTIMAL otherwise - a fetch slot without the usage would be invalid. */

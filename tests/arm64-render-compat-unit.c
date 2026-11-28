@@ -261,7 +261,7 @@ static uint32_t acc8(uint32_t n) { uint32_t v = 0; for (uint32_t i = 0; i < n; i
 typedef struct { const char *name; rc_body_t body; uint32_t nprim; uint64_t expect_sub; uint32_t expect_n; } scene_t;
 
 static void test_split_scenes(void) {
-    const bool dev_ro = g_dev->vk->have_raster_order;
+    const bool dev_ro = lagfx_vk_raster_order(g_dev->vk);   /* legacy backend never has ordering */
     const scene_t sc[] = {
         { "triangle list x4 (one draw)",          b_list4,   4, 4, 4 },
         { "indexed triangle list x4 (one draw)",  b_idx4,    4, 4, 4 },
@@ -297,7 +297,7 @@ static void test_split_scenes(void) {
 }
 
 static void test_split_strip_and_cap(void) {
-    const bool dev_ro = g_dev->vk->have_raster_order;
+    const bool dev_ro = lagfx_vk_raster_order(g_dev->vk);   /* legacy backend never has ordering */
     static rc_res_t ref, spl, naive; const uint32_t refs16[2] = { REF_TEX2, 0 }, refs8[2] = { REF_TEX, 0 };
     g_rc.fs = FS_FACE;
     rc_run(refs16, ZERO4, NULL, b_strip, dev_ro, &ref);
@@ -314,18 +314,27 @@ static void test_split_strip_and_cap(void) {
     rc_run(refs8, ZERO4, NULL, b_strip, false, &spl);
     puts("PASS: triangle strip split keeps the primitive order and the per-triangle facing (odd triangles flip the front face); a naive per-triangle strip draw does not (negative control)");
 
-    /* cap: 100 instances are split, 17000 (> A64_FBF_SPLIT_MAX) are recorded whole and counted */
+    /* cap: 100 instances are split, 17000 (> A64_FBF_SPLIT_MAX) are REFUSED and counted (never run unordered). RGBA16F so the count is not hidden by saturation: 100 fragments = exactly 25.0 red. */
     g_rc.fs = FS_F;
-    rc_run(refs8, ZERO4, NULL, b_inst100, false, &spl);
-    assert(spl.split_draws == 1 && spl.subdraws == 100 && spl.capped == 0 && ((px(spl.bgra, 8, 8) >> 16) & 255) == 255);
-    rc_run(refs8, ZERO4, NULL, b_inst17k, false, &spl);
-    assert(spl.split_draws == 0 && spl.subdraws == 0 && spl.capped == 1 && spl.draws == 1 && ((px(spl.bgra, 8, 8) >> 16) & 255) == 255);
-    puts("PASS: split cap: 100 sub-draws recorded, 17000 recorded whole and counted (fbf_split_capped)");
+    rc_run(refs16, ZERO4, NULL, b_inst100, false, &spl);
+    assert(spl.split_draws == 1 && spl.subdraws == 100 && spl.capped == 0 && spl.draws == 1 && h16(spl.half, 8, 8, 0) == 0x4e40);
+    rc_run(refs16, ZERO4, NULL, b_inst17k, false, &spl);
+    assert(spl.split_draws == 0 && spl.subdraws == 0 && spl.capped == 1 && spl.draws == 0 && spl.skipped >= 1 && h16(spl.half, 8, 8, 0) == 0 && h16(spl.half, 8, 8, 1) == 0 && h16(spl.half, 8, 8, 2) == 0);   /* nothing drawn: the clear survives */
+    puts("PASS: split cap: 100 sub-draws = exactly 25.0 red (RGBA16F, non-saturating); 17000 refused and counted (fbf_split_capped, draw skipped, target untouched)");
+    /* a device below Vulkan 1.3 (S8: 1.1.128): strips are still split, without the front-face flip (that path never culls). Reproduced on the legacy backend by lowering the reported API version. */
+    if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {
+        const uint32_t saved_api = g_dev->vk->phys_props.apiVersion;
+        g_dev->vk->phys_props.apiVersion = VK_MAKE_API_VERSION(0, 1, 1, 128);
+        rc_run(refs16, ZERO4, NULL, b_strip, false, &spl);
+        g_dev->vk->phys_props.apiVersion = saved_api;
+        assert(spl.split_draws == 1 && spl.subdraws == 4 && spl.unsupported == 0 && spl.draws == 1 && h16(spl.half, 8, 8, 0) == 0x3c00 && h16(spl.half, 8, 8, 2) == 0 /* 4 prims x 0.25 red or green-facing mix: FS_F adds red only */);
+        puts("PASS: Vulkan 1.1 (apiVersion lowered on the legacy backend): triangle strip split into 4 ordered sub-draws, 4 x 0.25 red (not refused, fbf_split_unsupported 0)");
+    } else puts("NOTE: Vulkan 1.1 strip case runs on the legacy backend only (dynamic backend needs 1.3 dynamic state)");
 }
 
 /* MRT: BGRA8 slot 0 and RGBA16F slot 1, FS reads both and adds 0.25 red / 0.125 green; 4 overlapping triangles in one draw */
 static void test_split_mrt(void) {
-    const bool dev_ro = g_dev->vk->have_raster_order;
+    const bool dev_ro = lagfx_vk_raster_order(g_dev->vk);   /* legacy backend never has ordering */
     static rc_res_t ref, spl; const uint32_t refs[2] = { REF_TEX, REF_TEX2 };
     g_rc.fs = FS_MRT;
     rc_run(refs, ZERO4, ZERO4, b_list4, dev_ro, &ref);
@@ -340,7 +349,7 @@ static void test_split_mrt(void) {
 static void b_list4_u(void) { b_list4(); }
 static void test_fetch_class(void) {
     static rc_res_t r; const uint32_t refs_u[2] = { REF_TEX3, 0 }, refs_f[2] = { REF_TEX2, 0 };
-    const bool dev_ro = g_dev->vk->have_raster_order;
+    const bool dev_ro = lagfx_vk_raster_order(g_dev->vk);   /* legacy backend never has ordering */
     for (int ro = 0; ro < 2; ro++) {
         if (ro && !dev_ro) break;
         /* positive control: uint shader on an R32Uint attachment: 4 overlapping fragments add 4 */
@@ -755,16 +764,54 @@ static void test_msaa_texture_refused(void) {
 }
 
 #ifndef LAGFX_COMPAT_NO_MAIN   /* arm64-msaa-guest-unit.c includes this file as its harness and has its own main */
+/* Fetch mask transitions in ONE protocol: a target WITH input-attachment usage (mask 1), a target created WITHOUT it (usage dropped by the test hook: fetch refused, plain layout),
+ * and back. The cached pipeline of the first state is reused, the refused state does not touch the target, and no validation message appears. */
+extern VkImageUsageFlags lagfx_a64_test_drop_usage;   /* arm64_resources.c test hook */
+static void test_fetch_mask_cache(void) {
+    setenv("LAGFX_ARM64_EXEC", "1", 1);
+    lagfx_protocol_t *p = mk(LAGFX_PROTO_ARM64_VMAPPLE);
+    lagfx_task_entry_t *t = def_task(p, 1);
+    build_objects();
+    g_res_tex3 = true;
+    lagfx_a64_exec_set_pipeline_resolver(p, rc_resolver, NULL);
+    g_rc.fs = FS_F;
+    static const double blue[4] = { 0, 0, 1, 1 };
+    uint8_t img[RT_W * RT_H * 4]; uint32_t w, h;
+    const uint64_t v0 = lagfx_vk_validation_msg_count;
+    cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); v_tris(1); cb_draw_p(3, 0, 3, 1);
+    exec(p, 1, cb_finish(), true);                                                   /* A: input usage present */
+    assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.pipe.pipes_built == 1 && p->diag2.exec.pipe.desc_unbound == 0);
+    lagfx_a64_test_drop_usage = VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    put_tex(REF_TEX3, VPN_TEX3, 80, 4, 1);                                           /* BGRA8, created now without INPUT_ATTACHMENT usage */
+    cb_reset(); cb_pass(REF_TEX3, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw_p(3, 0, 3, 1);
+    exec(p, 1, cb_finish(), true);                                                   /* B: no input usage */
+    lagfx_a64_test_drop_usage = 0;
+    assert(p->diag2.exec.run.draws == 1 && p->diag2.exec.run.draws_skipped >= 1 && p->diag2.exec.pipe.desc_unbound >= 1);   /* the fetch draw is refused and counted ... */
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX3, img, sizeof img, &w, &h) && px(img, 8, 8) == 0xff0000ffu);          /* ... the clear survives */
+    const uint64_t built_after_b = p->diag2.exec.pipe.pipes_built;
+    assert(built_after_b <= 2);
+    cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); cb_draw_p(3, 0, 3, 1);
+    exec(p, 1, cb_finish(), true);                                                   /* A again */
+    assert(p->diag2.exec.run.draws == 2 && p->diag2.exec.pipe.pipes_built == built_after_b);   /* the mask-1 pipeline is reused, nothing rebuilt */
+    assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h) && ((px(img, 8, 8) >> 16) & 255) != 0);
+    if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) assert(lagfx_vk_validation_msg_count == v0);   /* the dynamic local-read path has the known baseline messages (validation baseline helper) */
+    printf("PASS: fetch mask transitions 1 -> 0 -> 1 (%s): input-usage-less target refused for fetch and left untouched, mask-1 pipeline reused (pipes_built %llu), 0 validation messages\n",
+           lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy" : "dynamic", (unsigned long long)p->diag2.exec.pipe.pipes_built);
+    lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
+    g_res_tex3 = false;
+}
+
 int main(void) {
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
     assert(g_dev);
     if (!g_dev->vk || !g_dev->vk->initialized) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     printf("device: local_read=%d raster_order=%d\n", (int)g_dev->vk->have_local_read, (int)g_dev->vk->have_raster_order);
-    if (!g_dev->vk->have_local_read) { puts("SKIP: no dynamicRenderingLocalRead on this device (framebuffer fetch tests need it)"); return 77; }
+    if (!lagfx_vk_fetch_capable(g_dev->vk)) { puts("SKIP: no framebuffer-fetch capability (dynamic local read or legacy input attachments) (framebuffer fetch tests need it)"); return 77; }
     test_val_baseline_helper();
     test_split_scenes();
     test_split_strip_and_cap();
+    test_fetch_mask_cache();
     test_split_mrt();
     test_fetch_class();
     test_clear_integer_class();

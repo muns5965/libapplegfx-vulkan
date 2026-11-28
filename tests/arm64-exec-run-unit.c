@@ -655,15 +655,18 @@ static void test_exec_fetch(void) {
             cb_reset(); cb_pass(REF_TEX, 2, blue); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0);
             if (cs[ci].kind == 0) cb_draw_inst(0, 3, 2, 3); else if (cs[ci].kind == 1) cb_draw_indexed_prim(REF_IB, 6, 4); else cb_draw_inst(0, 3, 16385, 3);
             exec(q, 1, cb_finish(), true);
-            assert(q->diag2.exec.run.submit_failed == 0 && q->diag2.exec.run.draws == 1 && q->diag2.exec.run.draws_skipped == 0);
+            const bool refused = cs[ci].kind == 2 && !lagfx_vk_raster_order(g_dev->vk);   /* over the split cap on a backend without rasterization order: refused, never run unordered */
+            assert(q->diag2.exec.run.submit_failed == 0 && q->diag2.exec.run.draws == (refused ? 0u : 1u) && q->diag2.exec.run.draws_skipped == (refused ? 1u : 0u));
             assert(lagfx_a64_exec_readback_texture(q, tq, REF_TEX, img, sizeof img, &w, &h));
+            if (refused) { assert(px(img, 8, 8) == 0xff0000ffu); goto split_case_done; }   /* the clear survives */
             uint32_t vv = px(img, 8, 8);
             assert(((vv >> 16) & 255) == 255 && (vv & 255) == 255);   /* blue kept, red saturated by the overlapping fragments */
             assert(px(img, 0, 15) == 0xff0000ffu);
-            if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {
+            if (!lagfx_vk_raster_order(g_dev->vk)) {
                 if (cs[ci].kind == 2) assert(q->diag2.exec.fmt.fbf_split_capped == 1 && q->diag2.exec.fmt.fbf_split_draws == 0);
                 else assert(q->diag2.exec.fmt.fbf_split_draws == 1 && q->diag2.exec.fmt.fbf_split_subdraws == cs[ci].min_sub && q->diag2.exec.fmt.fbf_split_capped == 0);
             }
+split_case_done:;
             printf("PASS: framebuffer fetch split edge case \"%s\": split_draws=%llu subdraws=%llu capped=%llu\n", cs[ci].nm, (unsigned long long)q->diag2.exec.fmt.fbf_split_draws, (unsigned long long)q->diag2.exec.fmt.fbf_split_subdraws, (unsigned long long)q->diag2.exec.fmt.fbf_split_capped);
             lagfx_a64_exec_drop_task(q, 1); lagfx_a64_exec_free(q); free(q);
             g_blend.fetch = 0;

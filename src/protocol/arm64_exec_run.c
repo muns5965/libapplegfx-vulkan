@@ -574,7 +574,10 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     }
     if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) {   /* a VkRenderPass device: the pipeline is built against the pass render_begin will start (render_encoder.c begin_legacy), or not at all */
         lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE; lagfx_legacy_refuse_t why = LAGFX_LR_NONE;
-        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { rd.fetch_mask = lagfx_legacy_fetch_mask(&rd) & run_fetch_mask(r); lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
+        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { rd.fetch_mask = lagfx_legacy_fetch_mask(&rd) & run_fetch_mask(r);
+            { uint32_t need = 0; for (uint32_t bi = 0; bi < pp->src.n_bind; bi++) if (pp->src.bind[bi].kind == LAGFX_A64_BIND_INPUT && pp->src.bind[bi].metal_index >= 0 && pp->src.bind[bi].metal_index < 4) need |= 1u << pp->src.bind[bi].metal_index;
+              if (need & ~rd.fetch_mask) {   /* the shader reads an input attachment of a slot that is not a fetch slot of this pass (no INPUT_ATTACHMENT usage / MSAA): the pipeline would be invalid against that render pass (VUID-VkGraphicsPipelineCreateInfo-renderPass-06038) */
+                  p->diag2.exec.pipe.desc_unbound++, p->diag2.exec.pipe.desc_unbound_why[1]++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; } } lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
         if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++, p->diag2.exec.pipe.legacy_pipe_why[why]++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
         d.render_pass = (uint64_t)(uintptr_t)lrp;
     }
@@ -1372,15 +1375,17 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
  * that with the extension ("from one fragment to the next, in rasterization order, without explicit synchronization"); without it a read of a pixel another primitive of the same
  * draw writes is a data race, and a barrier is only possible BETWEEN draws. So the draw is recorded one primitive at a time (instance-major, then primitive order = the Vulkan
  * primitive order of the Primitive Order section) with the by-region barrier between consecutive sub-draws. Capped (A64_FBF_SPLIT_MAX sub-draws); over the cap, or with a topology /
- * device that cannot be split exactly, the draw is recorded whole and counted (fbf_split_capped / fbf_split_unsupported). Triangle strips: triangle i is {v_i, v_i+1+(i%2),
+ * primitives, the draw is REFUSED (counted fbf_split_capped, draws_skipped): recording it whole would make overlapping fragments race, i.e. silently wrong. On a device below Vulkan 1.3 a strip is split
+ * WITHOUT the front-face flip: that path never culls (static cull NONE) and has no stencil / FrontFacing use, so facing cannot change coverage (fbf_split_unsupported is no longer counted). Triangle strips: triangle i is {v_i, v_i+1+(i%2),
  * v_i+2-(i%2)}; a 3-vertex strip draw from v_i is that triangle with the opposite winding for odd i, so the front face is flipped for those sub-draws (provoking vertex v_i is the
  * same). Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
 #define A64_FBF_SPLIT_MAX 16384ull
-static bool fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint64_t *nprim, uint32_t *nv, uint32_t *step) {
-    if (lagfx_vk_raster_order(r->vk)) return false;   /* the legacy backend never has it: overlapping primitives of a fetch draw are split */
+/* 0 = no split needed, 1 = split, -1 = needs a split that is over the cap: refuse the draw. */
+static int fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint64_t *nprim, uint32_t *nv, uint32_t *step) {
+    if (lagfx_vk_raster_order(r->vk)) return 0;   /* the legacy backend never has it: overlapping primitives of a fetch draw are split */
     bool fetch = false;
     for (uint32_t i = 0; i < r->pipe->src.n_bind; i++) fetch |= r->pipe->src.bind[i].kind == LAGFX_A64_BIND_INPUT;
-    if (!fetch) return false;
+    if (!fetch) return 0;
     uint64_t n = d->count;
     switch (d->prim) {
     case 0: *nprim = n, *nv = 1, *step = 1; break;
@@ -1389,10 +1394,9 @@ static bool fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_dr
     case 3: *nprim = n / 3u, *nv = 3, *step = 3; break;
     default: *nprim = n >= 3u ? n - 2u : 0u, *nv = 3, *step = 1; break;
     }
-    if (*nprim * d->instances <= 1u) return false;   /* one primitive: nothing can overlap inside the draw */
-    if (d->prim == 4u && *nprim > 1u && !vk_core13(r->vk)) { p->diag2.exec.fmt.fbf_split_unsupported++; return false; }   /* the winding flip needs dynamic front face */
-    if (*nprim * d->instances > A64_FBF_SPLIT_MAX) { p->diag2.exec.fmt.fbf_split_capped++; return false; }
-    return true;
+    if (*nprim * d->instances <= 1u) return 0;   /* one primitive: nothing can overlap inside the draw */
+    if (*nprim * d->instances > A64_FBF_SPLIT_MAX) { p->diag2.exec.fmt.fbf_split_capped++; return -1; }
+    return 1;
 }
 
 static lagfx_status_t fbf_draw_split(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint32_t index_start, uint64_t nprim, uint32_t nv, uint32_t step) {
@@ -1458,7 +1462,9 @@ static void draw_cmd_inner(a64_run_t *r, lagfx_protocol_t *p, uint32_t tag, cons
     if (!bind_for_draw(r, p, d.prim)) { tag_partial(p, tag); return; }
     lagfx_status_t st;
     uint64_t sp_n = 0; uint32_t sp_nv = 0, sp_step = 0;
-    const bool split = fbf_split_plan(r, p, &d, &sp_n, &sp_nv, &sp_step);
+    const int plan = fbf_split_plan(r, p, &d, &sp_n, &sp_nv, &sp_step);
+    if (plan < 0) { CNT(p).draws_skipped++; tag_partial(p, tag); return; }   /* over the split cap: refused and counted, never run unordered */
+    const bool split = plan > 0;
     if (d.indexed) lagfx_translate_render_bind_index_buffer(&r->rs, ib->buf, d.index_offset, d.index_type == 1u ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
     if (split) st = fbf_draw_split(r, p, &d, index_start, sp_n, sp_nv, sp_step);
     else if (d.indexed) st = lagfx_translate_render_draw_indexed(&r->rs, (uint32_t)d.count, (uint32_t)d.instances, index_start, (int32_t)d.base_vertex, (uint32_t)d.base_instance);
