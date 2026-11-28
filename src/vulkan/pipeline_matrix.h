@@ -29,6 +29,7 @@ enum {
     LAGFX_MX_NORO = 1u << 0, LAGFX_MX_V13 = 1u << 1, LAGFX_MX_BLOCK = 1u << 2, LAGFX_MX_IAFIRST = 1u << 3, LAGFX_MX_IASET1 = 1u << 4, LAGFX_MX_STAGES = 1u << 5,
     LAGFX_MX_MAPBOTH = 1u << 6, LAGFX_MX_MAPIDX = 1u << 7, LAGFX_MX_MAPLOC = 1u << 8, LAGFX_MX_LEGACY = 1u << 9, LAGFX_MX_M8 = 1u << 10,
     LAGFX_MX_UG = 1u << 11, LAGFX_MX_UH = 1u << 12, LAGFX_MX_UI = 1u << 13, LAGFX_MX_UJ = 1u << 14, LAGFX_MX_UK = 1u << 15, LAGFX_MX_M8C = 1u << 16,
+    LAGFX_MX_STUBFS = 1u << 17, LAGFX_MX_STUBVS = 1u << 18, LAGFX_MX_VINF32 = 1u << 19, LAGFX_MX_STRIP = 1u << 20, LAGFX_MX_IDX32 = 1u << 21,
 };
 
 typedef struct {

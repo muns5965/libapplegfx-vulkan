@@ -28,6 +28,7 @@ enum {
     R_NORO = LAGFX_MX_NORO, R_V13 = LAGFX_MX_V13, R_BLOCK = LAGFX_MX_BLOCK, R_IAFIRST = LAGFX_MX_IAFIRST, R_IASET1 = LAGFX_MX_IASET1, R_STAGES = LAGFX_MX_STAGES,
     R_MAPBOTH = LAGFX_MX_MAPBOTH, R_MAPIDX = LAGFX_MX_MAPIDX, R_MAPLOC = LAGFX_MX_MAPLOC, R_LEGACY = LAGFX_MX_LEGACY, R_M8 = LAGFX_MX_M8, R_M8C = LAGFX_MX_M8C,
     R_UG = LAGFX_MX_UG, R_UH = LAGFX_MX_UH, R_UI = LAGFX_MX_UI, R_UJ = LAGFX_MX_UJ, R_UK = LAGFX_MX_UK,
+    R_STUBFS = LAGFX_MX_STUBFS, R_STUBVS = LAGFX_MX_STUBVS, R_VINF32 = LAGFX_MX_VINF32, R_STRIP = LAGFX_MX_STRIP, R_IDX32 = LAGFX_MX_IDX32,
 };
 #define R_LAYOUT_BITS (R_BLOCK | R_IAFIRST | R_IASET1 | R_STAGES)
 #define R_MAP_BITS (R_MAPBOTH | R_MAPIDX | R_MAPLOC)
@@ -199,7 +200,8 @@ static int xform_module(mctx_t *c, uint32_t mask, const uint32_t *orig, size_t o
     char info[200];
     struct { uint32_t bit; rw_fn fn; const char *tag; } steps[] = {
         { R_V13, lagfx_spv_variant_downgrade13, "v1.3" }, { R_UG, lagfx_spv_variant_undef_composites, "undef-g" }, { R_UH, lagfx_spv_variant_undef_struct_ptr, "undef-h" },
-        { R_UI, lagfx_spv_variant_drop_dead_undef, "undef-i" }, { R_UJ, lagfx_spv_variant_undef_struct, "undef-j" }, { R_UK, lagfx_spv_variant_undef_returns, "undef-k" } };
+        { R_UI, lagfx_spv_variant_drop_dead_undef, "undef-i" }, { R_UJ, lagfx_spv_variant_undef_struct, "undef-j" }, { R_UK, lagfx_spv_variant_undef_returns, "undef-k" },
+        { R_STRIP, lagfx_spv_variant_strip_caps, "strip-caps" }, { R_IDX32, lagfx_spv_variant_index32, "index32" } };
     for (size_t s = 0; s < sizeof steps / sizeof steps[0]; s++) {
         if (!(mask & steps[s].bit)) continue;
         uint32_t *o = NULL;
@@ -310,7 +312,7 @@ static VkResult run_recipe(mctx_t *c, uint32_t mask, bool *applicable, char *why
         snprintf(note, sizeof note, "fs from file (%zu bytes)%s", n8, m8v ? ", vs from file" : "");
     }
     /* SPIR-V transforms */
-    if (mask & (R_V13 | R_UNDEF_BITS | R_IAFIRST | R_IASET1)) {
+    if (mask & (R_V13 | R_UNDEF_BITS | R_IAFIRST | R_IASET1 | R_STRIP | R_IDX32)) {
         char vn[300] = "", fnn[300] = "";
         int a = xform_module(c, mask, vs, vsn / 4, &vo, &von, vn, sizeof vn, false), b = xform_module(c, mask, fs, fsn / 4, &fo, &fon, fnn, sizeof fnn, true);
         if (a < 0 || b < 0) { r = VK_ERROR_OUT_OF_HOST_MEMORY; snprintf(why, wcap, "SPIR-V rewrite failed (malformed module / out of memory)"); goto out; }
@@ -323,6 +325,14 @@ static VkResult run_recipe(mctx_t *c, uint32_t mask, bool *applicable, char *why
     }
     /* state */
     if (mask & R_NORO) d.raster_order_access = 0;
+    if (mask & R_STUBFS) { fs = lagfx_stub_fs_spv, fsn = sizeof lagfx_stub_fs_spv; snprintf(note + strlen(note), sizeof note - strlen(note), "%sreal vs + STUB fs (does the VERTEX stage alone fail?)", note[0] ? " | " : ""); }
+    if (mask & R_STUBVS) { vs = lagfx_stub_vs_spv, vsn = sizeof lagfx_stub_vs_spv; snprintf(note + strlen(note), sizeof note - strlen(note), "%sSTUB vs + real fs (does the FRAGMENT stage alone fail?)", note[0] ? " | " : ""); }
+    if (mask & R_VINF32) {   /* Half4 (MTLVertexFormat 27) attributes -> Float4 (31): same 16 bytes of the 48-byte vertex vs 8, creation-only (the bytes would be read as float) */
+        uint32_t nh = 0;
+        for (uint32_t a = 0; a < d.n_pso_attrs && a < 8u; a++) if (d.pso_attr_fmt[a] == 27u) d.pso_attr_fmt[a] = 31u, nh++;
+        if (!nh) { *applicable = false; snprintf(why, wcap, "no Half4 vertex attribute in the failing state"); goto out; }
+        snprintf(note + strlen(note), sizeof note - strlen(note), "%s%u Half4 attribute(s) declared Float4", note[0] ? " | " : "", nh);
+    }
     if (mask & R_MAP_BITS) {
         idx_info_t *ip = &ii;
         loc_info_t *lp = &li;
@@ -416,6 +426,12 @@ void lagfx_pipeline_matrix_run(VkDevice dev, const lagfx_pipeline_desc_t *d0, co
     row(c, "M9i", "unreferenced OpUndef dropped", R_UI, true);
     row(c, "M9j", "OpUndef struct -> OpConstantNull", R_UJ, true);
     row(c, "M9k", "only OpReturnValue(OpUndef) operands -> OpConstantNull", R_UK, true);
+    /* stage / vertex-input / capability localisation (the offline ladder's d1 / d2 / e / f rows, here on the device; DIAGNOSTIC meanings, never single=true so M10 does not combine them) */
+    row(c, "M11a", "real VERTEX + stub fragment (VS alone)", R_STUBFS, false);
+    row(c, "M11b", "stub vertex + real FRAGMENT (FS alone)", R_STUBVS, false);
+    row(c, "M12", "Half4 vertex attributes declared Float4 (vertex input format)", R_VINF32, false);
+    row(c, "M13", "drop unused Int8/16/Float16/Int64 capability declarations", R_STRIP, false);
+    row(c, "M14", "64-bit dynamic vector index -> 32-bit", R_IDX32, false);
     /* M10: the largest compatible set of the single rows whose outcome differs from M0 (BUILT where M0 failed, or another VkResult), then pairs of them (at most 8 rows in all) */
     {
         uint32_t chg[24], nchg = 0;

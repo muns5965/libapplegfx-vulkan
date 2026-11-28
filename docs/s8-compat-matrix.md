@@ -25,7 +25,7 @@ Companion: `docs/metal-vulkan-compatibility.md` (API-level mapping). This file i
 | D Render | Legacy render pass (no dynamic rendering) | fallback done, device-verified | log: legacy_renderpass active; images non-black |
 | D | Framebuffer fetch (input attachment) | partial | `legacy_fetch`; multisampled fetch refused below Vulkan 1.4 property |
 | D | MSAA sampled texture read | missing | `texture2d_ms` spelling unverified: draw skipped, counted |
-| D | Depth/stencil resolve | per `render_pass.h` header: not in the legacy backend | re-check before relying |
+| D | Depth/stencil resolve | implemented (backend + guest path), host-verified, device-pending | `render_pass.c` ~224-254 (`vkCreateRenderPass2` + `VkSubpassDescriptionDepthStencilResolve`), `arm64_exec_run.c` ~1249 → `lagfx_a64_msaa_ds_resolve`; the `render_pass.h` header comment saying otherwise is stale (found by review, previously mis-listed) |
 | D | Blend / MRT correctness | device-pending | `have_independent_blend`; no pixel comparison on device |
 | E Display/VM | Swap / present | partial, device-verified | 757 swaps then stalled (OFF control) |
 | E | VBL / display events | experiment | ON 900 s run pending |
@@ -35,5 +35,5 @@ Companion: `docs/metal-vulkan-compatibility.md` (API-level mapping). This file i
 
 ## What blocks what
 - Needs external data: A (AIR bundles), B-independent compute (census dump from the next device run), C-storage (format list from the next device run).
-- Can proceed from source now: none of the rows above has a design that is correct without that data; guessing the compute record format or the BGRA storage substitute would be unverifiable and is deliberately not done.
+- Can proceed from source now (corrected after review; the earlier "none" was wrong): Pipeline-creation localisation rows in the on-device matrix (stage / vertex-input / capability), the common Vulkan compute execution base (pipeline + descriptors + dispatch + barrier, separable from the guest record parsing), threadgroup-memory arguments, general Int64 lowering, texture-view mip/layer. Only the guest compute *record format* and the real -13 root cause need device data; those are not guessed.
 - S26 path: every change in this branch is gated by capability (subgroup range, usage trimming) or counters only; the S26 native paths are unchanged.
