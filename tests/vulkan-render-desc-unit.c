@@ -145,7 +145,7 @@ static void ms_img_free(struct lagfx_vk_state *vk, ms_img_t *o) {
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->mem) vkFreeMemory(vk->device, o->mem, NULL);
 }
-typedef struct { ms_img_t *m0, *m2, *dp; lagfx_vk_render_target_t *r0, *r2; bool res2, gap; VkResolveModeFlagBits mode0; } msc_t;
+typedef struct { ms_img_t *m0, *m2, *dp; lagfx_vk_render_target_t *r0, *r2; bool res2, gap; VkResolveModeFlagBits mode0; uint32_t fetch0; } msc_t;
 static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     msc_t *g = arg;
     VkImageMemoryBarrier b[3]; uint32_t nb = 0;
@@ -167,6 +167,7 @@ static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     d.color[0] = (lagfx_render_attachment_t){ .view = g->m0->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .clear = { .color = red },
         .resolve_view = g->r0->view, .resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .resolve_mode = g->mode0 ? g->mode0 : VK_RESOLVE_MODE_AVERAGE_BIT };
+    if (g->fetch0) d.fetch_mask = g->fetch0, d.color[0].layout = VK_IMAGE_LAYOUT_GENERAL;   /* multisampled input attachment named on slot 0 */
     d.color[s2] = (lagfx_render_attachment_t){ .view = g->m2->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = g->res2 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = green } };
     if (g->res2) { d.color[s2].resolve_view = g->r2->view; d.color[s2].resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; d.color[s2].resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT; }
@@ -447,6 +448,14 @@ static void run_backend(int legacy) {
                     snprintf(m, sizeof m, "msaa combo: direct begin_desc with resolve mode SAMPLE_ZERO on BGRA8 is refused on legacy (%s)", bn);
                     CHECK(!accepted, m);
                     g.mode0 = 0;
+                }
+                if (variant == 0 && legacy) {   /* direct begin_desc: a multisampled fetch slot is refused when the per-sample read path is not available (no sampleRateShading), for every caller */
+                    const bool srs = vk->have_sample_rate_shading;
+                    vk->have_sample_rate_shading = false; g.fetch0 = 1u;
+                    const bool accepted = one_shot(vk, rec_msc, &g);
+                    vk->have_sample_rate_shading = srs; g.fetch0 = 0;
+                    snprintf(m, sizeof m, "msaa fetch: direct begin_desc with a multisampled fetch slot and no sampleRateShading is refused on legacy (%s)", bn);
+                    CHECK(!accepted, m);
                 }
                 if (res2) { snprintf(m, sizeof m, "msaa combo %d: the second real slot resolved to green, not shifted (%s)", variant, bn); CHECK(px_is(vk, &r2, 8, 8, 0, 255, 0), m); }
             }

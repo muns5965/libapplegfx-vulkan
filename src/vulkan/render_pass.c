@@ -249,6 +249,8 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
 
     if (!fetch_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
+    for (uint32_t i = 0; i < d->color_count && i < LAGFX_RENDER_MAX_COLOR; i++)   /* a multisampled input attachment needs the per-sample read path (subpassInputMS + sample-rate shading pipelines): the descriptor entry point checks it for every caller */
+        if ((d->fetch_mask & (1u << i)) && samples_of(&d->color[i]) != VK_SAMPLE_COUNT_1_BIT && !lagfx_vk_fetch_ms_capable(vk)) return LAGFX_ERR_INVALID_ARG;
 
     /* the legacy resolve is implicit: a resolve_mode (0 = average) it would not perform is refused here, for every caller of the descriptor entry point, not only the encoder */
     for (uint32_t i = 0; i < d->color_count; i++) {

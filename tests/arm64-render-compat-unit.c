@@ -122,6 +122,7 @@ static void test_val_baseline_helper(void) {
 /* ---- scenario state read by the resolver ---- */
 enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF, FS_DISC, FS_ORDER };
 static struct { int fs; bool blend; int fs2; bool two; } g_rc;   /* two: ref 7 (REF_PIPE2 of arm64-exec-run-unit) takes fs2 instead of fs */
+static VkShaderModule g_rc_tmp[128]; static int g_rc_ntmp;   /* per-run FS_DISC modules, destroyed in rc_teardown */
 static VkShaderModule g_rc_fs[7], g_rc_vs_order; static uint8_t *g_disc_spv; static size_t g_disc_bytes;   /* FS_DISC: a fragment shader translated from a fixture by the test */ static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
 
 static VkShaderModule rc_module(struct lagfx_vk_state *vk, const uint32_t *w, size_t bytes) {
@@ -155,7 +156,7 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
         out->desc.vertex_shader = g_rc_vs_order, out->desc.n_vtx_inputs = 2, out->desc.vtx_in_loc[1] = 1, out->desc.vtx_in_comp[1] = 1, out->desc.vtx_stride = 12;
     }
     if (fs_sel == FS_DISC) {
-        out->desc.fragment_shader = rc_module(vk, (const uint32_t *)(const void *)g_disc_spv, g_disc_bytes);   /* a fresh module per run: the SPIR-V changes with the mode under test */
+        out->desc.fragment_shader = rc_module(vk, (const uint32_t *)(const void *)g_disc_spv, g_disc_bytes); assert(g_rc_ntmp < 128); g_rc_tmp[g_rc_ntmp++] = out->desc.fragment_shader;   /* a fresh module per run: the SPIR-V changes with the mode under test */
     } else if (fs_sel == FS_HALF) {
         if (!g_rc_fs[FS_HALF]) g_rc_fs[FS_HALF] = rc_module(vk, k_fs_half_spv, sizeof k_fs_half_spv);
         out->desc.fragment_shader = g_rc_fs[FS_HALF];
@@ -777,6 +778,17 @@ static void test_msaa_texture_refused(void) {
     puts("PASS: a guest texture descriptor with samples > 1 is refused with a dedicated counter (a sample count on a non-multisample texture type is not a texture Metal can create; the real multisample path is tested in arm64-msaa-guest-unit.c); 1 sample is accepted");
 }
 
+/* Harness-owned Vulkan objects (rc_module / rc_layout): destroyed before the device (VUID-vkDestroyDevice-device-05137 otherwise). */
+static void rc_teardown(struct lagfx_vk_state *vk) {
+    while (g_rc_ntmp > 0) vkDestroyShaderModule(vk->device, g_rc_tmp[--g_rc_ntmp], NULL);
+    for (int i = 0; i < 7; i++) if (g_rc_fs[i]) vkDestroyShaderModule(vk->device, g_rc_fs[i], NULL), g_rc_fs[i] = VK_NULL_HANDLE;
+    if (g_rc_vs_order) vkDestroyShaderModule(vk->device, g_rc_vs_order, NULL), g_rc_vs_order = VK_NULL_HANDLE;
+    if (g_vs) vkDestroyShaderModule(vk->device, g_vs, NULL), g_vs = VK_NULL_HANDLE;
+    for (int i = 0; i < 2; i++) {
+        if (g_rc_pl[i]) vkDestroyPipelineLayout(vk->device, g_rc_pl[i], NULL), g_rc_pl[i] = VK_NULL_HANDLE;
+        if (g_rc_dsl[i]) vkDestroyDescriptorSetLayout(vk->device, g_rc_dsl[i], NULL), g_rc_dsl[i] = VK_NULL_HANDLE;
+    }
+}
 #ifndef LAGFX_COMPAT_NO_MAIN   /* arm64-msaa-guest-unit.c includes this file as its harness and has its own main */
 /* Fetch mask transitions in ONE protocol: a target WITH input-attachment usage (mask 1), a target created WITHOUT it (usage dropped by the test hook: fetch refused, plain layout),
  * and back. The cached pipeline of the first state is reused, the refused state does not touch the target, and no validation message appears. */
@@ -841,6 +853,7 @@ int main(void) {
     test_round_halves_away();
     test_injected_formats();
     test_msaa_texture_refused();
+    rc_teardown(g_dev->vk);
     lagfx_device_free(g_dev);
     free(g_mem);
     return 0;

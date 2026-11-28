@@ -650,6 +650,7 @@ int main(void) {
       printf("%s\n", g.line);
       puts("PASS g7-gpu-msaa line carries the counts"); }
 
+    rc_teardown(g_dev->vk);
     lagfx_device_free(g_dev);
     free(g_mem);
     return 0;
