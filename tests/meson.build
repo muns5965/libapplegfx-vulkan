@@ -1595,6 +1595,8 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   test('arm64 exec render, legacy render pass forced (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
   # A device WITHOUT dynamic rendering (the feature is not enabled at vkCreateDevice: any stray vkCmdBeginRendering is invalid): the closest host stand-in for a Vulkan 1.1 phone GPU. Needs the opt-in.
   test('arm64 exec render, device without dynamic rendering (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_FEATURES=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1'])
+  # Depth / stencil / depth-bias PIXEL checks through the Vulkan 1.1 path: simulated 1.1 + legacy VkRenderPass + VK_EXT_extended_dynamic_state (what S8 uses once the EDS1 feature chain reaches the device); validation clean.
+  test('arm64 exec render depth/stencil, simulated Vulkan 1.1 + legacy render pass + EDS1 (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_TEST_API_MINOR=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1'])
 endif
 
 # ARM64 render draw record layouts + serialized sampler decoding (pure, no device).
