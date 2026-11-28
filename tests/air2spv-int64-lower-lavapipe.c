@@ -115,7 +115,7 @@ static int chain_indices_guarded(const uint8_t *b, size_t n, int *chains) {
     const uint32_t *w = (const uint32_t *)(const void *)b; uint32_t bound = w[3]; uint8_t *def = calloc(bound, 1); if (!def) return 0; int ok = 1; *chains = 0;
     for (size_t i = 5; i < n / 4;) { uint32_t wc = w[i] >> 16, op = w[i] & 0xffff; if (!wc) break;
         if (op >= 43 && op <= 52) { } else if (wc >= 3 && op != 62 && op != 5 && op != 71 && w[i + 2] < bound && op >= 61 && op != 249 && op != 250 && op != 247 && op != 248) def[w[i + 2]] = (uint8_t)(op == 169 ? 1 : 2);
-        if (op == 65 || op == 66) { for (uint32_t k = 5; k < wc; k++) { (*chains)++; uint32_t id = w[i + k]; if (id < bound && def[id] == 2) ok = 0; } }
+        if (op == 65 || op == 66 || op == 67 || op == 70) { for (uint32_t k = 4; k < wc; k++) { (*chains)++; uint32_t id = w[i + k]; if (id < bound && def[id] == 2) ok = 0; } }
         i += wc; }
     free(def); return ok;
 }
@@ -146,7 +146,7 @@ int main(void) {
     g_qf = ~0u; for (uint32_t i = 0; i < nq; i++) if (qp[i].queueFlags & VK_QUEUE_COMPUTE_BIT) { g_qf = i; break; }
     free(qp); CHECK(g_qf != ~0u, "no compute queue");
     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_qf, .queueCount = 1, .pQueuePriorities = &prio };
-    VkPhysicalDeviceFeatures en = { .shaderInt64 = VK_FALSE };   /* the S8 condition */
+    VkPhysicalDeviceFeatures en = { .shaderInt64 = VK_FALSE, .robustBufferAccess = VK_TRUE };   /* the S8 condition */
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci, .pEnabledFeatures = &en };
     VK(vkCreateDevice(g_pd, &dci, NULL, &g_dev)); vkGetDeviceQueue(g_dev, g_qf, 0, &g_q);
 
@@ -195,6 +195,16 @@ int main(void) {
         int bad5 = 0; for (uint64_t i = 0; i < 256; i++) { uint64_t in = 0xFEDCBA9876543210ull * (i + 1u) + (i << 33); if (q[i] != in * 3u + i) bad5++; }
         CHECK(bad5 == 0, "i64 load/store round trip: %d mismatches", bad5);
         printf("PASS: 64-bit values LOADED from a buffer (including high words) survive load -> arithmetic -> store\n"); }
+    /* an index >= 2^32 must NOT wrap onto element i: the store through (i + 2^32) is out of range (discarded under robustBufferAccess) and every o[i] only gets its +1 */
+    {   uint8_t *s6; size_t n6; lagfx_status_t st6; if (translate("int64_oob.air.bc", &s6, &n6, &st6)) return 1;
+        CHECK(st6 == LAGFX_OK && s6, "oob translate %d", (int)st6);
+        uint8_t *l6 = NULL; size_t ln6 = 0; CHECK(lagfx_spv_lower_int64(s6, n6, &l6, &ln6, why, sizeof why) == 1, "oob lowering: %s", why);
+        buf_t o6; if (mkbuf(&o6, 256 * 8)) return 1; uint64_t *q6 = (uint64_t *)(void *)o6.p;
+        for (uint64_t i = 0; i < 256; i++) q6[i] = 0x1000000000ull + i;
+        CHECK(run(l6, ln6, &o6, 4, 64, 0) == 0, "oob run");
+        int bad6 = 0; for (uint64_t i = 0; i < 256; i++) if (q6[i] != 0x1000000000ull + i + 1u) bad6++;
+        CHECK(bad6 == 0, "an index of 2^32 + i wrapped onto element i (%d elements changed wrongly)", bad6);
+        printf("PASS: a 64-bit index >= 2^32 does not alias a valid element (robustBufferAccess on)\n"); }
     /* a module with no 64-bit integers is returned untouched (rc 0) */
     {   uint8_t *s2; size_t n2; lagfx_status_t st2; if (translate("threadgroup_arg_i32.air.bc", &s2, &n2, &st2)) return 1;
         lagfx_air2spv_set_narrow_int64(1); free(s2); s2 = NULL;

@@ -89,6 +89,15 @@ static void shift64(L *l, uint32_t kind, uint32_t res, uint32_t a, uint32_t amt_
 
 static uint32_t nid_all_ones(L *l) { return E(l, OP_NOT, l->U32, l->c0, 0, 1); }
 
+/* a 64-bit index as a 32-bit one: kept when it IS a 32-bit value (high word 0, or a sign extension of a negative 32-bit value: hi == 0xFFFFFFFF and the low word's top bit set, so the
+ * original negative / out-of-range meaning survives); anything else is out of range for every buffer and becomes 0xFFFFFFFF (never wrapped onto another element) */
+static uint32_t guard_index64(L *l, uint32_t idx) {
+    uint32_t lo = Ex(l, idx, 0), hi = Ex(l, idx, 1), ones = nid_all_ones(l);
+    uint32_t pos = B(l, OP_I_EQUAL, hi, l->c0);
+    uint32_t neg = B(l, OP_LOGICAL_AND, B(l, OP_I_EQUAL, hi, ones), B(l, OP_I_NOT_EQUAL, U(l, OP_SHR_LOGICAL, lo, l->c31), l->c0));
+    return Sel(l, B(l, OP_LOGICAL_OR, pos, neg), lo, ones);
+}
+
 static uint32_t cmp64(L *l, uint32_t op, uint32_t a, uint32_t b) {
     uint32_t al = Ex(l, a, 0), ah = Ex(l, a, 1), bl = Ex(l, b, 0), bh = Ex(l, b, 1);
     if (op == OP_I_EQUAL) return B(l, OP_LOGICAL_AND, B(l, OP_I_EQUAL, al, bl), B(l, OP_I_EQUAL, ah, bh));
@@ -241,20 +250,21 @@ int lagfx_spv_lower_int64(const uint8_t *in, size_t in_len, uint8_t **out, size_
             uint32_t nw3[8]; const uint32_t ix = op == OP_VECTOR_EXTRACT_DYNAMIC ? 4u : 5u;
             if (wc > 8u || wc <= ix || res64) { fail(&l, "unsupported 64-bit integer operation (SPIR-V opcode %u)", op); break; }
             memcpy(nw3, &l.w[i], wc * 4u);
-            if (is64(&l, nw3[ix])) { uint32_t idx = nw3[ix], lo = Ex(&l, idx, 0), hi = Ex(&l, idx, 1); nw3[ix] = Sel(&l, B(&l, OP_I_EQUAL, hi, l.c0), lo, nid_all_ones(&l)); }
+            if (is64(&l, nw3[ix])) nw3[ix] = guard_index64(&l, nw3[ix]);
             for (uint32_t k = 0; k < wc; k++) wput(&l.o, nw3[k]);
             break;
         }
         case OP_ACCESS_CHAIN: case OP_IN_BOUNDS_ACCESS_CHAIN: case OP_PTR_ACCESS_CHAIN: case OP_IN_BOUNDS_PTR_ACCESS_CHAIN: {
             uint32_t nw2[32]; if (wc > 32u) { fail(&l, "access chain too long (id %u)", o[1]); break; }
-            memcpy(nw2, &l.w[i], wc * 4u);
+            memcpy(nw2, &l.w[i], wc * 4u); bool guarded = false; uint32_t cop = op;
             for (uint32_t k = 4; k < wc; k++) if (is64(&l, nw2[k])) {
                 /* a 64-bit index with a non-zero high word is out of range for any buffer (< 2^32 bytes); keeping only the low word would wrap it onto a DIFFERENT valid element.
                  * So it becomes 0xFFFFFFFF (still out of range: the driver's robust-access rules apply, as for the original index). */
-                uint32_t idx = nw2[k], lo = Ex(&l, idx, 0), hi = Ex(&l, idx, 1);
-                nw2[k] = Sel(&l, B(&l, OP_I_EQUAL, hi, l.c0), lo, nid_all_ones(&l));
+                nw2[k] = guard_index64(&l, nw2[k]); guarded = true;
             }
             if (l.X && nw2[1] == l.I64) nw2[1] = l.X;
+            /* an index replaced by an out-of-range value must not sit under an InBounds promise: the chain becomes the plain one (behaviour then follows robustBufferAccess) */
+            if (guarded) { if (cop == OP_IN_BOUNDS_ACCESS_CHAIN) cop = OP_ACCESS_CHAIN; else if (cop == OP_IN_BOUNDS_PTR_ACCESS_CHAIN) cop = OP_PTR_ACCESS_CHAIN; nw2[0] = (wc << 16) | cop; }
             for (uint32_t k = 0; k < wc; k++) wput(&l.o, nw2[k]);
             break;
         }

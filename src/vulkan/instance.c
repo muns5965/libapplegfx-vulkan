@@ -792,6 +792,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         .features = { .shaderInt64 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) ? VK_TRUE : VK_FALSE,
                       .shaderInt16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT16)) ? VK_TRUE : VK_FALSE,
                       .independentBlend = probe2.features.independentBlend ? VK_TRUE : VK_FALSE,
+                      /* out-of-range buffer accesses (e.g. the 0xFFFFFFFF index the Int64 lowering substitutes for an index >= 2^32) must be discarded / read as zero, not touch memory */
+                      .robustBufferAccess = probe2.features.robustBufferAccess ? VK_TRUE : VK_FALSE,
                       .depthBiasClamp = probe2.features.depthBiasClamp ? VK_TRUE : VK_FALSE },
         .pNext = legacy_feat ? legacy_head : (void *)&feat12,
     };
