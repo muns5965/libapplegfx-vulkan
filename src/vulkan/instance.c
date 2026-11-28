@@ -460,6 +460,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
     const bool ext_eds1 = has_ext(dext, dext_n, "VK_EXT_extended_dynamic_state");   /* evaluated here: dext is freed below */
+    const bool ext_demote = has_ext(dext, dext_n, "VK_EXT_shader_demote_to_helper_invocation");   /* the pre-1.3 form of DemoteToHelperInvocation (same feature, same SPIR-V capability; the SPIR-V side declares SPV_EXT_demote_to_helper_invocation below 1.6) */
     /* Opt-in cubic filtering (filter_cubic.h): only requested with LAGFX_CUBIC=1; the extension has no feature struct. The EXT form is preferred, the IMG alias is used on a device that lacks it. */
     const char *cubic_ext = !lagfx_cubic_optin() ? NULL : has_ext(dext, dext_n, "VK_EXT_filter_cubic") ? "VK_EXT_filter_cubic" : has_ext(dext, dext_n, "VK_IMG_filter_cubic") ? "VK_IMG_filter_cubic" : NULL;
     typedef struct { VkStructureType sType; void *pNext; VkBool32 dynamicRenderingLocalRead; } local_read_feat_t;   /* older headers lack the type */
@@ -680,6 +681,13 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         }
         caps_en |= lagfx_vk_atomic_caps(&af);
     }
+    bool demote_ext_ok = false;
+    if (!probe13.shaderDemoteToHelperInvocation && s->phys_props.apiVersion < VK_API_VERSION_1_3 && ext_demote && !getenv("LAGFX_VK_NO_DEMOTE_EXT")) {   /* Vulkan 1.1 / 1.2 device (S8: Adreno 730): through the extension */
+        VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT qd = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT };
+        VkPhysicalDeviceFeatures2 qf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &qd };
+        vkGetPhysicalDeviceFeatures2(s->phys_device, &qf);
+        if (qd.shaderDemoteToHelperInvocation) demote_ext_ok = true, caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);
+    }
     if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
@@ -711,6 +719,11 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         wanted_dev_exts[wanted_dev_n++] = "VK_KHR_spirv_1_4";
         wanted_dev_exts[wanted_dev_n++] = "VK_KHR_shader_float_controls";
     }
+    VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT demote_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES_EXT, .shaderDemoteToHelperInvocation = VK_TRUE };
+    if (demote_ext_ok && (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)) && wanted_dev_n < 22u) {   /* before the legacy chain is linked below: it takes feat13.pNext as its tail */
+        demote_en.pNext = feat13.pNext; feat13.pNext = &demote_en;
+        wanted_dev_exts[wanted_dev_n++] = "VK_EXT_shader_demote_to_helper_invocation";
+    } else if (demote_ext_ok) caps_en &= ~LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* cannot enable the extension: do not advertise the capability */
     feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
     feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
     feat12.shaderBufferInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF)) ? VK_TRUE : VK_FALSE;      /* each feature follows its own cap: a device with only one of them is still created */
@@ -887,6 +900,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_exts;
         qct_enabled = true;
     }
+    if (legacy_feat) le_bda.pNext = feat13.pNext;   /* the legacy chain ends in whatever hangs off feat13.pNext NOW (demote / EDS1 / local read / raster order / tile structs were linked after it was built) */
     vr = vkCreateDevice(s->phys_device, &dci, NULL, &s->device);
     lagfx_qcomtile_fallback_t qct_fb = LAGFX_QCT_FB_NONE;
     int qct_create = (int)vr;
@@ -894,6 +908,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         feat13.pNext = qct_saved_chain, wanted_dev_n = qct_saved_n;
         dci.enabledExtensionCount = wanted_dev_n, dci.ppEnabledExtensionNames = wanted_dev_n ? wanted_dev_exts : NULL;
         qct_enabled = false, qct_mask = 0, qct_fb = LAGFX_QCT_FB_DEVICE_CREATE_FAILED;
+        if (legacy_feat) le_bda.pNext = feat13.pNext;
         vr = vkCreateDevice(s->phys_device, &dci, NULL, &s->device);
     }
     s->qcomtile.flag = qct_flag, s->qcomtile.injected = qct_inject, s->qcomtile.reason = qct_reason, s->qcomtile.enabled = qct_enabled, s->qcomtile.fallback = qct_fb;

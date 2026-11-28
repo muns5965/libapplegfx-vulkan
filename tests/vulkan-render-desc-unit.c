@@ -10,6 +10,7 @@
  * NOT verified: a real Vulkan 1.1 driver (Adreno), depth CONTENT (the depth image is only attached and cleared), the validation layer only where the test is registered with LAGFX_VK_VALIDATION=1 (then: messenger active, positive control delivered, 0 messages before it). Exit 77 = no usable device. */
 #define _GNU_SOURCE
 #include "vulkan/instance.h"
+#include "vulkan/caps.h"
 #include "vulkan/render_pass.h"
 #include "vulkan/render_target.h"
 #include "vulkan/command.h"
@@ -695,6 +696,13 @@ int main(void) {
         if (lagfx_vk_init(&vk, &dd) != LAGFX_OK || !vk || !vk->initialized) { printf("no usable Vulkan device: skip\n"); return 77; }
         CHECK(VK_VERSION_MAJOR(vk->phys_props.apiVersion) == 1 && VK_VERSION_MINOR(vk->phys_props.apiVersion) < 2, "simulated device reports below Vulkan 1.2");
         CHECK(lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY, "legacy backend");
+        {   /* Shader Demote through VK_EXT_shader_demote_to_helper_invocation below 1.3 (S8): the cap is offered only together with the extension, and the feature struct reaches the device (legacy chain) */
+            bool has_ext = strstr(vk->dev_exts, "VK_EXT_shader_demote_to_helper_invocation") != NULL, cap = (vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)) != 0;
+            CHECK(has_ext == cap, "demote capability <=> VK_EXT_shader_demote_to_helper_invocation enabled (simulated 1.1)");
+            printf("INFO simulated 1.1: demote via extension %s (device exts: %s)\n", cap ? "ENABLED" : "not offered by this ICD", vk->dev_exts);
+            if (getenv("LAGFX_REQUIRE_DEMOTE_EXT")) CHECK(cap, "demote extension path required but not enabled");
+            CHECK(vk->have_eds == (strstr(vk->dev_exts, "VK_EXT_extended_dynamic_state") != NULL), "EDS1 table <=> extension enabled (simulated 1.1)");
+        }
         test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", false);
         test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", true);
         CHECK(lagfx_test_validation_expect(vk, "simulated 1.1") == 0, "validation: control delivered, 0 messages before it (simulated 1.1)");
