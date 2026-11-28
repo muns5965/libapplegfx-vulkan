@@ -16,7 +16,7 @@ Companion: `docs/metal-vulkan-compatibility.md` (API-level mapping). This file i
 | B | Subgroup 32 on 64..128 range | fallback done (logical 32-lane emulation, pinned 64), host-verified, device-pending | `lagfx_a64_tile_simd_emul_width`, `tile-simd-plan-unit` |
 | B | Independent compute segment (type 1) | missing | 0/153 run; record format unknown → census (`seg_census.c`) in the pending APK |
 | B | Information segment (type 4) | not analysed | 153 seen, not executed; semantics unknown |
-| B | Threadgroup-memory *arguments* `[[threadgroup(n)]]` | missing | not modelled (`translate_function.c` ~3070) |
+| B | Threadgroup-memory *arguments* `[[threadgroup(n)]]` | translator done (host-verified), dispatcher not wired | Workgroup T[N], N = SpecConstant (SpecId 3+k, elements); i32/i64/float elements, indexed access only; a bare dereference refuses the kernel. The metadata key `air.threadgroup_buffer` is unverified against a captured module; no guest compute path calls it yet |
 | C Resource | Usage trimming per format | fallback done, device-verified (counted) | `format_caps.c`, `fmt.dropped[]` (storage usage removed 333) |
 | C | Storage image write | partial | 18 refusals; cause split (linear / format unsupported / usage not requested / view) in the pending APK; no substitute path yet |
 | C | Linear (buffer-backed) texture as storage image | missing | `t->linear` returns no view |

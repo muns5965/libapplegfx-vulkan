@@ -166,6 +166,8 @@ typedef enum {
     CSA_THREADS_PER_SIMD,  /* threads_per_simdgroup             -> SubgroupSize           */
 } lagfx_cs_arg_kind_t;
 
+#define LAGFX_TG_ARG_SPEC_BASE 3u        /* SpecId 0..2 are the workgroup size */
+#define LAGFX_TG_ARG_DEFAULT_ELEMS 1024u
 typedef struct {
     lagfx_spv_builder_t      *b;
     const lagfx_air_module_t *m;
@@ -355,6 +357,11 @@ typedef struct {
      * instead (indices are already in access-type units per LLVM GEP
      * semantics). 0 = no override. */
     uint32_t                  arg_pointee_override[LAGFX_MAX_VERTEX_ARGS];
+    /* `threadgroup T *p [[threadgroup(n)]]` kernel arguments (key "air.threadgroup_buffer"): arg_tg[a] = 1 when modelled. The allocation is a Workgroup array T[N] whose length N
+     * is a SpecConstant (SpecId LAGFX_TG_ARG_SPEC_BASE + k, k = the argument's rank among the threadgroup arguments, in argument order; unit = ELEMENTS, default
+     * LAGFX_TG_ARG_DEFAULT_ELEMS; the spec constant is OpName'd "lagfx.tgarg.<k>.<element bytes>"). The dispatcher sets N = setThreadgroupMemoryLength / element bytes. */
+    uint8_t                   arg_tg[LAGFX_MAX_VERTEX_ARGS];
+    uint32_t                  arg_tg_var[LAGFX_MAX_VERTEX_ARGS], arg_tg_len[LAGFX_MAX_VERTEX_ARGS];
     /* Byte-buffer VIEW variables (descriptor aliasing). Metal code takes a
      * `device uchar *blob` arg and BITCASTs it to several typed views
      * (`device Uniforms*`, `device float4*`, ...) — the VfxXgb login vertex
@@ -2425,6 +2432,17 @@ static void note_unsupported_simd(const char *fn_name) {
     t_unsup_simd.n++;
 }
 
+/* A `[[threadgroup(n)]]` argument the translator cannot model (the element type is not a 32/64-bit integer / float, the body accesses it through a bare dereference instead of an
+ * indexed GEP, or it is used in a helper): never a silently undefined pointer - the kernel is not built. Per translation. */
+static _Thread_local struct { uint32_t n; char first[120]; } t_unsup_tg;
+static void note_unsupported_tg(const char *why) {
+    if (!t_unsup_tg.n) snprintf(t_unsup_tg.first, sizeof t_unsup_tg.first, "%s", why);
+    t_unsup_tg.n++;
+}
+uint32_t lagfx_air2spv_last_unsupported_threadgroup_arg(char *first, size_t cap) {
+    if (first && cap) snprintf(first, cap, "%s", t_unsup_tg.n ? t_unsup_tg.first : "");
+    return t_unsup_tg.n;
+}
 static uint32_t cs_op2(xlate_ctx_t *c, uint32_t op, uint32_t ty, uint32_t a, uint32_t b);
 /* the simdgroup width a kernel sees (a constant when emulating, else the subgroup size) */
 static uint32_t cs_simd_size(xlate_ctx_t *c) {
@@ -2536,6 +2554,22 @@ static void cs_prologue(xlate_ctx_t *c) {
         if (!strcmp(k, "air.imageblock")) { c->arg_is_imageblock[i] = 1u; continue; }
         c->arg_cs_kind[i] = (uint8_t)cs_arg_kind_from_key(k);
         if (c->arg_cs_kind[i]) continue;
+        if (c->arg_tg[i]) {   /* `threadgroup T *p [[threadgroup(n)]]`: the length is a specialization constant (elements) */
+            uint32_t u32t = emit_type_int_w(c, 32u, 0u);
+            uint32_t k_rank = 0; for (uint32_t j = 0; j < i; j++) k_rank += c->arg_tg[j];
+            c->arg_tg_len[i] = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t so[] = { u32t, c->arg_tg_len[i], LAGFX_TG_ARG_DEFAULT_ELEMS };
+            lagfx_spv_builder_emit_op(c->b, 50u /* OpSpecConstant */, so, 3);
+            uint32_t sd[] = { c->arg_tg_len[i], 1u /* SpecId */, LAGFX_TG_ARG_SPEC_BASE + k_rank };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_DECORATE, sd, 3);
+            { uint32_t eb = 4u; uint32_t el = c->arg_pointee_override[i]; uint32_t nt2 = 0; const lagfx_air_type_t *t2 = lagfx_air_module_types(c->m, &nt2);
+              if (el < nt2 && t2[el].kind == LAGFX_AIR_TYPE_INTEGER && t2[el].num_op >= 1u && t2[el].op[0] == 64u) eb = 8u;
+              char nm[48]; snprintf(nm, sizeof nm, "lagfx.tgarg.%u.%u", k_rank, eb);
+              uint32_t pre[] = { c->arg_tg_len[i] };
+              lagfx_spv_builder_emit_op_string(c->b, 5u /* OpName */, pre, 1, nm, NULL, 0); }
+            c->arg_tg_var[i] = lagfx_spv_builder_alloc_id(c->b);
+            continue;
+        }
         int rk = frag_resource_kind(c, i);
         if (rk == 3 && !block_struct_handleable(c, buffer_arg_struct_ty(c, i))) continue;
         if (rk != 0) { c->arg_resource_var[i] = lagfx_spv_builder_alloc_id(c->b); c->arg_resource_kind[i] = (uint8_t)rk; }
@@ -3161,6 +3195,21 @@ static void emit_module_vars_and_function(xlate_ctx_t *c) {
     } else if (c->stage == LAGFX_XLATE_STAGE_COMPUTE) {
         emit_arg_resource_vars(c, c->num_args < LAGFX_MAX_VERTEX_ARGS ? c->num_args : LAGFX_MAX_VERTEX_ARGS);
         emit_workgroup_globals(c);
+        for (uint32_t i = 0; i < c->num_args && i < LAGFX_MAX_VERTEX_ARGS; i++) {   /* threadgroup arguments: Workgroup T[N] */
+            if (!c->arg_tg[i] || !c->arg_tg_var[i]) continue;
+            uint32_t el_spv = emit_air_type(c, c->arg_pointee_override[i]);
+            uint32_t arr = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t ao[] = { arr, el_spv, c->arg_tg_len[i] };
+            lagfx_spv_builder_emit_op(c->b, 28u /* OpTypeArray */, ao, 3);
+            uint32_t ptr = lagfx_spv_builder_alloc_id(c->b);
+            uint32_t po[] = { ptr, 4u /* Workgroup */, arr };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_TYPE_POINTER, po, 3);
+            uint32_t vo[] = { ptr, c->arg_tg_var[i], 4u };
+            lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_VARIABLE, vo, 3);
+            cs_iface_add(c, c->arg_tg_var[i]);
+            bind_value_spv(c, c->arg_id_base + i, c->arg_tg_var[i]);
+            set_value_storage(c, c->arg_id_base + i, 4u);
+        }
     } else /* fragment */ {
         /* One Output OpVariable per render target, each typed to its actual
          * member/return type (float / float2 / float4), not a hardcoded
@@ -6709,6 +6758,10 @@ static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
         }
     }
 
+    /* A threadgroup argument is a Workgroup T[N] variable: the LLVM GEP's FIRST index is the element index (kept), applied by an ordinary OpAccessChain on the array. */
+    bool tg_base = false;
+    if (ptr_id >= c->arg_id_base && ptr_id < c->arg_id_base + c->num_args && ptr_id - c->arg_id_base < LAGFX_MAX_VERTEX_ARGS && c->arg_tg[ptr_id - c->arg_id_base]) { tg_base = true; first_idx = 0u; }
+
     /* Walk the AIR type chain to deduce the result pointer's pointee
      * type. For a runtime-array buffer base, start at the element type and
      * walk through ALL indices; otherwise start at source_ty and skip the
@@ -6723,7 +6776,7 @@ static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
      * element index walked one level too deep (a `GEP v4float, ptr, i64 n`
      * result pointee became float → OpAccessChain result-type mismatch,
      * the VfxU11 vertex shader / 5 login pipelines). */
-    for (uint32_t i = (rtarr_elem || ptr_arith) ? first_idx + 1u : first_idx;
+    for (uint32_t i = (rtarr_elem || ptr_arith || tg_base) ? first_idx + 1u : first_idx;
          i < n_idx_total; i++) {
         if (pointee >= n_types) break;
         const lagfx_air_type_t *t = &ts[pointee];
@@ -9644,9 +9697,14 @@ static lagfx_status_t translate_body(xlate_ctx_t *c) {
  * access type (see the field doc; the VfxXgb `device uchar*`-as-float4
  * login vertex shader). Runs before emit_prologue — uses only arg/type
  * tables and the decoded instruction stream. */
+static bool tg_elem_ok(const lagfx_air_type_t *ts, uint32_t n, uint32_t t) {   /* element types a Workgroup array models: i32 / i64 / float */
+    if (t >= n) return false;
+    return (ts[t].kind == LAGFX_AIR_TYPE_INTEGER && ts[t].num_op >= 1u && (ts[t].op[0] == 32u || ts[t].op[0] == 64u)) || ts[t].kind == LAGFX_AIR_TYPE_FLOAT;
+}
 static void prescan_buffer_arg_access_types(xlate_ctx_t *c) {
     uint32_t access_ty[LAGFX_MAX_VERTEX_ARGS] = {0};
     bool     mixed[LAGFX_MAX_VERTEX_ARGS] = {false};
+    bool     tg_direct[LAGFX_MAX_VERTEX_ARGS] = {false};   /* a threadgroup argument dereferenced directly (not through an indexed GEP) */
     uint32_t n_types = 0;
     const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n_types);
 
@@ -9757,6 +9815,15 @@ static void prescan_buffer_arg_access_types(xlate_ctx_t *c) {
                 }
             }
         }
+        {   /* a bare LOAD / STORE / atomic through the argument pointer itself */
+            uint32_t dp_rel = 0; bool have = false;
+            if (inst->code == LAGFX_AIR_INST_STORE && inst->num_ops >= 2u) { dp_rel = (uint32_t)inst->ops[0]; have = true; }
+            else if (acc && inst->code != LAGFX_AIR_INST_GEP && inst->code != LAGFX_AIR_INST_GEP_OLD) { dp_rel = ptr_rel; have = true; }
+            if (have) {
+                uint32_t dpid = resolve_relative(dp_rel, next_val_id);
+                if (dpid < c->value_id_capacity && alias[dpid] && (uint32_t)alias[dpid] - 1u < LAGFX_MAX_VERTEX_ARGS) tg_direct[(uint32_t)alias[dpid] - 1u] = true;
+            }
+        }
         if (acc) {
             uint32_t ptr_id = resolve_relative(ptr_rel, next_val_id);
             if (ptr_id < c->value_id_capacity && alias[ptr_id] &&
@@ -9775,6 +9842,17 @@ static void prescan_buffer_arg_access_types(xlate_ctx_t *c) {
     c->value_view = vview;
 
     for (uint32_t a = 0; a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++) {
+        if (c->iface_own_in && a < c->iface_own_in->n && !strcmp(c->iface_own_in->key[a], "air.threadgroup_buffer")) {
+            uint32_t aty0 = c->arg_air_type_ids[a];
+            uint32_t declared = (aty0 < n_types && ts[aty0].kind == LAGFX_AIR_TYPE_POINTER && ts[aty0].num_op >= 1u) ? ts[aty0].op[0] : n_types;
+            uint32_t el = 0;
+            if (declared < n_types && tg_elem_ok(ts, n_types, declared)) el = declared;
+            else if (access_ty[a] && !mixed[a] && tg_elem_ok(ts, n_types, access_ty[a])) el = access_ty[a];
+            if (tg_direct[a]) note_unsupported_tg("a threadgroup argument is dereferenced directly, not through an indexed access");
+            else if (!el) note_unsupported_tg("threadgroup argument element type is not a 32/64-bit integer or float, or the accesses disagree");
+            else { c->arg_pointee_override[a] = el; c->arg_tg[a] = 1u; }
+            continue;
+        }
         {   /* `device atomic_T*` (Apple: pointer to struct.metal::_atomic { T }): model the buffer as `device T*` */
             uint32_t aty0 = c->arg_air_type_ids[a];
             if (aty0 < n_types && ts[aty0].kind == LAGFX_AIR_TYPE_POINTER && ts[aty0].num_op >= 1u) {
@@ -10944,6 +11022,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     xlate_ctx_t c = {0};
     t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0; nr_reset();
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
+    t_unsup_tg.n = 0; t_unsup_tg.first[0] = 0;
     t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;
     t_unlowered_refused = false; t_unlowered.n = t_unlowered.n_llvm = 0; t_unlowered.first[0] = t_unlowered.first_llvm[0] = 0; t_xlate_serial = atomic_fetch_add(&g_xlate_serial, 1u) + 1u;
     c.b = lagfx_spv_builder_create(256u);
@@ -11033,6 +11112,11 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
             goto fail;
         }
         LAGFX_WARN("air2spv: %u SIMD-group / quad-group operation(s) have no implementation (first: %s): their results are undefined values", t_unsup_simd.n, t_unsup_simd.first);
+    }
+    if (t_unsup_tg.n) {   /* a threadgroup argument that was not modelled would be an undefined pointer: its stores lost, its loads undefined */
+        LAGFX_WARN("air2spv: compute kernel not translated: %u unsupported threadgroup argument(s) (%s)", t_unsup_tg.n, t_unsup_tg.first);
+        st = LAGFX_ERR_PROTOCOL;
+        goto fail;
     }
     if (t_narrow64 && t_narrow_unsafe) {   /* genuine 64-bit data on a device without shaderInt64: refuse rather than truncate */
         LAGFX_WARN("air2spv: module not translated: 64-bit data (%s) cannot be narrowed to 32 bits on a device without shaderInt64", t_narrow_reason);

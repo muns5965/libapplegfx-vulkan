@@ -158,6 +158,11 @@ void lagfx_air2spv_set_imageblock_unformatted(uint32_t rt_mask);
  *   lagfx_air2spv_simd_unsupported_totals process-wide: translations that met one, calls, compute kernels rejected */
 typedef struct { uint64_t modules, calls, kernels_rejected; } lagfx_simd_unsupported_totals_t;
 uint32_t lagfx_air2spv_last_unsupported_simd(char *first_name, size_t cap);
+/* `threadgroup T *p [[threadgroup(n)]]` kernel arguments (metadata key "air.threadgroup_buffer"; the key spelling is the translator's reading of Apple's AIR, NOT yet seen in a captured
+ * module): modelled as a Workgroup array T[N] with N a SpecConstant, SpecId 3 + k (k = rank among the threadgroup arguments in argument order), unit = elements, default 1024;
+ * the constant is OpName'd "lagfx.tgarg.<k>.<element bytes>". An argument the translator cannot model (element not a 32/64-bit integer / float, a bare dereference, mixed
+ * access types) makes the COMPUTE translation fail (LAGFX_ERR_PROTOCOL); this returns the calling thread's last translation's count (0 = none) and the first reason. */
+uint32_t lagfx_air2spv_last_unsupported_threadgroup_arg(char *first_reason, size_t cap);
 void lagfx_air2spv_simd_unsupported_totals(lagfx_simd_unsupported_totals_t *out);
 
 /* Atomics (air.atomic.*): 32-bit integer load / store / exchange / compare-exchange / add sub and or xor min max on device (StorageBuffer) and threadgroup (Workgroup) memory,

@@ -1711,6 +1711,17 @@ if fs.is_file(meson.current_source_dir() / 'pipeline-fallback-draw-lavapipe.c') 
   test('fallback pipeline draws pixel-identical to the original (legacy + dynamic rendering, lavapipe)', pfd_test, timeout : 120)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'air2spv-threadgroup-arg-lavapipe.c') and vulkan_dep.found()
+  tga_test = executable('air2spv-threadgroup-arg-lavapipe',
+    'air2spv-threadgroup-arg-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    c_args : ['-DSRCDIR="' + meson.current_source_dir() + '"', '-D_GNU_SOURCE'],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('threadgroup [[threadgroup(n)]] arguments: translate + execute vs CPU model (lavapipe)', tga_test, timeout : 120)
+endif
+
 # Tile kernel subgroup plan (pure decision table; the Adreno 64..128 range is emulated as logical 32-lane groups in a pinned subgroup).
 if fs.is_file(meson.current_source_dir() / 'tile-simd-plan-unit.c') and vulkan_dep.found()
   tsp_test = executable('tile-simd-plan-unit',
