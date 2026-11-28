@@ -213,11 +213,26 @@ int main(void) {
     assert(count(log, "pipeline-build-fail:") == 1);                  /* three identical failures: one line */
     assert(strstr(log, "result=VK_ERROR_") && strstr(log, "vs[bytes=") && strstr(log, "module=accepted") && strstr(log, "vertex_bindings=1 vertex_attrs=1[loc0:fmt103@0]")
            && strstr(log, "color_format=44") && strstr(log, "render_path=dynamic_rendering(VkPipelineRenderingCreateInfo") && strstr(log, "caps_mask=0x"));
+    {   /* the same failure through the LEGACY render-pass path (S8: no dynamicRendering): the line must say so, not claim dynamic rendering */
+        VkAttachmentDescription ad = { .format = VK_FORMAT_R8G8B8A8_UNORM, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE, .initialLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkAttachmentReference ar = { 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+        VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = 1, .pColorAttachments = &ar };
+        VkRenderPassCreateInfo rpi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, .attachmentCount = 1, .pAttachments = &ad, .subpassCount = 1, .pSubpasses = &sp };
+        VkRenderPass rp = VK_NULL_HANDLE; assert(vkCreateRenderPass(vk->device, &rpi, NULL, &rp) == VK_SUCCESS);
+        lagfx_pipeline_desc_t dl = d; dl.color_format = VK_FORMAT_R8G8B8A8_UNORM, dl.render_pass = (uint64_t)(uintptr_t)rp, dl.subpass = 0;
+        VkPipeline pl2 = VK_NULL_HANDLE; assert(lagfx_pipeline_build(vk->device, &dl, &pl2) == LAGFX_ERR_BACKEND && !pl2);
+        char *l2 = slurp(logf);
+        assert(strstr(l2, "color_format=37") && strstr(l2, "render_path=legacy_renderpass(VkRenderPass,no VkPipelineRenderingCreateInfo)"));
+        free(l2);
+        vkDestroyRenderPass(vk->device, rp, NULL);
+        log = slurp(logf);
+    }
     free(log);
     d.topology_plus1 = VK_PRIMITIVE_TOPOLOGY_LINE_LIST + 1u;          /* another key */
     assert(lagfx_pipeline_build(vk->device, &d, &pl) == LAGFX_ERR_BACKEND);
     log = slurp(logf);
-    assert(count(log, "pipeline-build-fail:") == 2 && strstr(log, "topology=1"));
+    assert(count(log, "pipeline-build-fail:") == 3 && strstr(log, "topology=1"));
     free(log);
     for (int i = 0; i < 12; i++) { d.color_format = (VkFormat)(VK_FORMAT_R8G8B8A8_UNORM + i * 3); (void)lagfx_pipeline_build(vk->device, &d, &pl); }   /* many keys: bounded */
     log = slurp(logf);

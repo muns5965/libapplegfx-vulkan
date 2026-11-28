@@ -1543,6 +1543,10 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
             /* Apple's opaque resource structs (strip a "struct." prefix). */
             const char *p = nm;
             if (strncmp(p, "struct.", 7u) == 0) p += 7u;
+            /* texture1d_array (INFER, as 2d_array): a Metal 1D array texture is a width x 1 image with layers, so it is sampled as a 2D ARRAY image of height 1 (kind 6): the shader gets
+             * (u, 0.5, layer), the centre of its single row. No Dim1D image, Sampled1D capability or new Vulkan view type is needed -- the host's 2D_ARRAY view of all layers is reused. */
+            if (strstr(p, "_texture_1d_array") && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 6;
+            if (strstr(p, "_texture") && lagfx_air_arg_is_texture1d_array(c->m, arg_idx) && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 6;
             if (strstr(p, "_texture_3d") && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 5;   /* sampled texture3d: Dim3D */
             if (strstr(p, "_texture_2d_array") && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 6;   /* sampled texture2d_array: Dim2D arrayed (INFER: the struct name is not in any fixture; the argument metadata below is the second route) */
             if (strstr(p, "_texture") && lagfx_air_arg_is_texture_array(c->m, arg_idx) && !lagfx_air_arg_is_written_texture(c->m, arg_idx)) return 6;
@@ -1577,7 +1581,7 @@ static int frag_resource_kind(const xlate_ctx_t *c, uint32_t arg_idx) {
     if (pointee >= n && lagfx_air_arg_is_buffer(c->m, arg_idx))
         return 3;                    /* OPAQUE pointer (LLVM >= 15 bitcode): the pointee says nothing, the "air.buffer" arg metadata says buffer (atomic fixtures; Apple's typed modules never reach here) */
     if (addrspace == 1u)             /* texture (opaque) */
-        return lagfx_air_arg_is_written_texture(c->m, arg_idx) ? 4 : lagfx_air_arg_is_texture3d(c->m, arg_idx) ? 5 : lagfx_air_arg_is_texture_array(c->m, arg_idx) ? 6 : 1;
+        return lagfx_air_arg_is_written_texture(c->m, arg_idx) ? 4 : lagfx_air_arg_is_texture3d(c->m, arg_idx) ? 5 : (lagfx_air_arg_is_texture_array(c->m, arg_idx) || lagfx_air_arg_is_texture1d_array(c->m, arg_idx)) ? 6 : 1;
     if (addrspace == 2u) return 2;   /* sampler (opaque) */
     return 0;
 }
@@ -6029,23 +6033,29 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
     /* air.sample_texture_3d shares this path with a Dim3D image (resource kind 5), a float3 coordinate and OpImageSampleImplicitLod, so the
      * hardware filters in Z too. A texture3d arg that is not a Dim3D resource variable degrades to the typed undef path (no 2D-slice fallback). */
     if ((strncmp(fn_name, "air.sample_texture_2d", 21u) == 0 ||
-         strncmp(fn_name, "air.sample_texture_3d", 21u) == 0) &&
+         strncmp(fn_name, "air.sample_texture_3d", 21u) == 0 ||
+         strncmp(fn_name, "air.sample_texture_1d_array", 27u) == 0) &&
         result_value_id != 0u) {
         const bool is3d = strncmp(fn_name, "air.sample_texture_3d", 21u) == 0;
+        /* air.sample_texture_1d_array.<vty>(tex, samp, float coord, i32 array_index, i1 has_offset, i32 offset, i1 lod_is_level, float lod_or_bias, float min_lod, i32 flags): operand order INFERRED
+         * from the 2d_array form with a scalar coordinate and offset (no capture holds a 1D array sample). It is lowered onto the 2D ARRAY image path: coordinate (u, 0.5, float(layer)) on a height-1 image.
+         * Without a texture1d_array argument (kind 6 via the metadata) the call keeps its typed-undef result. Pixel-coordinate samplers and constant offsets are not applied (warned). */
+        const bool is1da = strncmp(fn_name, "air.sample_texture_1d_array", 27u) == 0;
         /* air.sample_texture_2d_array.<vty>(tex, samp, float2 coord, i32 array_index, i1 has_offset, <2 x i32> offset, i1 lod_is_level, float lod_or_bias, float min_lod, i32 flags):
          * the operand order is aee8ded's (INFER: no fixture or capture holds an array sample). With a texture2d_array argument (resource kind 6, an arrayed Dim2D image) the layer
          * joins the coordinate: (u, v, float(layer)) -- Vulkan rounds it to the nearest layer and clamps it to the image's layers. Without one (the argument metadata does not name
          * an array texture) the sample reads layer 0 of a plain 2D image, as before, and says so. */
-        const bool arr_fn = !is3d && strncmp(fn_name, "air.sample_texture_2d_array", 27u) == 0;
+        const bool arr_fn = !is3d && (is1da || strncmp(fn_name, "air.sample_texture_2d_array", 27u) == 0);
         bool use_arr = false;
         for (uint32_t a = 0; arr_fn && a < c->num_args && a < LAGFX_MAX_VERTEX_ARGS; a++)
             if (c->arg_resource_var[a] && c->arg_resource_kind[a] == 6u) use_arr = true;
-        if (arr_fn && !use_arr) LAGFX_WARN("sample_texture_2d_array: no texture2d_array argument (resource kind 6) -- the array index is dropped and layer 0 of a 2D image is sampled");
+        if (is1da && !use_arr) LAGFX_WARN("sample_texture_1d_array: no texture1d_array argument -- the call keeps its typed-undef result");
+        else if (arr_fn && !use_arr) LAGFX_WARN("sample_texture_2d_array: no texture2d_array argument (resource kind 6) -- the array index is dropped and layer 0 of a 2D image is sampled");
         const uint8_t want_tex_kind = is3d ? 5u : use_arr ? 6u : 1u;
         uint32_t tex_slot = callee_slot_idx + 1u;
         uint32_t samp_slot = callee_slot_idx + 2u;
         uint32_t uv_slot   = callee_slot_idx + 3u;
-        if (inst->num_ops > uv_slot + (use_arr ? 1u : 0u)) {
+        if (inst->num_ops > uv_slot + (use_arr ? 1u : 0u) && !(is1da && !use_arr)) {
             int cxs_k = -1;   /* index of the constexpr sampler this sample uses, or -1 */
             int samp_arg = -1;   /* the sampler parameter / argument this sample uses (helper: its hidden pixel flag decides the coordinate conversion), or -1 */
             uint32_t tex_var = resolve_value_spv(c,
@@ -6088,7 +6098,7 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
             }
             uint32_t uv_spv = resolve_or_undef(c,
                 resolve_relative((uint32_t)inst->ops[uv_slot], next_val_id),
-                is3d ? emit_type_vec3_f(c) : emit_type_vec2_f(c));
+                is3d ? emit_type_vec3_f(c) : is1da ? emit_type_float32(c) : emit_type_vec2_f(c));
             if (tex_var && samp_var) {
                 uint32_t img_t  = is3d ? emit_type_image3d_f(c) : use_arr ? emit_type_image2da_f(c) : emit_type_image2d_f(c);
                 uint32_t samp_t = emit_type_sampler(c);
@@ -6105,7 +6115,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                  * address modes / filters, so the coordinate is divided by the image size here (OpImageQuerySizeLod, level 0) -- explicit, no Vulkan unnormalized-coordinate
                  * restrictions (which would need explicit-LOD sampling and 1D/2D images, no mips, no anisotropy). The bit-15 meaning is INFER (constexpr_sampler.h). */
                 const uint32_t pix_dyn = (cxs_k < 0 && samp_arg >= 0 && c->is_helper) ? c->samp_pix_id[samp_arg] : 0u;   /* helper: whether the sampler PASSED IN is a pixel sampler is a run-time (call-site) fact */
-                if ((cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) || pix_dyn) {
+                if (is1da && ((cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) || pix_dyn)) LAGFX_WARN("sample_texture_1d_array: pixel (unnormalized) coordinates are not converted -- the coordinate is used as given");
+                else if ((cxs_k >= 0 && !c->cxs_dec[cxs_k].normalized) || pix_dyn) {
                     const uint32_t nl = is3d ? 3u : 2u;   /* components of the coordinate that are texel positions */
                     if (!c->cap_imgq) { c->cap_imgq = 1u; uint32_t cap[] = { 50u /* ImageQuery */ }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CAPABILITY, cap, 1); }
                     uint32_t u32 = emit_type_int_w(c, 32u, 0u), vu = emit_type_vec(c, u32, nl), vf = nl == 3u ? emit_type_vec3_f(c) : emit_type_vec2_f(c);
@@ -6135,8 +6146,11 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                 if (use_arr) {   /* coordinate = (u, v, float(array index)) */
                     uint32_t f32t = emit_type_float32(c);
                     uint32_t cu = lagfx_spv_builder_alloc_id(c->b), cv = lagfx_spv_builder_alloc_id(c->b);
+                    if (is1da) { cu = uv_spv; cv = emit_const_float32(c, 0.5f); }   /* 1D: u as given, v = centre of the single row */
+                    else {
                     { uint32_t o[] = { f32t, cu, uv_spv, 0u }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, o, 4); }
                     { uint32_t o[] = { f32t, cv, uv_spv, 1u }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_COMPOSITE_EXTRACT, o, 4); }
+                    }
                     uint32_t lid = resolve_relative((uint32_t)inst->ops[uv_slot + 1u], next_val_id);
                     uint32_t lt = value_air_type_idx(c, lid), nt = 0;
                     const lagfx_air_type_t *lts = lagfx_air_module_types(c->m, &nt);
@@ -6167,7 +6181,8 @@ static void emit_inst_call(xlate_ctx_t *c, uint32_t inst_idx,
                         LAGFX_WARN("sample_texture: has_offset flag is not a constant -- offset ignored");
                         hf = false;
                     }
-                    if (hf) {
+                    if (hf && is1da) LAGFX_WARN("sample_texture_1d_array: constant offset not applied");
+                    else if (hf) {
                         uint32_t lanes = smp_3d ? 3u : 2u;
                         if (!sample_opt_ivec(c, resolve_relative((uint32_t)inst->ops[o0 + 1u], next_val_id), lanes, off)) {
                             LAGFX_WARN("sample_texture: offset is not a compile-time constant -- offset ignored (Offset is valid for gather only; no coordinate fallback)");
@@ -10419,7 +10434,7 @@ static int classify_helper_param(const xlate_ctx_t *c, uint32_t air_ty,
             const char *p = nm;
             if (strncmp(p, "struct.", 7u) == 0) p += 7u;
             if (strstr(p, "_texture_3d") && !strstr(p, "_write")) return LAGFX_HPARAM_TEX3D;
-            if (strstr(p, "_texture_2d_array")) return 0;   /* UNSUPPORTED: a helper taking a texture2d_array is not registered (its call keeps the undef result); there is no array helper-parameter kind */
+            if (strstr(p, "_texture_2d_array") || strstr(p, "_texture_1d_array")) return 0;   /* UNSUPPORTED: a helper taking a texture2d_array is not registered (its call keeps the undef result); there is no array helper-parameter kind */
             if (strstr(p, "_texture") || strstr(p, "_depth"))
                 return LAGFX_HPARAM_TEX;
             if (strstr(p, "_sampler")) return LAGFX_HPARAM_SAMP;

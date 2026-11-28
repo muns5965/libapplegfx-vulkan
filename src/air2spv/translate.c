@@ -254,6 +254,30 @@ bool lagfx_air_arg_is_texture_array(const lagfx_air_module_t *m, uint32_t arg_id
     return tex && ta;
 }
 
+/* True when entry-point argument `arg_idx` is a `texture1d_array<...>` (arg_type_name prefix; INFER by analogy with texture2d_array, no capture carries one). */
+bool lagfx_air_arg_is_texture1d_array(const lagfx_air_module_t *m, uint32_t arg_idx) {
+    if (!m) return false;
+    const lagfx_air_metadata_t *named = lagfx_air_module_named_metadata(m, "air.vertex");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.fragment");
+    if (!named) named = lagfx_air_module_named_metadata(m, "air.kernel");
+    if (!named || named->num_operands < 1u) return false;
+    const lagfx_air_metadata_t *ep = md_record(m, named->operands[0]);
+    if (!ep || ep->kind != LAGFX_AIR_MD_NODE || ep->num_operands < 3u || ep->operands[2] == 0u) return false;
+    const lagfx_air_metadata_t *args = md_record(m, ep->operands[2] - 1u);
+    if (!args || args->kind != LAGFX_AIR_MD_NODE || arg_idx >= args->num_operands || args->operands[arg_idx] == 0u) return false;
+    const lagfx_air_metadata_t *arg = md_record(m, args->operands[arg_idx] - 1u);
+    if (!arg || arg->kind != LAGFX_AIR_MD_NODE) return false;
+    bool tex = false, ta = false;
+    for (uint32_t j = 0; j < arg->num_operands; j++) {
+        if (arg->operands[j] == 0u) continue;
+        const char *str = md_string(m, arg->operands[j] - 1u);
+        if (!str) continue;
+        if (strcmp(str, "air.texture") == 0) tex = true;
+        else if (strncmp(str, "texture1d_array", 15) == 0) ta = true;
+    }
+    return tex && ta;
+}
+
 /* Key of one per-arg / per-output metadata NODE: the Metal link name. The
  * "air.position" / "air.point_size" / "air.point_coord" markers key
  * themselves; a user varying is keyed by its "generated(...)" string, the

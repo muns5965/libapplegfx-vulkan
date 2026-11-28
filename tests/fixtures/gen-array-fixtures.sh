@@ -58,3 +58,34 @@ W=$(python3 -c "v=0x807bff0000080000 | (1 | 1<<3 | 1<<6) | 1<<15; print(v-(1<<64
   body 1.000000e+00 "@__air_sampler_state" "" "0.000000e+00"; echo "$FTR"; echo '!air.sampler_states = !{!18}'; echo '!air.fragment = !{!15}'
   echo '!15 = !{ptr @Arr, !12, !13}'; echo '!12 = !{!16}'; echo '!13 = !{!17, !19}'; echo '!18 = !{!"air.sampler_state", ptr addrspace(2) @__air_sampler_state}'; echo "$TEX_ARR"
 } | llvm-as -o arr_cxs_pix.air.bc -
+
+# texture1d_array (INFER, as above: no capture holds one): air.sample_texture_1d_array.v4f32(tex, samp, float coord, i32 array_index, i1 has_offset, i32 offset, i1 lod_is_level, float lod_or_bias, float min_lod, i32 flags)
+# lowered by the translator onto a 2D ARRAY image of height 1 (coordinate (u, 0.5, layer)).
+#   arr1d          texture1d_array argument; u = (px + 0.5) / 8, array index = floor(py / 2), plain implicit-LOD sample
+#   arr1d_plain    the texture argument is typed "texture1d" (no array): the call keeps its typed-undef result
+DECL1='declare { <4 x float>, i8 } @air.sample_texture_1d_array.v4f32(ptr addrspace(1) nocapture readonly, ptr addrspace(2) nocapture readonly, float, i32, i1, i32, i1, float, float, i32)'
+body1() {
+cat <<EOT
+define <4 x float> @Arr(<4 x float> %0, ptr addrspace(1) %1, ptr addrspace(2) %2) {
+entry:
+  %px = extractelement <4 x float> %0, i64 0
+  %py = extractelement <4 x float> %0, i64 1
+  %u = fmul float %px, 1.250000e-01
+  %hy = fmul float %py, 5.000000e-01
+  %layer = fptosi float %hy to i32
+  %r = call { <4 x float>, i8 } @air.sample_texture_1d_array.v4f32(ptr addrspace(1) %1, ptr addrspace(2) %2, float %u, i32 %layer, i1 false, i32 0, i1 false, float 0.000000e+00, float 0.000000e+00, i32 0)
+  %c = extractvalue { <4 x float>, i8 } %r, 0
+  ret <4 x float> %c
+}
+$DECL1
+EOT
+}
+TEX_1DA='!19 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture1d_array<float, sample>", !"air.arg_name", !"tex"}'
+TEX_1D='!19 = !{i32 1, !"air.texture", !"air.location_index", i32 0, i32 1, !"air.sample", !"air.arg_type_name", !"texture1d<float, sample>", !"air.arg_name", !"tex"}'
+rt1() {
+  { echo "$HDR"; body1; echo "$FTR"; echo '!air.fragment = !{!15}'
+    echo '!15 = !{ptr @Arr, !12, !13}'; echo '!12 = !{!16}'; echo '!13 = !{!17, !19, !20}'; echo "$2"; echo "$SMP"
+  } | llvm-as -o "$1.air.bc" -
+}
+rt1 arr1d "$TEX_1DA"
+rt1 arr1d_plain "$TEX_1D"

@@ -123,6 +123,7 @@ bool lagfx_air_arg_is_written_texture(const lagfx_air_module_t *m, uint32_t arg_
 /* True when entry-point argument `arg_idx` is a texture3d<...> (argument metadata air.arg_type_name). */
 bool lagfx_air_arg_is_texture3d(const lagfx_air_module_t *m, uint32_t arg_idx);
 bool lagfx_air_arg_is_buffer(const lagfx_air_module_t *m, uint32_t arg_idx);   /* entry-point argument metadata carries "air.buffer" (the route for opaque-pointer modules) */
+bool lagfx_air_arg_is_texture1d_array(const lagfx_air_module_t *m, uint32_t arg_idx);   /* a sampled `texture1d_array<...>` entry-point argument (INFER) */
 bool lagfx_air_arg_is_texture_array(const lagfx_air_module_t *m, uint32_t arg_idx);   /* a sampled `texture2d_array<...>` entry-point argument (INFER, see translate.c) */
 
 /* Walk the entry point's air.vertex / air.fragment per-arg metadata and

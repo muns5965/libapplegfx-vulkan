@@ -525,6 +525,76 @@ static int spirv_valid(const uint8_t *spv, size_t sz, const char *what) {
     CHECK(rc == 0, "%s: spirv-val rejects the translated module", what);
     return 0;
 }
+/* ---------------------------------------------------------------- E: texture1d_array (lowered to a height-1 2D array) */
+static int make_1da_tex(atex_t *out) {
+    VkImageCreateInfo ici = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .extent = { 8, 1, 1 }, .mipLevels = 1, .arrayLayers = AL,
+        .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    VK(vkCreateImage(g_dev, &ici, NULL, &out->img));
+    VkMemoryRequirements mr; vkGetImageMemoryRequirements(g_dev, out->img, &mr);
+    VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size, .memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    VK(vkAllocateMemory(g_dev, &mai, NULL, &out->mem)); VK(vkBindImageMemory(g_dev, out->img, out->mem, 0));
+    VkImageViewCreateInfo vci = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = out->img, .viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY, .format = VK_FORMAT_R32G32B32A32_SFLOAT,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, AL } };
+    VK(vkCreateImageView(g_dev, &vci, NULL, &out->varr));
+    VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 8 * 16 * AL, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+    VkBuffer sb; VK(vkCreateBuffer(g_dev, &bci, NULL, &sb)); vkGetBufferMemoryRequirements(g_dev, sb, &mr);
+    mai.allocationSize = mr.size; mai.memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    VkDeviceMemory smem; VK(vkAllocateMemory(g_dev, &mai, NULL, &smem)); VK(vkBindBufferMemory(g_dev, sb, smem, 0));
+    float *p; VK(vkMapMemory(g_dev, smem, 0, VK_WHOLE_SIZE, 0, (void **)&p));
+    for (int l = 0; l < AL; l++) for (int x = 0; x < 8; x++) { float *t = p + (l * 8 + x) * 4; t[0] = (1 + x) / 16.0f; t[1] = 0.5f; t[2] = 0.25f; t[3] = (1 + l) / 8.0f; }
+    vkUnmapMemory(g_dev, smem);
+    VkCommandPoolCreateInfo cpi = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO };
+    VkCommandPool pool; VK(vkCreateCommandPool(g_dev, &cpi, NULL, &pool));
+    VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = pool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 1 };
+    VkCommandBuffer cmd; VK(vkAllocateCommandBuffers(g_dev, &cai, &cmd));
+    VkCommandBufferBeginInfo cbi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO };
+    VK(vkBeginCommandBuffer(cmd, &cbi));
+    VkImageMemoryBarrier b1 = { .sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+        .newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED, .image = out->img,
+        .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, AL } };
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &b1);
+    for (int l = 0; l < AL; l++) {
+        VkBufferImageCopy bic = { .bufferOffset = (VkDeviceSize)l * 8 * 16, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, (uint32_t)l, 1 }, .imageExtent = { 8, 1, 1 } };
+        vkCmdCopyBufferToImage(cmd, sb, out->img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bic);
+    }
+    VkImageMemoryBarrier b2 = b1; b2.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b2.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    b2.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b2.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &b2);
+    VK(vkEndCommandBuffer(cmd));
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cmd };
+    VK(vkQueueSubmit(g_q, 1, &si, VK_NULL_HANDLE)); VK(vkQueueWaitIdle(g_q));
+    vkDestroyCommandPool(g_dev, pool, NULL); vkDestroyBuffer(g_dev, sb, NULL); vkFreeMemory(g_dev, smem, NULL);
+    return 0;
+}
+/* pixel (x, y) = texel x of layer y / 2 of an 8 x 1 x 4 image, nearest. Also: the module must declare a 2D arrayed image (the lowering), not a plain one, and the plain texture1d control must NOT sample. */
+static int test_1d_array(void) {
+    atex_t at; if (make_1da_tex(&at)) return 1;
+    VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
+    VkSampler s; VK(vkCreateSampler(g_dev, &sci, NULL, &s));
+    float want[W * H * 4], got[W * H * 4];
+    uint8_t *spv; size_t sz;
+    if (translate("arr1d.air.bc", &spv, &sz)) return 1;
+    {
+        lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spv, sz, rb, 8);
+        int dim = -1, arrd = -1; for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE) dim = rb[i].image_dim, arrd = rb[i].image_arrayed;
+        CHECK(dim == 1 && arrd == 1, "arr1d: the texture1d_array binding reflects Dim %d arrayed %d, want 1 (2D) / 1", dim, arrd);
+    }
+    if (spirv_valid(spv, sz, "arr1d")) return 1;
+    for (int y = 0; y < H; y++) for (int x = 0; x < W; x++) { float *t = want + (y * W + x) * 4; int l = y >> 1; t[0] = (1 + x) / 16.0f; t[1] = 0.5f; t[2] = 0.25f; t[3] = (1 + l) / 8.0f; }
+    if (render(spv, sz, at.varr, s, got) || compare("texture1d_array: texel = column, layer = row", got, want, 1e-6f)) return 1;
+    {   int distinct = 0; for (int a = 0; a < 4; a++) { int dup = 0; for (int b = 0; b < a; b++) if (!memcmp(got + ((a * 2) * W + 3) * 4, got + ((b * 2) * W + 3) * 4, 16)) dup = 1; distinct += !dup; }
+        CHECK(distinct == 4, "the four layers are not all distinct (%d)", distinct); }
+    {   /* control: a texture argument typed texture1d (not an array) keeps the typed-undef result: translated, but no arrayed image is declared */
+        uint8_t *spv2; size_t sz2; if (translate("arr1d_plain.air.bc", &spv2, &sz2)) return 1;
+        lagfx_spv_binding_t rb[8]; size_t nb = lagfx_spv_reflect_bindings(spv2, sz2, rb, 8); int arrd = 0;
+        for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && rb[i].image_arrayed) arrd = 1;
+        CHECK(!arrd, "arr1d_plain: a non-array texture1d argument must not become an arrayed image");
+    }
+    printf("PASS: texture1d_array: all %d pixels match (8 texels x 4 layers, via the height-1 2D array lowering)\n", W * H);
+    return 0;
+}
+
 static int test_array(void) {
     atex_t at; init_arr(); if (make_arr_tex(&at)) return 1;
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -629,6 +699,7 @@ int main(void) {
     if (!rc) rc = test_runtime(&t2d);
     if (!rc) rc = test_3d();
     if (!rc) rc = test_array();
+    if (!rc) rc = test_1d_array();
     if (rc) return rc;
     printf("PASS air2spv-sampler-lavapipe on %s (mirror clamp to edge %s)\n", pp.deviceName, g_have_mirror_clamp ? "exact" : "not available");
     return 0;

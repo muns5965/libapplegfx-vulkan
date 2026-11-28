@@ -756,20 +756,22 @@ static lagfx_a64_obj_t *obj_make(lagfx_protocol_t *p, mgr2_t *m, struct lagfx_vk
         for (size_t i = 0; ok && i < sizeof k_fmt / sizeof *k_fmt; i++) if (k_fmt[i].mtl == fmt) o->format = k_fmt[i].vk, o->bpp = k_fmt[i].bpp;
         for (size_t i = 0; ok && o->format == VK_FORMAT_UNDEFINED && i < sizeof k_dfmt / sizeof *k_dfmt; i++)
             if (k_dfmt[i].mtl == fmt) o->format = k_dfmt[i].vk, o->ds_aspects = k_dfmt[i].aspects, o->bpp = 4;   /* bpp only keeps divisions safe: no guest copy is ever made */
-        /* MTLTextureType 2 = 2D, 3 = 2D array, 7 = 3D */
+        /* MTLTextureType 1 = 1D array, 2 = 2D, 3 = 2D array, 7 = 3D. A 1D array is mirrored as a width x 1 2D image with `array` layers (INFER: the descriptor's height is 1 or absent), which is what the
+         * translator's texture1d_array lowering samples (a 2D ARRAY view). Plain 1D (type 0) stays refused (no texture1d sampler lowering). */
         o->img_type = mtype == 7 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
         if (!ok) { MKFAIL(o->tex_block_h > 1 ? TEXWHY_C_FORMAT : TEXWHY_C_PAYLOAD); goto bad; }   /* block height > 1: a block-compressed layout */
         if (o->format == VK_FORMAT_UNDEFINED) { MKFAIL(TEXWHY_C_FORMAT); goto bad; }
         uint32_t ms_req = 1;   /* multisample gate (arm64_msaa.c): type 4 with samples > 1 is a 2D multisample texture; every other sample count is a shape the mirror refuses (counted) */
         const int msg = lagfx_a64_msaa_tex_gate(p, mtype, samples, dmips, array, &ms_req);
         if (msg == LAGFX_A64_MSAA_REFUSE) { MKFAIL(TEXWHY_C_MSAA); goto bad; }
-        if (msg != LAGFX_A64_MSAA_YES && mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
+        if (msg != LAGFX_A64_MSAA_YES && mtype != 1 && mtype != 2 && mtype != 3 && mtype != 7) { MKFAIL(TEXWHY_C_TYPE); goto bad; }
         o->samples_req = (uint8_t)ms_req;
+        if (mtype == 1 && !o->height) o->height = 1u;   /* 1D array: one row */
         if (!o->width || !o->height || o->width > 16384 || o->height > 16384) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         if (mtype == 7) { if (!o->depth || o->depth > 2048) { MKFAIL(TEXWHY_C_DIMS); goto bad; } } else o->depth = 1;
         if (!dmips || dmips > LAGFX_A64_MAX_MIPS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         o->mips = dmips;
-        o->layers = mtype == 3 ? array : 1u;
+        o->layers = (mtype == 3 || mtype == 1) ? array : 1u;
         if (!o->layers || o->layers > LAGFX_A64_MAX_LAYERS) { MKFAIL(TEXWHY_C_DIMS); goto bad; }
         o->kind = LAGFX_A64_TEXTURE, o->length = (len + 0x3fffu) & ~0x3fffull;
         if (o->ds_aspects) {   /* depth / stencil attachment: a plain 2D image of one level, content only on the device */

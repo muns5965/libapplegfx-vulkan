@@ -178,6 +178,22 @@ static void test_mip_chain(void) {
     puts("PASS: 2D view over a 4-level chain: explicit LOD (linear / nearest mip filter) reads the colour of that level; no mip filter / one level / LOD clamps behave as the CPU model");
 }
 
+/* MTLTextureType 1 (1D array) is mirrored as a 2D image with `array` layers (the texture1d_array lowering samples it through a 2D_ARRAY view): the same descriptor as type 3 gives the same image, and the
+ * draw is neither skipped nor refused. (Before this the type was refused: TEXWHY_C_TYPE.) */
+static void test_1d_array_type(void) {
+    uint8_t img3[RT_W * RT_H * 4], img1[RT_W * RT_H * 4];
+    lagfx_protocol_t *p3 = tv_run(1, 0x86000000u, 3, 4, 4);
+    g_lo = 0, g_hi = 3; g_clamp_lo = -1.f;
+    tv_exec(p3, img3);
+    lagfx_protocol_t *p1 = tv_run(1, 0x86000000u, 1, 4, 4);
+    g_lo = 0, g_hi = 3; g_clamp_lo = -1.f;
+    tv_exec(p1, img1);
+    __typeof__(p1->diag2.exec.run) *R = &p1->diag2.exec.run;
+    assert(R->draws == 1 && R->draws_skipped == 0 && R->ext_tex_array_views == 1);
+    assert(memcmp(img1, img3, sizeof img1) == 0);
+    puts("PASS: MTLTextureType 1 (1D array) is accepted as a layered image and reads exactly like type 3 (draw not skipped, array view used)");
+}
+
 static void test_array(void) {
     uint8_t img[RT_W * RT_H * 4];
     /* texture2d_array shader on a 4-layer x 4-level texture: row = layer, column = level, all sixteen colours */
@@ -315,6 +331,7 @@ int main(void) {
     if (!(g_dev->vk && g_dev->vk->initialized)) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     test_mip_chain();
     test_array();
+    test_1d_array_type();
     test_unnorm_mips();
     test_cubic();
     assert(lagfx_vk_validation_msg_count == 0);   /* checked before the test's own shader modules / layouts are destroyed */
