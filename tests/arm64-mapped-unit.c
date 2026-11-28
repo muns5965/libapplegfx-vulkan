@@ -885,6 +885,10 @@ int main(void) {
     assert(p->diag2.disp.image_probes >= 1 && p->diag2.disp.image_probe_unavail == 0 && p->diag2.disp.image_probe_nonblack_last == (uint64_t)SW * SH);
     printf("PASS: two surfaces: each exec's colour lands in its OWN guest pages, a swap names the surface whose pages hold its colour, neither rewrites the other\n");
 
+    /* diagnostics invariant: every mapped_unsupported increment carries a site, so the by-site cells sum to the total (g7-gpu-unsup line), and the refusal paths above were hit */
+    { uint64_t sum = 0; for (int k = 0; k < 12; k++) sum += CNT(p).mapped_unsup_site[k];
+      assert(CNT(p).mapped_unsupported > 0 && sum == CNT(p).mapped_unsupported);
+      printf("PASS: mapped_unsupported (%llu) == sum of its 12 by-site cells\n", (unsigned long long)sum); }
     printf("INFO: validation messenger %s, messages %llu\n", g_dev->vk->debug_messenger ? "ACTIVE" : "inactive", (unsigned long long)lagfx_vk_validation_msg_count);
     assert(lagfx_vk_validation_msg_count == 0);
     lagfx_arm64_cq_shutdown(p, 0);

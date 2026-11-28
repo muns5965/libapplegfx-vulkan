@@ -1892,6 +1892,41 @@ static bool direct_tag(uint32_t tag) {
     }
 }
 
+/* ---- census of the records inside a segment this path does not execute (compute 1, information 4): the first sight of each (type, tag) logs its size and the first bytes of one
+ * record, then its running count at 4, 16, 64, ... Same [tag u32][size u32][payload] framing as the render body (arm64_exec_decode.h). Read-only; no state is changed. The
+ * point: no capture of a compute / information segment body exists, so the record formats of a compute encoder are not known; this is the data a compute implementation needs. ---- */
+#define SEG_CENSUS_MAX 64u
+static struct { uint32_t type, tag, szmin, szmax; uint64_t n; } g_seg_census[SEG_CENSUS_MAX];
+static uint32_t g_seg_census_n;
+static void seg_census(lagfx_protocol_t *p, const lagfx_exec_seg_t *s, const uint8_t *buf, uint32_t avail) {
+    (void)p;
+    if (s->type != 1u && s->type != 4u) return;
+    uint64_t pos = s->prot_skipped ? 24u : 8u;
+    uint64_t have = avail > pos ? avail - pos : 0, lim = s->body_len < have ? s->body_len : have, q = 0;
+    uint32_t guard = 0;
+    while (q + 8u <= lim && guard++ < LAGFX_EXEC_MAX_INNER) {
+        uint32_t tag = lagfx_le32(buf + pos + q), sz = lagfx_le32(buf + pos + q + 4);
+        if (sz < 8u || q + sz > lim) break;
+        uint32_t k = 0;
+        while (k < g_seg_census_n && !(g_seg_census[k].type == s->type && g_seg_census[k].tag == tag)) k++;
+        if (k == g_seg_census_n && k < SEG_CENSUS_MAX) {
+            g_seg_census[k].type = s->type, g_seg_census[k].tag = tag, g_seg_census[k].szmin = g_seg_census[k].szmax = sz, g_seg_census[k].n = 0, g_seg_census_n++;
+            char hx[3 * 64 + 1]; uint32_t nb = sz - 8u < 64u ? sz - 8u : 64u, o = 0;
+            for (uint32_t i = 0; i < nb; i++) o += (uint32_t)snprintf(hx + o, sizeof hx - o, "%02x%s", buf[pos + q + 8u + i], i + 1u < nb ? " " : "");
+            hx[o] = 0;
+            LAGFX_LOG("g7-seg-census: FIRST seg_type=%u tag=%u size=%u (payload %u bytes) first %u payload bytes: %s", s->type, tag, sz, sz - 8u, nb, hx);
+        }
+        if (k < g_seg_census_n && g_seg_census[k].type == s->type && g_seg_census[k].tag == tag) {
+            if (sz < g_seg_census[k].szmin) g_seg_census[k].szmin = sz;
+            if (sz > g_seg_census[k].szmax) g_seg_census[k].szmax = sz;
+            uint64_t n = ++g_seg_census[k].n;
+            if (n >= 4u && !(n & (n - 1u)) && !(__builtin_ctzll(n) & 1))   /* 4, 16, 64, 256, ... */
+                LAGFX_LOG("g7-seg-census: COUNT seg_type=%u tag=%u n=%llu size[min=%u max=%u]", s->type, tag, (unsigned long long)n, g_seg_census[k].szmin, g_seg_census[k].szmax);
+        }
+        q += sz;
+    }
+}
+
 void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const uint8_t *buf, uint32_t avail, uint64_t len, const lagfx_exec_seg_t *s) {
     a64_run_t *r = p ? RUN(p) : NULL;
     if (!r || !r->x || !buf || !s) return;
@@ -1905,7 +1940,11 @@ void lagfx_a64_exec_segment(lagfx_protocol_t *p, lagfx_task_entry_t *task, const
         lagfx_a64_res_blit_segment(r->x, buf + hl, s->body_len < have_b ? s->body_len : have_b);
         return;
     }
-    if (s->type != 0u) { CNT(p).seg_unsupported++; CNT(p).seg_unsup_type[s->type & 7u]++; return; }    /* compute (1), information (4) and the rest: counted, not executed */
+    if (s->type != 0u) {   /* compute (1), information (4) and the rest: counted, not executed */
+        CNT(p).seg_unsupported++; CNT(p).seg_unsup_type[s->type < 7u ? s->type : 7u]++;   /* 7 = type 7 and above */
+        seg_census(p, s, buf, avail);
+        return;
+    }
     CNT(p).seg_render++;
     uint64_t pos = s->prot_skipped ? 24u : 8u;
     uint64_t have = avail > pos ? avail - pos : 0, lim = s->body_len < have ? s->body_len : have, q = 0;
