@@ -1149,7 +1149,7 @@ int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *r, size_
         }
     }
     if (ok) { m->st.blit_done++; if (tag - 300u < 16u) m->st.blit_tag[tag - 300]++; barrier(x->cb); }
-    else m->st.blit_rejected++;
+    else { m->st.blit_rejected++; if (tag - 300u < 32u) m->st.blit_rej_tag[tag - 300u]++; }
     return ok;
 }
 
@@ -1166,7 +1166,17 @@ void lagfx_a64_res_blit_segment(lagfx_a64_rexec_t *x, const uint8_t *body, uint3
         else if (tag == 319) lagfx_a64_blit_op(x->p, tag, body + q + 8, sz - 8);               /* fill buffer with a 32-bit pattern: no x86-era table entry, executed directly */
         else if ((tag >= 308 && tag <= 311) || tag == 314 || tag == 315) m->st.blit_noop++;   /* hints: Apple does nothing either */
         else if (tag == 316 || tag == 317 || tag == 322 || tag == 323) m->st.blit_noop++;    /* blit fences (one in-order command buffer) and invalidate-compressed-texture (compressed textures are not mirrored) */
-        else m->st.blit_unsupported++;                                                         /* 307 (generate mipmaps) and unknown tags */
+        else {   /* 304 305 307 312 313 318 320 321 and unknown tags: not executed. Counted per tag, and the first 4 payloads of each tag are logged raw: no layout exists in this repository for them (docs/blit-coverage.md), so real guest records are the evidence needed to implement them */
+            m->st.blit_unsupported++;
+            if (tag - 300u < 32u) {
+                const uint64_t seen = m->st.blit_unsup_tag[tag - 300u]++;
+                if (seen < 4u) {
+                    char hex[8 * 9 + 1]; size_t hl = 0; const uint32_t pl = sz - 8u, nw = pl / 4u < 16u ? pl / 4u : 16u;
+                    for (uint32_t w = 0; w < nw && hl + 9u < sizeof hex; w++) hl += (size_t)snprintf(hex + hl, sizeof hex - hl, "%08x ", lagfx_le32(body + q + 8u + 4u * w));
+                    LAGFX_WARN("blit tag %u (0x%x) NOT EXECUTED (no payload layout / lowering): occurrence %llu, body %u bytes, first words: %s", tag, tag, (unsigned long long)seen + 1u, pl, hl ? hex : "-");
+                }
+            }
+        }
         q += sz;
     }
 }

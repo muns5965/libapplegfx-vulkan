@@ -409,6 +409,8 @@ static void test_bad_inputs(void) {
     CHECK(wrongly_done == 0, "only the single valid command ran; every bad one was refused");
     CHECK(silent == 0, "every bad command counted as rejected");
     CHECK(S()->blit_unsupported >= s0.blit_unsupported + 2, "307 / unknown tags counted unsupported");
+    CHECK(S()->blit_unsup_tag[307 - 300] >= s0.blit_unsup_tag[307 - 300] + 1, "307 counted in the per-tag unsupported census");
+    CHECK(S()->blit_rej_tag[303 - 300] >= s0.blit_rej_tag[303 - 300] + 4, "refused 303 commands counted per tag (65-wide, destination outside, overlap, 2D->3D, buffer as texture)");
     uint8_t got[2 * PG]; va_read((uint64_t)VPN_B << 14, got, sizeof got);
     uint8_t exp[2 * PG]; memset(exp, 0x44, sizeof exp); memcpy(exp + 110, a + 100, 50);
     CHECK(!memcmp(got, exp, sizeof got), "rejected commands changed nothing");

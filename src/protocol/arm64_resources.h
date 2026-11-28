@@ -67,6 +67,7 @@ typedef struct {
     uint64_t linear_made, linear_unsupported, linear_resync;   /* type 8/9 linear textures mirrored (device image only) / that could not be */
     uint64_t obj_slots, obj_table_full;   /* object table size in slots (holes of released objects are reused) / creations refused because all 4096 slots were live */
     uint64_t created, destroyed, deferred_frees;   /* mirror objects built / destroyed; frees parked until the in-flight fence signalled */
+    uint64_t blit_unsup_tag[32], blit_rej_tag[32];   /* tags 300..331: commands not executed because no payload layout / lowering exists (unsupported) or because validation refused them (rejected) */
     uint64_t blit_tag[16];   /* done, indexed tag - 300 (300..315) */
 } lagfx_a64_stats_t;
 
