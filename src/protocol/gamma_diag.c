@@ -16,6 +16,7 @@
 #define INC(x) __atomic_add_fetch(&(x), 1u, __ATOMIC_RELAXED)
 #define GET(x) __atomic_load_n(&(x), __ATOMIC_RELAXED)
 
+#define GD_MAX_REREADS 16u   /* changed-table re-validations after the first acceptance */
 #define GD_MAX_REGION_ATTEMPTS 8u   /* region read attempts while none has succeeded (was 3 before the descriptor check lost its cap) */
 #define GD_MAX_DESC_LINES      64u
 #define GD_MAX_PARSE_LINES     8u
@@ -35,7 +36,7 @@ static uint64_t s_desc_lines, s_parse_lines, s_walk_lines, s_probe_lines, s_ram_
 static bool s_have_last, s_have_nonzero; static lagfx_gd_desc_t s_last, s_nonzero;
 static int s_busy;
 /* selected-LUT record (see lagfx_gd_select_t); guarded by a tiny spin flag so the getter is safe against the op 0x08 thread */
-static lagfx_gd_select_t s_sel; static uint8_t s_sel_data[3u * 4096u * 4u]; static int s_sel_lock;
+static lagfx_gd_select_t s_sel; static uint8_t s_sel_data[3u * 4096u * 4u], s_pend_data[3u * 4096u * 4u]; static int s_sel_lock; static uint32_t s_sel_gen; static uint32_t s_rereads;   /* s_pend_data: the candidate table, committed with s_sel under ONE lock (no torn table / state); only the op 0x08 thread writes it */
 static void sel_lock(void) { while (__atomic_test_and_set(&s_sel_lock, __ATOMIC_ACQUIRE)) { } }
 static void sel_unlock(void) { __atomic_clear(&s_sel_lock, __ATOMIC_RELEASE); }
 
@@ -44,13 +45,16 @@ void lagfx_gd_test_reset(void) {
     s_desc_lines = s_parse_lines = s_walk_lines = s_probe_lines = s_ram_lines = s_map_lines = s_probe_reads = s_probe_match = 0;
     s_have_last = s_have_nonzero = false;
     memset(&s_last, 0, sizeof s_last); memset(&s_nonzero, 0, sizeof s_nonzero);
-    sel_lock(); memset(&s_sel, 0, sizeof s_sel); sel_unlock();
+    s_rereads = 0;
+    sel_lock(); memset(&s_sel, 0, sizeof s_sel); sel_unlock();   /* s_sel_gen is NOT reset: a consumer's cache keyed by gen must never see a reused number */
     __atomic_clear(&s_busy, __ATOMIC_RELEASE);
 }
 
+void lagfx_gd_reset(void) { lagfx_gd_test_reset(); }
+
 void lagfx_gd_stats_get(lagfx_gd_stats_t *o) {
     if (!o) return;
-    o->read_attempts = GET(s_st.read_attempts); o->read_done = GET(s_st.read_done); o->translate_ok = GET(s_st.translate_ok);
+    o->rereads = GET(s_st.rereads); o->read_attempts = GET(s_st.read_attempts); o->read_done = GET(s_st.read_done); o->translate_ok = GET(s_st.translate_ok);
     o->unmapped = GET(s_st.unmapped); o->phys_read_fail = GET(s_st.phys_read_fail); o->descriptor_parse_fail = GET(s_st.descriptor_parse_fail);
     o->applied_ok = 0;   /* nothing applies a gamma table: this is a constant, not a counter */
     o->sum_match = GET(s_st.sum_match); o->sum_mismatch = GET(s_st.sum_mismatch);
@@ -67,6 +71,8 @@ size_t lagfx_gd_stats_suffix(char *out, size_t cap) {
                      (unsigned long long)s.desc_changes, (unsigned long long)GET(s_probe_reads), (unsigned long long)GET(s_probe_match));
     return n < 0 ? 0 : (size_t)n < cap ? (size_t)n : cap - 1;
 }
+
+uint32_t lagfx_gd_select_gen(void) { sel_lock(); const uint32_t g = s_sel.state == LAGFX_GD_SEL_ACCEPTED ? s_sel.gen : 0u; sel_unlock(); return g; }
 
 size_t lagfx_gd_select_get(lagfx_gd_select_t *o, uint8_t *copy, size_t cap) {
     size_t n = 0;
@@ -267,7 +273,7 @@ static void gd_region_read(lagfx_protocol_t *p, const lagfx_gd_desc_t *d, lagfx_
             nmatch++;
             if (nmatch == 1u) {
                 rec = &acc; have_acc = true;
-                sel_lock(); memcpy(s_sel_data, buf, (size_t)l.nwords * 4u); sel_unlock();   /* the validated words; the rest of the page is not kept */
+                memcpy(s_pend_data, buf, (size_t)l.nwords * 4u);   /* the validated words (committed below together with the state); the rest of the page is not kept */
             }
         } else if (l.fits) {
             nmis++; INC(s_st.sel_rejected_mismatch);
@@ -303,7 +309,8 @@ static void gd_region_read(lagfx_protocol_t *p, const lagfx_gd_desc_t *d, lagfx_
         if (nmatch == 1u) {
             memset(&s_sel, 0, sizeof s_sel);
             s_sel.state = LAGFX_GD_SEL_ACCEPTED; s_sel.task = mtasks[0]; s_sel.preferred = mtasks[0] == pref; s_sel.count = d->count; s_sel.sum = d->sum;
-            s_sel.va = d->off; s_sel.len = d->len; s_sel.nwords = acc.l.nwords; s_sel.attempt = (uint32_t)att;
+            s_sel.va = d->off; s_sel.len = d->len; s_sel.nwords = acc.l.nwords; s_sel.attempt = (uint32_t)att; s_sel.gen = ++s_sel_gen;
+            memcpy(s_sel_data, s_pend_data, (size_t)acc.l.nwords * 4u);
         } else if (nmatch >= 2u) {
             memset(&s_sel, 0, sizeof s_sel);
             s_sel.state = LAGFX_GD_SEL_AMBIGUOUS; s_sel.ntasks = nmatch; for (uint32_t k = 0; k < 4u && k < nmatch; k++) s_sel.tasks[k] = mtasks[k];
@@ -341,6 +348,10 @@ void lagfx_gd_note_op8(lagfx_protocol_t *p, uint32_t chan, const uint8_t *pl, ui
     }
     if (d.off != 0) { s_nonzero = d; s_have_nonzero = true; }
     if (d.off != 0 && !gd_sel_accepted() && GET(s_st.read_attempts) < GD_MAX_REGION_ATTEMPTS) gd_region_read(p, &d, reader, owner);
+    else if (d.off != 0 && gd_sel_accepted() && s_rereads < GD_MAX_REREADS) {   /* a NEW table (another count / checksum) after one was accepted: validate it again. A zero descriptor never clears the selection (the live captures send the table once, zeros afterwards). A re-read that matches replaces the table; one that does not DROPS it (nothing is applied rather than a stale table). */
+        lagfx_gd_select_t cur; lagfx_gd_select_get(&cur, NULL, 0);
+        if (cur.count != d.count || cur.sum != d.sum) { s_rereads++; INC(s_st.rereads); gd_region_read(p, &d, reader, owner); }
+    }
     if (is_sample(n)) {
         uint32_t k = 0;
         for (uint32_t i = 0; i < LAGFX_MAX_TASKS && k < GD_MAX_TASKS_PER_EVENT; i++) if (p->tasks[i].live) { k++; gd_walk_task(p, n, &p->tasks[i]); }

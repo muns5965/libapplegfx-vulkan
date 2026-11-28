@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "protocol/gamma_diag.h"
 #include "draw_diag.h"
 #include "state.h"
 #include "arm64_completion.h"
@@ -44,6 +45,7 @@ void lagfx_protocol_free(lagfx_protocol_t *p) {
     lagfx_a64_exec_free(p);   /* ARM64 exec objects + resource mirror, before the Vulkan device goes (device.c frees the protocol first) */
     free(p->scratch_exec_heap);
     lagfx_draw_diag_free(p);
+    lagfx_gd_reset();   /* the gamma selection is process-wide: a new protocol instance (VM restart in the same process) must not inherit the previous table */
     memset(p, 0, sizeof(*p));
     free(p);
 }

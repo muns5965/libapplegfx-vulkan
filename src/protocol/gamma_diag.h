@@ -133,6 +133,7 @@ typedef int (*lagfx_gd_reader_t)(lagfx_protocol_t *p, uint32_t task_id, uint64_t
 void lagfx_gd_set_reader(lagfx_gd_reader_t r);
 
 typedef struct {
+    uint64_t rereads;                /* changed-table re-validations after an acceptance */
     uint64_t read_attempts, read_done;
     uint64_t translate_ok;           /* attempts in which some task translated the WHOLE range VA -> GPA (read_done + phys_read_fail) */
     uint64_t unmapped;               /* attempts in which no task could translate the range (page table says unmapped / no such task) */
@@ -172,10 +173,15 @@ typedef struct {
     uint32_t nwords;          /* 3 * count: bytes valid in the copy = 4 * nwords */
     uint32_t ntasks, tasks[4];/* AMBIGUOUS: first matching tasks (ntasks may exceed 4; only 4 are kept) */
     uint32_t attempt;         /* region-read attempt number that produced this record */
+    uint32_t gen;             /* ACCEPTED: increments on every new accepted table (a cache key for consumers; 0 = none yet) */
 } lagfx_gd_select_t;
 /* Copies the current selection into *o. When state is ACCEPTED and `copy` != NULL, copies min(cap, 4 * nwords) bytes of the validated table into it and returns the byte count
  * copied (4 * nwords when cap suffices; a short copy means cap was too small: do not use it). Returns 0 otherwise. Thread-safe against lagfx_gd_note_op8. */
 size_t lagfx_gd_select_get(lagfx_gd_select_t *o, uint8_t *copy, size_t cap);
+/* Current selection generation without copying the table (0 = no accepted table). Cheap enough for a per-frame check. */
+uint32_t lagfx_gd_select_gen(void);
+/* Drops the selection, the counters and the one-shot state (a new VM / protocol instance must not inherit the previous run's table). Called by lagfx_protocol_free. */
+void lagfx_gd_reset(void);
 void lagfx_gd_test_reset(void);   /* tests only: zero the counters and the one-shot state */
 
 #endif

@@ -20,6 +20,7 @@
  *     identical to no-Vulkan at runtime.
  */
 
+#include "vulkan/gamma_apply.h"
 #include "device.h"
 #include "libapplegfx-vulkan.h"
 #include "display.h"
@@ -816,6 +817,7 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
                     LAGFX_ERR("display_submit_clear: readback for DMA "
                               "writeback failed (%d)", (int)rb_st);
                 } else {
+                    (void)lagfx_gamma_apply_present_fmt(pixels, (size_t)rt_w * (size_t)rt_h, (int)display->rt.format);   /* the same opt-in gamma as the blit path (this clear write-back is the other scanout writer) */
                     if (!display->device->desc.shell.write_memory(
                             display->device->desc.shell.opaque,
                             scanout_gpa, (uint64_t)rt_bytes, pixels)) {

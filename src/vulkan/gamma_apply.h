@@ -15,9 +15,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
-typedef enum { LAGFX_GAMMA_APPLIED = 0, LAGFX_GAMMA_IDENTITY = 1, LAGFX_GAMMA_BAD_TABLE = 2, LAGFX_GAMMA_BAD_ARGS = 3 } lagfx_gamma_result_t;
+typedef enum { LAGFX_GAMMA_APPLIED = 0, LAGFX_GAMMA_IDENTITY = 1 /* EXACT identity: every entry equals its input */, LAGFX_GAMMA_BAD_TABLE = 2, LAGFX_GAMMA_BAD_ARGS = 3,
+               LAGFX_GAMMA_NEAR_IDENTITY = 4 /* differs from identity by at most ONE level somewhere: a real (tiny) transform, deliberately NOT applied; counted apart from the exact identity */ } lagfx_gamma_result_t;
 
-typedef struct { uint64_t applied, identity, bad_table, not_selected, disabled; } lagfx_gamma_stats_t;
+typedef struct { uint64_t applied, applied_srgb, identity_exact, identity_near, bad_table, not_selected, disabled, bad_format, table_builds, cache_hits; } lagfx_gamma_stats_t;
 
 /* Builds three 256-entry byte tables from the planar float table (linear interpolation between entries, clamped to [0,1], rounded). tab[c][v] is the output for input byte v on
  * plane c. Returns BAD_TABLE for count < 2 / count > 4096 / a non-finite value, IDENTITY when no entry differs from v by more than one level, else APPLIED. */
@@ -26,7 +27,11 @@ lagfx_gamma_result_t lagfx_gamma_build(const float *planar, uint32_t count, uint
 /* Applies the tables to `npx` 4-byte pixels. `bgra` != 0: byte order B,G,R,A (plane 0 = R is byte 2); else R,G,B,A. Alpha is never touched. */
 void lagfx_gamma_apply8(uint8_t *px, size_t npx, int bgra, const uint8_t tab[3][256]);
 
-/* The present path's entry point: reads the accepted selection (gamma_diag), and applies it when LAGFX_GAMMA_APPLY=1. Counted in the stats; never fails the present. */
+/* The present paths' entry point (display_blit.c AND display.c's clear write-back): `vkfmt` is the render target's VkFormat as an integer (37 R8G8B8A8_UNORM, 43 R8G8B8A8_SRGB, 44 B8G8R8A8_UNORM,
+ * 50 B8G8R8A8_SRGB; anything else is left alone and counted). Reads the accepted selection (gamma_diag) when its generation changed (the 256-entry tables are rebuilt only then) and applies it
+ * when LAGFX_GAMMA_APPLY=1. UNORM and SRGB bytes get the SAME transform: the colour space the table is defined in is NOT known. Counted in the stats; never fails the present. */
+lagfx_gamma_result_t lagfx_gamma_apply_present_fmt(uint8_t *px, size_t npx, int vkfmt);
+/* Same with an explicit byte order (tests): bgra != 0 -> B,G,R,A. */
 lagfx_gamma_result_t lagfx_gamma_apply_present(uint8_t *px, size_t npx, int bgra);
 
 void lagfx_gamma_stats_get(lagfx_gamma_stats_t *s);
