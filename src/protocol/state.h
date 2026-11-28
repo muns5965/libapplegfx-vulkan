@@ -626,7 +626,7 @@ typedef struct lagfx_protocol {
                 uint64_t desc_unbound_why[6];   /* desc_unbound by cause: 0 buffer missing/offset, 1 input attachment, 2 storage image, 3 sampled image missing, 4 sampled image view (linear/none), 5 sampler */
                 uint64_t stub_fbfetch_why[5];   /* stub_fbfetch by reason (LAGFX_A64_FBF_*; [0] unused) */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
-                uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
+                uint64_t pipes_built, pipe_build_failed, pipe_replaced, pipe_fallback_built, topo[8];   /* pipe_fallback_built: built only by a value-preserving variant after the original failed */
                 /* VkRenderPass backend, one counter per cause (indices = lagfx_legacy_refuse_t, array of 12 >= LAGFX_LR__COUNT):
                  *   legacy_shape_refused = pipelines refused (sum of legacy_pipe_why), counted once per (pipeline, formats, topology): failures are cached;
                  *   legacy_pipe_why[]    those pipelines by cause (NO_COLOR, DS_MIXED, NO_DS, PASS);

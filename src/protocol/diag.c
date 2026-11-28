@@ -290,8 +290,8 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
                 (unsigned long long)R->seg_unsupported, (unsigned long long)R->seg_unsup_type[1], (unsigned long long)R->seg_unsup_type[4],
                 (unsigned long long)(R->seg_unsupported - R->seg_unsup_type[1] - R->seg_unsup_type[4]), (unsigned long long)R->mapped_unsupported);
             for (int i = 0; i < 12 && uo < sizeof ul; i++) uo += (size_t)snprintf(ul + uo, sizeof ul - uo, "%s%d=%llu", i ? " " : "", i, (unsigned long long)R->mapped_unsup_site[i]);
-            if (uo < sizeof ul) uo += (size_t)snprintf(ul + uo, sizeof ul - uo, "] storage_img_unsupported=%llu why[linear=%llu usage_missing_format_unsupported=%llu usage_missing_format_supported=%llu view_failed=%llu] log_overflow=%llu",
-                (unsigned long long)R->ext_storage_img_unsupported, (unsigned long long)R->ext_storage_img_why[0], (unsigned long long)R->ext_storage_img_why[1], (unsigned long long)R->ext_storage_img_why[2],
+            if (uo < sizeof ul) uo += (size_t)snprintf(ul + uo, sizeof ul - uo, "] pipe_fallback_built=%llu storage_img_unsupported=%llu why[linear=%llu usage_missing_format_unsupported=%llu usage_missing_format_supported=%llu view_failed=%llu] log_overflow=%llu",
+                (unsigned long long)p->diag2.exec.pipe.pipe_fallback_built, (unsigned long long)R->ext_storage_img_unsupported, (unsigned long long)R->ext_storage_img_why[0], (unsigned long long)R->ext_storage_img_why[1], (unsigned long long)R->ext_storage_img_why[2],
                 (unsigned long long)R->ext_storage_img_why[3], (unsigned long long)R->ext_storage_img_log_overflow);
             fprintf(stderr, "%s\n", ul); LAGFX_LOG("%s", ul);
             lagfx_seg_census_summary();

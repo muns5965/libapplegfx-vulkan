@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: MIT */
 #include "pipeline_build.h"
+#include "spv_variants.h"
 #include "pipeline_bundle.h"
 #include "render_pass.h"
 #include "common/log.h"
@@ -610,3 +611,44 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
 }
 
 #endif  /* LAGFX_HAVE_VULKAN */
+
+
+/* ---- build with value-preserving fallback ---- */
+int lagfx_pipeline_test_fail_original = 0;
+
+lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeline_desc_t *desc, VkPipeline *out, uint32_t *variant) {
+    if (variant) *variant = 0;
+    lagfx_status_t st;
+    if (lagfx_pipeline_test_fail_original) { lagfx_pipeline_build_quiet(1); st = LAGFX_ERR_BACKEND; lagfx_pipeline_build_quiet(0); }
+    else st = lagfx_pipeline_build(device, desc, out);
+    if (st == LAGFX_OK || !desc || !desc->vertex_spv || !desc->vertex_spv_bytes || !desc->fragment_spv || !desc->fragment_spv_bytes) return st;
+    /* variant 1: unused capability declarations removed from both stages */
+    uint32_t *vo = NULL, *fo = NULL; size_t von = 0, fon = 0; char vi[200] = "", fi[200] = "";
+    int a = lagfx_spv_variant_strip_caps(desc->vertex_spv, desc->vertex_spv_bytes / 4u, &vo, &von, vi, sizeof vi);
+    int b = lagfx_spv_variant_strip_caps(desc->fragment_spv, desc->fragment_spv_bytes / 4u, &fo, &fon, fi, sizeof fi);
+    if (a <= 0 && b <= 0) { free(vo); free(fo); return st; }   /* nothing to strip (or the rewrite failed): the original failure stands */
+    lagfx_pipeline_desc_t d = *desc;
+    const uint32_t *vs = a > 0 ? vo : desc->vertex_spv, *fs = b > 0 ? fo : desc->fragment_spv;
+    size_t vsn = a > 0 ? von * 4u : desc->vertex_spv_bytes, fsn = b > 0 ? fon * 4u : desc->fragment_spv_bytes;
+    VkShaderModule vm = VK_NULL_HANDLE, fm = VK_NULL_HANDLE;
+    VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = vsn, .pCode = vs };
+    VkResult r = vkCreateShaderModule(device, &ci, NULL, &vm);
+    if (r == VK_SUCCESS) { ci.codeSize = fsn, ci.pCode = fs; r = vkCreateShaderModule(device, &ci, NULL, &fm); }
+    if (r == VK_SUCCESS) {
+        d.vertex_shader = vm, d.fragment_shader = fm, d.vertex_spv = vs, d.vertex_spv_bytes = vsn, d.fragment_spv = fs, d.fragment_spv_bytes = fsn;
+        lagfx_pipeline_bundle_suppress(1);
+        lagfx_pipeline_build_quiet(1);
+        lagfx_status_t st2 = lagfx_pipeline_build(device, &d, out);
+        lagfx_pipeline_build_quiet(0);
+        lagfx_pipeline_bundle_suppress(0);
+        if (st2 == LAGFX_OK) {
+            if (variant) *variant = 1;
+            LAGFX_WARN("pipeline-fallback: the original failed; BUILT with unused capability declarations removed (vs: %s | fs: %s)", vi[0] ? vi : "unchanged", fi[0] ? fi : "unchanged");
+            st = LAGFX_OK;
+        }
+    }
+    if (vm) vkDestroyShaderModule(device, vm, NULL);
+    if (fm) vkDestroyShaderModule(device, fm, NULL);
+    free(vo); free(fo);
+    return st;
+}

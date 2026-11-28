@@ -589,7 +589,9 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
     }
     VkPipeline pl = VK_NULL_HANDLE;
     const uint64_t hold_t0 = lagfx_hold_now_ns();
-    const bool built = lagfx_pipeline_build(r->vk->device, &d, &pl) == LAGFX_OK;
+    uint32_t pvar = 0;
+    const bool built = lagfx_pipeline_build_fallback(r->vk->device, &d, &pl, &pvar) == LAGFX_OK;   /* the original, else the value-preserving variants (pipeline_build.h) */
+    if (built && pvar) p->diag2.exec.pipe.pipe_fallback_built++;
     lagfx_hold_note(built ? LAGFX_HOLD_PIPE_BUILD : LAGFX_HOLD_PIPE_FAIL, hold_t0, 0);
     if (!built) {
         p->diag2.exec.pipe.pipe_build_failed++;

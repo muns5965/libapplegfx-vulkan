@@ -170,6 +170,14 @@ bool lagfx_pipeline_render_desc_why(const lagfx_pipeline_desc_t *desc, lagfx_ren
 /* While on, THIS thread's failing lagfx_pipeline_build() calls log nothing, write no bundle and start no matrix (the matrix / repro rebuild failing pipelines on purpose). */
 void lagfx_pipeline_build_quiet(int on);
 
+/* lagfx_pipeline_build, and when it FAILS a retry with the value-preserving variants that exist (today: the capability declarations that nothing in either module uses are
+ * removed, lagfx_spv_variant_strip_caps - the program is unchanged, only declarations nothing needs go). The retry needs desc->vertex_spv / fragment_spv. *variant: 0 = the
+ * original built (or nothing else applied), 1 = the stripped modules built. The original failure is logged / bundled exactly as before; a variant that builds is logged once.
+ * Stub stages, dropped features and changed formats are NOT variants of this function. */
+lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeline_desc_t *desc, VkPipeline *out, uint32_t *variant);
+/* TEST HOOK (0 in production): while non-zero the unmodified build of lagfx_pipeline_build_fallback is reported as failed without calling Vulkan. */
+extern int lagfx_pipeline_test_fail_original;
+
 /* VkResult of the calling thread's last vkCreateGraphicsPipelines inside lagfx_pipeline_build() (lagfx_pipeline_build itself only returns LAGFX_ERR_BACKEND). */
 int32_t lagfx_pipeline_build_last_result(void);
 
