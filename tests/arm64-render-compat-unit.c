@@ -764,6 +764,7 @@ static void test_msaa_texture_refused(void) {
     cb_reset(); cb_pass_n(refs, loads, clr); cb_viewport(RT_W, RT_H); cb_pipeline(REF_PIPE); cb_vbuf(REF_VB, 0); b_half();
     exec(p, 1, cb_finish(), true);
     assert(p->diag2.exec.fmt.msaa_refused >= 1 && p->diag2.exec.run.no_target >= 1 && p->diag2.exec.run.draws == 0);
+    { __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run; assert(R->no_target == R->no_target_pass + R->no_target_draw && R->no_target_pass >= 1); printf("INFO: no_target=%llu = pass %llu + draw %llu\n", (unsigned long long)R->no_target, (unsigned long long)R->no_target_pass, (unsigned long long)R->no_target_draw); }
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex2 = false;
     /* control: the same texture with 1 sample is accepted */

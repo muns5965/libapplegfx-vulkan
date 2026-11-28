@@ -574,7 +574,7 @@ typedef struct lagfx_protocol {
                 uint64_t execs, passes, draws, draws_skipped, submits, submit_failed, submit_pending, pending_leaked;
                 uint64_t busy_skipped, pending_unqueued, seg_blit, held;   /* execs refused while the previous one was in flight / PENDING without a completion queue / blit segments recorded */
                 uint64_t seg_render, seg_unsupported;              /* render segments executed / segments of other types skipped */
-                uint64_t no_vulkan, bad_rec, no_pass, no_target, no_pipeline, no_pipeline_why[4], no_vertex_buf, no_index_buf, prim_unsupported;
+                uint64_t no_vulkan, bad_rec, no_pass, no_target, no_target_pass, no_target_draw /* no_target = pass-level target/attachment/begin failures (no_target_pass) + draws skipped because their pass was not rendering (no_target_draw): one failed pass is counted again once per draw it swallows */, no_pipeline, no_pipeline_why[4], no_vertex_buf, no_index_buf, prim_unsupported;
                 uint64_t multi_attach, blend_indep_mismatch, extra_attach_ignored, load_uninit_cleared, pipeline_unresolved, obj_unsupported, obj_unsupported_linear;
                 /* depth / stencil / raster state (arm64_depth_stencil.c, arm64_exec_run.c) */
                 uint64_t dss_decoded, dss_bad, dss_bound, dss_unresolved;   /* tag-4 objects decoded / rejected; tag 104 applied / ref not a decodable object (state then stays as it was) */
