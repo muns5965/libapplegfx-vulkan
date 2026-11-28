@@ -13,8 +13,10 @@
  *
  * An unused colour slot (format VK_FORMAT_UNDEFINED, no view) is kept in place (VK_ATTACHMENT_UNUSED in the subpass, no framebuffer view), so fragment output locations do not move.
  *
- * NOT here yet: MSAA resolve attachments, input attachments (framebuffer fetch), multiple subpasses. A sample count > 1 is accepted (the MSAA image itself is rendered
- * and stored), but nothing resolves it. Call sites are converted one at a time; a call site that has not been converted must not run on a LEGACY device. */
+ * MSAA: a colour attachment with samples > 1 may carry a resolve view (see lagfx_render_attachment_t); pipelines are created against the compatible pass WITHOUT resolve (render-pass
+ * compatibility ignores resolve attachments when both passes have a single subpass). Depth/stencil resolve is not here.
+ *
+ * NOT here yet: depth/stencil resolve, input attachments (framebuffer fetch), multiple subpasses. Call sites are converted one at a time; a call site that has not been converted must not run on a LEGACY device. */
 #ifndef LAGFX_VULKAN_RENDER_PASS_H
 #define LAGFX_VULKAN_RENDER_PASS_H
 
@@ -55,6 +57,12 @@ typedef struct {
     VkAttachmentLoadOp     stencil_load;   /* depth/stencil attachment only; ignored for colour */
     VkAttachmentStoreOp    stencil_store;
     VkClearValue           clear;          /* used when load (or stencil_load) == CLEAR: .color for colour, .depthStencil for depth/stencil */
+    /* COLOUR attachments with samples > 1 only: a single-sample view the pass resolves into at its end (legacy: pResolveAttachments of the one subpass; dynamic: resolveImageView).
+     * NULL = no resolve. The resolve image has the same format; resolve_layout is its layout during the pass (0 = COLOR_ATTACHMENT_OPTIMAL). resolve_mode (dynamic backend only; the
+     * legacy resolve is implicit: averaged for float / normalised formats, sample 0 for integer formats, as VK_RESOLVE_MODE_AVERAGE / _SAMPLE_ZERO) is 0 = AVERAGE. */
+    VkImageView            resolve_view;
+    VkImageLayout          resolve_layout;
+    VkResolveModeFlagBits  resolve_mode;
 } lagfx_render_attachment_t;
 
 typedef struct {

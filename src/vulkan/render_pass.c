@@ -11,11 +11,12 @@
  * referenced by a recorded, not yet submitted command buffer; they leave only through render_forget_view / shutdown. A full cache is a clean error, not an eviction. */
 #define RP_MAX_DEFAULT 256u
 #define FB_MAX_DEFAULT 1024u
-#define MAX_ATT (LAGFX_RENDER_MAX_COLOR + 1u)   /* colours + depth/stencil */
+#define MAX_ATT (LAGFX_RENDER_MAX_COLOR + 1u + LAGFX_RENDER_MAX_COLOR)   /* colours + depth/stencil + resolve targets */
+#define MAX_REAL (LAGFX_RENDER_MAX_COLOR + 1u)   /* colours + depth/stencil (the slots of the key) */
 
 /* One attachment of a pass, as far as the pass object cares. All 32-bit members, no padding: keys are compared with memcmp after memset(0). */
-typedef struct { VkFormat fmt; VkSampleCountFlagBits samples; VkImageLayout layout; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; } akey_t;
-typedef struct { uint32_t ncolor, has_ds; akey_t a[MAX_ATT]; } rpkey_t;
+typedef struct { VkFormat fmt; VkSampleCountFlagBits samples; VkImageLayout layout; VkAttachmentLoadOp load, sload; VkAttachmentStoreOp store, sstore; VkImageLayout rlayout; } akey_t;   /* rlayout != 0: resolved into a 1x view of the same format */
+typedef struct { uint32_t ncolor, has_ds; akey_t a[MAX_REAL]; } rpkey_t;
 
 typedef struct { rpkey_t key; VkRenderPass rp; } rp_ent_t;
 typedef struct { VkRenderPass rp; uint32_t nview; VkImageView view[MAX_ATT]; uint32_t w, h; VkFramebuffer fb; } fb_ent_t;
@@ -78,6 +79,7 @@ static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
         }
         used++;
         if (need_views && d->color[i].view == VK_NULL_HANDLE) return false;
+        if (d->color[i].resolve_view != VK_NULL_HANDLE && samples_of(&d->color[i]) == VK_SAMPLE_COUNT_1_BIT) return false;   /* nothing to resolve from a single-sample image */
     }
     if (used == 0u) return false;   /* a pass needs at least one real attachment */
     if (d->has_depth_stencil) {
@@ -96,14 +98,15 @@ static void make_key(rpkey_t *k, const lagfx_render_desc_t *d, bool compat) {
         if (a->format == VK_FORMAT_UNDEFINED) continue;   /* unused slot: all-zero entry, only its position is part of the key */
         k->a[i] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   /* never UNDEFINED: not valid for an attachment reference or a LOAD */
                             compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
-                            compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE };
+                            compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE, 0 };
+        if (!compat && a->resolve_view != VK_NULL_HANDLE) k->a[i].rlayout = a->resolve_layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->resolve_layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     }
     if (d->has_depth_stencil) {
         const lagfx_render_attachment_t *a = &d->depth_stencil;
         k->has_ds = 1;
         k->a[d->color_count] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                          compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->stencil_load,
-                                         compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, compat ? VK_ATTACHMENT_STORE_OP_STORE : a->stencil_store };
+                                         compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, compat ? VK_ATTACHMENT_STORE_OP_STORE : a->stencil_store, 0 };
     }
 }
 
@@ -115,7 +118,8 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
         rp_ent_t *n = realloc(c->rp, nc * sizeof *n); if (!n) return VK_NULL_HANDLE;
         c->rp = n; c->cap_rp = nc;
     }
-    VkAttachmentDescription ad[MAX_ATT]; VkAttachmentReference cref[LAGFX_RENDER_MAX_COLOR]; VkAttachmentReference dref = { 0 };
+    VkAttachmentDescription ad[MAX_ATT]; VkAttachmentReference cref[LAGFX_RENDER_MAX_COLOR], rref[LAGFX_RENDER_MAX_COLOR]; VkAttachmentReference dref = { 0 };
+    bool any_resolve = false;
     uint32_t na = 0;   /* real attachments only: an unused colour slot is VK_ATTACHMENT_UNUSED in the subpass and has no attachment description */
     for (uint32_t i = 0; i < k->ncolor + k->has_ds; i++) {
         const akey_t *a = &k->a[i];
@@ -128,8 +132,18 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
         else dref = (VkAttachmentReference){ na, a->layout };
         na++;
     }
+    for (uint32_t i = 0; i < k->ncolor; i++) {   /* resolve targets come after every real attachment (the framebuffer lists their views in the same order) */
+        rref[i] = (VkAttachmentReference){ VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED };
+        const akey_t *a = &k->a[i];
+        if (a->fmt == VK_FORMAT_UNDEFINED || a->rlayout == 0) continue;
+        ad[na] = (VkAttachmentDescription){ .format = a->fmt, .samples = VK_SAMPLE_COUNT_1_BIT, .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                            .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
+                                            .initialLayout = (VkImageLayout)a->rlayout, .finalLayout = (VkImageLayout)a->rlayout };
+        rref[i] = (VkAttachmentReference){ na, (VkImageLayout)a->rlayout };
+        na++; any_resolve = true;
+    }
     VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->ncolor, .pColorAttachments = k->ncolor ? cref : NULL,
-                                .pDepthStencilAttachment = k->has_ds ? &dref : NULL };
+                                .pResolveAttachments = any_resolve ? rref : NULL, .pDepthStencilAttachment = k->has_ds ? &dref : NULL };
     /* External dependencies: the caller's barrier covers the layout change; these order the attachment writes against what comes before / after the pass. */
     VkPipelineStageFlags ds_st = k->has_ds ? (VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT) : 0;
     VkAccessFlags ds_ac = k->has_ds ? (VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT) : 0;
@@ -180,6 +194,7 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
                                                                                    .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE }; continue; }
         col[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = a->view, .imageLayout = a->layout,
                                               .loadOp = a->load, .storeOp = a->store, .clearValue = a->clear };
+        if (a->resolve_view != VK_NULL_HANDLE) { col[i].resolveImageView = a->resolve_view; col[i].resolveImageLayout = a->resolve_layout ? a->resolve_layout : a->layout; col[i].resolveMode = a->resolve_mode ? a->resolve_mode : VK_RESOLVE_MODE_AVERAGE_BIT; }
     }
     VkRenderingInfo ri = { .sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = { { 0, 0 }, { d->width, d->height } }, .layerCount = 1,
                            .colorAttachmentCount = d->color_count, .pColorAttachments = d->color_count ? col : NULL };
@@ -218,6 +233,10 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
         const lagfx_render_attachment_t *a = &d->depth_stencil;
         views[na] = a->view; cv[na] = a->clear; na++;
         if (a->load == VK_ATTACHMENT_LOAD_OP_CLEAR || a->stencil_load == VK_ATTACHMENT_LOAD_OP_CLEAR) any_clear = true;
+    }
+    for (uint32_t i = 0; i < d->color_count; i++) {   /* resolve targets: after the real attachments, in the order rp_locked numbers them */
+        if (d->color[i].format == VK_FORMAT_UNDEFINED || d->color[i].resolve_view == VK_NULL_HANDLE) continue;
+        views[na] = d->color[i].resolve_view; memset(&cv[na], 0, sizeof cv[na]); na++;
     }
     rpkey_t k; make_key(&k, d, false);
     pthread_mutex_lock(&rc->mu);

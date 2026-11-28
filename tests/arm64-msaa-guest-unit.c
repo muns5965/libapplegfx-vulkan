@@ -502,8 +502,9 @@ int main(void) {
       assert(lagfx_spv_msfetch_rewrite((const uint8_t *)k_fs_half_spv, sizeof k_fs_half_spv, &o, &osz, &nr) == 0 && o == NULL);   /* no SubpassData: nothing to do */
       puts("PASS multisampled fetch rewrite: valid SPIR-V (1 / 2 reads), a shader without a SubpassData is untouched"); }
 
+    const bool legacy_be = lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY;
     /* 12: framebuffer fetch (input attachment) in a multisampled pass: a multisampled SubpassData read per SAMPLE (SPIR-V rewrite, sample-rate shading); the resolve equals the CPU coverage reference */
-    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F;
+    if (legacy_be) { puts("SKIP 12: the legacy VkRenderPass backend has no framebuffer fetch / input-attachment local read (Dynamic Rendering Local Read only); the fetch is refused and counted on legacy, covered by the refusal counters, not by pixels"); } else { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.fs = FS_F;
       /* default: the device must ADVERTISE local reads of multisampled attachments (Vulkan 1.4 dynamicRenderingLocalReadMultisampledAttachments). lavapipe reports 0, so with the property as the device gave it the draw is refused */
       const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = false;
       gr_run(&s, &g);
@@ -525,7 +526,7 @@ int main(void) {
       puts("PASS negative: no sample-rate shading -> multisampled fetch refused (fbfetch_ms_refused, sample_shading_refused), draw skipped"); }
 
     /* 12c: per-sample distinct start values: the fetch must read ITS OWN sample. Forcing sample 0 (negative control through the rewrite's test seam) must break the result. */
-    { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.two = true;
+    if (legacy_be) { puts("SKIP 12c: the legacy VkRenderPass backend has no framebuffer fetch / input-attachment local read (Dynamic Rendering Local Read only); the fetch is refused and counted on legacy, covered by the refusal counters, not by pixels"); } else { sc_t s = sc(REF_MS8, 80, 4, 4, 4, 2, REF_TEX); s.two = true;
       const bool lrms = g_dev->vk->have_local_read_ms; g_dev->vk->have_local_read_ms = true;
       unsigned part = 0;
       gr_run(&s, &g);

@@ -233,8 +233,8 @@ lagfx_status_t lagfx_translate_render_begin_ds(
 
 /* begin_ds plus the attachment FORMATS and sample count, which a legacy (VkRenderPass) backend needs and the attachment infos do not carry. color_formats[i] is the format
  * of color_attachments[i]; ds_format the format of the depth / stencil view (VK_FORMAT_UNDEFINED = none). On the dynamic backend this is exactly begin_ds. On the legacy backend
- * (render_pass.h) a pass the backend does not express is refused with LAGFX_ERR_BACKEND and NOTHING is recorded (state stays outside a pass): an empty colour slot (a gap,
- * or the unused slot of a depth-only pass), a resolve attachment, samples > 1 (no resolve implemented), more than LAGFX_RENDER_MAX_COLOR attachments. */
+ * (render_pass.h) a pass the backend does not express is refused with LAGFX_ERR_BACKEND and NOTHING is recorded (state stays outside a pass): an inconsistent slot (a view without a format or the reverse; a gap with neither is an
+ * unused slot and IS expressed, as is the single unused slot of a depth-only pass), a depth/stencil resolve attachment, a colour resolve for a single-sample pass, more than LAGFX_RENDER_MAX_COLOR attachments. */
 lagfx_status_t lagfx_translate_render_begin_fmt(
     struct lagfx_vk_state *vk,
     lagfx_translate_render_state_t *state,
