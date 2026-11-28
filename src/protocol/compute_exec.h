@@ -30,6 +30,13 @@ typedef struct lagfx_cx_pipe lagfx_cx_pipe_t;
 
 /* NULL on failure (shader module / layout / pipeline creation). entry NULL = "main". push_bytes = size of the push-constant block (0 = none). */
 lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes);
+/* Descriptor types this module binds: STORAGE_BUFFER, UNIFORM_BUFFER, STORAGE_IMAGE, SAMPLED_IMAGE, SAMPLER, COMBINED_IMAGE_SAMPLER; any other type fails lagfx_cx_pipe_create.
+ * Optional: the device limits, checked at record time (workgroup count per axis, push-constant size). Without them only the zero checks apply. Buffer ranges: a buffer binding
+ * needs a non-null VkBuffer and an offset that satisfies the caller's alignment (minStorageBufferOffsetAlignment / minUniformBufferOffsetAlignment, checked when the limits are
+ * set); the buffer's size is the caller's to respect (this module does not know it). Image bindings need a non-null view (sampler bindings a non-null sampler); the image LAYOUT
+ * and its transition are the caller's responsibility (the layout named in the binding must be the one the image is in when the dispatch executes). Descriptor sets are reused
+ * only after lagfx_cx_recycle, which the caller calls once the GPU has COMPLETED the recorded work. */
+void lagfx_cx_set_limits(lagfx_cx_pipe_t *p, const VkPhysicalDeviceLimits *lim);
 void lagfx_cx_pipe_destroy(lagfx_cx_pipe_t *p);
 
 /* Record: barrier(all -> compute), bind pipeline + a freshly allocated descriptor set written from res[] (every layout binding must be present exactly once), push

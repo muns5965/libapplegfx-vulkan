@@ -241,7 +241,6 @@ int main(void) {
     vkDestroyShaderModule(vk->device, vs, NULL); vkDestroyShaderModule(vk->device, fs, NULL);
     printf("PASS: builder: success silent, one line per distinct failure key, bounded at 8 keys\n");
     {   /* fallback: the original build fails (hook), the value-preserving variant (unused capability declarations removed) builds; a module with nothing to strip stays failed */
-        extern int lagfx_pipeline_test_fail_original;
         uint32_t cvs[sizeof k_vs_spv / 4 + 2], cfs[sizeof k_fs_spv / 4 + 2];
         memcpy(cvs, k_vs_spv, 5 * 4); cvs[5] = 0x00020011u, cvs[6] = 9u /* OpCapability Float16, used by nothing */; memcpy(cvs + 7, k_vs_spv + 5, sizeof k_vs_spv - 5 * 4);
         memcpy(cfs, k_fs_spv, 5 * 4); cfs[5] = 0x00020011u, cfs[6] = 22u /* OpCapability Int16, used by nothing */; memcpy(cfs + 7, k_fs_spv + 5, sizeof k_fs_spv - 5 * 4);
@@ -256,6 +255,12 @@ int main(void) {
         lagfx_pipeline_desc_t g = d; g.vertex_entry_point = g.fragment_entry_point = "main"; g.color_format = VK_FORMAT_B8G8R8A8_UNORM, g.topology_plus1 = 0;   /* k_vs/k_fs: nothing to strip */
         var = 99; assert(lagfx_pipeline_build_fallback(vk->device, &g, &fp, &var) != LAGFX_OK && !fp && var == 0);
         lagfx_pipeline_test_fail_original = 0;
+        {   /* a failure BEFORE Vulkan (serialized attributes missing for a reflected input: LAGFX_ERR_PROTOCOL) is not retried although the modules have strippable declarations */
+            lagfx_pipeline_desc_t h = f; h.pso_attrs_serialized = 1; h.n_pso_attrs = 0; h.n_vtx_inputs = 1;
+            const uint64_t t0 = atomic_load(&lagfx_pipeline_fallback_tries);
+            var = 99; assert(lagfx_pipeline_build_fallback(vk->device, &h, &fp, &var) != LAGFX_OK && !fp && var == 0);
+            assert(atomic_load(&lagfx_pipeline_fallback_tries) == t0);   /* no rebuild was attempted */
+        }
         printf("PASS: pipeline fallback: failed original -> value-preserving variant (unused capabilities stripped) builds; nothing to strip keeps the failure\n");
     }
 

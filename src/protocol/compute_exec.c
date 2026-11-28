@@ -8,6 +8,7 @@ struct lagfx_cx_pipe {
     VkDevice dev;
     VkShaderModule cs; VkDescriptorSetLayout dsl; VkPipelineLayout pl; VkPipeline pipe; VkDescriptorPool pool;
     lagfx_cx_bind_t bind[LAGFX_CX_MAX_BIND]; uint32_t nbind, push_bytes, nsets;
+    bool have_lim; uint32_t max_groups[3], max_push; VkDeviceSize ssbo_align, ubo_align;
 };
 
 void lagfx_cx_pipe_destroy(lagfx_cx_pipe_t *p) {
@@ -22,6 +23,11 @@ void lagfx_cx_pipe_destroy(lagfx_cx_pipe_t *p) {
 
 lagfx_cx_pipe_t *lagfx_cx_pipe_create(VkDevice dev, const uint32_t *spv, size_t spv_bytes, const char *entry, const lagfx_cx_bind_t *bind, uint32_t nbind, uint32_t push_bytes) {
     if (!dev || !spv || !spv_bytes || (spv_bytes & 3u) || nbind > LAGFX_CX_MAX_BIND || (nbind && !bind) || (push_bytes & 3u) || push_bytes > 128u) return NULL;
+    for (uint32_t i = 0; i < nbind; i++) {   /* only the descriptor types record() knows how to write */
+        const VkDescriptorType t = bind[i].type;
+        if (t != VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && t != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && t != VK_DESCRIPTOR_TYPE_STORAGE_IMAGE && t != VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE &&
+            t != VK_DESCRIPTOR_TYPE_SAMPLER && t != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) return NULL;
+    }
     for (uint32_t i = 0; i < nbind; i++) for (uint32_t j = i + 1; j < nbind; j++) if (bind[i].binding == bind[j].binding) return NULL;   /* one descriptor per binding */
     lagfx_cx_pipe_t *p = calloc(1, sizeof *p);
     if (!p) return NULL;
@@ -52,6 +58,13 @@ fail:
     return NULL;
 }
 
+void lagfx_cx_set_limits(lagfx_cx_pipe_t *p, const VkPhysicalDeviceLimits *lim) {
+    if (!p || !lim) return;
+    p->have_lim = true;
+    for (int i = 0; i < 3; i++) p->max_groups[i] = lim->maxComputeWorkGroupCount[i];
+    p->max_push = lim->maxPushConstantsSize, p->ssbo_align = lim->minStorageBufferOffsetAlignment, p->ubo_align = lim->minUniformBufferOffsetAlignment;
+}
+
 void lagfx_cx_recycle(lagfx_cx_pipe_t *p) {
     if (!p) return;
     if (p->pool) vkResetDescriptorPool(p->dev, p->pool, 0);
@@ -66,6 +79,19 @@ bool lagfx_cx_record(lagfx_cx_pipe_t *p, VkCommandBuffer cb, const lagfx_cx_res_
         uint32_t k = 0; while (k < p->nbind && p->bind[k].binding != res[i].binding) k++;
         if (k == p->nbind || by[k]) return false;
         by[k] = &res[i];
+    }
+    if (p->have_lim && (gx > p->max_groups[0] || gy > p->max_groups[1] || gz > p->max_groups[2] || push_bytes > p->max_push)) return false;
+    for (uint32_t k = 0; k < p->nbind; k++) {   /* resource sanity before anything is allocated or recorded */
+        const lagfx_cx_res_t *r = by[k];
+        switch (p->bind[k].type) {
+        case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER: case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER: {
+            const VkDeviceSize al = p->bind[k].type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER ? p->ssbo_align : p->ubo_align;
+            if (!r->buffer || (p->have_lim && al && (r->offset % al))) return false;
+            break; }
+        case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE: case VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE: if (!r->view) return false; break;
+        case VK_DESCRIPTOR_TYPE_SAMPLER: if (!r->sampler) return false; break;
+        default: if (!r->view || !r->sampler) return false; break;   /* combined image sampler */
+        }
     }
     VkDescriptorSet ds = VK_NULL_HANDLE;
     if (p->nbind) {

@@ -67,6 +67,9 @@ int main(void) {
     const lagfx_cx_bind_t bind[2] = { { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER }, { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER } };
     lagfx_cx_pipe_t *pp = lagfx_cx_pipe_create(vk->device, k_cx_spv, sizeof k_cx_spv, "main", bind, 2, 8);
     CHECK(pp, "pipeline create");
+    { VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(vk->pd, &pr); lagfx_cx_set_limits(pp, &pr.limits);
+      CHECK(!lagfx_cx_pipe_create(vk->device, k_cx_spv, sizeof k_cx_spv, "main", (lagfx_cx_bind_t[1]){ { 0, VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR } }, 1, 0), "unsupported descriptor type refused");
+      CHECK(!lagfx_cx_record(pp, VK_NULL_HANDLE, NULL, 0, NULL, 0, 1, 1, 1), "null command buffer refused"); }
     CHECK(!lagfx_cx_pipe_create(vk->device, k_cx_spv, sizeof k_cx_spv, "main", (lagfx_cx_bind_t[2]){ { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER }, { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER } }, 2, 8), "duplicate binding refused");
 
     enum { N = 1000 };   /* 15 full groups of 64 + a partial one of 40 */
@@ -100,6 +103,12 @@ int main(void) {
     CHECK(!lagfx_cx_record(pp, cb, unk, 2, push1, 8, 1, 1, 1), "unknown binding refused");
     CHECK(!lagfx_cx_record(pp, cb, r1, 2, push1, 4, 1, 1, 1), "wrong push size refused");
     CHECK(!lagfx_cx_record(pp, cb, r1, 2, push1, 8, 0, 1, 1), "zero groups refused");
+    CHECK(!lagfx_cx_record(pp, cb, r1, 2, push1, 8, 0xffffffffu, 1, 1), "group count above the device limit refused");
+    { const lagfx_cx_res_t nb[2] = { { .binding = 0, .buffer = VK_NULL_HANDLE }, { .binding = 1, .buffer = b.b } };
+      CHECK(!lagfx_cx_record(pp, cb, nb, 2, push1, 8, 1, 1, 1), "null buffer refused");
+      const lagfx_cx_res_t ua[2] = { { .binding = 0, .buffer = a.b, .offset = 4 }, { .binding = 1, .buffer = b.b } };
+      VkPhysicalDeviceProperties pr; vkGetPhysicalDeviceProperties(vk->pd, &pr);
+      if (pr.limits.minStorageBufferOffsetAlignment > 4) CHECK(!lagfx_cx_record(pp, cb, ua, 2, push1, 8, 1, 1, 1), "misaligned buffer offset refused"); }
     CHECK(vkEndCommandBuffer(cb) == VK_SUCCESS && submit_wait(vk, cb), "submit");
     for (uint32_t i = 0; i < N; i++) {
         uint32_t e1 = a.p[i] * 5u + 1u, e2 = e1 * 3u + 1u;

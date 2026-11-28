@@ -177,6 +177,8 @@ void lagfx_pipeline_build_quiet(int on);
 lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeline_desc_t *desc, VkPipeline *out, uint32_t *variant);
 /* TEST HOOK (0 in production): while non-zero the unmodified build of lagfx_pipeline_build_fallback is reported as failed without calling Vulkan. */
 extern int lagfx_pipeline_test_fail_original;
+#include <stdatomic.h>
+extern _Atomic uint64_t lagfx_pipeline_fallback_tries;   /* rebuilds attempted by lagfx_pipeline_build_fallback (after a retryable failure with something to strip) */
 
 /* VkResult of the calling thread's last vkCreateGraphicsPipelines inside lagfx_pipeline_build() (lagfx_pipeline_build itself only returns LAGFX_ERR_BACKEND). */
 int32_t lagfx_pipeline_build_last_result(void);
