@@ -940,6 +940,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         }
     }
     s->have_dynamic_rendering      = have_dyn_rendering_feature;
+    s->render_backend              = (int)lagfx_vk_render_backend_select(have_dyn_rendering_feature);
     s->have_synchronization2       = have_synchronization2;
     s->have_timeline_semaphore     = have_timeline_semaphore_feat;
     s->have_descriptor_indexing    = have_descriptor_indexing;

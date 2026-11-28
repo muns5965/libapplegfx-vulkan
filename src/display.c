@@ -694,6 +694,7 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
     vkCmdPipelineBarrier(cb, src_stage,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, NULL, 0, NULL, 1, &barrier);
+    const VkImageLayout prev_layout_clear = rt->layout;   /* the barrier is recorded into a buffer that is dropped if render_begin fails: the image keeps this layout */
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     lagfx_render_color_t rcol = {
@@ -703,6 +704,7 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
     if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) {
+        rt->layout = prev_layout_clear;
         lagfx_vk_cmdbuf_free(vk, cb);
         return LAGFX_ERR_BACKEND;
     }
@@ -1076,6 +1078,7 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
     vkCmdPipelineBarrier(cb, src_stage,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, NULL, 0, NULL, 1, &barrier);
+    const VkImageLayout prev_layout_overlay = rt->layout;   /* the barrier is recorded into a buffer that is dropped if render_begin fails: the image keeps this layout */
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     lagfx_render_color_t rcol = {
@@ -1084,6 +1087,7 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
     if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) {
+        rt->layout = prev_layout_overlay;
         lagfx_vk_cmdbuf_free(vk, cb);
         return LAGFX_ERR_BACKEND;
     }

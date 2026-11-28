@@ -246,6 +246,7 @@ lagfx_status_t lagfx_vk_composite_over(struct lagfx_vk_state *vk,
     vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, NULL, 0, NULL, 1, &bar);
+    const VkImageLayout prev_layout_comp = display_rt->layout;   /* the barrier is recorded into a buffer that is dropped if render_begin fails: the image keeps this layout */
     display_rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
     lagfx_render_color_t rcol = {
@@ -253,7 +254,8 @@ lagfx_status_t lagfx_vk_composite_over(struct lagfx_vk_state *vk,
         .load = VK_ATTACHMENT_LOAD_OP_LOAD, .store = VK_ATTACHMENT_STORE_OP_STORE,
         .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
-    if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) { lagfx_vk_cmdbuf_free(vk, cb); return LAGFX_ERR_BACKEND; }
+    if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) {
+        display_rt->layout = prev_layout_comp; lagfx_vk_cmdbuf_free(vk, cb); return LAGFX_ERR_BACKEND; }
     /* Destination rect (guest-declared placement); w/h == 0 → full-screen.
      * Clamp to the rt so the dynamic viewport/scissor stay valid. */
     uint32_t vx = dst_x, vy = dst_y, vw = dst_w, vh = dst_h;

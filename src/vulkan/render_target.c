@@ -379,6 +379,7 @@ lagfx_status_t lagfx_vk_render_clear_color(struct lagfx_vk_state *vk,
     };
     lagfx_status_t bst = lagfx_vk_render_begin(vk, cmd, &rc);
     if (bst != LAGFX_OK) {
+        /* the layout barrier is already in the caller's command buffer (which the caller owns and may still submit): rt->layout stays what that barrier does */
         LAGFX_ERR("render_clear_color: render_begin failed (%d)", (int)bst);
         return bst;
     }

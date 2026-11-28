@@ -7,9 +7,9 @@
 #include <string.h>
 
 #define RP_MAX 16
-#define FB_MAX 64
+#define FB_MAX 1024   /* never evicted: a framebuffer may be referenced by a recorded, not yet submitted command buffer; entries leave only through render_forget_view / shutdown */
 
-typedef struct { VkFormat fmt; VkImageLayout layout; VkRenderPass rp; } rp_ent_t;
+typedef struct { VkFormat fmt; VkImageLayout layout; VkAttachmentLoadOp load; VkAttachmentStoreOp store; VkRenderPass rp; } rp_ent_t;
 typedef struct { VkRenderPass rp; VkImageView view; uint32_t w, h; VkFramebuffer fb; } fb_ent_t;
 
 struct lagfx_render_cache {
@@ -18,9 +18,15 @@ struct lagfx_render_cache {
     fb_ent_t fb[FB_MAX]; unsigned n_fb;
 };
 
-lagfx_render_backend_t lagfx_vk_render_backend(const struct lagfx_vk_state *vk) {
+/* Chosen once, when the device is created (lagfx_vk_init), and never changed afterwards: pipelines, begin and end must all see the same backend. */
+lagfx_render_backend_t lagfx_vk_render_backend_select(bool have_dynamic_rendering) {
     const char *f = getenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
     if (f && !strcmp(f, "1")) return LAGFX_RENDER_LEGACY;
+    return have_dynamic_rendering ? LAGFX_RENDER_DYNAMIC : LAGFX_RENDER_LEGACY;
+}
+
+lagfx_render_backend_t lagfx_vk_render_backend(const struct lagfx_vk_state *vk) {
+    if (vk && vk->render_backend == LAGFX_RENDER_LEGACY) return LAGFX_RENDER_LEGACY;
     return vk && vk->have_dynamic_rendering ? LAGFX_RENDER_DYNAMIC : LAGFX_RENDER_LEGACY;
 }
 
@@ -34,12 +40,12 @@ static struct lagfx_render_cache *cache_get(struct lagfx_vk_state *vk) {
     return vk->render_cache;
 }
 
-static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cache *c, VkFormat fmt, VkImageLayout layout) {
-    for (unsigned i = 0; i < c->n_rp; i++) if (c->rp[i].fmt == fmt && c->rp[i].layout == layout) return c->rp[i].rp;
+static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cache *c, VkFormat fmt, VkImageLayout layout, VkAttachmentLoadOp load, VkAttachmentStoreOp store) {
+    for (unsigned i = 0; i < c->n_rp; i++) if (c->rp[i].fmt == fmt && c->rp[i].layout == layout && c->rp[i].load == load && c->rp[i].store == store) return c->rp[i].rp;
     if (c->n_rp >= RP_MAX) { LAGFX_ERR("render_pass: cache full (%u formats)", c->n_rp); return VK_NULL_HANDLE; }
     VkAttachmentDescription ad = {
         .format = fmt, .samples = VK_SAMPLE_COUNT_1_BIT,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE,   /* the real ops are per begin: see the note in begin */
+        .loadOp = load, .storeOp = store,   /* part of the cache key: exactly what the caller asked for */
         .stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE,
         .initialLayout = layout, .finalLayout = layout,
     };
@@ -63,7 +69,7 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
     VkRenderPass rp = VK_NULL_HANDLE;
     VkResult vr = vkCreateRenderPass(vk->device, &ci, NULL, &rp);
     if (vr != VK_SUCCESS) { LAGFX_ERR("render_pass: vkCreateRenderPass failed (%d)", (int)vr); return VK_NULL_HANDLE; }
-    c->rp[c->n_rp++] = (rp_ent_t){ fmt, layout, rp };
+    c->rp[c->n_rp++] = (rp_ent_t){ fmt, layout, load, store, rp };
     return rp;
 }
 
@@ -72,7 +78,7 @@ VkRenderPass lagfx_vk_render_pass_get(struct lagfx_vk_state *vk, VkFormat format
     struct lagfx_render_cache *c = cache_get(vk);
     if (!c) return VK_NULL_HANDLE;
     pthread_mutex_lock(&c->mu);
-    VkRenderPass rp = rp_locked(vk, c, format, layout);
+    VkRenderPass rp = rp_locked(vk, c, format, layout, VK_ATTACHMENT_LOAD_OP_LOAD, VK_ATTACHMENT_STORE_OP_STORE);   /* pipelines only need a COMPATIBLE pass: format + samples */
     pthread_mutex_unlock(&c->mu);
     return rp;
 }
@@ -91,17 +97,13 @@ lagfx_status_t lagfx_vk_render_begin(struct lagfx_vk_state *vk, VkCommandBuffer 
     struct lagfx_render_cache *rc = cache_get(vk);
     if (!rc) return LAGFX_ERR_BACKEND;
     pthread_mutex_lock(&rc->mu);
-    VkRenderPass rp = rp_locked(vk, rc, c->format, c->layout);
+    VkRenderPass rp = rp_locked(vk, rc, c->format, c->layout, c->load, c->store);
     VkFramebuffer fb = VK_NULL_HANDLE;
     if (rp != VK_NULL_HANDLE) {
         for (unsigned i = 0; i < rc->n_fb; i++)
             if (rc->fb[i].rp == rp && rc->fb[i].view == c->view && rc->fb[i].w == c->width && rc->fb[i].h == c->height) { fb = rc->fb[i].fb; break; }
         if (fb == VK_NULL_HANDLE) {
-            if (rc->n_fb >= FB_MAX) {   /* full: nothing recorded may still use them once the device is idle */
-                vkDeviceWaitIdle(vk->device);
-                for (unsigned i = 0; i < rc->n_fb; i++) vkDestroyFramebuffer(vk->device, rc->fb[i].fb, NULL);
-                rc->n_fb = 0;
-            }
+            if (rc->n_fb >= FB_MAX) { LAGFX_ERR("render_begin: framebuffer cache full (%u): a view is not being forgotten", rc->n_fb); goto fb_done; }
             VkFramebufferCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = rp, .attachmentCount = 1, .pAttachments = &c->view,
                                             .width = c->width, .height = c->height, .layers = 1 };
             VkResult vr = vkCreateFramebuffer(vk->device, &fci, NULL, &fb);
@@ -109,17 +111,14 @@ lagfx_status_t lagfx_vk_render_begin(struct lagfx_vk_state *vk, VkCommandBuffer 
             else rc->fb[rc->n_fb++] = (fb_ent_t){ rp, c->view, c->width, c->height, fb };
         }
     }
+fb_done:
     pthread_mutex_unlock(&rc->mu);
     if (fb == VK_NULL_HANDLE) return LAGFX_ERR_BACKEND;
-    /* The cached pass loads and stores; a CLEAR is expressed with the clear value only when asked: the pass has loadOp LOAD, so clear explicitly inside it. */
+    VkClearValue cv = { .color = c->clear };
     VkRenderPassBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = rp, .framebuffer = fb,
-                                 .renderArea = { { 0, 0 }, { c->width, c->height } } };
+                                 .renderArea = { { 0, 0 }, { c->width, c->height } },
+                                 .clearValueCount = c->load == VK_ATTACHMENT_LOAD_OP_CLEAR ? 1u : 0u, .pClearValues = &cv };
     vkCmdBeginRenderPass(cmd, &bi, VK_SUBPASS_CONTENTS_INLINE);
-    if (c->load == VK_ATTACHMENT_LOAD_OP_CLEAR) {
-        VkClearAttachment ca = { .aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, .colorAttachment = 0, .clearValue = { .color = c->clear } };
-        VkClearRect cr = { .rect = { { 0, 0 }, { c->width, c->height } }, .baseArrayLayer = 0, .layerCount = 1 };
-        vkCmdClearAttachments(cmd, 1, &ca, 1, &cr);
-    }
     return LAGFX_OK;
 }
 
@@ -136,7 +135,7 @@ void lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageView view) {
     bool idle = false;
     for (unsigned i = 0; i < c->n_fb;) {
         if (c->fb[i].view == view) {
-            if (!idle) { vkDeviceWaitIdle(vk->device); idle = true; }
+            if (!idle) { if (vkDeviceWaitIdle(vk->device) != VK_SUCCESS) LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed"); idle = true; }
             vkDestroyFramebuffer(vk->device, c->fb[i].fb, NULL);
             c->fb[i] = c->fb[--c->n_fb];
         } else i++;

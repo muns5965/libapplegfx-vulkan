@@ -197,13 +197,20 @@ int main(void) {
 #ifdef LAGFX_HAVE_VULKAN
     if (dev->vk && dev->vk->initialized) {
         (void)render_and_readback(dev->vk);
-        /* The same clear + readback through the legacy VkRenderPass backend (what a device without dynamic rendering uses), forced on this ICD. */
-        setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
-        CHECK(lagfx_vk_render_backend(dev->vk) == LAGFX_RENDER_LEGACY, "force knob selects the legacy backend");
-        (void)render_and_readback(dev->vk);
-        (void)render_and_readback(dev->vk);   /* second pass: cached render pass / framebuffer path, after the first target was destroyed */
-        unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+        /* The same clear + readback through the legacy VkRenderPass backend. The backend is fixed when the device is created, so this is a NEW device. */
         CHECK(lagfx_vk_render_backend(dev->vk) == LAGFX_RENDER_DYNAMIC, "default backend is dynamic rendering");
+        setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
+        char *err2 = NULL;
+        lagfx_device_t *dev2 = make_device(&err2);
+        free(err2);
+        unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+        if (dev2 && dev2->vk && dev2->vk->initialized) {
+            CHECK(lagfx_vk_render_backend(dev2->vk) == LAGFX_RENDER_LEGACY, "force knob selects the legacy backend at device creation");
+            (void)render_and_readback(dev2->vk);
+            (void)render_and_readback(dev2->vk);   /* second pass: cached render pass / framebuffer path, after the first target was destroyed */
+            CHECK(lagfx_vk_render_backend(dev->vk) == LAGFX_RENDER_DYNAMIC, "the first device keeps its backend");
+        } else SKIP("second device for the legacy backend could not be created");
+        if (dev2) lagfx_device_free(dev2);
     } else {
         SKIP("LAGFX_HAVE_VULKAN set but dev->vk->initialized is false");
     }

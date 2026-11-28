@@ -6,6 +6,8 @@
 #define _GNU_SOURCE
 #include "vulkan/instance.h"
 #include "vulkan/render_pass.h"
+#include "vulkan/render_target.h"
+#include "vulkan/command.h"
 #include "libapplegfx-vulkan.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,45 @@ int main(void) {
         CHECK(lagfx_vk_render_pass_get(vk, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) != VK_NULL_HANDLE, "render pass cache returns a pass");
         lagfx_vk_shutdown(vk);
     } else CHECK(0, "init with the legacy render-pass backend forced");
+    unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
+
+    /* Load/store semantics, backend fixed at init, framebuffer cache beyond 64 entries -- on the legacy backend. */
+    setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
+    vk = NULL;
+    if (lagfx_vk_init(&vk, &dd) == LAGFX_OK && vk && vk->initialized) {
+        unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");   /* must not matter any more */
+        CHECK(lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY, "backend stays legacy after the variable is gone");
+        enum { NRT = 70 };
+        lagfx_vk_render_target_t rt[NRT]; memset(rt, 0, sizeof rt);
+        int made = 0;
+        for (; made < NRT; made++) if (lagfx_vk_render_target_create(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &rt[made]) != LAGFX_OK) break;
+        CHECK(made == NRT, "70 render targets");
+        VkCommandBuffer cb = VK_NULL_HANDLE;
+        if (made == NRT && lagfx_vk_cmdbuf_alloc(vk, &cb) == LAGFX_OK) {
+            VkCommandBufferBeginInfo bi = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT };
+            vkBeginCommandBuffer(cb, &bi);
+            const float red[4] = { 1, 0, 0, 1 };
+            int ok = 1;
+            for (int i = 0; i < NRT; i++) ok &= lagfx_vk_render_clear_color(vk, cb, &rt[i], red) == LAGFX_OK;   /* > 64 framebuffers recorded into ONE command buffer: none may be evicted */
+            CHECK(ok, "70 clears recorded into one command buffer (framebuffer cache grows, no eviction)");
+            /* LOAD must keep the red: begin/end with no draw on target 0 after it was cleared (barrier back to attachment is a no-op here: same layout) */
+            lagfx_render_color_t keep = { .view = rt[0].view, .format = rt[0].format, .width = 8, .height = 8, .load = VK_ATTACHMENT_LOAD_OP_LOAD, .store = VK_ATTACHMENT_STORE_OP_STORE, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL };
+            CHECK(lagfx_vk_render_begin(vk, cb, &keep) == LAGFX_OK, "LOAD pass begins");
+            lagfx_vk_render_end(vk, cb);
+            vkEndCommandBuffer(cb);
+            VkFence f = VK_NULL_HANDLE; VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO };
+            vkCreateFence(vk->device, &fci, NULL, &f);
+            VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
+            CHECK(vkQueueSubmit(vk->graphics_queue, 1, &si, f) == VK_SUCCESS && vkWaitForFences(vk->device, 1, &f, VK_TRUE, 2000000000ull) == VK_SUCCESS, "submit + wait");
+            vkDestroyFence(vk->device, f, NULL);
+            lagfx_vk_cmdbuf_free(vk, cb);
+            uint8_t px[8 * 8 * 4]; size_t stride = 0;
+            CHECK(lagfx_vk_render_target_readback(vk, &rt[0], px, sizeof px, &stride) == LAGFX_OK && px[2] == 255 && px[0] == 0, "LOAD preserved the cleared colour (CLEAR was applied before)");
+            CHECK(lagfx_vk_render_target_readback(vk, &rt[NRT - 1], px, sizeof px, &stride) == LAGFX_OK && px[2] == 255, "the 70th target holds its clear");
+        } else CHECK(0, "command buffer for the load/store test");
+        for (int i = 0; i < made; i++) lagfx_vk_render_target_destroy(vk, &rt[i]);
+        lagfx_vk_shutdown(vk);
+    } else CHECK(0, "init for the load/store test");
     unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
 
     char path[] = "/tmp/legacyfeat-XXXXXX"; int fd = mkstemp(path);

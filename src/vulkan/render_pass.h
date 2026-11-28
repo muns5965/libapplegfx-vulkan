@@ -32,6 +32,8 @@ typedef struct {
     VkImageLayout          layout;   /* the layout the image is in during the pass (COLOR_ATTACHMENT_OPTIMAL) */
 } lagfx_render_color_t;
 
+/* The backend of a device: fixed at lagfx_vk_init (LAGFX_VK_FORCE_LEGACY_RENDERPASS is read there, once); changing the variable later has no effect on an existing device. */
+lagfx_render_backend_t lagfx_vk_render_backend_select(bool have_dynamic_rendering);
 lagfx_render_backend_t lagfx_vk_render_backend(const struct lagfx_vk_state *vk);
 
 /* The (cached) VkRenderPass for one colour format; NULL handle on failure. Used for pipeline creation and by render_begin. */
