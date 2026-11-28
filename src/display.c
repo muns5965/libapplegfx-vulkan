@@ -28,6 +28,7 @@
 #include "vulkan/instance.h"
 #include "vulkan/command.h"
 #include "vulkan/render_target.h"
+#include "vulkan/render_pass.h"
 #include "vulkan/surface_writeback.h"
 #include "vulkan/cursor.h"
 #include "common/log.h"
@@ -695,31 +696,23 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
                          0, 0, NULL, 0, NULL, 1, &barrier);
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    VkRenderingAttachmentInfo color_att = {
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = rt->view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
-        .clearValue  = { .color = { .float32 = { rgba_local[0], rgba_local[1],
-                                                  rgba_local[2],
-                                                  rgba_local[3] } } },
+    lagfx_render_color_t rcol = {
+        .view = rt->view, .format = rt->format, .width = rt->width, .height = rt->height,
+        .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE,
+        .clear = { .float32 = { rgba_local[0], rgba_local[1], rgba_local[2], rgba_local[3] } },
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
-    VkRenderingInfo ri = {
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = { { 0, 0 }, { rt->width, rt->height } },
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &color_att,
-    };
-    vkCmdBeginRendering(cb, &ri);
+    if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) {
+        lagfx_vk_cmdbuf_free(vk, cb);
+        return LAGFX_ERR_BACKEND;
+    }
 
     lagfx_status_t cursor_st = LAGFX_OK;
     if (want_cursor) {
         cursor_st = lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
                                          cs->x, cs->y, cs->hot_x, cs->hot_y);
     }
-    vkCmdEndRendering(cb);
+    lagfx_vk_render_end(vk, cb);
     if (cursor_st != LAGFX_OK) {
         lagfx_vk_cmdbuf_free(vk, cb);
         return cursor_st;
@@ -1085,24 +1078,18 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
                          0, 0, NULL, 0, NULL, 1, &barrier);
     rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    VkRenderingAttachmentInfo color_att = {
-        .sType       = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView   = rt->view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp      = VK_ATTACHMENT_LOAD_OP_LOAD,
-        .storeOp     = VK_ATTACHMENT_STORE_OP_STORE,
+    lagfx_render_color_t rcol = {
+        .view = rt->view, .format = rt->format, .width = rt->width, .height = rt->height,
+        .load = VK_ATTACHMENT_LOAD_OP_LOAD, .store = VK_ATTACHMENT_STORE_OP_STORE,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
     };
-    VkRenderingInfo ri = {
-        .sType                = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea           = { { 0, 0 }, { rt->width, rt->height } },
-        .layerCount           = 1,
-        .colorAttachmentCount = 1,
-        .pColorAttachments    = &color_att,
-    };
-    vkCmdBeginRendering(cb, &ri);
+    if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) {
+        lagfx_vk_cmdbuf_free(vk, cb);
+        return LAGFX_ERR_BACKEND;
+    }
     lagfx_status_t cursor_st = lagfx_vk_cursor_draw(vk, cb, rt_w, rt_h,
                                                     cs->x, cs->y, cs->hot_x, cs->hot_y);
-    vkCmdEndRendering(cb);
+    lagfx_vk_render_end(vk, cb);
     if (cursor_st != LAGFX_OK) {
         lagfx_vk_cmdbuf_free(vk, cb);
         return cursor_st;

@@ -23,6 +23,7 @@
 
 #include "pipeline.h"
 #include "command.h"
+#include "render_pass.h"
 #include "common/log.h"
 #include "shaders/catalog.h"
 
@@ -371,6 +372,18 @@ static lagfx_status_t create_pipeline_layout(struct lagfx_vk_state *vk) {
 
 /* --- Pipeline creation from clear shader pair -------------------- */
 
+/* Dynamic-rendering pipelines chain VkPipelineRenderingCreateInfo and have no render pass; on the legacy backend (render_pass.h) the same pipeline is created
+ * against the cached single-colour VkRenderPass for the format instead. Render-pass compatibility only needs the format / sample count to match. */
+static bool pipeline_use_render_pass(struct lagfx_vk_state *vk, VkGraphicsPipelineCreateInfo *gpci, VkFormat fmt) {
+    if (lagfx_vk_render_backend(vk) != LAGFX_RENDER_LEGACY) return true;
+    VkRenderPass rp = lagfx_vk_render_pass_get(vk, fmt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+    if (rp == VK_NULL_HANDLE) return false;
+    gpci->pNext = NULL;
+    gpci->renderPass = rp;
+    gpci->subpass = 0;
+    return true;
+}
+
 static lagfx_status_t create_passthrough_pipeline(struct lagfx_vk_state *vk) {
     const lagfx_shader_blob_t *vert_blob =
         lagfx_shader_catalog_lookup_stage(LAGFX_SHADER_CLEAR,
@@ -514,6 +527,12 @@ static lagfx_status_t create_passthrough_pipeline(struct lagfx_vk_state *vk) {
         .renderPass          = VK_NULL_HANDLE,
     };
 
+    if (!pipeline_use_render_pass(vk, &gpci, passthrough_color_fmt)) {
+        vkDestroyShaderModule(vk->device, vert_mod, NULL);
+        vkDestroyShaderModule(vk->device, frag_mod, NULL);
+        LAGFX_ERR("passthrough_pipeline: no render pass for the legacy backend");
+        return LAGFX_ERR_BACKEND;
+    }
     vr = vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &gpci,
                                    NULL, &vk->passthrough_pipeline);
     vkDestroyShaderModule(vk->device, vert_mod, NULL);
@@ -1176,6 +1195,12 @@ static lagfx_status_t create_cursor_pipeline(struct lagfx_vk_state *vk) {
         .renderPass          = VK_NULL_HANDLE,
     };
 
+    if (!pipeline_use_render_pass(vk, &gpci, cursor_color_fmt)) {
+        vkDestroyShaderModule(vk->device, vert_mod, NULL);
+        vkDestroyShaderModule(vk->device, frag_mod, NULL);
+        LAGFX_ERR("cursor_pipeline: no render pass for the legacy backend");
+        return LAGFX_ERR_BACKEND;
+    }
     vr = vkCreateGraphicsPipelines(vk->device, VK_NULL_HANDLE, 1, &gpci,
                                     NULL, &vk->cursor_pipeline);
     vkDestroyShaderModule(vk->device, vert_mod, NULL);

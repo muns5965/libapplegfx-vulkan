@@ -6,6 +6,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include "render_pass.h"
 #include "composite.h"
 #include "command.h"
 #include "../shaders/catalog.h"
@@ -144,6 +145,11 @@ static bool composite_ensure(struct lagfx_vk_state *vk) {
         .pMultisampleState = &ms, .pColorBlendState = &cb,
         .pDynamicState = &ds, .layout = vk->composite_layout,
     };
+    if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY) {   /* same pipeline against the cached single-colour render pass (render_pass.h) */
+        VkRenderPass rp = lagfx_vk_render_pass_get(vk, color_fmt, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+        if (rp == VK_NULL_HANDLE) { vkDestroyShaderModule(dev, vmod, NULL); vkDestroyShaderModule(dev, fmod, NULL); return false; }
+        gpci.pNext = NULL; gpci.renderPass = rp; gpci.subpass = 0;
+    }
     VkResult pr = vkCreateGraphicsPipelines(dev, VK_NULL_HANDLE, 1, &gpci, NULL,
                                             &vk->composite_pipeline);
     vkDestroyShaderModule(dev, vmod, NULL);
@@ -242,16 +248,12 @@ lagfx_status_t lagfx_vk_composite_over(struct lagfx_vk_state *vk,
                          0, 0, NULL, 0, NULL, 1, &bar);
     display_rt->layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
 
-    VkRenderingAttachmentInfo att = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-        .imageView = display_rt->view,
-        .imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-        .loadOp = VK_ATTACHMENT_LOAD_OP_LOAD, .storeOp = VK_ATTACHMENT_STORE_OP_STORE };
-    VkRenderingInfo ri = {
-        .sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-        .renderArea = { { 0, 0 }, { display_rt->width, display_rt->height } },
-        .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &att };
-    vkCmdBeginRendering(cb, &ri);
+    lagfx_render_color_t rcol = {
+        .view = display_rt->view, .format = display_rt->format, .width = display_rt->width, .height = display_rt->height,
+        .load = VK_ATTACHMENT_LOAD_OP_LOAD, .store = VK_ATTACHMENT_STORE_OP_STORE,
+        .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+    };
+    if (lagfx_vk_render_begin(vk, cb, &rcol) != LAGFX_OK) { lagfx_vk_cmdbuf_free(vk, cb); return LAGFX_ERR_BACKEND; }
     /* Destination rect (guest-declared placement); w/h == 0 → full-screen.
      * Clamp to the rt so the dynamic viewport/scissor stay valid. */
     uint32_t vx = dst_x, vy = dst_y, vw = dst_w, vh = dst_h;
@@ -268,7 +270,7 @@ lagfx_status_t lagfx_vk_composite_over(struct lagfx_vk_state *vk,
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             vk->composite_layout, 0, 1, &vk->composite_set, 0, NULL);
     vkCmdDraw(cb, 3, 1, 0, 0);
-    vkCmdEndRendering(cb);
+    lagfx_vk_render_end(vk, cb);
 
     if (vkEndCommandBuffer(cb) != VK_SUCCESS) { lagfx_vk_cmdbuf_free(vk, cb); return LAGFX_ERR_BACKEND; }
     VkFence fence = VK_NULL_HANDLE;

@@ -5,6 +5,7 @@
  * initialises and resolves get_buffer_address. NOT verified here: a real Vulkan 1.1 driver. Exit 77 = no usable Vulkan device. */
 #define _GNU_SOURCE
 #include "vulkan/instance.h"
+#include "vulkan/render_pass.h"
 #include "libapplegfx-vulkan.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,6 +26,18 @@ int main(void) {
     CHECK(vk->have_dynamic_rendering, "default path: dynamic rendering");
     CHECK(vk->have_buffer_device_address == (vk->get_buffer_address != NULL), "default path: BDA flag and entry point agree");
     lagfx_vk_shutdown(vk);
+
+    /* The default pipelines created against the legacy render pass: passthrough + cursor exist and the cached pass is used. */
+    setenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS", "1", 1);
+    vk = NULL;
+    if (lagfx_vk_init(&vk, &dd) == LAGFX_OK && vk && vk->initialized) {
+        CHECK(lagfx_vk_render_backend(vk) == LAGFX_RENDER_LEGACY, "forced legacy render pass backend");
+        CHECK(vk->passthrough_pipeline != VK_NULL_HANDLE, "passthrough pipeline built against a VkRenderPass");
+        CHECK(vk->cursor_pipeline != VK_NULL_HANDLE, "cursor pipeline built against a VkRenderPass");
+        CHECK(lagfx_vk_render_pass_get(vk, VK_FORMAT_B8G8R8A8_UNORM, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) != VK_NULL_HANDLE, "render pass cache returns a pass");
+        lagfx_vk_shutdown(vk);
+    } else CHECK(0, "init with the legacy render-pass backend forced");
+    unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
 
     char path[] = "/tmp/legacyfeat-XXXXXX"; int fd = mkstemp(path);
     if (fd < 0) { printf("mkstemp failed\n"); return 1; }
