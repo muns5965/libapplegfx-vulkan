@@ -573,6 +573,31 @@ static int spv_count_op(const uint8_t *spv, size_t sz, uint32_t op) {
     while (i < n) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == op) c++; i += wc; }
     return c;
 }
+/* For each OpImageSampleImplicitLod/ExplicitLod: follow sampledImage -> OpSampledImage -> image -> OpLoad -> (OpAccessChain) -> OpVariable, return its id (0 = chain not resolved). */
+static int spv_sample_vars(const uint8_t *spv, size_t sz, uint32_t *vars, int max) {
+    const uint32_t *w = (const uint32_t *)spv; size_t n = sz / 4; int cnt = 0;
+    for (size_t i = 5; i < n;) { uint32_t wc = w[i] >> 16, op = w[i] & 0xffffu; if (!wc) break;
+        if ((op == 87u || op == 88u) && cnt < max) {
+            uint32_t id = w[i + 3], v = 0;
+            for (int hop = 0; hop < 5 && id; hop++) {
+                uint32_t nid = 0;
+                for (size_t j = 5; j < n;) { uint32_t wj = w[j] >> 16, oj = w[j] & 0xffffu; if (!wj) break;
+                    if (oj == 86u && w[j + 2] == id) { nid = w[j + 3]; break; }            /* OpSampledImage -> image */
+                    if (oj == 61u && w[j + 2] == id) { nid = w[j + 3]; break; }            /* OpLoad -> pointer */
+                    if (oj == 65u && w[j + 2] == id) { nid = w[j + 3]; break; }            /* OpAccessChain -> base */
+                    if (oj == 59u && w[j + 2] == id) { v = id; break; }                    /* OpVariable */
+                    j += wj; }
+                if (v) break;
+                id = nid; }
+            vars[cnt++] = v; }
+        i += wc; }
+    return cnt;
+}
+static int spv_deco_binding(const uint8_t *spv, size_t sz, uint32_t var, uint32_t deco) {
+    const uint32_t *w = (const uint32_t *)spv; size_t n = sz / 4;
+    for (size_t i = 5; i < n;) { uint32_t wc = w[i] >> 16; if (!wc) break; if ((w[i] & 0xffffu) == 71u && w[i + 1] == var && w[i + 2] == deco) return (int)w[i + 3]; i += wc; }
+    return -1;
+}
 static int test_1d_array(void) {
     atex_t at; if (make_1da_tex(&at)) return 1;
     VkSamplerCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, .magFilter = VK_FILTER_NEAREST, .minFilter = VK_FILTER_NEAREST, .mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST,
@@ -598,6 +623,13 @@ static int test_1d_array(void) {
         for (size_t i = 0; i < nb; i++) if (rb[i].kind == LAGFX_SPV_BINDING_SAMPLED_IMAGE && rb[i].image_arrayed && rb[i].image_dim == 1) narr++;
         CHECK(narr == 2, "arr_mixed: two arrayed 2D image bindings expected, got %d", narr);
         CHECK(spv_count_op(spvm, szm, 87u) == 2, "arr_mixed: two image samples expected, got %d", spv_count_op(spvm, szm, 87u));
+        {   uint32_t vars[4]; int ns = spv_sample_vars(spvm, szm, vars, 4);
+            CHECK(ns == 2 && vars[0] && vars[1], "arr_mixed: both samples must resolve to an image variable (got %d samples, vars %u/%u)", ns, ns > 0 ? vars[0] : 0, ns > 1 ? vars[1] : 0);
+            if (ns == 2 && vars[0] && vars[1]) {
+                CHECK(vars[0] != vars[1], "arr_mixed: the two samples read the SAME image variable (%u)", vars[0]);
+                int b0 = spv_deco_binding(spvm, szm, vars[0], 33u /* Binding */), b1 = spv_deco_binding(spvm, szm, vars[1], 33u);
+                CHECK(b0 >= 0 && b1 >= 0 && b0 != b1, "arr_mixed: the two samples must use distinct bindings (%d, %d)", b0, b1);
+            } }
         if (spirv_valid(spvm, szm, "arr_mixed")) return 1;
     }
     {   /* control: a texture argument typed texture1d (not an array) keeps the typed-undef result: translated, but no arrayed image is declared */
