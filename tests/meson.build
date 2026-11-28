@@ -1953,6 +1953,18 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-strict-unit.c')
     workdir : meson.current_source_dir() / '..')
 endif
 
+# AIR atomics: translation MATRIX (space x op x signedness spelling x type, one module per cell, independent oracle). Assembles modules with llvm-as; exits 77 (SKIP) without it.
+if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-matrix-unit.c')
+  air2spv_atomic_matrix_test = executable('air2spv-atomic-matrix-unit',
+    'air2spv-atomic-matrix-unit.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep],
+    build_by_default : true,
+  )
+  test('air2spv atomics translation matrix (unit, llvm-as)', air2spv_atomic_matrix_test,
+    workdir : meson.current_source_dir() / '..')
+endif
+
 # AIR atomics -> SPIR-V: storage class vs scope, memory model (GLSL450, no Vulkan-memory-model capability), spirv-val on vulkan1.2 / 1.3 and on the VulkanKHR variants. Skips (77) without spirv-val.
 if fs.is_file(meson.current_source_dir() / 'air2spv-atomic-spv-unit.c')
   air2spv_atomic_spv_test = executable('air2spv-atomic-spv-unit',
