@@ -144,7 +144,7 @@ static void ms_img_free(struct lagfx_vk_state *vk, ms_img_t *o) {
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->mem) vkFreeMemory(vk->device, o->mem, NULL);
 }
-typedef struct { ms_img_t *m0, *m2, *dp; lagfx_vk_render_target_t *r0, *r2; bool res2, gap; } msc_t;
+typedef struct { ms_img_t *m0, *m2, *dp; lagfx_vk_render_target_t *r0, *r2; bool res2, gap; VkResolveModeFlagBits mode0; } msc_t;
 static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     msc_t *g = arg;
     VkImageMemoryBarrier b[3]; uint32_t nb = 0;
@@ -165,7 +165,7 @@ static bool rec_msc(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     const VkClearColorValue red = { .float32 = { 1, 0, 0, 1 } }, green = { .float32 = { 0, 1, 0, 1 } };
     d.color[0] = (lagfx_render_attachment_t){ .view = g->m0->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_DONT_CARE, .clear = { .color = red },
-        .resolve_view = g->r0->view, .resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT };
+        .resolve_view = g->r0->view, .resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, .resolve_mode = g->mode0 ? g->mode0 : VK_RESOLVE_MODE_AVERAGE_BIT };
     d.color[s2] = (lagfx_render_attachment_t){ .view = g->m2->view, .format = VK_FORMAT_B8G8R8A8_UNORM, .samples = VK_SAMPLE_COUNT_4_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
         .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = g->res2 ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = green } };
     if (g->res2) { d.color[s2].resolve_view = g->r2->view; d.color[s2].resolve_layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL; d.color[s2].resolve_mode = VK_RESOLVE_MODE_AVERAGE_BIT; }
@@ -335,9 +335,16 @@ static void run_backend(int legacy) {
             if (ok && dep) ok = ms_img_make(vk, VK_FORMAT_D32_SFLOAT, VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT, &dp);
             snprintf(m, sizeof m, "msaa resolve combo %d targets (%s)", variant, bn); CHECK(ok, m);
             if (ok) {
-                msc_t g = { &m0, &m2, dep ? &dp : NULL, &r0, &r2, res2, gap };
+                msc_t g = { &m0, &m2, dep ? &dp : NULL, &r0, &r2, res2, gap, 0 };
                 snprintf(m, sizeof m, "msaa combo %d (gap=%d depth=%d resolve2=%d): pass records and runs (%s)", variant, gap, dep, res2, bn); CHECK(one_shot(vk, rec_msc, &g), m);
                 snprintf(m, sizeof m, "msaa combo %d: slot 0 resolved to red (%s)", variant, bn); CHECK(px_is(vk, &r0, 8, 8, 0, 0, 255), m);
+                if (variant == 0 && legacy) {   /* the descriptor entry point itself must refuse a mode the legacy implicit resolve does not perform (BGRA8 = average). Not run on the dynamic backend: SAMPLE_ZERO on a normalised colour attachment is itself invalid there (VUID-VkRenderingAttachmentInfo-imageView-06129) */
+                    g.mode0 = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT;
+                    const bool accepted = one_shot(vk, rec_msc, &g);
+                    snprintf(m, sizeof m, "msaa combo: direct begin_desc with resolve mode SAMPLE_ZERO on BGRA8 is refused on legacy (%s)", bn);
+                    CHECK(!accepted, m);
+                    g.mode0 = 0;
+                }
                 if (res2) { snprintf(m, sizeof m, "msaa combo %d: the second real slot resolved to green, not shifted (%s)", variant, bn); CHECK(px_is(vk, &r2, 8, 8, 0, 255, 0), m); }
             }
             lagfx_vk_render_target_destroy(vk, &r2); lagfx_vk_render_target_destroy(vk, &r0);
@@ -377,7 +384,9 @@ static void run_backend(int legacy) {
           && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, 0) && !lagfx_legacy_resolve_mode_ok(VK_FORMAT_B8G8R8A8_UNORM, VK_RESOLVE_MODE_MIN_BIT),
           "legacy resolve mode: only the mode the implicit resolve performs is accepted (float/normalised average, integer sample 0)");
     { snprintf(m, sizeof m, "validation: messenger live, control delivered, 0 messages before it (%s)", bn); CHECK(lagfx_test_validation_expect(vk, bn) == 0, m); }
+    const uint64_t msgs_before_shutdown = lagfx_vk_validation_msg_count;
     lagfx_vk_shutdown(vk);   /* after a deferral: the deferred view/image/memory go here, after the framebuffers */
+    if (getenv("LAGFX_VK_VALIDATION") && getenv("LAGFX_VK_VALIDATION")[0] == '1') { snprintf(m, sizeof m, "validation: no message during shutdown / cache teardown (%s)", bn); CHECK(lagfx_vk_validation_msg_count == msgs_before_shutdown, m); }
 }
 
 /* E. DEVICE_LOST is seen in ONE place (lagfx_vk_queue_submit / lagfx_vk_wait_fences): after it, no submit of ANY kind reaches the driver (readback, submit_empty, submit_checked,

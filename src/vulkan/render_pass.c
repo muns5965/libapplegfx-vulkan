@@ -221,6 +221,17 @@ lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBu
     if (lagfx_vk_device_lost(vk)) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
 
+    /* the legacy resolve is implicit: a resolve_mode (0 = average) it would not perform is refused here, for every caller of the descriptor entry point, not only the encoder */
+    for (uint32_t i = 0; i < d->color_count; i++) {
+        const lagfx_render_attachment_t *a = &d->color[i];
+        if (a->resolve_view == VK_NULL_HANDLE) continue;
+        const VkResolveModeFlagBits want = a->resolve_mode ? a->resolve_mode : VK_RESOLVE_MODE_AVERAGE_BIT;
+        if (!lagfx_legacy_resolve_mode_ok(a->format, want)) {
+            LAGFX_ERR("render_begin: legacy backend: colour %u asks resolve mode 0x%x, the implicit resolve of this format does not perform it", i, (unsigned)want);
+            return LAGFX_ERR_BACKEND;
+        }
+    }
+
     struct lagfx_render_cache *rc = cache_get(vk);
     if (!rc) return LAGFX_ERR_BACKEND;
     uint32_t na = 0;   /* real attachments, in the order the render pass numbers them (unused colour slots take no entry) */
