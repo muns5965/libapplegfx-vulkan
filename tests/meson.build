@@ -2616,3 +2616,14 @@ spv_lower_i64_switch_test = executable('spv-lower-int64-switch-unit',
   build_by_default : true,
 )
 test('Int64 lowering: OpSwitch literals are not operands (unit)', spv_lower_i64_switch_test)
+
+if vulkan_dep.found()
+  planar422_test = executable('planar422-unit',
+    'planar422-unit.c',
+    include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+    dependencies : pipeline_bundle_deps,
+    c_args : ['-DLAGFX_HAVE_VULKAN=1'],
+    build_by_default : true,
+  )
+  test('422f bi-planar surface mirror: R8 + R8G8 planes, padding-preserving transfers, dirty write-back, remap (lavapipe)', planar422_test)
+endif

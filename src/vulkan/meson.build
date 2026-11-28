@@ -34,6 +34,7 @@ lagfx_sources += files(
   'gamma_apply.c',
   'draw_record.c',
   'surface_writeback.c',
+  'planar422.c',
   'gpu_readback.c',
   'sampler_cache.c',
   'filter_cubic.c',
