@@ -17,12 +17,12 @@ extern uint64_t lagfx_vk_validation_msg_count;
 extern void (*lagfx_vk_validation_hook)(const char *msg);
 
 /* Messages a test KNOWS and explains (matched by substring of the message, e.g. a VUID / message id) are counted apart and do not count as unexplained. */
-static const char *g_val_allow[4]; static unsigned g_val_nallow; static uint64_t g_val_allowed;
+static const char *g_val_allow[8]; static unsigned g_val_nallow; static uint64_t g_val_allowed;
 static inline void lagfx_test_validation_hook(const char *msg) {
     for (unsigned i = 0; i < g_val_nallow; i++) if (strstr(msg, g_val_allow[i])) { g_val_allowed++; return; }
 }
 static inline void lagfx_test_validation_allow(const char *needle) {
-    if (g_val_nallow < 4u) g_val_allow[g_val_nallow++] = needle;
+    if (g_val_nallow < 8u) g_val_allow[g_val_nallow++] = needle;
     lagfx_vk_validation_hook = lagfx_test_validation_hook;
 }
 
@@ -36,6 +36,30 @@ static inline int lagfx_test_validation_control(struct lagfx_vk_state *vk) {
     const uint64_t seen = lagfx_vk_validation_msg_count - base;
     lagfx_vk_validation_msg_count = base;   /* the control's own message is expected; everything else must stay at 0 */
     return seen > 0 ? 1 : 0;
+}
+
+/* A validation layer older than the headers 1.3.287 does not know VK_KHR_dynamic_rendering_local_read (the RENDERING_LOCAL_READ layout, the barrier exemption inside a dynamic
+ * rendering instance, input attachments without a render pass) nor the ARM rasterization-order flag on a dynamic pipeline: its messages about exactly those are explained by the
+ * layer's age, NOT proven harmless. They are allowed ONLY while the installed layer is that old; with a newer layer the same messages fail the test. Returns the layer's spec
+ * version (0 = not found). */
+static inline uint32_t lagfx_test_validation_layer_version(void) {
+    uint32_t n = 0; uint32_t v = 0;
+    if (vkEnumerateInstanceLayerProperties(&n, NULL) != VK_SUCCESS || n == 0) return 0;
+    VkLayerProperties *l = calloc(n, sizeof *l);
+    if (l && vkEnumerateInstanceLayerProperties(&n, l) == VK_SUCCESS)
+        for (uint32_t i = 0; i < n; i++) if (!strcmp(l[i].layerName, "VK_LAYER_KHRONOS_validation")) v = l[i].specVersion;
+    free(l);
+    return v;
+}
+static inline void lagfx_test_validation_allow_old_layer_localread(void) {
+    const uint32_t v = lagfx_test_validation_layer_version();
+    if (v == 0 || v >= VK_MAKE_API_VERSION(0, 1, 3, 287)) return;
+    printf("INFO: validation layer %u.%u.%u predates local read (1.3.287): its local-read / raster-order messages are listed as explained-by-layer-age, not proven harmless\n",
+           VK_VERSION_MAJOR(v), VK_VERSION_MINOR(v), VK_VERSION_PATCH(v));
+    lagfx_test_validation_allow("VUID-vkCmdPipelineBarrier-shaderTileImageColorReadAccess-08718");
+    lagfx_test_validation_allow("VUID-vkCmdPipelineBarrier-None-08719");
+    lagfx_test_validation_allow("VUID-VkWriteDescriptorSet-descriptorType-04151");
+    lagfx_test_validation_allow("VUID-VkGraphicsPipelineCreateInfo-renderPass-06061");
 }
 
 /* returns 0 when everything holds (or validation is not requested and not active), nonzero on a failure; prints one INFO line either way */

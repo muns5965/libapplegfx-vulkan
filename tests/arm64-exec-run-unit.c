@@ -888,6 +888,12 @@ static void test_exec_depth_unsupported(void) {
 int main(void) {
     /* explained: a fragment shader that writes colour output 0 while the pass leaves slot 0 empty (mrt_case "only slot 1 attached"): Vulkan discards that output; the layer says so as a warning */
     lagfx_test_validation_allow("Undefined-Value-ShaderOutputNotConsumed");
+    /* explained: a depth-only pass (one unused colour slot) whose fragment shader still declares a colour output; the layer warns, Vulkan discards the output */
+    lagfx_test_validation_allow("Undefined-Value-ShaderFragmentOutputMismatch");
+    /* explained by the layer's age (see validation-control.h), only while the installed layer predates local read */
+    lagfx_test_validation_allow_old_layer_localread();
+    /* ARM rasterization-order flag on a dynamic pipeline (VUID ...flags-06482): the layer rejects it without knowing the ARM/EXT rasterization-order extension form */
+    if (lagfx_test_validation_layer_version() && lagfx_test_validation_layer_version() < VK_MAKE_API_VERSION(0, 1, 3, 287)) lagfx_test_validation_allow("VUID-VkGraphicsPipelineCreateInfo-flags-06482");
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
     assert(g_dev);
@@ -910,6 +916,12 @@ int main(void) {
         if (g_fs_mrt) vkDestroyShaderModule(g_dev->vk->device, g_fs_mrt, NULL);
         if (g_vs3) vkDestroyShaderModule(g_dev->vk->device, g_vs3, NULL);
         if (g_fs_green) vkDestroyShaderModule(g_dev->vk->device, g_fs_green, NULL);
+        if (g_fs_fetch) vkDestroyShaderModule(g_dev->vk->device, g_fs_fetch, NULL);   /* test-owned modules that were never destroyed (VUID-vkDestroyDevice-device-05137), found with a create/destroy trace */
+        if (g_fs_fetch2) vkDestroyShaderModule(g_dev->vk->device, g_fs_fetch2, NULL);
+        if (g_fetch_pl) vkDestroyPipelineLayout(g_dev->vk->device, g_fetch_pl, NULL);
+        if (g_fetch_dsl) vkDestroyDescriptorSetLayout(g_dev->vk->device, g_fetch_dsl, NULL);
+        if (g_fetch2_pl) vkDestroyPipelineLayout(g_dev->vk->device, g_fetch2_pl, NULL);
+        if (g_fetch2_dsl) vkDestroyDescriptorSetLayout(g_dev->vk->device, g_fetch2_dsl, NULL);
     } else {
         puts("SKIP: no Vulkan device; execution tests not run");
         lagfx_device_free(g_dev); free(g_mem);

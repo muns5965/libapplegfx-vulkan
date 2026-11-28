@@ -1587,9 +1587,9 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
     dependencies : er_deps,
     build_by_default : true,
   )
-  test('arm64 exec render execution (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1'])
-  test('arm64 exec render, local read forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_LOCAL_READ=1'])
-  test('arm64 exec render, raster order forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
+  test('arm64 exec render execution (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1'])
+  test('arm64 exec render, local read forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_NO_LOCAL_READ=1'])
+  test('arm64 exec render, raster order forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
   # The same suite on the legacy VkRenderPass backend (what a device without dynamic rendering uses): colour / MRT (no gaps) / depth / stencil / blend / tile / depth-only; MSAA, framebuffer fetch
   # and empty colour slots are refused there (the test branches on lagfx_vk_render_backend).
   test('arm64 exec render, legacy render pass forced (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
