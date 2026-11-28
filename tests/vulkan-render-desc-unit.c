@@ -702,6 +702,14 @@ int main(void) {
             printf("INFO simulated 1.1: demote via extension %s (device exts: %s)\n", cap ? "ENABLED" : "not offered by this ICD", vk->dev_exts);
             if (getenv("LAGFX_REQUIRE_DEMOTE_EXT")) CHECK(cap, "demote extension path required but not enabled");
             CHECK(vk->have_eds == (strstr(vk->dev_exts, "VK_EXT_extended_dynamic_state") != NULL), "EDS1 table <=> extension enabled (simulated 1.1)");
+            {   /* Subgroup Size Control below 1.3 (S8: min/max came from the 1.1 fixed size before): enabled <=> sg_control; range from the EXT properties */
+                bool sgx = strstr(vk->dev_exts, "VK_EXT_subgroup_size_control") != NULL;
+                CHECK(vk->sg_control == sgx || (!sgx && !vk->sg_control), "subgroup size control <=> VK_EXT_subgroup_size_control enabled (simulated 1.1)");
+                CHECK(!sgx || vk->sg_ext_queried, "extension enabled -> min/max read from the EXT properties");
+                CHECK(!vk->sg_ext_queried || (vk->sg_min >= 1u && vk->sg_min <= vk->sg_max), "EXT range sane");
+                printf("INFO simulated 1.1: subgroup size=%u min=%u max=%u control=%d via %s\n", vk->sg_size, vk->sg_min, vk->sg_max, (int)vk->sg_control, vk->sg_ext_queried ? "EXT" : "none (extension absent)");
+                if (getenv("LAGFX_REQUIRE_SGC_EXT")) CHECK(sgx && vk->sg_control, "subgroup size control required but not enabled");
+            }
         }
         test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", false);
         test_ds_resolve(vk, "legacy, simulated 1.1 (KHR entry points)", true);

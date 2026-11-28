@@ -460,6 +460,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
     const bool ext_eds1 = has_ext(dext, dext_n, "VK_EXT_extended_dynamic_state");   /* evaluated here: dext is freed below */
+    const bool ext_sgc = has_ext(dext, dext_n, "VK_EXT_subgroup_size_control");   /* pre-1.3 form of subgroup size control (same feature/property layout as the 1.3 core structs) */
     const bool ext_demote = has_ext(dext, dext_n, "VK_EXT_shader_demote_to_helper_invocation");   /* the pre-1.3 form of DemoteToHelperInvocation (same feature, same SPIR-V capability; the SPIR-V side declares SPV_EXT_demote_to_helper_invocation below 1.6) */
     /* Opt-in cubic filtering (filter_cubic.h): only requested with LAGFX_CUBIC=1; the extension has no feature struct. The EXT form is preferred, the IMG alias is used on a device that lacks it. */
     const char *cubic_ext = !lagfx_cubic_optin() ? NULL : has_ext(dext, dext_n, "VK_EXT_filter_cubic") ? "VK_EXT_filter_cubic" : has_ext(dext, dext_n, "VK_IMG_filter_cubic") ? "VK_IMG_filter_cubic" : NULL;
@@ -691,6 +692,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
     if (probe13.shaderDemoteToHelperInvocation) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* core 1.3 feature (VK_EXT_shader_demote_to_helper_invocation promoted); a 1.2 device with only the extension is not used: discard falls back to OpKill */
     bool spirv14_core = VK_VERSION_MAJOR(s->phys_props.apiVersion) > 1u || (VK_VERSION_MAJOR(s->phys_props.apiVersion) == 1u && VK_VERSION_MINOR(s->phys_props.apiVersion) >= 2u);
     if (spirv14_core || have_spirv14_ext) caps_en |= LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_SPIRV14);
+    bool sgc_ext_ok = false;
     {   /* simd-group (subgroup) operations a compute shader may use: Metal's simd_* intrinsics map to GroupNonUniform*; the device must offer them in the COMPUTE stage */
         VkPhysicalDeviceVulkan13Properties sgp13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES };
         VkPhysicalDeviceVulkan11Properties sgp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES };
@@ -709,6 +711,19 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             s->sg_required_stages = sgp13.requiredSubgroupSizeStages;
             s->sg_control = probe13.subgroupSizeControl == VK_TRUE && (sgp13.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0;
             s->sg_full = probe13.computeFullSubgroups == VK_TRUE;
+        } else if (ext_sgc && !getenv("LAGFX_VK_NO_SGC_EXT")) {   /* Vulkan 1.1 / 1.2 device (S8 Adreno 730 lists the extension): its own property + feature structs; the 1.3 ones are not valid here */
+            VkPhysicalDeviceSubgroupSizeControlPropertiesEXT sp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES_EXT };
+            VkPhysicalDeviceProperties2 pq = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sp };
+            vkGetPhysicalDeviceProperties2(s->phys_device, &pq);
+            VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sf = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT };
+            VkPhysicalDeviceFeatures2 fq = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &sf };
+            vkGetPhysicalDeviceFeatures2(s->phys_device, &fq);
+            s->sg_min = sp.minSubgroupSize, s->sg_max = sp.maxSubgroupSize;
+            s->sg_required_stages = sp.requiredSubgroupSizeStages;
+            sgc_ext_ok = sf.subgroupSizeControl == VK_TRUE && (sp.requiredSubgroupSizeStages & VK_SHADER_STAGE_COMPUTE_BIT) != 0 && wanted_dev_n < 22u;
+            s->sg_control = sgc_ext_ok;
+            s->sg_full = sf.computeFullSubgroups == VK_TRUE;
+            s->sg_ext_queried = true;
         }
     }
     if (legacy_feat && have_buffer_device_address && wanted_dev_n < 20) wanted_dev_exts[wanted_dev_n++] = "VK_KHR_buffer_device_address";
@@ -724,6 +739,11 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         demote_en.pNext = feat13.pNext; feat13.pNext = &demote_en;
         wanted_dev_exts[wanted_dev_n++] = "VK_EXT_shader_demote_to_helper_invocation";
     } else if (demote_ext_ok) caps_en &= ~LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE);   /* cannot enable the extension: do not advertise the capability */
+    VkPhysicalDeviceSubgroupSizeControlFeaturesEXT sgc_en = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES_EXT, .subgroupSizeControl = VK_TRUE };
+    if (sgc_ext_ok && wanted_dev_n < 22u) {   /* linked before the legacy chain takes feat13.pNext as its tail */
+        sgc_en.pNext = feat13.pNext; feat13.pNext = &sgc_en;
+        wanted_dev_exts[wanted_dev_n++] = "VK_EXT_subgroup_size_control";
+    } else if (sgc_ext_ok) s->sg_control = false;
     feat12.shaderInt8 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT8)) ? VK_TRUE : VK_FALSE;
     feat12.shaderFloat16 = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_FLOAT16)) ? VK_TRUE : VK_FALSE;
     feat12.shaderBufferInt64Atomics = (caps_en & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_ATOMIC64_BUF)) ? VK_TRUE : VK_FALSE;      /* each feature follows its own cap: a device with only one of them is still created */
@@ -947,7 +967,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         vkGetPhysicalDeviceProperties2(s->phys_device, &dp2);
         snprintf(s->driver_name, sizeof s->driver_name, "%s", drv.driverName), snprintf(s->driver_info, sizeof s->driver_info, "%s", drv.driverInfo);
     }
-    if (feat13.subgroupSizeControl != VK_TRUE) s->sg_control = false;
+    if (feat13.subgroupSizeControl != VK_TRUE && !s->sg_ext_queried) s->sg_control = false;   /* the pre-1.3 path enabled it through sgc_en */
     {   /* what vkCreateDevice was actually given: the feature VALUES from the structs chained into dci (feat2 / feat11 / feat12 / feat13, lr_en and ro_en only when chained: have_local_read / have_raster_order),
          * and the real wanted_dev_exts array. VK_EXT_shader_tile_image is never requested here (no such extension name in wanted_dev_exts, no tile-image feature struct in the chain) -> 0. */
         const lagfx_vkdev_enabled_t en = {
@@ -966,8 +986,8 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         if (!sg_printed) {
             sg_printed = true;
             char sl[300];
-            snprintf(sl, sizeof sl, "g7-gpu-feat: subgroup size=%u min=%u max=%u subgroupSizeControl=%d requiredSubgroupSizeStages=0x%x computeFullSubgroups=%d pin32=%s",
-                     s->sg_size, s->sg_min, s->sg_max, (int)s->sg_control, (unsigned)s->sg_required_stages, (int)s->sg_full,
+            snprintf(sl, sizeof sl, "g7-gpu-feat: subgroup size=%u min=%u max=%u via=%s subgroupSizeControl=%d requiredSubgroupSizeStages=0x%x computeFullSubgroups=%d pin32=%s",
+                     s->sg_size, s->sg_min, s->sg_max, s->sg_ext_queried ? "EXT" : (s->phys_props.apiVersion >= VK_API_VERSION_1_3 ? "core13" : "none"), (int)s->sg_control, (unsigned)s->sg_required_stages, (int)s->sg_full,
                      s->sg_size == 32u ? "native" : lagfx_vk_can_pin_subgroup32(s) ? "required_size" : "no(lane-mapped tile kernels are skipped)");
             fprintf(stderr, "%s\n", sl);
             LAGFX_LOG("%s", sl);
