@@ -65,7 +65,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            meson ninja-build pkg-config clang \
+            meson ninja-build pkg-config clang llvm-20 \
             libvulkan-dev vulkan-tools \
             vulkan-validationlayers mesa-vulkan-drivers \
             glslang-tools spirv-tools
@@ -113,6 +113,8 @@ jobs:
           build/android-memory-mock
 
       - name: Test
+        env:
+          LAGFX_REQUIRE_LLC_SPIRV: "1"   # an llc without the SPIR-V target is a FAIL here, not a SKIP (llvm-20 is installed above)
         run: meson test -C build --print-errorlogs
 
       - name: Assert vulkan-* tests actually ran

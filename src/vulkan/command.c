@@ -210,7 +210,7 @@ lagfx_status_t lagfx_vk_submit_empty(struct lagfx_vk_state *vk) {
         .commandBufferCount   = 1,
         .pCommandBuffers      = &cb,
     };
-    vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    vr = lagfx_vk_queue_submit(vk, &si, fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("submit_empty: vkQueueSubmit failed (VkResult=%d)",
                   (int)vr);
@@ -224,7 +224,7 @@ lagfx_status_t lagfx_vk_submit_empty(struct lagfx_vk_state *vk) {
      * sub-millisecond; the generous timeout is defensive against a
      * busy CI host. If it fires we want a clear failure, not a hang. */
     const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
-    vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+    vr = lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE, timeout_ns);
     lagfx_status_t result = LAGFX_OK;
     if (vr == VK_TIMEOUT) {
         LAGFX_ERR("submit_empty: vkWaitForFences timed out after 1s");
@@ -353,7 +353,7 @@ lagfx_status_t lagfx_vk_end_frame(struct lagfx_vk_state *vk) {
         .commandBufferCount = 1,
         .pCommandBuffers    = &vk->frame_cmdbuf,
     };
-    vr = vkQueueSubmit(vk->graphics_queue, 1, &si, vk->frame_fence);
+    vr = lagfx_vk_queue_submit(vk, &si, vk->frame_fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("end_frame: vkQueueSubmit failed (VkResult=%d)", (int)vr);
         lagfx_vk_cmdbuf_free(vk, vk->frame_cmdbuf);
@@ -449,13 +449,39 @@ lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence 
     if (r == VK_SUCCESS) return LAGFX_VK_WAIT_OK;
     if (r == VK_TIMEOUT || r == VK_NOT_READY) { lagfx_vk_note_gpu_failure(true); LAGFX_WARN("vk wait: timeout (slow, not failed)"); return LAGFX_VK_WAIT_TIMEOUT; }
     lagfx_vk_note_gpu_failure(false);
+    if (r == VK_ERROR_DEVICE_LOST) lagfx_vk_mark_device_lost(vk);
     LAGFX_ERR("vk wait: VkResult %d (device lost?)", (int)r);
     return LAGFX_VK_WAIT_FAILED;
 }
 
+static atomic_int g_inject_submit = 0x7fffffff;
+void lagfx_vk_test_inject_submit_result(int vkresult) { atomic_store(&g_inject_submit, vkresult); }
+
+bool lagfx_vk_device_lost(const struct lagfx_vk_state *vk) { return vk && __atomic_load_n(&vk->device_lost, __ATOMIC_ACQUIRE); }
+void lagfx_vk_mark_device_lost(struct lagfx_vk_state *vk) {
+    if (vk && !__atomic_exchange_n(&vk->device_lost, true, __ATOMIC_ACQ_REL)) LAGFX_ERR("vk: VK_ERROR_DEVICE_LOST seen; no new GPU work is submitted from now on (objects can still be destroyed)");
+}
+
+VkResult lagfx_vk_queue_submit(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence) {
+    if (!vk || !si || vk->graphics_queue == VK_NULL_HANDLE) return VK_ERROR_INITIALIZATION_FAILED;
+    int inj = atomic_load(&g_inject_submit);
+    VkResult r;
+    if (lagfx_vk_device_lost(vk)) r = VK_ERROR_DEVICE_LOST;   /* nothing new goes to a lost device */
+    else if (inj != 0x7fffffff) r = (VkResult)inj;            /* test seam: reported, not submitted */
+    else r = vkQueueSubmit(vk->graphics_queue, 1, si, fence);
+    if (r == VK_ERROR_DEVICE_LOST) lagfx_vk_mark_device_lost(vk);
+    return r;
+}
+
+VkResult lagfx_vk_wait_fences(struct lagfx_vk_state *vk, uint32_t n, const VkFence *fences, VkBool32 wait_all, uint64_t timeout_ns) {
+    VkResult r = vkWaitForFences(vk->device, n, fences, wait_all, timeout_ns);
+    if (r == VK_ERROR_DEVICE_LOST) lagfx_vk_mark_device_lost(vk);
+    return r;
+}
+
 lagfx_status_t lagfx_vk_submit_checked(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence) {
     if (!vk || !si || vk->graphics_queue == VK_NULL_HANDLE) return LAGFX_ERR_INVALID_ARG;
-    VkResult r = vkQueueSubmit(vk->graphics_queue, 1, si, fence);
+    VkResult r = lagfx_vk_queue_submit(vk, si, fence);
     if (r == VK_SUCCESS) return LAGFX_OK;
     atomic_fetch_add(&g_gpu_submit_failures, 1);
     LAGFX_ERR("vkQueueSubmit failed: VkResult %d", (int)r);

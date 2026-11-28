@@ -625,7 +625,13 @@ typedef struct lagfx_protocol {
                 uint64_t stub_fbfetch_why[5];   /* stub_fbfetch by reason (LAGFX_A64_FBF_*; [0] unused) */
                 uint64_t stub_fbfetch, fbfetch_pipes, fbfetch_draws, blend_decoded, blend_off, color1_seen, stub_blend, stub_depth_stencil, stub_color_format_from_pass, stub_raster_state, stub_vertex_textures;
                 uint64_t pipes_built, pipe_build_failed, pipe_replaced, topo[8];
-                uint64_t legacy_shape_refused;   /* VkRenderPass backend: pipelines refused because their attachments are not expressible (depth-only, empty colour slot, mixed depth/stencil formats) */
+                /* VkRenderPass backend, one counter per cause (indices = lagfx_legacy_refuse_t, array of 12 >= LAGFX_LR__COUNT):
+                 *   legacy_shape_refused = pipelines refused (sum of legacy_pipe_why), counted once per (pipeline, formats, topology): failures are cached;
+                 *   legacy_pipe_why[]    those pipelines by cause (NO_COLOR, DS_MIXED, NO_DS, PASS);
+                 *   legacy_begin_why[]   passes refused by cause (ARGS, MSAA, RESOLVE, SLOT, DS, BEGIN), counted per pass attempt;
+                 *   legacy_draws_dropped_pipe  DRAWS dropped for want of a pipeline on this backend (refused or build failed; every draw, not once);
+                 *   legacy_gap_passes    passes begun with an unused colour slot (supported). */
+                uint64_t legacy_shape_refused, legacy_pipe_why[12], legacy_begin_why[12], legacy_draws_dropped_pipe, legacy_gap_passes;
                 uint64_t desc_sets, desc_unbound, desc_unaligned, desc_feedback, desc_failed, samplers, sampler_failed, point_no_size;
                 uint64_t dump_objects, dump_bytes, dump_files, dump_skipped_cap, dump_truncated, dump_draws, dump_table_full;
                 uint64_t cap_draws, cap_passes, cap_snaps, cap_bytes, cap_truncated, cap_skipped_filter, cap_skipped_cap, cap_failed, cap_blobs_dedup;   /* arm64_capture.c */

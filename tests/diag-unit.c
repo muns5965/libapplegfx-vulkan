@@ -121,6 +121,16 @@ int main(void) {
         free(dev);
     }
 
+    {   /* VkRenderPass backend refusals reach the g7-gpu-pipe line, by cause (they were counted but never printed before) */
+        p->diag2.exec.pipe.legacy_shape_refused = 3; p->diag2.exec.pipe.legacy_pipe_why[6] = 2; p->diag2.exec.pipe.legacy_pipe_why[9] = 1;
+        p->diag2.exec.pipe.legacy_draws_dropped_pipe = 17; p->diag2.exec.pipe.legacy_gap_passes = 4;
+        p->diag2.exec.pipe.legacy_begin_why[2] = 5; p->diag2.exec.pipe.legacy_begin_why[3] = 1;
+        lagfx_diag_stats(p, now_ns_for_test(), true);
+        assert(file_lines(path, "legacy[pipes_refused=3 draws_dropped=17 gap_passes=4 pipe_no_color=2 pipe_pass=1 begin_msaa=5 begin_resolve=1]") == 1);
+        memset(&p->diag2.exec.pipe.legacy_pipe_why, 0, sizeof p->diag2.exec.pipe.legacy_pipe_why); memset(&p->diag2.exec.pipe.legacy_begin_why, 0, sizeof p->diag2.exec.pipe.legacy_begin_why);
+        p->diag2.exec.pipe.legacy_shape_refused = p->diag2.exec.pipe.legacy_draws_dropped_pipe = p->diag2.exec.pipe.legacy_gap_passes = 0;
+    }
+
     {   /* idle triage line: absent without the completion queue; with it, the last poll time is recorded and the counters reach the line */
         long ni = file_lines(path, "g7-gpu-idle:");
         lagfx_diag_stats(p, now_ns_for_test(), true);

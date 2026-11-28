@@ -73,6 +73,17 @@ lagfx_vk_wait_result_t lagfx_vk_wait_bounded(struct lagfx_vk_state *vk, VkFence 
 /* vkQueueSubmit with the result checked and counted. LAGFX_OK or LAGFX_ERR_BACKEND (the fence is then NOT pending). */
 lagfx_status_t lagfx_vk_submit_checked(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence);
 
+/* === Device loss: the common submit / wait layer ===
+ * Every vkQueueSubmit / vkWaitForFences of the library goes through these two, so that VK_ERROR_DEVICE_LOST is seen in ONE place: it sets the sticky vk->device_lost flag, and from then on
+ * lagfx_vk_queue_submit() submits NOTHING (returns VK_ERROR_DEVICE_LOST, counted as a submit failure). Waiting stays allowed (it returns at once on a lost device) and destroying objects
+ * stays allowed. The flag is read / written atomically. */
+bool     lagfx_vk_device_lost(const struct lagfx_vk_state *vk);
+void     lagfx_vk_mark_device_lost(struct lagfx_vk_state *vk);
+VkResult lagfx_vk_queue_submit(struct lagfx_vk_state *vk, const VkSubmitInfo *si, VkFence fence);   /* one submit on the graphics queue */
+VkResult lagfx_vk_wait_fences(struct lagfx_vk_state *vk, uint32_t n, const VkFence *fences, VkBool32 wait_all, uint64_t timeout_ns);
+/* Test seam: make the next lagfx_vk_queue_submit return this VkResult WITHOUT submitting (0x7fffffff = off); VK_ERROR_DEVICE_LOST also sets the sticky flag. */
+void     lagfx_vk_test_inject_submit_result(int vkresult);
+
 /* Free a previously-allocated primary command buffer. */
 void lagfx_vk_cmdbuf_free(struct lagfx_vk_state *vk, VkCommandBuffer cb);
 

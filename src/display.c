@@ -116,9 +116,9 @@ static void display_rt_tint(lagfx_display_t *disp) {
                 .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                 .commandBufferCount = 1, .pCommandBuffers = &cb,
             };
-            VkResult submit = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+            VkResult submit = lagfx_vk_queue_submit(vk, &si, fence);
             if (submit == VK_SUCCESS &&
-                vkWaitForFences(vk->device, 1, &fence, VK_TRUE, 1000000000ull) != VK_SUCCESS) {
+                lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE, 1000000000ull) != VK_SUCCESS) {
                 VkResult idle = vkDeviceWaitIdle(vk->device);
                 if (idle != VK_SUCCESS && idle != VK_ERROR_DEVICE_LOST) return;
             }
@@ -305,7 +305,7 @@ void lagfx_display_free(lagfx_display_t *display) {
         for (uint32_t i = 0; i < LAGFX_DISPLAY_STAGING_SLOTS; ++i) {
             lagfx_display_staging_slot_t *s = &display->staging[i];
             if (s->in_flight && s->fence != VK_NULL_HANDLE) {
-                VkResult wr = vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
+                VkResult wr = lagfx_vk_wait_fences(vk, 1, &s->fence, VK_TRUE,
                                                1000ull * 1000ull * 1000ull);
                 if (wr != VK_SUCCESS) {
                     VkResult idle = vkDeviceWaitIdle(vk->device);
@@ -742,7 +742,7 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
         .commandBufferCount = 1,
         .pCommandBuffers    = &cb,
     };
-    vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    vr = lagfx_vk_queue_submit(vk, &si, fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("display_submit_clear: vkQueueSubmit failed (%d)", (int)vr);
         vkDestroyFence(vk->device, fence, NULL);
@@ -751,7 +751,7 @@ lagfx_status_t lagfx_display_submit_clear_color(lagfx_display_t *display,
     }
 
     const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
-    vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+    vr = lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE, timeout_ns);
     if (vr != VK_SUCCESS) {
         vk->cursor_sync_failed = true;
         VkResult idle = vkDeviceWaitIdle(vk->device);
@@ -973,7 +973,7 @@ static lagfx_status_t display_staging_ring_ensure(lagfx_display_t *display,
     for (uint32_t i = 0; i < LAGFX_DISPLAY_STAGING_SLOTS; ++i) {
         lagfx_display_staging_slot_t *s = &display->staging[i];
         if (s->in_flight && s->fence != VK_NULL_HANDLE) {
-            VkResult wr = vkWaitForFences(vk->device, 1, &s->fence, VK_TRUE,
+            VkResult wr = lagfx_vk_wait_fences(vk, 1, &s->fence, VK_TRUE,
                                            1000ull * 1000ull * 1000ull);
             if (wr != VK_SUCCESS) {
                 VkResult idle = vkDeviceWaitIdle(vk->device);
@@ -1114,9 +1114,9 @@ lagfx_status_t lagfx_display_overlay_cursor(lagfx_display_t *display) {
         .commandBufferCount = 1,
         .pCommandBuffers    = &cb,
     };
-    VkResult vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    VkResult vr = lagfx_vk_queue_submit(vk, &si, fence);
     if (vr == VK_SUCCESS) {
-        vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
+        vr = lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE,
                              1000ull * 1000ull * 1000ull);
         if (vr != VK_SUCCESS) {
             vk->cursor_sync_failed = true;
@@ -1303,7 +1303,7 @@ lagfx_status_t lagfx_display_submit_rendered_frame(
         (slot_idx + 1u) % LAGFX_DISPLAY_STAGING_SLOTS;
 
     if (slot->in_flight) {
-        VkResult wr = vkWaitForFences(vk->device, 1, &slot->fence, VK_TRUE,
+        VkResult wr = lagfx_vk_wait_fences(vk, 1, &slot->fence, VK_TRUE,
                                        1000ull * 1000ull * 1000ull);
         if (wr != VK_SUCCESS) {
             LAGFX_ERR("display_submit_rendered_frame: prior fence wait failed (%d)",
@@ -1450,7 +1450,7 @@ lagfx_status_t lagfx_display_submit_rendered_frame(
             .commandBufferCount = 1,
             .pCommandBuffers    = &cb,
         };
-        vr = vkQueueSubmit(vk->graphics_queue, 1, &si, slot->fence);
+        vr = lagfx_vk_queue_submit(vk, &si, slot->fence);
         if (vr != VK_SUCCESS) {
             LAGFX_ERR("display_submit_rendered_frame: vkQueueSubmit failed (%d)",
                       (int)vr);
@@ -1462,7 +1462,7 @@ lagfx_status_t lagfx_display_submit_rendered_frame(
 
     {
         const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
-        vr = vkWaitForFences(vk->device, 1, &slot->fence, VK_TRUE, timeout_ns);
+        vr = lagfx_vk_wait_fences(vk, 1, &slot->fence, VK_TRUE, timeout_ns);
         if (vr != VK_SUCCESS) {
             LAGFX_ERR("display_submit_rendered_frame: vkWaitForFences failed (%d)",
                       (int)vr);

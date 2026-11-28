@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: MIT */
 #include "render_pass.h"
 #include "instance.h"
+#include "command.h"
 #include "common/log.h"
 #include <pthread.h>
 #include <stdlib.h>
@@ -68,12 +69,17 @@ static VkSampleCountFlagBits samples_of(const lagfx_render_attachment_t *a) { re
 
 static bool desc_valid(const lagfx_render_desc_t *d, bool need_views) {
     if (!d || d->color_count > LAGFX_RENDER_MAX_COLOR) return false;
-    if (d->color_count == 0 && !d->has_depth_stencil) return false;
     if (need_views && (!d->width || !d->height)) return false;
+    uint32_t used = d->has_depth_stencil ? 1u : 0u;
     for (uint32_t i = 0; i < d->color_count; i++) {
-        if (d->color[i].format == VK_FORMAT_UNDEFINED) return false;
+        if (d->color[i].format == VK_FORMAT_UNDEFINED) {   /* an unused slot (format UNDEFINED, no view): it keeps its place, so the shader's output locations do not move */
+            if (need_views && d->color[i].view != VK_NULL_HANDLE) return false;
+            continue;
+        }
+        used++;
         if (need_views && d->color[i].view == VK_NULL_HANDLE) return false;
     }
+    if (used == 0u) return false;   /* a pass needs at least one real attachment */
     if (d->has_depth_stencil) {
         if (d->depth_stencil.format == VK_FORMAT_UNDEFINED) return false;
         if (need_views && d->depth_stencil.view == VK_NULL_HANDLE) return false;
@@ -87,14 +93,15 @@ static void make_key(rpkey_t *k, const lagfx_render_desc_t *d, bool compat) {
     k->ncolor = d->color_count;
     for (uint32_t i = 0; i < d->color_count; i++) {
         const lagfx_render_attachment_t *a = &d->color[i];
-        k->a[i] = (akey_t){ a->format, samples_of(a), a->layout,
+        if (a->format == VK_FORMAT_UNDEFINED) continue;   /* unused slot: all-zero entry, only its position is part of the key */
+        k->a[i] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,   /* never UNDEFINED: not valid for an attachment reference or a LOAD */
                             compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, VK_ATTACHMENT_LOAD_OP_DONT_CARE,
                             compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, VK_ATTACHMENT_STORE_OP_DONT_CARE };
     }
     if (d->has_depth_stencil) {
         const lagfx_render_attachment_t *a = &d->depth_stencil;
         k->has_ds = 1;
-        k->a[d->color_count] = (akey_t){ a->format, samples_of(a), a->layout,
+        k->a[d->color_count] = (akey_t){ a->format, samples_of(a), a->layout != VK_IMAGE_LAYOUT_UNDEFINED ? a->layout : VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                                          compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->load, compat ? VK_ATTACHMENT_LOAD_OP_LOAD : a->stencil_load,
                                          compat ? VK_ATTACHMENT_STORE_OP_STORE : a->store, compat ? VK_ATTACHMENT_STORE_OP_STORE : a->stencil_store };
     }
@@ -108,15 +115,18 @@ static VkRenderPass rp_locked(struct lagfx_vk_state *vk, struct lagfx_render_cac
         rp_ent_t *n = realloc(c->rp, nc * sizeof *n); if (!n) return VK_NULL_HANDLE;
         c->rp = n; c->cap_rp = nc;
     }
-    uint32_t na = k->ncolor + k->has_ds;
     VkAttachmentDescription ad[MAX_ATT]; VkAttachmentReference cref[LAGFX_RENDER_MAX_COLOR]; VkAttachmentReference dref = { 0 };
-    for (uint32_t i = 0; i < na; i++) {
+    uint32_t na = 0;   /* real attachments only: an unused colour slot is VK_ATTACHMENT_UNUSED in the subpass and has no attachment description */
+    for (uint32_t i = 0; i < k->ncolor + k->has_ds; i++) {
         const akey_t *a = &k->a[i];
-        ad[i] = (VkAttachmentDescription){ .format = a->fmt, .samples = a->samples, .loadOp = a->load, .storeOp = a->store,
-                                           .stencilLoadOp = a->sload, .stencilStoreOp = a->sstore,   /* part of the cache key: exactly what the caller asked for */
-                                           .initialLayout = a->layout, .finalLayout = a->layout };
-        if (i < k->ncolor) cref[i] = (VkAttachmentReference){ i, a->layout };
-        else dref = (VkAttachmentReference){ i, a->layout };
+        const bool is_color = i < k->ncolor;
+        if (is_color && a->fmt == VK_FORMAT_UNDEFINED) { cref[i] = (VkAttachmentReference){ VK_ATTACHMENT_UNUSED, VK_IMAGE_LAYOUT_UNDEFINED }; continue; }
+        ad[na] = (VkAttachmentDescription){ .format = a->fmt, .samples = a->samples, .loadOp = a->load, .storeOp = a->store,
+                                            .stencilLoadOp = a->sload, .stencilStoreOp = a->sstore,   /* part of the cache key: exactly what the caller asked for */
+                                            .initialLayout = a->layout, .finalLayout = a->layout };
+        if (is_color) cref[i] = (VkAttachmentReference){ na, a->layout };
+        else dref = (VkAttachmentReference){ na, a->layout };
+        na++;
     }
     VkSubpassDescription sp = { .pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS, .colorAttachmentCount = k->ncolor, .pColorAttachments = k->ncolor ? cref : NULL,
                                 .pDepthStencilAttachment = k->has_ds ? &dref : NULL };
@@ -166,6 +176,8 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
     VkRenderingAttachmentInfo col[LAGFX_RENDER_MAX_COLOR], dep = { 0 }, ste = { 0 };
     for (uint32_t i = 0; i < d->color_count; i++) {
         const lagfx_render_attachment_t *a = &d->color[i];
+        if (a->format == VK_FORMAT_UNDEFINED) { col[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = VK_NULL_HANDLE,
+                                                                                   .loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE }; continue; }
         col[i] = (VkRenderingAttachmentInfo){ .sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = a->view, .imageLayout = a->layout,
                                               .loadOp = a->load, .storeOp = a->store, .clearValue = a->clear };
     }
@@ -190,20 +202,21 @@ static lagfx_status_t begin_dynamic(struct lagfx_vk_state *vk, VkCommandBuffer c
 
 lagfx_status_t lagfx_vk_render_begin_desc(struct lagfx_vk_state *vk, VkCommandBuffer cmd, const lagfx_render_desc_t *d) {
     if (!vk || cmd == VK_NULL_HANDLE || !desc_valid(d, true)) return LAGFX_ERR_INVALID_ARG;
-    if (vk->device_lost) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
+    if (lagfx_vk_device_lost(vk)) { LAGFX_ERR("render_begin: device lost earlier; no new work"); return LAGFX_ERR_BACKEND; }
     if (lagfx_vk_render_backend(vk) == LAGFX_RENDER_DYNAMIC) return begin_dynamic(vk, cmd, d);
 
     struct lagfx_render_cache *rc = cache_get(vk);
     if (!rc) return LAGFX_ERR_BACKEND;
-    uint32_t na = d->color_count + (d->has_depth_stencil ? 1u : 0u);
+    uint32_t na = 0;   /* real attachments, in the order the render pass numbers them (unused colour slots take no entry) */
     VkImageView views[MAX_ATT]; VkClearValue cv[MAX_ATT]; bool any_clear = false;
     for (uint32_t i = 0; i < d->color_count; i++) {
-        views[i] = d->color[i].view; cv[i] = d->color[i].clear;
+        if (d->color[i].format == VK_FORMAT_UNDEFINED) continue;
+        views[na] = d->color[i].view; cv[na] = d->color[i].clear; na++;
         if (d->color[i].load == VK_ATTACHMENT_LOAD_OP_CLEAR) any_clear = true;
     }
     if (d->has_depth_stencil) {
         const lagfx_render_attachment_t *a = &d->depth_stencil;
-        views[d->color_count] = a->view; cv[d->color_count] = a->clear;
+        views[na] = a->view; cv[na] = a->clear; na++;
         if (a->load == VK_ATTACHMENT_LOAD_OP_CLEAR || a->stencil_load == VK_ATTACHMENT_LOAD_OP_CLEAR) any_clear = true;
     }
     rpkey_t k; make_key(&k, d, false);
@@ -273,7 +286,7 @@ lagfx_forget_t lagfx_vk_render_forget_view(struct lagfx_vk_state *vk, VkImageVie
             if (c->fail_waitidle) { c->fail_waitidle--; vr = c->fail_lost ? VK_ERROR_DEVICE_LOST : VK_ERROR_OUT_OF_HOST_MEMORY; }
             else vr = vkDeviceWaitIdle(vk->device);
             if (vr == VK_SUCCESS) idle = true;
-            else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; vk->device_lost = true; LAGFX_ERR("render_forget_view: device lost; the objects are destroyed (nothing can still run), but no new work is accepted from now on"); }
+            else if (vr == VK_ERROR_DEVICE_LOST) { idle = true; lagfx_vk_mark_device_lost(vk); LAGFX_ERR("render_forget_view: device lost; the objects are destroyed (nothing can still run), but no new work is accepted from now on"); }
             else { out = LAGFX_FORGET_DEFERRED; LAGFX_ERR("render_forget_view: vkDeviceWaitIdle failed (%d); framebuffers and the view's resources are deferred to shutdown", (int)vr); }
         }
         if (out == LAGFX_FORGET_DEFERRED) { i++; continue; }

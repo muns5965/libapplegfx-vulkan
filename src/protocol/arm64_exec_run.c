@@ -564,9 +564,9 @@ static VkPipeline pipeline_for(a64_run_t *r, lagfx_protocol_t *p, a64_pipe_t *pp
         }
     }
     if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) {   /* a VkRenderPass device: the pipeline is built against the pass render_begin will start (render_encoder.c begin_legacy), or not at all */
-        lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE;
-        if (lagfx_pipeline_render_desc(&d, &rd)) lrp = lagfx_vk_render_pass_compat(r->vk, &rd);
-        if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
+        lagfx_render_desc_t rd; VkRenderPass lrp = VK_NULL_HANDLE; lagfx_legacy_refuse_t why = LAGFX_LR_NONE;
+        if (lagfx_pipeline_render_desc_why(&d, &rd, &why)) { lrp = lagfx_vk_render_pass_compat(r->vk, &rd); if (lrp == VK_NULL_HANDLE) why = LAGFX_LR_PASS; }
+        if (lrp == VK_NULL_HANDLE) { p->diag2.exec.pipe.legacy_shape_refused++, p->diag2.exec.pipe.legacy_pipe_why[why]++; cache_put(pp, fmts, dfm, key, VK_NULL_HANDLE, r); return VK_NULL_HANDLE; }
         d.render_pass = (uint64_t)(uintptr_t)lrp;
     }
     VkPipeline pl = VK_NULL_HANDLE;
@@ -1030,7 +1030,7 @@ static bool prepare_pipeline(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
         }
     }
     VkPipeline vp = pipeline_for(r, p, r->pipe, fmts, r->nslots, prim | alt);
-    if (!vp) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[2]++; CNT(p).draws_skipped++; return false; }   /* 2: vkCreateGraphicsPipelines failed (now or earlier: failures are cached) */
+    if (!vp) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[2]++; CNT(p).draws_skipped++; if (lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY) p->diag2.exec.pipe.legacy_draws_dropped_pipe++; return false; }   /* 2: vkCreateGraphicsPipelines failed (now or earlier: failures are cached) */
     if (r->bound_vk != vp) {
         if (lagfx_translate_render_bind_vk_pipeline(&r->rs, vp, r->pipe->src.desc.layout) != LAGFX_OK) { CNT(p).no_pipeline++, CNT(p).no_pipeline_why[3]++; CNT(p).draws_skipped++; return false; }   /* 3: recording the bind failed */
         r->bound_vk = vp;
@@ -1220,6 +1220,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
     r->nslots = nslots;
     VkFormat cfmt[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };   /* the legacy backend (VkRenderPass) needs the formats the infos do not carry */
     for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) cfmt[q] = r->rts[q]->format;
+    r->rs.legacy_refuse = 0;
     if (lagfx_translate_render_begin_fmt(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), first ? first->img : dso->img, fw, fh, ca, nslots,
                                          dso && (dso->ds_aspects & 1u) ? &dai : NULL, dso && (dso->ds_aspects & 2u) ? &sai : NULL,
                                          cfmt, dso ? dso->format : VK_FORMAT_UNDEFINED, r->ms.samples > 1u ? r->ms.samples : 1u) != LAGFX_OK) {
@@ -1227,6 +1228,7 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         lagfx_a64_msaa_pass_abort(r->x, &r->ms);
         if (dso) lagfx_a64_res_ds_end(r->x, dso);
         memset(r->rts, 0, sizeof r->rts), r->nslots = 0;
+        if (r->rs.legacy_refuse && r->rs.legacy_refuse < LAGFX_LR__COUNT) p->diag2.exec.pipe.legacy_begin_why[r->rs.legacy_refuse]++;   /* per cause: which shape the VkRenderPass backend could not begin */
         if (strict) { lagfx_a64_msaa_veto_t v; memset(&v, 0, sizeof v); snprintf(v.what, sizeof v.what, "pass"), v.why = "render_begin_failed"; lagfx_a64_msaa_reject(p, &v); }
         CNT(p).no_target++; tag_partial(p, 26); return;
     }
@@ -1236,6 +1238,8 @@ static void begin_pass(a64_run_t *r, lagfx_protocol_t *p, const uint8_t *rec, ui
         CNT(p).ds_passes++;
     }
     r->rendering = true, r->rt = first, r->rt_w = fw, r->rt_h = fh;
+    if (first && lagfx_vk_render_backend(r->vk) == LAGFX_RENDER_LEGACY)
+        for (uint32_t q = 0; q < nslots && q < 4u; q++) if (!r->rts[q]) { p->diag2.exec.pipe.legacy_gap_passes++; break; }   /* an unused colour slot, kept in place */
     for (uint32_t k = 0; k < d.color_attachment_count && k < LAGFX_RENDER_PASS_MAX_COLOR_ATTACHMENTS && k < 2u; k++)   /* idle-gap diagnostics: logged only in the window after a gap, one relaxed load otherwise */
         lagfx_gap_note_pass(d.colors[k].texture_ref, d.colors[k].slot, d.colors[k].load_action, d.colors[k].store_action, d.colors[k].clear_color, fw, fh, d.color_attachment_count);
     if (r->ms.samples > 1u) p->diag2.exec.msaa.ms_passes++;
@@ -1525,6 +1529,7 @@ static void cap_fill(a64_run_t *r, const cap_dinfo_t *di, lagfx_a64_cap_draw_in_
 /* Per-draw diagnostics (draw_diag.h): counters before / after one draw classify its outcome; the event goes into the bounded table, nothing is formatted here. */
 enum { DD_C_DRAWS, DD_C_SKIPPED, DD_C_NOPIPE, DD_C_UB_BUF, DD_C_UB_IN, DD_C_UB_SI, DD_C_UB_TEX, DD_C_UB_VIEW, DD_C_UB_SAMP, DD_C_NOTGT, DD_C_NOVB, DD_C_NOIB, DD_C_PRIM, DD_C_INDBAD, DD_C_UNAL, DD_C_FB, DD_C_DFAIL,
        DD_C_NOSIZE, DD_C_FBF, DD_C_UNNORM, DD_C_ZERO, DD_C_BADREC, DD_C_TILE, DD_C_N };
+_Static_assert(LAGFX_LR__COUNT <= 12, "state.h legacy_pipe_why[] / legacy_begin_why[] hold LAGFX_LR__COUNT entries");
 _Static_assert(DD_C_N == LAGFX_DD_NCTR, "draw_diag.c ctr_name[] must match the DD_C_* enum");
 static void dd_counters(lagfx_protocol_t *p, uint64_t *v) {
     const __typeof__(p->diag2.exec.pipe) *Q = &p->diag2.exec.pipe;
@@ -1621,12 +1626,14 @@ static bool tile_resume(void *c) {
     }
     VkFormat cfmt[4] = { VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED };
     for (uint32_t q = 0; q < 4u; q++) if (r->rts[q]) cfmt[q] = r->rts[q]->format;
+    r->rs.legacy_refuse = 0;
     if (ok && lagfx_translate_render_begin_fmt(r->vk, &r->rs, lagfx_a64_res_cmdbuf(r->x), r->rsnap.img, r->rt_w, r->rt_h, ca, r->nslots,
                                                r->rsnap.has_d ? &dai : NULL, r->rsnap.has_s ? &sai : NULL,
                                                cfmt, r->dsobj ? r->dsobj->format : VK_FORMAT_UNDEFINED, r->ms.samples > 1u ? r->ms.samples : 1u) == LAGFX_OK) {
         r->rendering = true, r->bound_vk = VK_NULL_HANDLE, r->last_fetch = false, r->es.dirty = true;
         return true;
     }
+    if (r->rs.legacy_refuse && r->rs.legacy_refuse < LAGFX_LR__COUNT) r->p->diag2.exec.pipe.legacy_begin_why[r->rs.legacy_refuse]++;
     for (uint32_t i = 0; i < 4u; i++) if (begun & (1u << i)) lagfx_a64_res_target_end(r->x, r->rts[i]);
     if (dbegun) lagfx_a64_res_ds_end(r->x, r->dsobj);
     return false;   /* the pass goes on without rendering: its draws are counted as no_target */

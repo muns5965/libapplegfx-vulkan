@@ -289,7 +289,7 @@ lagfx_status_t lagfx_vk_display_present_surface(
             .commandBufferCount = 1,
             .pCommandBuffers    = &cb,
         };
-        VkResult vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+        VkResult vr = lagfx_vk_queue_submit(vk, &si, fence);
         if (vr != VK_SUCCESS) {
             LAGFX_ERR("display_blit: vkQueueSubmit failed (%d)", (int)vr);
             result = LAGFX_ERR_BACKEND;
@@ -299,7 +299,7 @@ lagfx_status_t lagfx_vk_display_present_surface(
 
     {
         const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
-        VkResult vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
+        VkResult vr = lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE,
                                        timeout_ns);
         if (vr != VK_SUCCESS) {
             LAGFX_ERR("display_blit: vkWaitForFences failed/timeout (%d)",

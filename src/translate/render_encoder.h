@@ -120,6 +120,9 @@ typedef struct lagfx_translate_render_state {
      * state. */
     bool render_pass_active;
 
+    /* Legacy backend only: why the last _begin was refused (lagfx_legacy_refuse_t; 0 = not refused / dynamic backend). Valid after a failed _begin. */
+    uint8_t legacy_refuse;
+
     /* A caller (the ARM64 exec path) binds real vertex buffers itself: draw / draw_indexed then do NOT rebind the dummy placeholder over them. */
     bool external_vb;
 

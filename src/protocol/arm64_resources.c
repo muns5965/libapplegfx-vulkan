@@ -176,7 +176,7 @@ static bool submit_fence(struct lagfx_vk_state *vk, mgr2_t *m, VkCommandBuffer c
     VkResult r = vkCreateFence(vk->device, &fi, NULL, out);
     if (r != VK_SUCCESS) { m->st.gpu_fail++; *out = VK_NULL_HANDLE; return false; }
     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
-    r = vkQueueSubmit(vk->graphics_queue, 1, &si, *out);
+    r = lagfx_vk_queue_submit(vk, &si, *out);
     if (r != VK_SUCCESS) { m->st.gpu_fail++; vkDestroyFence(vk->device, *out, NULL); *out = VK_NULL_HANDLE; LAGFX_WARN("arm64 exec: vkQueueSubmit failed (%d)", (int)r); return false; }
     return true;
 }
@@ -195,7 +195,7 @@ static lagfx_a64_status_t submit_wait(struct lagfx_vk_state *vk, mgr2_t *m, VkCo
     VkFence f;
     if (!submit_fence(vk, m, *cb, &f)) return LAGFX_A64_FAILED;
     uint64_t t0 = lagfx_rb_enabled() ? lagfx_wbv_now_ns() : 0;
-    VkResult r = vkWaitForFences(vk->device, 1, &f, VK_TRUE, wait_ns());
+    VkResult r = lagfx_vk_wait_fences(vk, 1, &f, VK_TRUE, wait_ns());
     if (t0) lagfx_rb_note_wait(lagfx_wbv_now_ns() - t0, r == VK_SUCCESS);
     if (r == VK_SUCCESS) { vkDestroyFence(vk->device, f, NULL); return LAGFX_A64_DONE; }
     *cb = VK_NULL_HANDLE;

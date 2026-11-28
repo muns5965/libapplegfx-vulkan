@@ -272,8 +272,8 @@ lagfx_status_t lagfx_translate_blit_fill_image_color(void *vk, const lagfx_blit_
     vr = vkCreateFence(vk_impl->device, &fci, NULL, &fence);
     if (vr == VK_SUCCESS) {
         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO, .commandBufferCount = 1, .pCommandBuffers = &cb };
-        vr = vkQueueSubmit(vk_impl->graphics_queue, 1, &si, fence);
-        if (vr == VK_SUCCESS) vkWaitForFences(vk_impl->device, 1, &fence, VK_TRUE, UINT64_MAX);
+        vr = lagfx_vk_queue_submit(vk_impl, &si, fence);
+        if (vr == VK_SUCCESS) lagfx_vk_wait_fences(vk_impl, 1, &fence, VK_TRUE, UINT64_MAX);
         vkDestroyFence(vk_impl->device, fence, NULL);
     }
     lagfx_vk_cmdbuf_free(vk, cb);
@@ -489,8 +489,8 @@ lagfx_status_t lagfx_translate_blit_copy_texture_to_texture(void *vk,
             .commandBufferCount = 1,
             .pCommandBuffers    = &cb,
         };
-        vkQueueSubmit(vk_impl->graphics_queue, 1, &si, fence);
-        vkWaitForFences(vk_impl->device, 1, &fence, VK_TRUE, UINT64_MAX);
+        lagfx_vk_queue_submit(vk_impl, &si, fence);
+        lagfx_vk_wait_fences(vk_impl, 1, &fence, VK_TRUE, UINT64_MAX);
         vkDestroyFence(vk_impl->device, fence, NULL);
     } else {
         LAGFX_WARN("blit_copy_texture_to_texture: create fence failed (%d)", (int)vr);

@@ -200,6 +200,8 @@ static void test_vulkan(struct lagfx_vk_state *vk) {
         assert(lagfx_vk_wait_bounded(vk, nf, 1000000) == LAGFX_VK_WAIT_FAILED);
         assert(lagfx_arm64_poll_completions(p) == 1 && lagfx_arm64_gpu_faulted(p));
         lagfx_vk_test_inject_fence_result(0x7fffffff);
+        assert(lagfx_vk_device_lost(vk));                    /* the common wait layer made the (injected) loss sticky, as for a real one */
+        vk->device_lost = false;                             /* the loss was only injected: the device is fine, the rest of the test keeps using it */
         lagfx_arm64_cq_stats_t q; lagfx_arm64_cq_stats(p, &q);
         assert(q.fault_completed == 1 && q.fault);
         hh.stamp = 21; cc = lagfx_arm64_submit_begin(p, 3, &hh);

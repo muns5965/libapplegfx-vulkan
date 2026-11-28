@@ -11,6 +11,8 @@
  * (initial == final), so the two backends are interchangeable at a call site. Pipelines used inside a legacy pass must be created against
  * lagfx_vk_render_pass_compat() for the same attachment formats / sample counts (render-pass COMPATIBILITY does not depend on load/store ops or layouts).
  *
+ * An unused colour slot (format VK_FORMAT_UNDEFINED, no view) is kept in place (VK_ATTACHMENT_UNUSED in the subpass, no framebuffer view), so fragment output locations do not move.
+ *
  * NOT here yet: MSAA resolve attachments, input attachments (framebuffer fetch), multiple subpasses. A sample count > 1 is accepted (the MSAA image itself is rendered
  * and stored), but nothing resolves it. Call sites are converted one at a time; a call site that has not been converted must not run on a LEGACY device. */
 #ifndef LAGFX_VULKAN_RENDER_PASS_H
@@ -27,6 +29,22 @@ struct lagfx_vk_state;
 
 typedef enum { LAGFX_RENDER_DYNAMIC = 0, LAGFX_RENDER_LEGACY = 1 } lagfx_render_backend_t;
 
+/* Why the legacy backend refused a pipeline shape or a pass (diagnostic counters, one per cause). */
+typedef enum {
+    LAGFX_LR_NONE = 0,
+    LAGFX_LR_ARGS,        /* attachment arguments inconsistent (view without format, format without view, count out of range) */
+    LAGFX_LR_MSAA,        /* sample count > 1: no resolve yet */
+    LAGFX_LR_RESOLVE,     /* a colour or depth/stencil resolve attachment was asked for */
+    LAGFX_LR_SLOT,        /* an unused colour slot is described inconsistently */
+    LAGFX_LR_DS,          /* depth/stencil attachment without format / view, or depth and stencil on different views */
+    LAGFX_LR_NO_COLOR,    /* pipeline: no colour slot has a format */
+    LAGFX_LR_DS_MIXED,    /* pipeline: depth and stencil formats differ */
+    LAGFX_LR_NO_DS,       /* pipeline: no_color without a depth/stencil format */
+    LAGFX_LR_PASS,        /* pipeline: the compatible VkRenderPass could not be created (cache full / driver failure) */
+    LAGFX_LR_BEGIN,       /* pass: render pass / framebuffer could not be created, or the device is lost */
+    LAGFX_LR__COUNT
+} lagfx_legacy_refuse_t;
+
 typedef struct {
     VkImageView            view;
     VkFormat               format;
@@ -41,7 +59,7 @@ typedef struct {
 
 typedef struct {
     uint32_t                   width, height;
-    uint32_t                   color_count;                       /* 0 .. LAGFX_RENDER_MAX_COLOR */
+    uint32_t                   color_count;                       /* 0 .. LAGFX_RENDER_MAX_COLOR; a slot with format UNDEFINED is unused */
     lagfx_render_attachment_t  color[LAGFX_RENDER_MAX_COLOR];
     bool                       has_depth_stencil;                 /* depth, stencil or both, decided by the format */
     lagfx_render_attachment_t  depth_stencil;

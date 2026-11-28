@@ -16,13 +16,22 @@ void lagfx_trace_impl(const char *fmt, ...) { (void)fmt; }
 #define ASSERT(cond, msg) do { if (!(cond)) { \
     fprintf(stderr, "FAIL: %s\n", msg); return 1; } } while (0)
 
-static int llc_available(void) {
-    /* Same candidates as find_llc_binary() in src/air2spirv/shader_translate.c (macOS Homebrew pin, then Linux LLVM 20). */
+/* The llc the library would use (same order as find_llc_binary() in src/air2spirv/shader_translate.c) and whether it has a SPIR-V target: 0 = no llc at all,
+ * 1 = llc present WITHOUT a spirv64 target (an environment problem, e.g. Ubuntu LLVM 18: NOT a translator failure), 2 = usable. */
+static int llc_state(const char **path_out) {
     static const char *c[] = { "/opt/homebrew/opt/llvm@20/bin/llc", "/opt/homebrew/opt/llvm/bin/llc",
                                "/usr/lib/llvm-20/bin/llc", "/usr/bin/llc", NULL };
-    for (int i = 0; c[i]; i++) if (access(c[i], X_OK) == 0) return 1;
+    for (int i = 0; c[i]; i++) {
+        if (access(c[i], X_OK) != 0) continue;
+        if (path_out) *path_out = c[i];
+        char cmd[320]; snprintf(cmd, sizeof cmd, "%s --version 2>/dev/null", c[i]);
+        FILE *f = popen(cmd, "r"); int spirv = 0;
+        if (f) { char line[256]; while (fgets(line, sizeof line, f)) if (strstr(line, "spirv64")) spirv = 1; pclose(f); }
+        return spirv ? 2 : 1;
+    }
     return 0;
 }
+static int llc_available(void) { return llc_state(NULL) == 2; }
 
 static uint8_t *read_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
@@ -301,11 +310,17 @@ int main(void) {
     if (test_null_inputs() != 0) { _exit(1); }
     if (test_free_null_safe() != 0) { _exit(1); }
 
-    /* Smoke tests and corrupted_bitcode need llvm@20. Skip with meson SKIP code if absent. */
-    if (!llc_available()) {
-        fprintf(stderr, "shader_translate: llc not at /opt/homebrew/opt/llvm@20/bin/llc; "
-                        "smoke + corrupted_bitcode tests skipped (negative tests passed)\n");
-        _exit(77);
+    /* Smoke tests and corrupted_bitcode need an llc WITH a SPIR-V target (LLVM 20). Environment shortfalls are told apart from translator failures:
+     *   - no usable llc / no spirv64 target: SKIP (77) with the reason on stderr -- unless LAGFX_REQUIRE_LLC_SPIRV is set (CI, a prepared host), where it is a FAIL;
+     *   - a usable llc: every result is real, a failure is a failure. */
+    {
+        const char *lp = "(none)"; int ls = llc_state(&lp);
+        if (ls != 2) {
+            fprintf(stderr, "shader_translate: ENVIRONMENT: %s (llc: %s); smoke + corrupted_bitcode not run (negative tests passed)\n",
+                    ls == 0 ? "no llc found" : "llc has no spirv64 target (needs LLVM 20 with the SPIR-V backend)", lp);
+            if (getenv("LAGFX_REQUIRE_LLC_SPIRV")) { fprintf(stderr, "shader_translate: FAIL: LAGFX_REQUIRE_LLC_SPIRV is set\n"); _exit(1); }
+            _exit(77);
+        }
     }
 
     int ret = test_corrupted_bitcode();

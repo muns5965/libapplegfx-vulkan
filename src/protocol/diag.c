@@ -351,7 +351,9 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             }
         }
     }
-    if (X->pipe.resolved || X->pipe.resolve_failed || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
+    bool legacy_begin_any = false;
+    for (unsigned c = 1; c < 12u; c++) if (X->pipe.legacy_begin_why[c]) legacy_begin_any = true;
+    if (legacy_begin_any || X->pipe.resolved || X->pipe.resolve_failed || X->pipe.legacy_shape_refused || X->pipe.legacy_draws_dropped_pipe || X->pipe.legacy_gap_passes || X->pipe.obj_created || X->pipe.dump_objects || X->pipe.cap_draws || X->pipe.cap_failed || X->pipe.rf_missing_cap) {   /* ARM64 pipeline resolver / descriptor binding / capture */
         const __typeof__(X->pipe) *Q = &X->pipe;
 #define U(f) (unsigned long long)Q->f
         char pl[4800];
@@ -373,6 +375,22 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
         if (Q->discard_demote || Q->discard_kill || Q->discard_dropped) {
             size_t po = strlen(pl);
             if (po + 120 < sizeof pl) snprintf(pl + po, sizeof pl - po, " discard_fragment[demote=%llu kill=%llu dropped=%llu]", U(discard_demote), U(discard_kill), U(discard_dropped));
+        }
+        {   /* VkRenderPass (legacy) backend refusals by cause, only when something was refused or a gap pass ran; indices = lagfx_legacy_refuse_t */
+            static const char *const ln[12] = { "none", "args", "msaa", "resolve", "slot", "ds", "no_color", "ds_mixed", "no_ds", "pass", "begin", "?" };
+            size_t po = strlen(pl);
+            if ((Q->legacy_shape_refused || Q->legacy_draws_dropped_pipe || Q->legacy_gap_passes) && po + 60 < sizeof pl)
+                po += (size_t)snprintf(pl + po, sizeof pl - po, " legacy[pipes_refused=%llu draws_dropped=%llu gap_passes=%llu", U(legacy_shape_refused), U(legacy_draws_dropped_pipe), U(legacy_gap_passes));
+            else po = 0;
+            if (po) {
+                for (unsigned c = 1; c < 12u && po + 40 < sizeof pl; c++) if (Q->legacy_pipe_why[c]) po += (size_t)snprintf(pl + po, sizeof pl - po, " pipe_%s=%llu", ln[c], U(legacy_pipe_why[c]));
+            }
+            size_t pb = strlen(pl);
+            for (unsigned c = 1; c < 12u && pb + 40 < sizeof pl; c++) if (Q->legacy_begin_why[c]) {
+                if (!po) pb += (size_t)snprintf(pl + pb, sizeof pl - pb, " legacy[");
+                po = 1; pb += (size_t)snprintf(pl + pb, sizeof pl - pb, " begin_%s=%llu", ln[c], U(legacy_begin_why[c]));
+            }
+            if (po) { pb = strlen(pl); if (pb + 2 < sizeof pl) pl[pb++] = ']', pl[pb] = 0; }
         }
         {   /* mirror object table, cumulative per run (arm64_resources.c); live <= 4096, full = creations refused because all slots were live */
             size_t po = strlen(pl);

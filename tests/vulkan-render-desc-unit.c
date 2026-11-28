@@ -7,7 +7,7 @@
  *   C. legacy backend only: vkDeviceWaitIdle failure injected into render_forget_view -> the target's view/image/memory are DEFERRED (not destroyed), VK_ERROR_DEVICE_LOST counts
  *      as idle and the target is destroyed; shutdown after a deferral is clean;
  *   D. shapes the legacy backend does not express (UNDEFINED colour slot, no_color, dyn_state) are refused by lagfx_pipeline_render_desc, not built for another pass.
- * NOT verified: a real Vulkan 1.1 driver (Adreno), depth CONTENT (the depth image is only attached and cleared), the validation layer (not enabled here). Exit 77 = no usable device. */
+ * NOT verified: a real Vulkan 1.1 driver (Adreno), depth CONTENT (the depth image is only attached and cleared), the validation layer only where the test is registered with LAGFX_VK_VALIDATION=1 (then: messenger active, positive control delivered, 0 messages before it). Exit 77 = no usable device. */
 #define _GNU_SOURCE
 #include "vulkan/instance.h"
 #include "vulkan/render_pass.h"
@@ -15,6 +15,7 @@
 #include "vulkan/command.h"
 #include "vulkan/draw_record.h"
 #include "vulkan/pipeline_build.h"
+#include "validation-control.h"
 #include "libapplegfx-vulkan.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +77,24 @@ static bool rec_mrt(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
     d.depth_stencil = (lagfx_render_attachment_t){ .view = m->dview, .format = VK_FORMAT_D32_SFLOAT, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .stencil_load = VK_ATTACHMENT_LOAD_OP_DONT_CARE, .stencil_store = VK_ATTACHMENT_STORE_OP_DONT_CARE,
         .clear = { .depthStencil = { 1.0f, 0 } } };
+    if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
+    lagfx_vk_render_end(vk, cb);
+    return true;
+}
+
+typedef struct { lagfx_vk_render_target_t *c0, *c2; uint32_t w, h; } gap_t;
+static bool rec_gap(struct lagfx_vk_state *vk, VkCommandBuffer cb, void *arg) {
+    gap_t *g = arg;
+    lagfx_vk_cmd_rt_to_color(cb, g->c0);
+    lagfx_vk_cmd_rt_to_color(cb, g->c2);
+    lagfx_render_desc_t d; memset(&d, 0, sizeof d);
+    d.width = g->w; d.height = g->h; d.color_count = 3;
+    const VkClearColorValue red = { .float32 = { 1, 0, 0, 1 } }, green = { .float32 = { 0, 1, 0, 1 } };
+    d.color[0] = (lagfx_render_attachment_t){ .view = g->c0->view, .format = g->c0->format, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                              .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = red } };
+    /* slot 1: unused (format UNDEFINED, no view) */
+    d.color[2] = (lagfx_render_attachment_t){ .view = g->c2->view, .format = g->c2->format, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                                              .load = VK_ATTACHMENT_LOAD_OP_CLEAR, .store = VK_ATTACHMENT_STORE_OP_STORE, .clear = { .color = green } };
     if (lagfx_vk_render_begin_desc(vk, cb, &d) != LAGFX_OK) return false;
     lagfx_vk_render_end(vk, cb);
     return true;
@@ -227,6 +246,25 @@ static void run_backend(int legacy) {
         lagfx_vk_render_target_destroy(vk, &rt2);
     }
 
+    /* C2. a pass with an unused colour slot between two real ones: slot 2 keeps its index (the shader's output location), pixels land on the right targets */
+    {
+        lagfx_vk_render_target_t c0, c2; memset(&c0, 0, sizeof c0); memset(&c2, 0, sizeof c2);
+        int ok = lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &c0) == LAGFX_OK && lagfx_vk_render_target_create(vk, 16u, 16u, VK_FORMAT_B8G8R8A8_UNORM, &c2) == LAGFX_OK;
+        snprintf(m, sizeof m, "gap pass targets (%s)", bn); CHECK(ok, m);
+        if (ok) {
+            gap_t g = { &c0, &c2, 16u, 16u };
+            snprintf(m, sizeof m, "colour 0 + unused slot 1 + colour 2: pass records and runs (%s)", bn); CHECK(one_shot(vk, rec_gap, &g), m);
+            snprintf(m, sizeof m, "slot 0 holds red (%s)", bn); CHECK(px_is(vk, &c0, 8, 8, 0, 0, 255), m);
+            snprintf(m, sizeof m, "slot 2 holds green, not shifted onto slot 1 (%s)", bn); CHECK(px_is(vk, &c2, 8, 8, 0, 255, 0), m);
+            VkRenderPass a, b2; lagfx_render_desc_t d1; memset(&d1, 0, sizeof d1);
+            d1.color_count = 3; d1.color[0].format = VK_FORMAT_B8G8R8A8_UNORM; d1.color[2].format = VK_FORMAT_B8G8R8A8_UNORM;
+            lagfx_render_desc_t d2 = d1; d2.color[1].format = d2.color[2].format; d2.color[2].format = VK_FORMAT_UNDEFINED;
+            a = lagfx_vk_render_pass_compat(vk, &d1); b2 = lagfx_vk_render_pass_compat(vk, &d2);
+            snprintf(m, sizeof m, "the position of the gap is part of the pass identity (%s)", bn); CHECK(a != VK_NULL_HANDLE && b2 != VK_NULL_HANDLE && a != b2, m);
+        }
+        lagfx_vk_render_target_destroy(vk, &c2); lagfx_vk_render_target_destroy(vk, &c0);
+    }
+
     /* D. shapes the legacy backend does not express are refused */
     {
         lagfx_pipeline_desc_t d; lagfx_render_desc_t rd; memset(&d, 0, sizeof d);
@@ -241,10 +279,50 @@ static void run_backend(int legacy) {
         d.ds_depth_format = VK_FORMAT_UNDEFINED; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.depth_stencil.format == VK_FORMAT_D24_UNORM_S8_UINT, "stencil format only: that format is the attachment");
         d.ds_stencil_format = VK_FORMAT_UNDEFINED; d.dyn_state = 0;
         d.n_color = 2; d.color_formats[0] = VK_FORMAT_B8G8R8A8_UNORM; d.color_formats[1] = VK_FORMAT_UNDEFINED;
-        CHECK(!lagfx_pipeline_render_desc(&d, &rd), "an UNDEFINED colour slot: refused");
-        d.color_formats[1] = VK_FORMAT_R8G8B8A8_UNORM; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 2, "two defined colour slots: expressible");
+        CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 2 && rd.color[0].format == VK_FORMAT_B8G8R8A8_UNORM && rd.color[1].format == VK_FORMAT_UNDEFINED, "a gap after slot 0: expressed as an unused slot 1");
+        d.color_formats[0] = VK_FORMAT_UNDEFINED; d.color_formats[1] = VK_FORMAT_R8G8B8A8_UNORM;
+        CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 2 && rd.color[0].format == VK_FORMAT_UNDEFINED && rd.color[1].format == VK_FORMAT_R8G8B8A8_UNORM, "a gap before slot 1: slot 1 keeps its index");
+        d.color_formats[1] = VK_FORMAT_UNDEFINED;
+        { lagfx_legacy_refuse_t why = LAGFX_LR_NONE; CHECK(!lagfx_pipeline_render_desc_why(&d, &rd, &why) && why == LAGFX_LR_NO_COLOR, "no colour slot with a format: refused, reason NO_COLOR"); }
+        d.color_formats[1] = VK_FORMAT_R8G8B8A8_UNORM; CHECK(lagfx_pipeline_render_desc(&d, &rd) && rd.color_count == 2, "slot 0 gap + slot 1: expressible");
+        d.color_formats[0] = VK_FORMAT_B8G8R8A8_UNORM;
+        { lagfx_legacy_refuse_t why = LAGFX_LR_NONE; d.no_color = 1; d.dyn_state = 0;
+          CHECK(!lagfx_pipeline_render_desc_why(&d, &rd, &why) && why == LAGFX_LR_NO_DS, "no_color without depth/stencil: reason NO_DS");
+          d.no_color = 0; d.dyn_state = 1; d.ds_depth_format = VK_FORMAT_D32_SFLOAT; d.ds_stencil_format = VK_FORMAT_D24_UNORM_S8_UINT;
+          CHECK(!lagfx_pipeline_render_desc_why(&d, &rd, &why) && why == LAGFX_LR_DS_MIXED, "different depth and stencil formats: reason DS_MIXED"); }
     }
+    { snprintf(m, sizeof m, "validation: messenger live, control delivered, 0 messages before it (%s)", bn); CHECK(lagfx_test_validation_expect(vk, bn) == 0, m); }
     lagfx_vk_shutdown(vk);   /* after a deferral: the deferred view/image/memory go here, after the framebuffers */
+}
+
+/* E. DEVICE_LOST is seen in ONE place (lagfx_vk_queue_submit / lagfx_vk_wait_fences): after it, no submit of ANY kind reaches the driver (readback, submit_empty, submit_checked,
+ * a raw empty submit with a fence that would signal), objects can still be destroyed. The loss is INJECTED (the submit seam), not a real device loss. */
+static void test_lost_layer(void) {
+    unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS"); unsetenv("LAGFX_VK_FORCE_LEGACY_FEATURES");
+    struct lagfx_vk_state *vk = NULL; lagfx_device_descriptor_t dd; memset(&dd, 0, sizeof dd);
+    if (lagfx_vk_init(&vk, &dd) != LAGFX_OK || !vk || !vk->initialized) { CHECK(0, "init (lost layer)"); return; }
+    lagfx_vk_render_target_t rt; memset(&rt, 0, sizeof rt);
+    CHECK(lagfx_vk_render_target_create(vk, 8u, 8u, VK_FORMAT_B8G8R8A8_UNORM, &rt) == LAGFX_OK, "target for the lost-layer test");
+    uint8_t px[8 * 8 * 4]; size_t stride = 0;
+    CHECK(lagfx_vk_render_target_readback(vk, &rt, px, sizeof px, &stride) == LAGFX_OK, "before the loss: readback works");
+    CHECK(lagfx_vk_submit_empty(vk) == LAGFX_OK && !lagfx_vk_device_lost(vk), "before the loss: submit_empty works, flag clear");
+
+    lagfx_vk_test_inject_submit_result((int)VK_ERROR_DEVICE_LOST);
+    CHECK(lagfx_vk_submit_empty(vk) != LAGFX_OK, "injected DEVICE_LOST: submit_empty fails");
+    CHECK(lagfx_vk_device_lost(vk), "the one submit layer set the sticky flag");
+    lagfx_vk_test_inject_submit_result(0x7fffffff);   /* the seam is off again: only the sticky flag keeps the work out */
+
+    CHECK(lagfx_vk_render_target_readback(vk, &rt, px, sizeof px, &stride) != LAGFX_OK, "after the loss: readback submits nothing");
+    CHECK(lagfx_vk_submit_empty(vk) != LAGFX_OK, "after the loss: submit_empty submits nothing");
+    VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
+    CHECK(lagfx_vk_submit_checked(vk, &si, VK_NULL_HANDLE) == LAGFX_ERR_BACKEND, "after the loss: submit_checked refuses");
+    VkFenceCreateInfo fci = { .sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO }; VkFence f = VK_NULL_HANDLE;
+    CHECK(vkCreateFence(vk->device, &fci, NULL, &f) == VK_SUCCESS, "fence");
+    CHECK(lagfx_vk_queue_submit(vk, &si, f) == VK_ERROR_DEVICE_LOST, "after the loss: the common submit returns DEVICE_LOST");
+    CHECK(vkGetFenceStatus(vk->device, f) == VK_NOT_READY, "after the loss: the empty submit never reached the driver (its fence did not signal)");
+    vkDestroyFence(vk->device, f, NULL);
+    lagfx_vk_render_target_destroy(vk, &rt);   /* destroying stays allowed */
+    lagfx_vk_shutdown(vk);
 }
 #endif
 
@@ -258,6 +336,7 @@ int main(void) {
     lagfx_vk_shutdown(vk);
     run_backend(0);
     run_backend(1);
+    test_lost_layer();
     unsetenv("LAGFX_VK_FORCE_LEGACY_RENDERPASS");
     printf(g_fail ? "FAILED: %d\n" : "OK\n", g_fail);
     return g_fail ? 1 : 0;

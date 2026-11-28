@@ -1592,9 +1592,9 @@ if fs.is_file(meson.current_source_dir() / 'arm64-exec-run-unit.c')
   test('arm64 exec render, raster order forced off (unit, lavapipe)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
   # The same suite on the legacy VkRenderPass backend (what a device without dynamic rendering uses): colour / MRT (no gaps) / depth / stencil / blend / tile / depth-only; MSAA, framebuffer fetch
   # and empty colour slots are refused there (the test branches on lagfx_vk_render_backend).
-  test('arm64 exec render, legacy render pass forced (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
+  test('arm64 exec render, legacy render pass forced (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
   # A device WITHOUT dynamic rendering (the feature is not enabled at vkCreateDevice: any stray vkCmdBeginRendering is invalid): the closest host stand-in for a Vulkan 1.1 phone GPU. Needs the opt-in.
-  test('arm64 exec render, device without dynamic rendering (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_FEATURES=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1'])
+  test('arm64 exec render, device without dynamic rendering (unit, lavapipe + validation)', er_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_FEATURES=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1'])
 endif
 
 # ARM64 render draw record layouts + serialized sampler decoding (pure, no device).
@@ -2183,7 +2183,7 @@ vulkan_render_desc_test = executable('vulkan-render-desc-unit',
   build_by_default : true,
 )
 test('vulkan render desc + draw path, both backends (unit, lavapipe)', vulkan_render_desc_test)
-test('vulkan render desc + draw path, both backends (unit, lavapipe + validation)', vulkan_render_desc_test, env : ['LAGFX_VK_VALIDATION=1'])
+test('vulkan render desc + draw path, both backends (unit, lavapipe + validation)', vulkan_render_desc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1'])
 
 # Read-only device diagnostic g7-vkdev (identity, full extension list, feature summary): structure checks on the available ICD, skip (77) without one.
 vkdev_info_test = executable('vkdev-info-unit',

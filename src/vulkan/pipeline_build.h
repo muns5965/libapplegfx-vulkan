@@ -160,9 +160,12 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
 /* The attachments a pipeline built from `desc` draws to, as a render description (formats, sample count, default attachment layouts; width/height/views are left for the
  * caller): n_color colour slots (1..4, formats as the builder reads them) and, when dyn_state is set, one depth/stencil attachment named by ds_depth_format / ds_stencil_format
  * (one format; if both are set they must be equal). Feed it to lagfx_vk_render_pass_compat() and put the handle in desc->render_pass. no_color (a depth-only pass) needs dyn_state and a depth/stencil format and then has NO colour attachment (set desc->render_pass: the builder gives the blend state 0 attachments). Returns false for a shape the legacy
- * render-pass backend does not express: no_color without a depth/stencil format, an UNDEFINED (unused) colour slot, or different depth and stencil formats. The caller then refuses the draw
+ * render-pass backend does not express: no_color without a depth/stencil format, no colour slot with a format at all, or different depth and stencil formats. A gap (UNDEFINED slot among
+ * defined ones) IS expressed: it stays an unused slot of the pass. The caller then refuses the draw
  * cleanly instead of building a pipeline for the wrong pass. Resolve and input attachments are not part of the description. */
 bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out);
+/* Same, and says why a shape is refused (LAGFX_LR_NO_COLOR / _DS_MIXED / _NO_DS); *why may be NULL. */
+bool lagfx_pipeline_render_desc_why(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out, lagfx_legacy_refuse_t *why);
 
 /* While on, THIS thread's failing lagfx_pipeline_build() calls log nothing, write no bundle and start no matrix (the matrix / repro rebuild failing pipelines on purpose). */
 void lagfx_pipeline_build_quiet(int on);

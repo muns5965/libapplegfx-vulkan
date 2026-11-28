@@ -112,35 +112,42 @@ lagfx_status_t lagfx_translate_render_begin(
                                            color_attachments, color_attachment_count, NULL, NULL);
 }
 
-/* Legacy backend: the attachment infos become a lagfx_render_desc_t. Records nothing on refusal. */
+/* Legacy backend: the attachment infos become a lagfx_render_desc_t. Records nothing on refusal and says why in *why (lagfx_legacy_refuse_t). */
 static lagfx_status_t begin_legacy(struct lagfx_vk_state *vk, VkCommandBuffer cb, uint32_t w, uint32_t h,
                                    const VkRenderingAttachmentInfoKHR *ca, uint32_t n,
                                    const VkRenderingAttachmentInfoKHR *dai, const VkRenderingAttachmentInfoKHR *sai,
-                                   const VkFormat *cf, VkFormat dsf, uint32_t samples) {
+                                   const VkFormat *cf, VkFormat dsf, uint32_t samples, lagfx_legacy_refuse_t *why) {
     /* a depth-only pass is passed as ONE colour entry with no view (the dynamic-rendering "unused slot"): in a legacy pass that is no colour attachment at all */
     const bool depth_only = ca && n == 1u && ca[0].imageView == VK_NULL_HANDLE && (dai || sai);
     if (depth_only) n = 0u;
+    *why = LAGFX_LR_ARGS;
     if (!depth_only && (!ca || n == 0u || n > LAGFX_RENDER_MAX_COLOR || !cf)) { LAGFX_ERR("translate_render_begin: legacy backend needs 1..%u colour attachments with formats (or a depth-only pass)", LAGFX_RENDER_MAX_COLOR); return LAGFX_ERR_BACKEND; }
-    if (samples > 1u) { LAGFX_ERR("translate_render_begin: legacy backend has no multisample resolve yet (samples=%u)", samples); return LAGFX_ERR_BACKEND; }
+    if (samples > 1u) { *why = LAGFX_LR_MSAA; LAGFX_ERR("translate_render_begin: legacy backend has no multisample resolve yet (samples=%u)", samples); return LAGFX_ERR_BACKEND; }
     lagfx_render_desc_t d; memset(&d, 0, sizeof d);
     d.width = w; d.height = h; d.color_count = n;
     for (uint32_t i = 0; i < n; i++) {
-        if (ca[i].imageView == VK_NULL_HANDLE || cf[i] == VK_FORMAT_UNDEFINED) { LAGFX_ERR("translate_render_begin: legacy backend cannot express an empty colour slot (%u)", i); return LAGFX_ERR_BACKEND; }
-        if (ca[i].resolveImageView != VK_NULL_HANDLE || ca[i].resolveMode != 0) { LAGFX_ERR("translate_render_begin: legacy backend has no resolve attachment yet"); return LAGFX_ERR_BACKEND; }
+        const bool has_view = ca[i].imageView != VK_NULL_HANDLE, has_fmt = cf[i] != VK_FORMAT_UNDEFINED;
+        if (has_view != has_fmt) { *why = LAGFX_LR_SLOT; LAGFX_ERR("translate_render_begin: legacy backend: colour slot %u has %s but no %s", i, has_view ? "a view" : "a format", has_view ? "format" : "view"); return LAGFX_ERR_BACKEND; }
+        if (!has_view) continue;   /* a gap: an unused slot of the pass; it keeps its index so fragment output locations stay where the shader put them */
+        if (ca[i].resolveImageView != VK_NULL_HANDLE || ca[i].resolveMode != 0) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend has no resolve attachment yet"); return LAGFX_ERR_BACKEND; }
         d.color[i] = (lagfx_render_attachment_t){ .view = ca[i].imageView, .format = cf[i], .samples = VK_SAMPLE_COUNT_1_BIT, .layout = ca[i].imageLayout,
                                                   .load = ca[i].loadOp, .store = ca[i].storeOp, .clear = ca[i].clearValue };
     }
     if (dai || sai) {
+        /* ONE depth/stencil attachment: when both aspects are named they must be the same view in the same layout */
+        if (dai && sai && (dai->imageView != sai->imageView || dai->imageLayout != sai->imageLayout)) { *why = LAGFX_LR_DS; LAGFX_ERR("translate_render_begin: legacy backend: depth and stencil attachments are different views / layouts"); return LAGFX_ERR_BACKEND; }
         const VkRenderingAttachmentInfoKHR *any = dai ? dai : sai;
-        if (dsf == VK_FORMAT_UNDEFINED || any->imageView == VK_NULL_HANDLE) { LAGFX_ERR("translate_render_begin: legacy backend: depth/stencil attachment without a format or view"); return LAGFX_ERR_BACKEND; }
-        if ((dai && dai->resolveImageView != VK_NULL_HANDLE) || (sai && sai->resolveImageView != VK_NULL_HANDLE)) { LAGFX_ERR("translate_render_begin: legacy backend has no depth/stencil resolve"); return LAGFX_ERR_BACKEND; }
+        if (dsf == VK_FORMAT_UNDEFINED || any->imageView == VK_NULL_HANDLE) { *why = LAGFX_LR_DS; LAGFX_ERR("translate_render_begin: legacy backend: depth/stencil attachment without a format or view"); return LAGFX_ERR_BACKEND; }
+        if ((dai && dai->resolveImageView != VK_NULL_HANDLE) || (sai && sai->resolveImageView != VK_NULL_HANDLE)) { *why = LAGFX_LR_RESOLVE; LAGFX_ERR("translate_render_begin: legacy backend has no depth/stencil resolve"); return LAGFX_ERR_BACKEND; }
         d.has_depth_stencil = true;
         d.depth_stencil = (lagfx_render_attachment_t){ .view = any->imageView, .format = dsf, .samples = VK_SAMPLE_COUNT_1_BIT, .layout = any->imageLayout,
             .load = dai ? dai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .store = dai ? dai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,   /* an aspect the pass does not name is loaded and stored */
             .stencil_load = sai ? sai->loadOp : VK_ATTACHMENT_LOAD_OP_LOAD, .stencil_store = sai ? sai->storeOp : VK_ATTACHMENT_STORE_OP_STORE,
             .clear = { .depthStencil = { dai ? dai->clearValue.depthStencil.depth : 0.0f, sai ? sai->clearValue.depthStencil.stencil : 0u } } };
     }
-    return lagfx_vk_render_begin_desc(vk, cb, &d);
+    lagfx_status_t st = lagfx_vk_render_begin_desc(vk, cb, &d);
+    *why = st == LAGFX_OK ? LAGFX_LR_NONE : st == LAGFX_ERR_INVALID_ARG ? LAGFX_LR_ARGS : LAGFX_LR_BEGIN;
+    return st;
 }
 
 static lagfx_status_t begin_impl(
@@ -200,9 +207,10 @@ static lagfx_status_t begin_impl(
     }
 
     if (legacy) {   /* no fallback attachment here: the legacy backend needs the caller's formats */
+        lagfx_legacy_refuse_t why = LAGFX_LR_NONE;
         lagfx_status_t ls = begin_legacy(vk, vk_cmdbuf, target_width, target_height, color_attachments, color_attachment_count,
-                                         depth_attachment, stencil_attachment, color_formats, ds_format, samples);
-        if (ls != LAGFX_OK) { state->in_pass = false; return ls; }
+                                         depth_attachment, stencil_attachment, color_formats, ds_format, samples, &why);
+        if (ls != LAGFX_OK) { state->in_pass = false; state->legacy_refuse = (uint8_t)why; return ls; }
         state->render_pass_active = true;
         return LAGFX_OK;
     }

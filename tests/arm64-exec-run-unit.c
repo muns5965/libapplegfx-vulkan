@@ -1,6 +1,7 @@
 /* ARM64 0x43/0x45 execution of Render segments (LAGFX_ARM64_EXEC=1): (task, ref) object table lifetime, and real Vulkan recording
  * (lavapipe in CI / this container; NOT verified on a hardware GPU) read back pixel by pixel. SKIPs the Vulkan part when no ICD is present.
  * SPDX-License-Identifier: MIT */
+#include "validation-control.h"
 #include "dispatchers/channel_compute_dispatcher.h"
 #include "dispatchers/ring_common.h"
 #include "protocol/state.h"
@@ -535,12 +536,13 @@ static void mrt_case(const char *name, bool slot0, bool slot1, uint32_t mask0, u
     exec(p, 1, cb_finish(), true);
     uint8_t img[RT_W * RT_H * 8]; uint32_t w, h;
     __typeof__(p->diag2.exec.run) *R = &p->diag2.exec.run;
-    if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY && !slot0 && slot1) {
-        /* the legacy (VkRenderPass) backend cannot express an empty colour slot 0: the pass is refused, counted, and nothing is drawn (the clear is not executed either) */
-        assert(R->no_target >= 1 && R->draws == 0 && R->submit_failed == 0);
-        lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
-        g_blend.set = 0, g_blend.mrt = 0, g_res_tex2 = false;
-        (void)name; return;
+    /* an empty colour slot 0 is expressed on BOTH backends (legacy: VK_ATTACHMENT_UNUSED, slot 1 keeps its index): the same pixels, nothing refused */
+    if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {
+        assert(R->no_target == 0);
+        __typeof__(p->diag2.exec.pipe) *PP = &p->diag2.exec.pipe;
+        assert(PP->legacy_shape_refused == 0 && PP->legacy_draws_dropped_pipe == 0);
+        if (!slot0 && slot1) assert(PP->legacy_gap_passes >= 1);
+        else assert(PP->legacy_gap_passes == 0);
     }
     if (slot0) {
         assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, RT_W * RT_H * 4, &w, &h));
@@ -884,6 +886,8 @@ static void test_exec_depth_unsupported(void) {
 }
 
 int main(void) {
+    /* explained: a fragment shader that writes colour output 0 while the pass leaves slot 0 empty (mrt_case "only slot 1 attached"): Vulkan discards that output; the layer says so as a warning */
+    lagfx_test_validation_allow("Undefined-Value-ShaderOutputNotConsumed");
     g_mem = calloc(1, MEM_SIZE);
     g_dev = make_device();
     assert(g_dev);
@@ -899,6 +903,7 @@ int main(void) {
         test_exec_depth_stencil();
         test_exec_depth_unsupported();
         test_exec_no_resolver_and_pending();
+        if (lagfx_test_validation_expect(g_dev->vk, "arm64-exec-run") != 0) { puts("FAIL: validation"); return 1; }
         if (g_vs) vkDestroyShaderModule(g_dev->vk->device, g_vs, NULL);
         if (g_fs) vkDestroyShaderModule(g_dev->vk->device, g_fs, NULL);
         if (g_fs_half) vkDestroyShaderModule(g_dev->vk->device, g_fs_half, NULL);

@@ -231,8 +231,8 @@ lagfx_status_t lagfx_vk_iosurface_create(struct lagfx_vk_state *vk,
                         .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                         .commandBufferCount = 1, .pCommandBuffers = &cb,
                     };
-                    if (vkQueueSubmit(vk->graphics_queue, 1, &si, fence) == VK_SUCCESS) {
-                        vkWaitForFences(vk->device, 1, &fence, VK_TRUE,
+                    if (lagfx_vk_queue_submit(vk, &si, fence) == VK_SUCCESS) {
+                        lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE,
                                         1000ull * 1000ull * 1000ull);
                         ios->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                         LAGFX_LOG("iosurface_create: %ux%u cleared + SHADER_READ_ONLY (sampleable)",
@@ -354,8 +354,8 @@ lagfx_status_t lagfx_vk_iosurface_upload_pixels(struct lagfx_vk_state *vk,
                     .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
                     .commandBufferCount = 1, .pCommandBuffers = &cb,
                 };
-                if (vkQueueSubmit(vk->graphics_queue, 1, &si, fence) == VK_SUCCESS) {
-                    vkWaitForFences(vk->device, 1, &fence, VK_TRUE, 1000ull*1000ull*1000ull);
+                if (lagfx_vk_queue_submit(vk, &si, fence) == VK_SUCCESS) {
+                    lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE, 1000ull*1000ull*1000ull);
                     ios->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
                     result = LAGFX_OK;
                     LAGFX_LOG("iosurface_upload: %ux%u uploaded %llu/%llu bytes → SHADER_READ_ONLY",

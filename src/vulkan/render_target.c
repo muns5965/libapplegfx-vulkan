@@ -603,7 +603,7 @@ lagfx_status_t lagfx_vk_render_target_readback(struct lagfx_vk_state *vk,
         .commandBufferCount = 1,
         .pCommandBuffers    = &cb,
     };
-    vr = vkQueueSubmit(vk->graphics_queue, 1, &si, fence);
+    vr = lagfx_vk_queue_submit(vk, &si, fence);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("render_target_readback: vkQueueSubmit failed (%d)", (int)vr);
         result = LAGFX_ERR_BACKEND;
@@ -612,7 +612,7 @@ lagfx_status_t lagfx_vk_render_target_readback(struct lagfx_vk_state *vk,
     /* 1 second timeout — lavapipe readback of ~8 MB is sub-ms; generous
      * for CI headroom. */
     const uint64_t timeout_ns = 1ull * 1000ull * 1000ull * 1000ull;
-    vr = vkWaitForFences(vk->device, 1, &fence, VK_TRUE, timeout_ns);
+    vr = lagfx_vk_wait_fences(vk, 1, &fence, VK_TRUE, timeout_ns);
     if (vr != VK_SUCCESS) {
         LAGFX_ERR("render_target_readback: vkWaitForFences failed/timeout (%d)",
                   (int)vr);

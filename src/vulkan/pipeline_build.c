@@ -274,37 +274,46 @@ paired:
     return ok;
 }
 
-bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out) {
+bool lagfx_pipeline_render_desc_why(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out, lagfx_legacy_refuse_t *why) {
+    lagfx_legacy_refuse_t w = LAGFX_LR_NONE;
     if (!desc || !out) return false;
     memset(out, 0, sizeof *out);
-    if (desc->no_color) {   /* depth-only: a legacy subpass with no colour attachment (the builder then sets the blend attachment count to 0 when render_pass is given) */
-        if (!desc->dyn_state || (desc->ds_depth_format == VK_FORMAT_UNDEFINED && desc->ds_stencil_format == VK_FORMAT_UNDEFINED)) return false;
-        if (desc->ds_depth_format != VK_FORMAT_UNDEFINED && desc->ds_stencil_format != VK_FORMAT_UNDEFINED && desc->ds_depth_format != desc->ds_stencil_format) return false;
-        out->color_count = 0;
-        out->has_depth_stencil = true;
-        out->depth_stencil.format = desc->ds_depth_format != VK_FORMAT_UNDEFINED ? desc->ds_depth_format : desc->ds_stencil_format;
-        out->depth_stencil.samples = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
-        out->depth_stencil.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        return true;
-    }
-    const uint32_t ncol = (desc->n_color >= 2u && desc->n_color <= 4u) ? desc->n_color : 1u;
-    const VkSampleCountFlagBits smp = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
-    for (uint32_t i = 0; i < ncol; i++) {
-        VkFormat f = ncol > 1u ? (VkFormat)desc->color_formats[i]
-                   : desc->color_format != VK_FORMAT_UNDEFINED ? desc->color_format : VK_FORMAT_B8G8R8A8_UNORM;   /* same default as the builder */
-        if (f == VK_FORMAT_UNDEFINED) return false;
-        out->color[i].format = f; out->color[i].samples = smp; out->color[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-    }
-    out->color_count = ncol;
-    if (desc->dyn_state && (desc->ds_depth_format != VK_FORMAT_UNDEFINED || desc->ds_stencil_format != VK_FORMAT_UNDEFINED)) {
+    const bool ds_named = desc->dyn_state && (desc->ds_depth_format != VK_FORMAT_UNDEFINED || desc->ds_stencil_format != VK_FORMAT_UNDEFINED);
+    if (ds_named && desc->ds_depth_format != VK_FORMAT_UNDEFINED && desc->ds_stencil_format != VK_FORMAT_UNDEFINED && desc->ds_depth_format != desc->ds_stencil_format) {
         /* the builder names the depth and stencil formats separately (VkPipelineRenderingCreateInfo); a legacy pass has ONE depth/stencil attachment, so they must be the same image format */
-        if (desc->ds_depth_format != VK_FORMAT_UNDEFINED && desc->ds_stencil_format != VK_FORMAT_UNDEFINED && desc->ds_depth_format != desc->ds_stencil_format) return false;
+        w = LAGFX_LR_DS_MIXED; goto refuse;
+    }
+    const VkSampleCountFlagBits smp = desc->raster_samples ? (VkSampleCountFlagBits)desc->raster_samples : VK_SAMPLE_COUNT_1_BIT;
+    if (desc->no_color) {   /* depth-only: a legacy subpass with no colour attachment (the builder then sets the blend attachment count to 0 when render_pass is given) */
+        if (!ds_named) { w = LAGFX_LR_NO_DS; goto refuse; }
+        out->color_count = 0;
+    } else {
+        const uint32_t ncol = (desc->n_color >= 2u && desc->n_color <= 4u) ? desc->n_color : 1u;
+        uint32_t defined = 0;
+        for (uint32_t i = 0; i < ncol; i++) {
+            VkFormat f = ncol > 1u ? (VkFormat)desc->color_formats[i]
+                       : desc->color_format != VK_FORMAT_UNDEFINED ? desc->color_format : VK_FORMAT_B8G8R8A8_UNORM;   /* same default as the builder */
+            if (f == VK_FORMAT_UNDEFINED) continue;   /* a gap: an unused slot of the pass, its position kept */
+            out->color[i].format = f; out->color[i].samples = smp; out->color[i].layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            defined++;
+        }
+        if (defined == 0u) { w = LAGFX_LR_NO_COLOR; goto refuse; }
+        out->color_count = ncol;
+    }
+    if (ds_named) {
         out->has_depth_stencil = true;
         out->depth_stencil.format = desc->ds_depth_format != VK_FORMAT_UNDEFINED ? desc->ds_depth_format : desc->ds_stencil_format;
         out->depth_stencil.samples = smp; out->depth_stencil.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
     }
+    if (why) *why = LAGFX_LR_NONE;
     return true;
+refuse:
+    memset(out, 0, sizeof *out);
+    if (why) *why = w;
+    return false;
 }
+
+bool lagfx_pipeline_render_desc(const lagfx_pipeline_desc_t *desc, lagfx_render_desc_t *out) { return lagfx_pipeline_render_desc_why(desc, out, NULL); }
 
 lagfx_status_t lagfx_pipeline_build(VkDevice device,
                                     const lagfx_pipeline_desc_t *desc,
