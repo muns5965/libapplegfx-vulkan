@@ -133,6 +133,7 @@ typedef int (*lagfx_gd_reader_t)(lagfx_protocol_t *p, uint32_t task_id, uint64_t
 void lagfx_gd_set_reader(lagfx_gd_reader_t r);
 
 typedef struct {
+    uint64_t reread_capped;          /* changed tables seen after the GD_MAX_REREADS budget was spent (diagnostic policy, NOT a decision that the table is unchanged) */
     uint64_t rereads;                /* changed-table re-validations after an acceptance */
     uint64_t read_attempts, read_done;
     uint64_t translate_ok;           /* attempts in which some task translated the WHOLE range VA -> GPA (read_done + phys_read_fail) */

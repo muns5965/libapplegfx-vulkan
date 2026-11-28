@@ -2459,7 +2459,7 @@ if fs.is_file(meson.current_source_dir() / 'gamma-apply-unit.c')
   gamma_apply_test = executable('gamma-apply-unit',
     'gamma-apply-unit.c',
     include_directories : [include_dir, internal_include_dir],
-    dependencies : [libapplegfx_vulkan_dep],
+    dependencies : [libapplegfx_vulkan_dep, dependency('threads')],
     build_by_default : true,
   )
   test('gamma LUT application (unit)', gamma_apply_test)

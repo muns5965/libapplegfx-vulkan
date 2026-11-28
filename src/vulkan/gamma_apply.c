@@ -53,12 +53,14 @@ static lagfx_gamma_result_t apply_bytes(uint8_t *px, size_t npx, int bgra, int s
     if (s_cache.valid && s_cache.gen == gen) { memcpy(tab, s_cache.tab, sizeof tab); r = s_cache.res; cache_unlock(); INC(cache_hits); }
     else {
         cache_unlock();
-        lagfx_gd_select_t sel; static uint8_t copy[3u * 4096u * 4u];
-        const size_t n = lagfx_gd_select_get(&sel, copy, sizeof copy);   /* gen may have moved on since the check above: the table copied is the one built, and its gen is what is cached */
-        if (sel.state != LAGFX_GD_SEL_ACCEPTED || sel.count < 2u || sel.count > 4096u || sel.nwords != 3u * sel.count || n != (size_t)sel.nwords * 4u) { INC(bad_table); return LAGFX_GAMMA_BAD_TABLE; }
-        static float planar[3u * 4096u];
+        lagfx_gd_select_t sel;
+        /* heap, not static: two present paths (display.c, display_blit.c) may miss the cache at the same time; the scratch must be per call */
+        uint8_t *copy = malloc(3u * 4096u * 4u); float *planar = malloc(3u * 4096u * sizeof(float));
+        if (!copy || !planar) { free(copy); free(planar); INC(bad_table); return LAGFX_GAMMA_BAD_TABLE; }
+        const size_t n = lagfx_gd_select_get(&sel, copy, 3u * 4096u * 4u);   /* gen may have moved on since the check above: the table copied is the one built, and its gen is what is cached */
+        if (sel.state != LAGFX_GD_SEL_ACCEPTED || sel.count < 2u || sel.count > 4096u || sel.nwords != 3u * sel.count || n != (size_t)sel.nwords * 4u) { free(copy); free(planar); INC(bad_table); return LAGFX_GAMMA_BAD_TABLE; }
         for (uint32_t i = 0; i < sel.nwords; i++) { uint32_t w = (uint32_t)copy[4u * i] | (uint32_t)copy[4u * i + 1u] << 8 | (uint32_t)copy[4u * i + 2u] << 16 | (uint32_t)copy[4u * i + 3u] << 24; memcpy(&planar[i], &w, 4); }
-        r = lagfx_gamma_build(planar, sel.count, tab); INC(table_builds);
+        r = lagfx_gamma_build(planar, sel.count, tab); INC(table_builds); free(copy); free(planar);
         cache_lock(); s_cache.gen = sel.gen; s_cache.valid = 1; s_cache.res = r; memcpy(s_cache.tab, tab, sizeof tab); cache_unlock();
     }
     if (r == LAGFX_GAMMA_APPLIED) { lagfx_gamma_apply8(px, npx, bgra, tab); INC(applied); if (srgb) INC(applied_srgb); }

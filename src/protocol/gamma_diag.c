@@ -54,7 +54,7 @@ void lagfx_gd_reset(void) { lagfx_gd_test_reset(); }
 
 void lagfx_gd_stats_get(lagfx_gd_stats_t *o) {
     if (!o) return;
-    o->rereads = GET(s_st.rereads); o->read_attempts = GET(s_st.read_attempts); o->read_done = GET(s_st.read_done); o->translate_ok = GET(s_st.translate_ok);
+    o->reread_capped = GET(s_st.reread_capped); o->rereads = GET(s_st.rereads); o->read_attempts = GET(s_st.read_attempts); o->read_done = GET(s_st.read_done); o->translate_ok = GET(s_st.translate_ok);
     o->unmapped = GET(s_st.unmapped); o->phys_read_fail = GET(s_st.phys_read_fail); o->descriptor_parse_fail = GET(s_st.descriptor_parse_fail);
     o->applied_ok = 0;   /* nothing applies a gamma table: this is a constant, not a counter */
     o->sum_match = GET(s_st.sum_match); o->sum_mismatch = GET(s_st.sum_mismatch);
@@ -351,6 +351,10 @@ void lagfx_gd_note_op8(lagfx_protocol_t *p, uint32_t chan, const uint8_t *pl, ui
     else if (d.off != 0 && gd_sel_accepted() && s_rereads < GD_MAX_REREADS) {   /* a NEW table (another count / checksum) after one was accepted: validate it again. A zero descriptor never clears the selection (the live captures send the table once, zeros afterwards). A re-read that matches replaces the table; one that does not DROPS it (nothing is applied rather than a stale table). */
         lagfx_gd_select_t cur; lagfx_gd_select_get(&cur, NULL, 0);
         if (cur.count != d.count || cur.sum != d.sum) { s_rereads++; INC(s_st.rereads); gd_region_read(p, &d, reader, owner); }
+    }
+    else if (d.off != 0 && gd_sel_accepted()) {   /* re-validation budget (GD_MAX_REREADS) spent: a changed table is now IGNORED; count it so the limit is visible, not silent */
+        lagfx_gd_select_t cur; lagfx_gd_select_get(&cur, NULL, 0);
+        if (cur.count != d.count || cur.sum != d.sum) INC(s_st.reread_capped);
     }
     if (is_sample(n)) {
         uint32_t k = 0;

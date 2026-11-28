@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 #define CNT 257u
 static float g_tab[3 * CNT];
@@ -36,6 +37,25 @@ static lagfx_protocol_t *select_table(void) {
     w32(pl, 8, 7); w32(pl, 16, 0x118000u); w32(pl, 24, 0x4000u); w32(pl, 32, CNT); w32(pl, 36, sum);
     lagfx_gd_note_op8(p, 4, pl, sizeof pl, 0, NULL, owner_fn);
     return p;
+}
+
+
+/* two present paths missing the cache at the same time (display.c and display_blit.c): the scratch of a table build is per call, so every pixel is one of the two tables' results */
+static lagfx_protocol_t *g_cp; static volatile int g_stop; static volatile int g_bad;
+static void *cworker(void *a) { (void)a; while (!g_stop) { uint8_t px[4] = { 40, 128, 40, 255 }; lagfx_gamma_apply_present(px, 1, 0);
+    if (!((px[0] == 215 || px[0] == 6) && px[3] == 255)) g_bad = 1; } return NULL; }
+static int concurrency_and_cap(void) {
+    int k[3] = { 2, 2, 2 }; fill(k); lagfx_protocol_t *p = select_table(); g_cp = p;
+    setenv("LAGFX_GAMMA_APPLY", "1", 1); lagfx_gamma_test_reset();
+    pthread_t th[4]; for (int i = 0; i < 4; i++) pthread_create(&th[i], NULL, cworker, NULL);
+    for (int i = 0; i < 12; i++) { int kk[3] = { (i & 1) ? 1 : 2, (i & 1) ? 1 : 2, (i & 1) ? 1 : 2 }; fill(kk); op8_table(p, tab_sum()); }   /* each change bumps the generation: concurrent cache misses */
+    g_stop = 1; for (int i = 0; i < 4; i++) pthread_join(th[i], NULL);
+    assert(!g_bad);
+    /* the re-validation budget (GD_MAX_REREADS = 16 accepted re-reads) is a diagnostic limit: once spent, a changed table is ignored AND counted */
+    { lagfx_gd_stats_t gs; lagfx_gd_stats_get(&gs); const uint64_t r0 = gs.rereads, c0 = gs.reread_capped;
+      for (int i = 0; i < 12; i++) { int kk[3] = { (i & 1) ? 1 : 2, (i & 1) ? 1 : 2, (i & 1) ? 1 : 2 }; fill(kk); op8_table(p, tab_sum()); }
+      lagfx_gd_stats_get(&gs); (void)r0; (void)c0; assert(gs.rereads == 16u && gs.reread_capped == 4u /* only descriptors that differ from the table still active count; the equal ones are not changes */); }
+    unsetenv("LAGFX_GAMMA_APPLY"); lagfx_gd_set_reader(NULL); free(p); return 0;
 }
 
 int main(void) {
@@ -89,6 +109,7 @@ int main(void) {
       lagfx_gamma_apply_present(px, 1, 0); assert(!memcmp(px, orig, 4)); lagfx_gamma_stats_get(&st); assert(st.not_selected == 1 && st.applied == 0);
       /* lagfx_gd_reset (what lagfx_protocol_free calls) drops the selection too */
       unsetenv("LAGFX_GAMMA_APPLY"); lagfx_gd_set_reader(NULL); free(p); }
+    assert(concurrency_and_cap() == 0); puts("PASS gamma concurrent cache misses (4 threads) and the re-validation budget is counted");
     puts("PASS gamma application through the accepted selection: default OFF, only the value 1 enables it, applied once, no selection -> untouched and counted");
     return 0;
 }
