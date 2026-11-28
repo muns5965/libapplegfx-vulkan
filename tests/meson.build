@@ -2504,3 +2504,13 @@ if fs.is_file(meson.current_source_dir() / 'gamma-apply-unit.c')
   )
   test('gamma LUT application (unit)', gamma_apply_test)
 endif
+
+# Int64 narrowing sweep over every AIR fixture (devices without shaderInt64): never needs Int64 afterwards, refuses instead of dropping, spirv-val parity when the validator is installed.
+air_int64_narrow_test = executable('air-int64-narrow-unit',
+  'air-int64-narrow-unit.c',
+  include_directories : [include_dir, internal_include_dir, include_directories('../src')],
+  dependencies : pipeline_bundle_deps,
+  c_args : ['-DSRCDIR="' + meson.current_source_dir() + '/.."'],
+  build_by_default : true,
+)
+test('air2spv Int64 narrowing sweep (unit, all AIR fixtures, spirv-val)', air_int64_narrow_test, workdir : meson.current_source_dir() / '..')

@@ -1258,7 +1258,8 @@ static uint32_t get_value_spv_type(const xlate_ctx_t *c, uint32_t value_id);
 /* true when the AIR type is, or contains (vector element / array element / struct member / pointee), a 64-bit integer */
 static bool air_type_has_i64(xlate_ctx_t *c, uint32_t ty, unsigned depth) {
     uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
-    if (ty >= n || depth > 6u) return false;
+    if (ty >= n) return false;
+    if (depth > 6u) return true;   /* cannot be inspected: not assumed safe */
     const lagfx_air_type_t *t = &ts[ty];
     if (t->kind == LAGFX_AIR_TYPE_INTEGER) return t->num_op >= 1u && t->op[0] == 64u;
     if (t->kind == LAGFX_AIR_TYPE_VECTOR || t->kind == LAGFX_AIR_TYPE_ARRAY)   /* [count, elem] */
@@ -6730,8 +6731,7 @@ static void emit_inst_store(xlate_ctx_t *c, const lagfx_air_inst_t *inst,
      * the three array-element stores) or vec4f32 (the position store).
      * For the MVP, default to vec2f32 since that's what triangle's
      * GEP+STORE pattern stores. */
-    if (t_narrow64) { uint32_t vt = value_air_type_idx(c, val_id), nt = 0; const lagfx_air_type_t *ts_ = lagfx_air_module_types(c->m, &nt);
-        if (vt < nt && ts_[vt].kind == LAGFX_AIR_TYPE_INTEGER && ts_[vt].num_op >= 1u && ts_[vt].op[0] == 64u) narrow_unsafe("64-bit data"); }   /* a 64-bit store is data */
+    if (t_narrow64 && air_type_has_i64(c, value_air_type_idx(c, val_id), 0u)) narrow_unsafe("i64 store");   /* 64-bit data (scalar, vector, array, struct member or pointee), not index math */
     uint32_t val_spv = resolve_value_spv(c, val_id);
     if (!val_spv) {
         val_spv = emit_undef(c, emit_type_vec2_f(c));
@@ -6751,8 +6751,7 @@ static void emit_inst_load(xlate_ctx_t *c, uint32_t inst_idx,
     uint32_t ptr_rel       = (uint32_t)inst->ops[0];
     uint32_t result_ty_air = (uint32_t)inst->ops[1];
 
-    if (t_narrow64) { uint32_t nt = 0; const lagfx_air_type_t *ts_ = lagfx_air_module_types(c->m, &nt);
-        if (result_ty_air < nt && ts_[result_ty_air].kind == LAGFX_AIR_TYPE_INTEGER && ts_[result_ty_air].num_op >= 1u && ts_[result_ty_air].op[0] == 64u) narrow_unsafe("64-bit data"); }   /* a 64-bit load is data, not index math */
+    if (t_narrow64 && air_type_has_i64(c, result_ty_air, 0u)) narrow_unsafe("i64 load");   /* 64-bit data, not index math */
     uint32_t result_spv = emit_air_type(c, result_ty_air);
     uint32_t ptr_id     = resolve_relative(ptr_rel, next_val_id);
     uint32_t ptr_spv    = resolve_value_spv(c, ptr_id);
