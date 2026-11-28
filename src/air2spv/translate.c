@@ -436,6 +436,10 @@ lagfx_air2spv_translate_module_ex(const lagfx_air_module_t *m,
                 LAGFX_WARN("air2spv: translate_function refused (st=%d): an unlowered call; no stub fallback", (int)bst);
                 return LAGFX_ERR_PROTOCOL;
             }
+            if (lagfx_air2spv_last_narrow_refusal()[0]) {   /* 64-bit data on a device without shaderInt64: NOT replaced by the reference stub (it would draw a flat colour instead of the shader); the caller sees a failed translation */
+                LAGFX_WARN("air2spv: translate_function refused (st=%d): 64-bit data (%s) cannot be narrowed; no stub fallback", (int)bst, lagfx_air2spv_last_narrow_refusal());
+                return LAGFX_ERR_PROTOCOL;
+            }
             LAGFX_WARN("air2spv: translate_function failed (st=%d); falling back",
                        (int)bst);
         }

@@ -1926,6 +1926,9 @@ if fs.is_file(meson.current_source_dir() / 'air2spv-int-intrinsics-lavapipe.c') 
   )
   test('air2spv integer intrinsics on lavapipe', air2spv_int_vk_test,
     workdir : meson.current_source_dir() / '..')
+  # the same fixtures and CPU references translated with Int64 narrowing (S8: no shaderInt64): executed values must match; genuine 64-bit data is refused, never mistranslated
+  test('air2spv integer intrinsics on lavapipe, Int64 narrowed', air2spv_int_vk_test,
+    env : ['LAGFX_RUN_NARROW=1'], workdir : meson.current_source_dir() / '..')
 endif
 
 # AIR atomics (air.atomic.*) translated and executed on a Vulkan 1.3 device (lavapipe) against CPU references, with negative controls and a refusal check. Skips (77) without a device / shaderInt64.

@@ -8,6 +8,7 @@
 #include "air2spv/translate.h"
 #include "air2spv/translate_function.h"
 #include "air/bitcode_reader.h"
+#include "vulkan/caps.h"
 
 #include <vulkan/vulkan.h>
 #include <math.h>
@@ -284,8 +285,15 @@ static void ref_l_fma(int x, int y, float o[4]) {
 }
 static void neg_l_fma(int x, int y, float o[4]) { float e = (float)x * 0x1p-8f, a = e + 1.0f, c = -((e * 2.0f) + 1.0f); ref_l_fma(x, y, o); o[0] = o[1] = o[2] = a * a - c; }   /* wrong sign of the addend */
 
+/* Int64 narrowing (shaderInt64-less devices): address-style i64 arithmetic on small values */
+static void ref_i64idx(int x, int y, float o[4]) {
+    uint32_t a = (uint32_t)x, b = (uint32_t)y, pk = (a << 14) | (b << 8);
+    o[0] = (float)(a * b + 1000u); o[1] = (float)((int)a - 32 < (int)b - 32 ? a * 5u : b * 7u); o[2] = (float)(a < b ? (pk & 65535u) : pk); o[3] = (float)((pk + a * b) & 4095u);
+}
+static void neg_i64idx(int x, int y, float o[4]) { ref_i64idx(x, y, o); uint32_t a = (uint32_t)x, b = (uint32_t)y; o[1] = (float)((a - 32u) < (b - 32u) ? a * 5u : b * 7u); }   /* wrong model: unsigned compare of the differences (a 32-bit narrowing that loses the sign would behave like this) */
 typedef struct { const char *fixture; int w, h; void (*ref)(int x, int y, float o[4]); int nanmax; void (*neg)(int x, int y, float o[4]); } case_t;   /* neg: negative control (integ7b): a deliberately WRONG model that the pixels must NOT match, so the comparison is shown to discriminate */   /* nanmax: 0 = default translation; 1 = D2 NMin/NMax/NClamp forced on; 2 = default translation, REPORT only (what FMin/FMax/FClamp do with a NaN on this device is unspecified) */
 static const case_t cases[] = {
+    { "rt_i64idx_fragment.air.bc",     65, 65, ref_i64idx, 0, neg_i64idx },
     { "rt_bits32_fragment.air.bc",     65, 65, ref_bits32 },
     { "rt_bitsnarrow_fragment.air.bc", 65, 65, ref_narrow },
     { "rt_bitsnarrow2_fragment.air.bc", 65, 65, ref_narrow2 },
@@ -330,6 +338,7 @@ static const case_t cases[] = {
 
 static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q;
 
+static int g_narrow, g_narrow_ran, g_narrow_refused;
 static int run_case(const case_t *cs) {
     size_t bn = 0; uint8_t *bc = slurp(cs->fixture, &bn);
     CHECK(bc, "fixture %s not found", cs->fixture);
@@ -337,8 +346,19 @@ static int run_case(const case_t *cs) {
     CHECK(lagfx_air_module_open(bc, bn, &m) == LAGFX_OK && m, "%s: module_open", cs->fixture);
     uint8_t *spv = NULL; size_t sz = 0;
     lagfx_air2spv_set_nanmax(cs->nanmax == 1 ? 1 : 0);   /* explicit: the environment variable must not decide a test */
-    CHECK(lagfx_air2spv_translate_module(m, &spv, &sz) == LAGFX_OK && spv, "%s: translate", cs->fixture);
+    if (g_narrow) lagfx_air2spv_set_narrow_int64(1);   /* LAGFX_RUN_NARROW=1: the same fixtures and references, translated for a device without shaderInt64 */
+    int tr = lagfx_air2spv_translate_module(m, &spv, &sz);
+    lagfx_air2spv_set_narrow_int64(0);
     lagfx_air2spv_set_nanmax(-1);
+    if (g_narrow && (tr != LAGFX_OK || !spv)) {   /* genuine 64-bit data: refused with a reason, never mistranslated */
+        CHECK(lagfx_air2spv_last_narrow_refusal()[0], "%s: narrowed translation failed without a refusal reason (status %d)", cs->fixture, tr);
+        g_narrow_refused++; lagfx_air_module_free(m); free(bc); return 0;
+    }
+    CHECK(tr == LAGFX_OK && spv, "%s: translate", cs->fixture);
+    if (g_narrow) {
+        uint32_t need = 0; CHECK(lagfx_spv_required_caps_ex(spv, sz, &need) && !(need & (1u << LAGFX_VK_CAP_INT64)), "%s: narrowed module still needs Int64", cs->fixture);
+        g_narrow_ran++;
+    }
     VkDevice dev = g_dev; VkPhysicalDevice pd = g_pd; VkQueue q = g_q;
     const int W = cs->w, H = cs->h;
     VkImageCreateInfo imi = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R32G32B32A32_SFLOAT, .extent = { (uint32_t)W, H, 1 }, .mipLevels = 1, .arrayLayers = 1,
@@ -455,10 +475,12 @@ int main(void) {
     VkDevice dev; VK(vkCreateDevice(pd, &dci, NULL, &dev));
     VkQueue q; vkGetDeviceQueue(dev, 0, 0, &q);
     g_pd = pd; g_dev = dev; g_q = q;
+    { const char *e = getenv("LAGFX_RUN_NARROW"); g_narrow = e && e[0] == '1'; }
     int failed = 0;   /* every fixture runs even after a failure, so one revert shows the whole matrix */
     for (size_t k = 0; k < sizeof cases / sizeof cases[0]; k++)
         if (run_case(&cases[k])) failed++;
     if (failed) { printf("FAIL air2spv-int-intrinsics-lavapipe: %d of %zu fixtures failed\n", failed, sizeof cases / sizeof cases[0]); return 1; }
+    if (g_narrow) { printf("INFO narrowed run: executed=%d refused(64-bit data)=%d\n", g_narrow_ran, g_narrow_refused); if (g_narrow_ran < 10) { printf("FAIL: too few narrowed fixtures executed (%d)\n", g_narrow_ran); return 1; } }
     printf("PASS air2spv-int-intrinsics-lavapipe (%zu fixtures) on %s\n", sizeof cases / sizeof cases[0], pp.deviceName);
     return 0;
 }

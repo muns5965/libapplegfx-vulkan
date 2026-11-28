@@ -71,6 +71,12 @@ static void sweep(int strict_atomics, int have_val) {
     printf("INFO [%s atomics] fixtures translated=%d needing-Int64=%d narrowed=%d refused=%d spirv-val(narrowed ok=%d, base already invalid=%d, narrowing-only failures=%d, validator %s)\n",
            strict_atomics ? "strict" : "lenient", total, need64, narrowed, refused, vok, vbase_bad, vnarrow_only, have_val ? "present" : "absent");
     CHECK(total > 100, "fixture sweep too small (%d)", total);
+    {   /* a fragment/vertex function refused for 64-bit data must FAIL the translation: it used to fall back to the flat-colour reference stub (a red fragment) and look 'narrowed' */
+        size_t bn = 0; uint8_t *bc = slurp(SRCDIR "/tests/fixtures/rt_bits32_fragment.air.bc", &bn); lagfx_air_module_t *mm = NULL; uint8_t *sp = NULL; size_t sn = 0;
+        CHECK(bc && lagfx_air_module_open(bc, bn, &mm) == LAGFX_OK, "rt_bits32 fixture");
+        if (mm) { lagfx_air2spv_set_narrow_int64(1); int rr = lagfx_air2spv_translate_module(mm, &sp, &sn); lagfx_air2spv_set_narrow_int64(0); CHECK(rr != 0 && !sp, "refused 64-bit fragment fell back to a stub (status %d)", rr); free(sp); lagfx_air_module_free(mm); }
+        free(bc);
+    }
     CHECK(refused >= 3, "the 64-bit atomic fixtures must be refused (refused=%d)", refused);
 }
 
