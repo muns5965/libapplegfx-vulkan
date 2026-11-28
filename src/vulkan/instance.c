@@ -434,6 +434,13 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         LAGFX_LOG("vk_init: VK_EXT_extended_dynamic_state3 missing — "
                   "later phases may need fallbacks");
     }
+    /* On a device below Vulkan 1.2 the features of these extensions (shaderFloat16/Int8, 8/16-bit storage, variable pointers) were not yet core: using them through the
+     * Vulkan11/12 feature structs without enabling the extension is invalid usage. Enable each one the device offers (>= 1.2 devices keep their exact previous set). */
+    if (s->phys_props.apiVersion < VK_API_VERSION_1_2) {
+        static const char *const khr11[] = { "VK_KHR_shader_float16_int8", "VK_KHR_8bit_storage", "VK_KHR_16bit_storage", "VK_KHR_variable_pointers", "VK_KHR_storage_buffer_storage_class" };
+        for (size_t i = 0; i < sizeof khr11 / sizeof khr11[0]; i++)
+            if (has_ext(dext, dext_n, khr11[i]) && wanted_dev_n < 20) wanted_dev_exts[wanted_dev_n++] = khr11[i];
+    }
     bool have_spirv14_ext = has_ext(dext, dext_n, "VK_KHR_spirv_1_4") && has_ext(dext, dext_n, "VK_KHR_shader_float_controls");
     const bool ext_lr = has_ext(dext, dext_n, "VK_KHR_dynamic_rendering_local_read");
     /* Opt-in cubic filtering (filter_cubic.h): only requested with LAGFX_CUBIC=1; the extension has no feature struct. The EXT form is preferred, the IMG alias is used on a device that lacks it. */
