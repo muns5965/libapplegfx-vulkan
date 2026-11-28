@@ -275,19 +275,28 @@ static void msurf_unref(struct lagfx_vk_state *vk, msurf_t *ms) {
     free(ms);
 }
 
+/* A view the legacy backend used as a framebuffer attachment is referenced by the render-pass cache's VkFramebuffers: they must be forgotten BEFORE the view is destroyed, or the cache fills up
+ * (framebuffer cache full (1024) -> every later pass refused, S8: 749 draws) and a recycled view handle could match a stale framebuffer. A view whose framebuffers could not be proven idle
+ * is leaked (kept alive) instead of destroyed under them. */
+static void destroy_view(struct lagfx_vk_state *vk, VkImageView v) {
+    if (!v) return;
+    if (lagfx_vk_render_forget_view(vk, v) == LAGFX_FORGET_DEFERRED) return;
+    vkDestroyImageView(vk->device, v, NULL);
+}
+
 static void obj_free(struct lagfx_vk_state *vk, lagfx_a64_obj_t *o) {
     if (!o) return;
     if (o->ms) {   /* the image belongs to the shared surface */
-        if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
+        if (o->view) destroy_view(vk, o->view);
         msurf_unref(vk, o->ms);
         free(o);
         return;
     }
-    if (o->view) vkDestroyImageView(vk->device, o->view, NULL);
-    if (o->sview) vkDestroyImageView(vk->device, o->sview, NULL);
-    if (o->view3) vkDestroyImageView(vk->device, o->view3, NULL);
-    if (o->mview) vkDestroyImageView(vk->device, o->mview, NULL);
-    if (o->aview) vkDestroyImageView(vk->device, o->aview, NULL);
+    if (o->view) destroy_view(vk, o->view);
+    if (o->sview) destroy_view(vk, o->sview);
+    if (o->view3) destroy_view(vk, o->view3);
+    if (o->mview) destroy_view(vk, o->mview);
+    if (o->aview) destroy_view(vk, o->aview);
     if (o->img) vkDestroyImage(vk->device, o->img, NULL);
     if (o->img_mem) vkFreeMemory(vk->device, o->img_mem, NULL);
     free_buf(vk, o->buf, o->buf_mem);

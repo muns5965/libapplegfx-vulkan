@@ -2425,6 +2425,9 @@ if fs.is_file(meson.current_source_dir() / 'arm64-msaa-guest-unit.c') and vulkan
   test('arm64 msaa guest path (unit, lavapipe + validation)', msaa_guest_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1'])
   test('arm64 msaa guest path, legacy VkRenderPass (unit, forced legacy + validation required)', msaa_guest_test,
        env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
+  # Regression (S8 device log: 'framebuffer cache full (1024)', 749 draws refused): destroyed mirror views must leave the render-pass framebuffer cache. A cache of 6 makes the leak fatal within the run.
+  test('arm64 msaa guest path, legacy VkRenderPass with a 6-entry framebuffer cache (views must be forgotten when mirror objects die)', msaa_guest_test,
+       env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1', 'LAGFX_RENDER_CACHE_MAX_FB=6'])
   test('arm64 msaa guest path, simulated Vulkan 1.1 + VK_EXT_extended_dynamic_state (unit, legacy VkRenderPass, validation required)', msaa_guest_test,
        env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_TEST_API_MINOR=1', 'LAGFX_VK_LEGACY_RENDERPASS_GPU=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
 endif
