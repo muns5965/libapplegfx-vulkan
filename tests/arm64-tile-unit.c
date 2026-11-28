@@ -548,7 +548,20 @@ static void test_tile(const uint8_t *lib, size_t libn, uint32_t force_w) {
         free(img);
         cb_reset(); cb_pass(REF_DSTB, 2, clr); tile_bind_all(); cb_dispatch_region(g_S, 4, g_S, 0, g_S, g_H);
         exec_refs(p, 1, cb_finish());
-        assert(TILE(p).dispatches == 2 && TILE(p).bgra8_surr_dispatches == 2 && TILE(p).bgra8_variants == 1);
+        assert(TILE(p).dispatches == 2 && TILE(p).bgra8_surr_dispatches == 2 && TILE(p).bgra8_variants == 1 && TILE(p).resume_failed == 0 && RUNC(p).submit_failed == 0);
+        /* the region dispatch (origin (S, 0), S wide): inside = the CPU model (+-1 for unorm8 rounding), outside = the clear colour exactly (B, G, R, A bytes) */
+        img = malloc((size_t)g_W * g_H * 4);
+        assert(lagfx_a64_exec_readback_texture(p, t, REF_DSTB, img, (size_t)g_W * g_H * 4, &w, &h) && w == g_W && h == g_H);
+        unsigned bin = 0, bout = 0;
+        for (uint32_t y = 0; y < g_H; y++) for (uint32_t x = 0; x < g_W; x++) for (int ch = 0; ch < 4; ch++) {
+            static const int byte_of[4] = { 2, 1, 0, 3 };
+            int got = img[((size_t)y * g_W + x) * 4 + byte_of[ch]];
+            if (x >= g_S) { float m = model(x, y, ch); if (m > 1.0f) m = 1.0f; int want = (int)(m * 255.0f + 0.5f); if (got < want - 1 || got > want + 1) bin++; }
+            else { int want = (int)(clr[ch] * 255.0 + 0.5); if (got != want) bout++; }
+        }
+        printf("tile BGRA8 surrogate region dispatch: %u mismatches inside, %u outside\n", bin, bout);
+        assert(bin == 0 && bout == 0);
+        free(img);
         lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); pfree(p);
         vk->have_storage_img_rw_nofmt = saved_nf;
         lagfx_fmtcap_test_backend = NULL;
