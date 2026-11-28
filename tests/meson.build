@@ -1701,6 +1701,16 @@ if fs.is_file(meson.current_source_dir() / 'arm64-pipefail-unit.c') and vulkan_d
   test('pipeline build failure diagnostics + SPIR-V capture (lavapipe)', pf_test, timeout : 120)
 endif
 
+if fs.is_file(meson.current_source_dir() / 'pipeline-fallback-draw-lavapipe.c') and vulkan_dep.found()
+  pfd_test = executable('pipeline-fallback-draw-lavapipe',
+    'pipeline-fallback-draw-lavapipe.c',
+    include_directories : [include_dir, internal_include_dir],
+    dependencies : [libapplegfx_vulkan_dep, vulkan_dep, dependency('threads')],
+    build_by_default : true,
+  )
+  test('fallback pipeline draws pixel-identical to the original (legacy + dynamic rendering, lavapipe)', pfd_test, timeout : 120)
+endif
+
 # Tile kernel subgroup plan (pure decision table; the Adreno 64..128 range is emulated as logical 32-lane groups in a pinned subgroup).
 if fs.is_file(meson.current_source_dir() / 'tile-simd-plan-unit.c') and vulkan_dep.found()
   tsp_test = executable('tile-simd-plan-unit',

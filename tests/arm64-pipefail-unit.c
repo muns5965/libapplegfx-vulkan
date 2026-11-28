@@ -238,7 +238,6 @@ int main(void) {
     log = slurp(logf);
     assert(count(log, "pipeline-build-fail:") == 9 && count(log, "further failures are not logged") == 1);   /* 8 distinct keys + the single 'suppressed' line */
     free(log);
-    vkDestroyShaderModule(vk->device, vs, NULL); vkDestroyShaderModule(vk->device, fs, NULL);
     printf("PASS: builder: success silent, one line per distinct failure key, bounded at 8 keys\n");
     {   /* fallback: the original build fails (hook), the value-preserving variant (unused capability declarations removed) builds; a module with nothing to strip stays failed */
         uint32_t cvs[sizeof k_vs_spv / 4 + 2], cfs[sizeof k_fs_spv / 4 + 2];
@@ -263,6 +262,7 @@ int main(void) {
         }
         printf("PASS: pipeline fallback: failed original -> value-preserving variant (unused capabilities stripped) builds; nothing to strip keeps the failure\n");
     }
+    vkDestroyShaderModule(vk->device, vs, NULL); vkDestroyShaderModule(vk->device, fs, NULL);   /* d / f / g / h above hold these handles: they are destroyed only after the last use */
 
     /* (2) through an arm64 exec with LAGFX_ARM64_DUMP: the failing SPIR-V is written, the draw is skipped and counted, the stamp completes */
     char dir[64]; snprintf(dir, sizeof dir, "/tmp/lagfx-spv-XXXXXX"); assert(mkdtemp(dir));

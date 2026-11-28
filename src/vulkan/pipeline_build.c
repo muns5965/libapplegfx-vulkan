@@ -593,6 +593,7 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
         }
         lagfx_pipeline_matrix_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_MATRIX, default off: a no-op that returns at once */
         lagfx_pipeline_reduce_on_failure(device, desc, vr);   /* option LAGFX_PIPELINE_REDUCE, default off: a no-op that returns at once */
+        g_last_vr = (int32_t)vr;   /* the matrix / reduce diagnostics build OTHER pipelines through this function (thread-local g_last_vr is overwritten, e.g. with VK_SUCCESS): restore THIS build's result, the fallback gate reads it */
         return LAGFX_ERR_BACKEND;
     }
 
@@ -616,7 +617,9 @@ lagfx_status_t lagfx_pipeline_build(VkDevice device,
 
 /* ---- build with value-preserving fallback ---- */
 int lagfx_pipeline_test_fail_original = 0;
-_Atomic uint64_t lagfx_pipeline_fallback_tries;   /* retries ATTEMPTED (a module rewrite applied and a rebuild made) */
+_Atomic uint64_t lagfx_pipeline_fallback_tries;
+
+#ifdef LAGFX_HAVE_VULKAN   /* retries ATTEMPTED (a module rewrite applied and a rebuild made) */
 
 lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeline_desc_t *desc, VkPipeline *out, uint32_t *variant) {
     if (variant) *variant = 0;
@@ -661,3 +664,10 @@ lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeli
     free(vo); free(fo);
     return st;
 }
+
+#else  /* !LAGFX_HAVE_VULKAN */
+lagfx_status_t lagfx_pipeline_build_fallback(VkDevice device, const lagfx_pipeline_desc_t *desc, VkPipeline *out, uint32_t *variant) {
+    if (variant) *variant = 0;
+    return lagfx_pipeline_build(device, desc, out);   /* the stub: NOT_FOUND */
+}
+#endif  /* LAGFX_HAVE_VULKAN */
