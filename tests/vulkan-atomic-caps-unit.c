@@ -111,6 +111,9 @@ int main(void) {
         CHECK(!r && !(n_nar & B(LAGFX_VK_CAP_INT64)), "narrowed: a module with only i64 index math must not need Int64 (r=%d need 0x%x)", r, n_nar);
         int rb = need_of_status("atomic_i64.air.bc", &dummy);
         CHECK(rb != 0, "narrowed: a 64-bit atomic module must be refused, not truncated (status %d)", rb);
+        CHECK(strstr(lagfx_air2spv_last_narrow_refusal(), "i64") || strstr(lagfx_air2spv_last_narrow_refusal(), "64-bit"), "the refusal names its reason: '%s'", lagfx_air2spv_last_narrow_refusal());
+        int rs = need_of_status("simd_semantics.air.bc", &dummy);   /* shl i64 by a non-constant: the low word is only exact for a shift < 32, so it is refused */
+        CHECK(rs != 0 && strstr(lagfx_air2spv_last_narrow_refusal(), "shift"), "narrowed: i64 variable shift refused (status %d, '%s')", rs, lagfx_air2spv_last_narrow_refusal());
         lagfx_air2spv_set_narrow_int64(0);
     }
     CHECK((n_buf64 & B(LAGFX_VK_CAP_INT64)) && (n_sh64 & B(LAGFX_VK_CAP_INT64)), "64-bit atomics still need Int64 (n_buf64 0x%x n_sh64 0x%x)", n_buf64, n_sh64);

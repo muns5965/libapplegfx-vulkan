@@ -465,7 +465,7 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
     }
     {   /* a device without shaderInt64: i64 (index / address math) is translated as 32-bit; genuine 64-bit data is refused by the translator. The capability gate below stays. */
         lagfx_device_t *dv = (lagfx_device_t *)p->dev;
-        bool narrow = dv && dv->vk && !(dv->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) && !getenv("LAGFX_NO_INT64_NARROW");
+        bool narrow = dv && dv->vk && !(dv->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) && !(getenv("LAGFX_NO_INT64_NARROW") && !strcmp(getenv("LAGFX_NO_INT64_NARROW"), "1"));
         lagfx_air2spv_set_narrow_int64(narrow ? 1 : 0);
     }
     lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys; a typed vs_keys also links the interface types */
@@ -478,7 +478,17 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
         if (*nab > LAGFX_A64_MAX_ARGS) *nab = LAGFX_A64_MAX_ARGS;
     }
     lagfx_air_module_free(m);
-    if (st != LAGFX_OK || !*spv || !*sz) { free(*spv); *spv = NULL; CNTP(p).rf_translate++; return false; }
+    if (st != LAGFX_OK || !*spv || !*sz) {
+        const char *why = lagfx_air2spv_last_narrow_refusal();
+        const char *dd = getenv("LAGFX_ARM64_DUMP_DIR");
+        unsigned long long h = (unsigned long long)lagfx_a64_hash64(f->bitcode, f->bitcode_len);
+        LAGFX_WARN("arm64 translate: '%s' (bitcode hash %016llx) not translated (status %d%s%s)", f->name, h, (int)st, why[0] ? ", Int64 narrowing refusal: " : "", why);
+        if (dd && dd[0] && f->bitcode) {   /* the AIR that failed, named by its content hash (a pipeline ref can be reused by another guest task) */
+            char path[512]; snprintf(path, sizeof path, "%s/xlatereject_%016llx.air.bc", dd, h);
+            FILE *fp = fopen(path, "wb"); if (fp) { fwrite(f->bitcode, 1, f->bitcode_len, fp); fclose(fp); }
+        }
+        free(*spv); *spv = NULL; CNTP(p).rf_translate++; return false;
+    }
     CNTP(p).xlate_air2spv++;
     /* OPT-IN (LAGFX_SPV_SSA=1..4, default OFF: nothing below runs and the module is the translator's, byte for byte): Function variables -> SSA, see src/vulkan/spv_ssa.h. A failure keeps the original. */
     if (lagfx_spv_ssa_env_mode()) lagfx_spv_ssa_apply_env(spv, sz, keys_out ? "vertex" : "fragment");
@@ -557,7 +567,7 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
                 if (dd && dd[0]) {
                     char path[512]; const struct { const char *tag; const void *d; size_t n; } f[] = { { "vs.spv", vspv, vsz }, { "fs.spv", fspv, fsz }, { "vs.air.bc", vf->bitcode, vf->bitcode_len }, { "fs.air.bc", ff->bitcode, ff->bitcode_len } };
                     for (unsigned q = 0; q < 4u; q++) {
-                        snprintf(path, sizeof path, "%s/capreject_p%u_%s", dd, ref, f[q].tag);
+                        snprintf(path, sizeof path, "%s/capreject_%016llx_%016llx_%s", dd, (unsigned long long)lagfx_a64_hash64(vf->bitcode, vf->bitcode_len), (unsigned long long)lagfx_a64_hash64(ff->bitcode, ff->bitcode_len), f[q].tag);
                         FILE *fp = fopen(path, "wb"); if (fp) { fwrite(f[q].d, 1, f[q].n, fp); fclose(fp); }
                     }
                 }

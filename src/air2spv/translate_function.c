@@ -641,6 +641,9 @@ static _Atomic int g_narrow_i64_global;
 static _Thread_local bool t_narrow64;          /* narrowing active for the current translation */
 static _Thread_local bool t_narrow_used;       /* at least one i64 was narrowed */
 static _Thread_local bool t_narrow_unsafe;     /* genuine 64-bit data seen while narrowing: module refused */
+static _Thread_local char t_narrow_reason[64]; /* first reason */
+static void narrow_unsafe(const char *why) { if (!t_narrow_unsafe) snprintf(t_narrow_reason, sizeof t_narrow_reason, "%s", why); t_narrow_unsafe = true; }
+const char *lagfx_air2spv_last_narrow_refusal(void) { return t_narrow_unsafe ? t_narrow_reason : ""; }
 void lagfx_air2spv_set_narrow_int64(int on) { atomic_store(&g_narrow_i64_global, on ? 1 : 0); }
 bool lagfx_air2spv_last_narrowed_int64(void) { return t_narrow_used; }
 static uint32_t narrow_w(uint32_t w) { return (w == 64u && t_narrow64) ? 32u : w; }
@@ -695,6 +698,7 @@ static uint32_t emit_type_int_w(xlate_ctx_t *c, uint32_t width, uint32_t sign) {
 }
 
 static void emit_int_const_bits(xlate_ctx_t *c, uint32_t ty_spv, uint32_t id, uint32_t w, uint64_t bits) {
+    if (w == 64u && t_narrow64) { int64_t sv = (int64_t)bits; if (sv < (int64_t)INT32_MIN || sv > (int64_t)UINT32_MAX) narrow_unsafe("i64 constant beyond 32 bits"); }   /* high bits would be lost */
     if (narrow_w(w) == 64u) { uint32_t o[] = { ty_spv, id, (uint32_t)(bits & 0xFFFFFFFFu), (uint32_t)(bits >> 32u) }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 4); }
     else { uint32_t o[] = { ty_spv, id, (uint32_t)(bits & 0xFFFFFFFFu) }; lagfx_spv_builder_emit_op(c->b, LAGFX_SPV_OP_CONSTANT, o, 3); }
 }
@@ -1250,15 +1254,35 @@ static uint32_t resolve_relative(uint32_t encoded, uint32_t next_val_id) {
 static void emit_inst_gep(xlate_ctx_t *c, uint32_t inst_idx,
                            const lagfx_air_inst_t *inst,
                            uint32_t result_value_id, uint32_t next_val_id);
+static uint32_t get_value_spv_type(const xlate_ctx_t *c, uint32_t value_id);
+/* true when the AIR type is, or contains (vector element / array element / struct member / pointee), a 64-bit integer */
+static bool air_type_has_i64(xlate_ctx_t *c, uint32_t ty, unsigned depth) {
+    uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
+    if (ty >= n || depth > 6u) return false;
+    const lagfx_air_type_t *t = &ts[ty];
+    if (t->kind == LAGFX_AIR_TYPE_INTEGER) return t->num_op >= 1u && t->op[0] == 64u;
+    if (t->kind == LAGFX_AIR_TYPE_VECTOR || t->kind == LAGFX_AIR_TYPE_ARRAY)   /* [count, elem] */
+        return t->num_op >= 2u && air_type_has_i64(c, t->op[1], depth + 1u);
+    if (t->kind == LAGFX_AIR_TYPE_POINTER)                                       /* [pointee, addrspace]: memory holding i64 is data */
+        return t->num_op >= 1u && air_type_has_i64(c, t->op[0], depth + 1u);
+    if (t->kind == LAGFX_AIR_TYPE_STRUCT_ANON || t->kind == LAGFX_AIR_TYPE_STRUCT_NAMED) {   /* [packed, field...] */
+        for (uint32_t i = 1; i < t->num_op; i++) if (air_type_has_i64(c, t->op[i], depth + 1u)) return true;
+    }
+    return false;
+}
+
 static uint32_t value_air_type_idx(xlate_ctx_t *c, uint32_t value_id);
 /* Narrowing: a trunc / zext / sext whose two sides have the same SPIR-V width once i64 became 32 bits is an identity (OpUConvert / OpSConvert need differing widths). */
-static bool cast_same_width_narrowed(xlate_ctx_t *c, uint32_t src_value_id, uint32_t dest_air_ty) {
+static bool cast_same_width_narrowed(xlate_ctx_t *c, uint32_t src_value_id, uint32_t dest_air_ty, uint32_t dest_spv) {
     if (!t_narrow64) return false;
     uint32_t n = 0; const lagfx_air_type_t *ts = lagfx_air_module_types(c->m, &n);
     uint32_t st = value_air_type_idx(c, src_value_id);
     if (st >= n || dest_air_ty >= n || ts[st].kind != LAGFX_AIR_TYPE_INTEGER || ts[dest_air_ty].kind != LAGFX_AIR_TYPE_INTEGER) return false;
     uint32_t ws = ts[st].num_op >= 1u ? ts[st].op[0] : 32u, wd = ts[dest_air_ty].num_op >= 1u ? ts[dest_air_ty].op[0] : 32u;
-    return (ws == 64u || wd == 64u) && narrow_w(ws) == narrow_w(wd);
+    if (!((ws == 64u || wd == 64u) && narrow_w(ws) == narrow_w(wd))) return false;
+    uint32_t sspv = get_value_spv_type(c, src_value_id);   /* OpCopyObject needs identical SPIR-V types: a mismatch is refused, not emitted */
+    if (sspv && sspv != dest_spv) narrow_unsafe("narrowed cast with differing SPIR-V types");
+    return true;
 }
 
 static void emit_inst_cast(xlate_ctx_t *c, uint32_t inst_idx,
@@ -3652,21 +3676,21 @@ static void emit_inst_cast(xlate_ctx_t *c, uint32_t inst_idx,
             if (!result_spv) result_spv = lagfx_spv_builder_alloc_id(c->b);
             { uint32_t dest_ty_spv = emit_air_type(c, dest_ty);
               uint32_t ops[] = { dest_ty_spv, result_spv, opval_spv };
-              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_UCONVERT, ops, 3); }
+              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty, dest_ty_spv) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_UCONVERT, ops, 3); }
             break;
 
         case 1:  /* CAST_ZEXT → OpUConvert (larger width int) */
             if (!result_spv) result_spv = lagfx_spv_builder_alloc_id(c->b);
             { uint32_t dest_ty_spv = emit_air_type(c, dest_ty);
               uint32_t ops[] = { dest_ty_spv, result_spv, opval_spv };
-              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_UCONVERT, ops, 3); }
+              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty, dest_ty_spv) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_UCONVERT, ops, 3); }
             break;
 
         case 2:  /* CAST_SEXT → OpSConvert (larger width int) */
             if (!result_spv) result_spv = lagfx_spv_builder_alloc_id(c->b);
             { uint32_t dest_ty_spv = emit_air_type(c, dest_ty);
               uint32_t ops[] = { dest_ty_spv, result_spv, opval_spv };
-              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_SCONVERT, ops, 3); }
+              lagfx_spv_builder_emit_op(c->b, cast_same_width_narrowed(c, opval_id, dest_ty, dest_ty_spv) ? 83u /* OpCopyObject */ : LAGFX_SPV_OP_SCONVERT, ops, 3); }
             break;
 
         case 3:  /* CAST_FPTOUI → OpConvertFToU (float→unsigned int) */
@@ -4413,7 +4437,7 @@ static uint32_t ix_bty(ix_t *x) { return ix_vec_of(x->c, emit_type_bool(x->c), x
 /* integer constant of width w (value masked to w bits), splatted to the operand's lane count */
 static uint32_t ix_const(ix_t *x, uint32_t w, uint64_t v) {
     xlate_ctx_t *c = x->c;
-    if (w == 64u && t_narrow64) t_narrow_unsafe = true;   /* 64-bit counting / multiply-high helpers are genuine 64-bit data ops */
+    if (w == 64u && t_narrow64) narrow_unsafe("64-bit bit-count/mulhi helper");   /* 64-bit counting / multiply-high helpers are genuine 64-bit data ops */
     if (w < 64u) v &= ((uint64_t)1 << w) - 1u;
     uint32_t sty = emit_type_int_w(c, w, 0u);
     uint32_t sid = cache_lookup_const(c, 1, sty, v);
@@ -5208,7 +5232,7 @@ static unsigned emit_atomic_call(xlate_ctx_t *c, const atomic_name_t *an, const 
         }
     }
     /* capabilities / extensions by type */
-    if (an->bits == 64u && t_narrow64) t_narrow_unsafe = true;
+    if (an->bits == 64u && t_narrow64) narrow_unsafe("64-bit atomic");
     if (an->bits == 64u && !c->cap_atomic64) {
         c->cap_atomic64 = 1u;
         uint32_t cap[] = { 12u /* Int64Atomics */ };
@@ -6707,7 +6731,7 @@ static void emit_inst_store(xlate_ctx_t *c, const lagfx_air_inst_t *inst,
      * For the MVP, default to vec2f32 since that's what triangle's
      * GEP+STORE pattern stores. */
     if (t_narrow64) { uint32_t vt = value_air_type_idx(c, val_id), nt = 0; const lagfx_air_type_t *ts_ = lagfx_air_module_types(c->m, &nt);
-        if (vt < nt && ts_[vt].kind == LAGFX_AIR_TYPE_INTEGER && ts_[vt].num_op >= 1u && ts_[vt].op[0] == 64u) t_narrow_unsafe = true; }   /* a 64-bit store is data */
+        if (vt < nt && ts_[vt].kind == LAGFX_AIR_TYPE_INTEGER && ts_[vt].num_op >= 1u && ts_[vt].op[0] == 64u) narrow_unsafe("64-bit data"); }   /* a 64-bit store is data */
     uint32_t val_spv = resolve_value_spv(c, val_id);
     if (!val_spv) {
         val_spv = emit_undef(c, emit_type_vec2_f(c));
@@ -6728,7 +6752,7 @@ static void emit_inst_load(xlate_ctx_t *c, uint32_t inst_idx,
     uint32_t result_ty_air = (uint32_t)inst->ops[1];
 
     if (t_narrow64) { uint32_t nt = 0; const lagfx_air_type_t *ts_ = lagfx_air_module_types(c->m, &nt);
-        if (result_ty_air < nt && ts_[result_ty_air].kind == LAGFX_AIR_TYPE_INTEGER && ts_[result_ty_air].num_op >= 1u && ts_[result_ty_air].op[0] == 64u) t_narrow_unsafe = true; }   /* a 64-bit load is data, not index math */
+        if (result_ty_air < nt && ts_[result_ty_air].kind == LAGFX_AIR_TYPE_INTEGER && ts_[result_ty_air].num_op >= 1u && ts_[result_ty_air].op[0] == 64u) narrow_unsafe("64-bit data"); }   /* a 64-bit load is data, not index math */
     uint32_t result_spv = emit_air_type(c, result_ty_air);
     uint32_t ptr_id     = resolve_relative(ptr_rel, next_val_id);
     uint32_t ptr_spv    = resolve_value_spv(c, ptr_id);
@@ -7228,6 +7252,12 @@ static void emit_inst_binop(xlate_ctx_t *c, uint32_t inst_idx,
                 is_float = false;
             }
         }
+    }
+
+    if (t_narrow64 && !is_float && lhs_ty != LAGFX_AIR_TYPE_NONE && air_type_has_i64(c, lhs_ty, 0u)) {   /* narrowed arithmetic is exact only for results that stay < 2^32 and ops whose low word does not depend on the high word */
+        if (llvm_binop == 3 || llvm_binop == 4 || llvm_binop == 5 || llvm_binop == 6) narrow_unsafe("i64 division / remainder");
+        else if (llvm_binop == 8 || llvm_binop == 9) narrow_unsafe("i64 right shift");   /* high bits shift into the low word */
+        else if (llvm_binop == 7) { int32_t sh = 0; if (!resolve_value_lit_i32(c, rhs_id, &sh) || sh < 0 || sh >= 32) narrow_unsafe("i64 shift left by a non-constant or >= 32"); }
     }
 
     /* Determine result SPIR-V type. AIR type unknown → the operands'
@@ -10791,7 +10821,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
     *out_size_bytes = 0u;
 
     xlate_ctx_t c = {0};
-    t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false;
+    t_narrow64 = atomic_load(&g_narrow_i64_global) != 0; t_narrow_used = false; t_narrow_unsafe = false; t_narrow_reason[0] = 0;
     t_unsup_simd.n = 0; t_unsup_simd.first[0] = 0;
     t_unsup_atomic.n = 0; t_unsup_atomic.first[0] = 0; t_unsup_atomic.first_reason = 0;
     t_unlowered_refused = false; t_unlowered.n = t_unlowered.n_llvm = 0; t_unlowered.first[0] = t_unlowered.first_llvm[0] = 0; t_xlate_serial = atomic_fetch_add(&g_xlate_serial, 1u) + 1u;
@@ -10884,7 +10914,7 @@ lagfx_air2spv_translate_function_ex(const lagfx_air_module_t *m,
         LAGFX_WARN("air2spv: %u SIMD-group / quad-group operation(s) have no implementation (first: %s): their results are undefined values", t_unsup_simd.n, t_unsup_simd.first);
     }
     if (t_narrow64 && t_narrow_unsafe) {   /* genuine 64-bit data on a device without shaderInt64: refuse rather than truncate */
-        LAGFX_WARN("air2spv: module not translated: 64-bit data (load / store / atomic / bit-count) cannot be narrowed to 32 bits on a device without shaderInt64");
+        LAGFX_WARN("air2spv: module not translated: 64-bit data (%s) cannot be narrowed to 32 bits on a device without shaderInt64", t_narrow_reason);
         st = LAGFX_ERR_PROTOCOL;
         goto fail;
     }
