@@ -2354,7 +2354,7 @@ if fs.is_file(meson.current_source_dir() / 'arm64-render-compat-unit.c') and vul
     build_by_default : true,
   )
   test('arm64 render compat (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1'])
-  test('arm64 render compat, legacy render pass forced (unit, lavapipe + validation)', rc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
+  test('arm64 render compat, legacy render pass forced (unit, lavapipe + validation)', rc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_REQUIRE_VALIDATION=1', 'LAGFX_VK_FORCE_LEGACY_RENDERPASS=1'])
   test('arm64 render compat, raster order forced off (unit, lavapipe)', rc_test, env : ['LAGFX_VK_VALIDATION=1', 'LAGFX_VK_NO_RASTER_ORDER=1'])
 endif
 

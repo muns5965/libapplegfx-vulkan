@@ -120,9 +120,9 @@ static void test_val_baseline_helper(void) {
 }
 
 /* ---- scenario state read by the resolver ---- */
-enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF, FS_DISC };
+enum { FS_F, FS_U, FS_FACE, FS_MRT, FS_HALF, FS_DISC, FS_ORDER };
 static struct { int fs; bool blend; int fs2; bool two; } g_rc;   /* two: ref 7 (REF_PIPE2 of arm64-exec-run-unit) takes fs2 instead of fs */
-static VkShaderModule g_rc_fs[6]; static uint8_t *g_disc_spv; static size_t g_disc_bytes;   /* FS_DISC: a fragment shader translated from a fixture by the test */ static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
+static VkShaderModule g_rc_fs[7], g_rc_vs_order; static uint8_t *g_disc_spv; static size_t g_disc_bytes;   /* FS_DISC: a fragment shader translated from a fixture by the test */ static VkDescriptorSetLayout g_rc_dsl[2]; static VkPipelineLayout g_rc_pl[2];
 
 static VkShaderModule rc_module(struct lagfx_vk_state *vk, const uint32_t *w, size_t bytes) {
     VkShaderModule m; VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = bytes, .pCode = w };
@@ -150,6 +150,10 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
     out->desc.blend_set = 1, out->desc.color_write_mask = 0xf, out->desc.masks_valid = 1;
     for (int i = 0; i < 4; i++) out->desc.color_write_masks[i] = 0xf;
     out->desc.blend_src_rgb = out->desc.blend_src_a = VK_BLEND_FACTOR_ONE, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ZERO;   /* blend off by default */
+    if (fs_sel == FS_ORDER) {   /* vertices carry a weight (stride 12: x, y, w), flat into the fragment shader */
+        if (!g_rc_vs_order) g_rc_vs_order = rc_module(vk, k_vs_order_spv, sizeof k_vs_order_spv);
+        out->desc.vertex_shader = g_rc_vs_order, out->desc.n_vtx_inputs = 2, out->desc.vtx_in_loc[1] = 1, out->desc.vtx_in_comp[1] = 1, out->desc.vtx_stride = 12;
+    }
     if (fs_sel == FS_DISC) {
         out->desc.fragment_shader = rc_module(vk, (const uint32_t *)(const void *)g_disc_spv, g_disc_bytes);   /* a fresh module per run: the SPIR-V changes with the mode under test */
     } else if (fs_sel == FS_HALF) {
@@ -157,8 +161,8 @@ static bool rc_resolver(void *c, lagfx_protocol_t *p, const lagfx_task_entry_t *
         out->desc.fragment_shader = g_rc_fs[FS_HALF];
         if (g_rc.blend) out->desc.blend_enable = 1, out->desc.blend_dst_rgb = out->desc.blend_dst_a = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;   /* premultiplied source-over */
     } else {
-        const uint32_t *w[4] = { k_fs_acc_f_spv, k_fs_acc_u_spv, k_fs_acc_face_spv, k_fs_acc_mrt_spv };
-        const size_t sz[4] = { sizeof k_fs_acc_f_spv, sizeof k_fs_acc_u_spv, sizeof k_fs_acc_face_spv, sizeof k_fs_acc_mrt_spv };
+        const uint32_t *w[7] = { k_fs_acc_f_spv, k_fs_acc_u_spv, k_fs_acc_face_spv, k_fs_acc_mrt_spv, NULL, NULL, k_fs_acc_order_spv };
+        const size_t sz[7] = { sizeof k_fs_acc_f_spv, sizeof k_fs_acc_u_spv, sizeof k_fs_acc_face_spv, sizeof k_fs_acc_mrt_spv, 0, 0, sizeof k_fs_acc_order_spv };
         const int n = fs_sel == FS_MRT ? 2 : 1;
         if (!g_rc_fs[fs_sel]) g_rc_fs[fs_sel] = rc_module(vk, w[fs_sel], sz[fs_sel]);
         rc_layout(vk, n);
@@ -237,6 +241,9 @@ static void rc_run(const uint32_t refs[2], const double clr0[4], const double cl
 static const float TRI[6] = { -0.9f, -0.9f, 0.9f, -0.9f, 0.0f, 0.9f };
 static void v_tris(uint32_t n) { float v[2 * 3 * 16]; for (uint32_t i = 0; i < n * 3u; i++) v[2 * i] = TRI[2 * (i % 3)], v[2 * i + 1] = TRI[2 * (i % 3) + 1]; put_vertices(v, n * 3u); }
 static void b_list4(void)  { v_tris(4); cb_draw_p(3, 0, 12, 1); }                         /* 4 identical triangles in ONE draw */
+static void b_order4(void) {   /* 4 triangles of ONE draw at the same place, weights 1/16 .. 4/16: the k-th fragment on the pixel adds (k+1)/16 after halving what is there */
+    float v[4 * 3 * 3]; for (int k = 0; k < 4; k++) for (int i = 0; i < 3; i++) { v[(k * 3 + i) * 3] = TRI[2 * i], v[(k * 3 + i) * 3 + 1] = TRI[2 * i + 1], v[(k * 3 + i) * 3 + 2] = (float)(k + 1) / 16.0f; }
+    va_write((uint64_t)VPN_VB << 14, v, sizeof v); cb_draw_p(3, 0, 12, 1); }
 static void b_list1(void)  { v_tris(1); cb_draw_p(3, 0, 3, 1); }                          /* a single triangle: nothing to split */
 static void b_idx4(void)   { v_tris(1); const uint16_t ix[12] = { 0,1,2, 0,1,2, 0,1,2, 0,1,2 }; put_indices(ix, 12); cb_draw_idx_p(3, 12, 1); }
 static void b_inst4(void)  { v_tris(1); cb_draw_p(3, 0, 3, 4); }                          /* one triangle, 4 instances */
@@ -321,6 +328,13 @@ static void test_split_strip_and_cap(void) {
     rc_run(refs16, ZERO4, NULL, b_inst17k, false, &spl);
     assert(spl.split_draws == 0 && spl.subdraws == 0 && spl.capped == 1 && spl.draws == 0 && spl.skipped >= 1 && h16(spl.half, 8, 8, 0) == 0 && h16(spl.half, 8, 8, 1) == 0 && h16(spl.half, 8, 8, 2) == 0);   /* nothing drawn: the clear survives */
     puts("PASS: split cap: 100 sub-draws = exactly 25.0 red (RGBA16F, non-saturating); 17000 refused and counted (fbf_split_capped, draw skipped, target untouched)");
+    /* ORDER-dependent: C = 0.5 C + (k + 1) / 16 (per-triangle vertex weight) over 4 primitives of ONE draw (RGBA16F). In primitive order 0..3 the red is 49/128 = 0.3828125 (0x3620); any reordering, drop or repeat gives
+     * another value (reversed order: 0.203125), unlike the +constant shaders whose result does not depend on the order. */
+    g_rc.fs = FS_ORDER;
+    rc_run(refs16, ZERO4, NULL, b_order4, false, &spl);
+    assert(spl.draws == 1 && spl.pipe_fail == 0 && spl.split_draws == 1 && spl.subdraws == 4 && h16(spl.half, 8, 8, 0) == 0x3620);
+    puts("PASS: order-dependent fetch (C = 0.5 C + (k+1)/16, 4 primitives of one draw): 0.3828125 = primitive order 0..3 exactly (split, ordered sub-draws)");
+    g_rc.fs = FS_F;
     /* a device below Vulkan 1.3 (S8: 1.1.128): strips are still split, without the front-face flip (that path never culls). Reproduced on the legacy backend by lowering the reported API version. */
     if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) {
         const uint32_t saved_api = g_dev->vk->phys_props.apiVersion;
@@ -795,8 +809,9 @@ static void test_fetch_mask_cache(void) {
     assert(p->diag2.exec.run.draws == 2 && p->diag2.exec.pipe.pipes_built == built_after_b);   /* the mask-1 pipeline is reused, nothing rebuilt */
     assert(lagfx_a64_exec_readback_texture(p, t, REF_TEX, img, sizeof img, &w, &h) && ((px(img, 8, 8) >> 16) & 255) != 0);
     if (lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY) assert(lagfx_vk_validation_msg_count == v0);   /* the dynamic local-read path has the known baseline messages (validation baseline helper) */
-    printf("PASS: fetch mask transitions 1 -> 0 -> 1 (%s): input-usage-less target refused for fetch and left untouched, mask-1 pipeline reused (pipes_built %llu), 0 validation messages\n",
-           lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy" : "dynamic", (unsigned long long)p->diag2.exec.pipe.pipes_built);
+    printf("PASS: fetch mask transitions 1 -> 0 -> 1 (%s): input-usage-less target refused for fetch and left untouched, mask-1 pipeline reused (pipes_built %llu)%s\n",
+           lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy" : "dynamic", (unsigned long long)p->diag2.exec.pipe.pipes_built,
+           lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? ", 0 validation messages (asserted)" : " (validation count not asserted on the dynamic local-read path: known baseline)");
     lagfx_a64_exec_drop_task(p, 1); lagfx_a64_exec_free(p); free(p);
     g_res_tex3 = false;
 }
@@ -808,6 +823,8 @@ int main(void) {
     if (!g_dev->vk || !g_dev->vk->initialized) { puts("SKIP: no Vulkan device"); lagfx_device_free(g_dev); free(g_mem); return 77; }
     printf("device: local_read=%d raster_order=%d\n", (int)g_dev->vk->have_local_read, (int)g_dev->vk->have_raster_order);
     if (!lagfx_vk_fetch_capable(g_dev->vk)) { puts("SKIP: no framebuffer-fetch capability (dynamic local read or legacy input attachments) (framebuffer fetch tests need it)"); return 77; }
+    { char bn[64]; snprintf(bn, sizeof bn, "render compat, backend=%s", lagfx_vk_render_backend(g_dev->vk) == LAGFX_RENDER_LEGACY ? "legacy" : "dynamic");
+      if (lagfx_test_validation_expect(g_dev->vk, bn) != 0) { puts("FAIL: validation positive control"); return 1; } }   /* zero-size buffer must be reported (hard failure with LAGFX_REQUIRE_VALIDATION=1) */
     test_val_baseline_helper();
     test_split_scenes();
     test_split_strip_and_cap();

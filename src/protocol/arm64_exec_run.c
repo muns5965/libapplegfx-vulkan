@@ -1380,6 +1380,7 @@ static bool bind_for_draw(a64_run_t *r, lagfx_protocol_t *p, uint32_t prim) {
  * v_i+2-(i%2)}; a 3-vertex strip draw from v_i is that triangle with the opposite winding for odd i, so the front face is flipped for those sub-draws (provoking vertex v_i is the
  * same). Instance built-ins: the translator emits no InstanceId (grep), InstanceIndex = firstInstance + n is kept by firstInstance = base_instance + n. */
 #define A64_FBF_SPLIT_MAX 16384ull
+#define A64_PRE13_APPLIES_RASTER_STATE 0   /* set to 1 when apply_encoder_state starts applying cull / front face / stencil without core 1.3 */
 /* 0 = no split needed, 1 = split, -1 = needs a split that is over the cap: refuse the draw. */
 static int fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_draw_t *d, uint64_t *nprim, uint32_t *nv, uint32_t *step) {
     if (lagfx_vk_raster_order(r->vk)) return 0;   /* the legacy backend never has it: overlapping primitives of a fetch draw are split */
@@ -1395,6 +1396,10 @@ static int fbf_split_plan(a64_run_t *r, lagfx_protocol_t *p, const lagfx_a64_dra
     default: *nprim = n >= 3u ? n - 2u : 0u, *nv = 3, *step = 1; break;
     }
     if (*nprim * d->instances <= 1u) return 0;   /* one primitive: nothing can overlap inside the draw */
+    /* Below Vulkan 1.3 the front-face flip of odd strip triangles is not available, and not needed ONLY while that path applies no culling and no stencil (apply_encoder_state returns early:
+     * pipelines keep the static cull NONE, depth / stencil attachments are refused). Checked, not assumed: a pass that does carry a depth / stencil attachment, or a future change that applies
+     * cull / stencil state without core 1.3, must not silently take this branch - the strip is refused (fbf_split_unsupported) until a front-face pipeline variant exists. */
+    if (d->prim == 4u && *nprim > 1u && !vk_core13(r->vk) && (r->dsobj || A64_PRE13_APPLIES_RASTER_STATE)) { p->diag2.exec.fmt.fbf_split_unsupported++; return -1; }
     if (*nprim * d->instances > A64_FBF_SPLIT_MAX) { p->diag2.exec.fmt.fbf_split_capped++; return -1; }
     return 1;
 }
