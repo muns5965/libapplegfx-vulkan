@@ -463,6 +463,11 @@ static bool translate(lagfx_protocol_t *p, const lagfx_metallib_function_t *f, c
         lagfx_device_t *dv = (lagfx_device_t *)p->dev;
         lagfx_air2spv_set_discard_demote(dv && dv->vk && (dv->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_DEMOTE)));
     }
+    {   /* a device without shaderInt64: i64 (index / address math) is translated as 32-bit; genuine 64-bit data is refused by the translator. The capability gate below stays. */
+        lagfx_device_t *dv = (lagfx_device_t *)p->dev;
+        bool narrow = dv && dv->vk && !(dv->vk->caps_enabled & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) && !getenv("LAGFX_NO_INT64_NARROW");
+        lagfx_air2spv_set_narrow_int64(narrow ? 1 : 0);
+    }
     lagfx_status_t st = lagfx_air2spv_translate_module_ex(m, vs_keys, spv, sz);   /* fragment: stage-in Locations follow the vertex keys; a typed vs_keys also links the interface types */
     lagfx_air2spv_link_totals(&l1);   /* process-wide counters: the delta is this translation's (resolution runs on one thread) */
     lagfx_air2spv_discard_totals(&d1);
@@ -543,6 +548,20 @@ bool lagfx_a64_pipeline_resolve(void *ctx, lagfx_protocol_t *p, const lagfx_task
             for (unsigned c = 0; c < LAGFX_VK_CAP_COUNT; c++) if (miss & LAGFX_VK_CAP_BIT(c)) CNTP(p).stub_missing_cap[c]++;
             CNTP(p).rf_missing_cap++;
             LAGFX_WARN("arm64 pipeline %u: shader needs device capabilities that are not enabled (mask 0x%x); pipeline not built, its draws are skipped", ref, miss);
+            {   /* what the rejected pair is, and (for Int64) where the 64-bit integers are used; the modules are saved when LAGFX_ARM64_DUMP_DIR is set, so the same pair can be replayed on S26 and S8 */
+                char rep[2][200] = { "", "" };
+                if (miss & LAGFX_VK_CAP_BIT(LAGFX_VK_CAP_INT64)) lagfx_spv_int64_report(vspv, vsz, rep[0], sizeof rep[0]), lagfx_spv_int64_report(fspv, fsz, rep[1], sizeof rep[1]);
+                LAGFX_WARN("arm64 pipeline %u: rejected pair vs='%s' (need 0x%x, bitcode hash %016llx) fs='%s' (need 0x%x, hash %016llx)%s%s%s%s%s%s", ref, vf->name, nv, (unsigned long long)lagfx_a64_hash64(vf->bitcode, vf->bitcode_len),
+                           ff->name, nf, (unsigned long long)lagfx_a64_hash64(ff->bitcode, ff->bitcode_len), rep[0][0] ? " vs " : "", rep[0], rep[0][0] ? "; fs " : "", rep[1], "", "");
+                const char *dd = getenv("LAGFX_ARM64_DUMP_DIR");
+                if (dd && dd[0]) {
+                    char path[512]; const struct { const char *tag; const void *d; size_t n; } f[] = { { "vs.spv", vspv, vsz }, { "fs.spv", fspv, fsz }, { "vs.air.bc", vf->bitcode, vf->bitcode_len }, { "fs.air.bc", ff->bitcode, ff->bitcode_len } };
+                    for (unsigned q = 0; q < 4u; q++) {
+                        snprintf(path, sizeof path, "%s/capreject_p%u_%s", dd, ref, f[q].tag);
+                        FILE *fp = fopen(path, "wb"); if (fp) { fwrite(f[q].d, 1, f[q].n, fp); fclose(fp); }
+                    }
+                }
+            }
             goto done;
         }
     }

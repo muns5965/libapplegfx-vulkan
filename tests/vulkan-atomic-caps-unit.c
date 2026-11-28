@@ -41,6 +41,8 @@ static uint8_t *slurp(const char *name, size_t *n) {
     }
     return NULL;
 }
+/* translate status only (no CHECK on failure): 0 = translated, else the lagfx status */
+static int need_of_status(const char *name, uint32_t *need);
 /* required caps of the SPIR-V the translator produces for `name` (lenient: the float fixtures are only translated then) */
 static int need_of(const char *name, int lenient, uint32_t *need) {
     size_t an = 0; uint8_t *air = slurp(name, &an);
@@ -54,6 +56,17 @@ static int need_of(const char *name, int lenient, uint32_t *need) {
     CHECK(lagfx_spv_required_caps_ex(spv, sn, need), "%s: caps scan", name);
     free(spv); lagfx_air_module_free(m); free(air);
     return 0;
+}
+
+static int need_of_status(const char *name, uint32_t *need) {
+    size_t an = 0; uint8_t *air = slurp(name, &an);
+    CHECK(air, "fixture %s not found", name);
+    lagfx_air_module_t *m = NULL; uint8_t *spv = NULL; size_t sn = 0;
+    CHECK(lagfx_air_module_open(air, an, &m) == LAGFX_OK, "open %s", name);
+    lagfx_status_t st = lagfx_air2spv_translate_module(m, &spv, &sn);
+    if (st == LAGFX_OK && spv) (void)lagfx_spv_required_caps_ex(spv, sn, need);
+    free(spv); lagfx_air_module_free(m); free(air);
+    return (int)st;
 }
 
 int main(void) {
@@ -90,6 +103,17 @@ int main(void) {
     CHECK(!need_of("atomic_rmw.air.bc", 0, &n_32) && !need_of("atomic_i64.air.bc", 0, &n_buf64) && !need_of("atomic_i64_tg.air.bc", 0, &n_sh64) && !need_of("atomic_i64_both.air.bc", 0, &n_both64) &&
           !need_of("atomic_f32.air.bc", 1, &n_fbuf) && !need_of("atomic_f32_tg.air.bc", 1, &n_fsh), "translate");
     CHECK((n_32 & LAGFX_VK_CAPS_ATOMIC_ALL) == 0u, "32-bit integer atomics need no atomic cap (0x%x)", n_32);
+    CHECK((n_32 & B(LAGFX_VK_CAP_INT64)), "without narrowing the i64 index arithmetic of a real kernel needs Int64 (need 0x%x)", n_32);
+    {   /* devices without shaderInt64 (Adreno 730): narrowing turns i64 index math into 32-bit, genuine 64-bit atomics are refused */
+        uint32_t n_nar = 0xffffffffu, dummy;
+        lagfx_air2spv_set_narrow_int64(1);
+        int r = need_of("atomic_rmw.air.bc", 0, &n_nar);
+        CHECK(!r && !(n_nar & B(LAGFX_VK_CAP_INT64)), "narrowed: a module with only i64 index math must not need Int64 (r=%d need 0x%x)", r, n_nar);
+        int rb = need_of_status("atomic_i64.air.bc", &dummy);
+        CHECK(rb != 0, "narrowed: a 64-bit atomic module must be refused, not truncated (status %d)", rb);
+        lagfx_air2spv_set_narrow_int64(0);
+    }
+    CHECK((n_buf64 & B(LAGFX_VK_CAP_INT64)) && (n_sh64 & B(LAGFX_VK_CAP_INT64)), "64-bit atomics still need Int64 (n_buf64 0x%x n_sh64 0x%x)", n_buf64, n_sh64);
     CHECK((n_buf64 & LAGFX_VK_CAPS_ATOMIC_ALL) == A64B, "device-memory 64-bit: need 0x%x, want atomic64_buf only", n_buf64);
     CHECK((n_sh64 & LAGFX_VK_CAPS_ATOMIC_ALL) == A64S, "threadgroup 64-bit: need 0x%x, want atomic64_shared only", n_sh64);
     CHECK((n_both64 & LAGFX_VK_CAPS_ATOMIC_ALL) == (A64B | A64S), "both: need 0x%x", n_both64);

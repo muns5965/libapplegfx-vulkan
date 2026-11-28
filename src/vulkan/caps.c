@@ -295,3 +295,38 @@ bool lagfx_vk_can_pin_subgroup32(const struct lagfx_vk_state *vk) {
     if (vk->sg_size == 32u && vk->sg_min <= 32u && vk->sg_max >= 32u && vk->sg_min == vk->sg_max) return true;   /* fixed 32 (a range makes the driver free to choose: pin it) */
     return vk->sg_control && vk->sg_min <= 32u && vk->sg_max >= 32u;
 }
+
+void lagfx_spv_int64_report(const void *spv, size_t bytes, char *out, size_t out_n) {
+    const uint32_t *w = spv; const size_t n = bytes / 4u;
+    if (!out || !out_n) return;
+    out[0] = 0;
+    if (!w || n < 6u || w[0] != 0x07230203u) { snprintf(out, out_n, "not a SPIR-V module"); return; }
+    const uint32_t bound = w[3];
+    if (bound == 0 || bound > (1u << 22)) { snprintf(out, out_n, "bad id bound"); return; }
+    uint8_t *is64 = calloc(bound, 1);   /* id is an OpTypeInt 64 (or a vector / pointee-free type of one is not tracked: scalars and vectors of it) */
+    uint8_t *val64 = calloc(bound, 1);  /* id is a value whose type is 64-bit int */
+    if (!is64 || !val64) { free(is64); free(val64); snprintf(out, out_n, "oom"); return; }
+    unsigned tu = 0, ts = 0, cst = 0, conv = 0, arith = 0, bits = 0, mem = 0, idx = 0, other = 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (size_t i = 5; i < n;) {
+            const uint32_t op = w[i] & 0xffffu, len = w[i] >> 16;
+            if (!len || i + len > n) break;
+            if (pass == 0) {
+                if (op == 21u && len >= 4u && w[i + 2] == 64u && w[i + 1] < bound) { is64[w[i + 1]] = 1; if (w[i + 3]) ts++; else tu++; }
+                if (op == 23u && len >= 4u && w[i + 1] < bound && w[i + 2] < bound && is64[w[i + 2]]) is64[w[i + 1]] = 1;   /* OpTypeVector */
+            } else if (len >= 3u && w[i + 1] < bound && is64[w[i + 1]] && w[i + 2] < bound) {   /* result type is 64-bit int: w[i+2] is the result id */
+                val64[w[i + 2]] = 1;
+                if (op == 43u || op == 44u || op == 46u) cst++;
+                else if (op == 113u || op == 114u || op == 115u || op == 116u || op == 117u || op == 120u) conv++;
+                else if ((op >= 128u && op <= 141u)) arith++;
+                else if ((op >= 194u && op <= 199u) || op == 200u || op == 201u || op == 202u) bits++;
+                else if (op == 61u) mem++;
+                else other++;
+            }
+            if (pass == 1 && (op == 65u || op == 66u || op == 67u || op == 68u) && len >= 5u)   /* OpAccessChain / InBounds / PtrAccessChain / InBoundsPtrAccessChain: indices from word 4 on */
+                for (size_t k = 4; k < len; k++) { const uint32_t id = w[i + k]; if (id < bound && val64[id]) idx++; }
+            i += len;
+        }
+    snprintf(out, out_n, "i64 types(u=%u s=%u) consts=%u convert=%u arith=%u bitops=%u loads=%u other=%u access_chain_indices=%u", tu, ts, cst, conv, arith, bits, mem, other, idx);
+    free(is64); free(val64);
+}

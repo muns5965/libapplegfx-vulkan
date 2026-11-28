@@ -927,7 +927,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
             .rasterizationOrderColorAttachmentAccess = s->have_raster_order ? (int32_t)ro_en.rasterizationOrderColorAttachmentAccess : 0,
             .shaderTileImageColorReadAccess = 0, .shaderTileImageDepthReadAccess = 0, .shaderTileImageStencilReadAccess = 0,
             .subgroupSizeControl = feat13.subgroupSizeControl, .computeFullSubgroups = feat13.computeFullSubgroups,
-            .shaderFloat16 = feat12.shaderFloat16, .shaderInt64 = feat2.features.shaderInt64, .shaderInt8 = feat12.shaderInt8,
+            .shaderFloat16 = feat12.shaderFloat16, .sampleRateShading = feat2.features.sampleRateShading, .shaderInt64 = feat2.features.shaderInt64, .shaderInt8 = feat12.shaderInt8,
             .storageBuffer16BitAccess = feat11.storageBuffer16BitAccess, .storageBuffer8BitAccess = feat12.storageBuffer8BitAccess,
             .variablePointers = feat11.variablePointers, .variablePointersStorageBuffer = feat11.variablePointersStorageBuffer };
         lagfx_vk_devinfo_log_once_ex(s->phys_device, &en);   /* read-only g7-vkdev diagnostic (devinfo.h), WARN, once per process */

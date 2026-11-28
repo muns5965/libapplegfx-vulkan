@@ -251,6 +251,21 @@ static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkEx
             q.pNext = chain;
             vkGetPhysicalDeviceFeatures2(pd, &q);
         }
+        /* below 1.2 these features live in the extension structs (core 1.1: 16-bit storage + variable pointers; VK_KHR_shader_float16_int8, VK_KHR_8bit_storage): read them there, otherwise the
+         * "supported" column says 0 for a feature the device really has and enables (Adreno 730, Vulkan 1.1.128) */
+        VkPhysicalDeviceShaderFloat16Int8Features x_f16i8 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_FLOAT16_INT8_FEATURES };
+        VkPhysicalDevice8BitStorageFeatures x_8b = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_8BIT_STORAGE_FEATURES };
+        VkPhysicalDevice16BitStorageFeatures x_16b = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_16BIT_STORAGE_FEATURES };
+        VkPhysicalDeviceVariablePointersFeatures x_vp = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES };
+        if (pd2 && !core12) {
+            void *c2 = NULL;
+            if (ex && has_ext(ex, ne, "VK_KHR_shader_float16_int8")) { x_f16i8.pNext = c2; c2 = &x_f16i8; }
+            if (ex && has_ext(ex, ne, "VK_KHR_8bit_storage")) { x_8b.pNext = c2; c2 = &x_8b; }
+            x_16b.pNext = c2; c2 = &x_16b;
+            x_vp.pNext = c2; c2 = &x_vp;
+            VkPhysicalDeviceFeatures2 t = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = c2 };
+            vkGetPhysicalDeviceFeatures2(pd, &t);
+        }
         const int ext_lr = ex && has_ext(ex, ne, "VK_KHR_dynamic_rendering_local_read"), ro_e = ex && has_ext(ex, ne, "VK_EXT_rasterization_order_attachment_access"), ro_a = ex && has_ext(ex, ne, "VK_ARM_rasterization_order_attachment_access");
         local_read_feat_t lr = { .sType = (VkStructureType)ST_LOCAL_READ_FEATURES };
         raster_order_feat_t ro = { .sType = (VkStructureType)ST_RASTER_ORDER_FEATURES };
@@ -284,13 +299,14 @@ static void extra_lines(sink_t *s, VkPhysicalDevice pd, uint32_t api, const VkEx
             { "shaderTileImageStencilReadAccess", ext_ti ? (int)ti.shaderTileImageStencilReadAccess : 0, en_p ? en_p->shaderTileImageStencilReadAccess : -1 },
             { "subgroupSizeControl", core13 ? (int)f13.subgroupSizeControl : 0, en_p ? en_p->subgroupSizeControl : -1 },
             { "computeFullSubgroups", core13 ? (int)f13.computeFullSubgroups : 0, en_p ? en_p->computeFullSubgroups : -1 },
-            { "shaderFloat16", core12 ? (int)f12.shaderFloat16 : 0, en_p ? en_p->shaderFloat16 : -1 },
+            { "shaderFloat16", core12 ? (int)f12.shaderFloat16 : (int)x_f16i8.shaderFloat16, en_p ? en_p->shaderFloat16 : -1 },
+            { "sampleRateShading", (int)q.features.sampleRateShading, en_p ? en_p->sampleRateShading : -1 },
             { "shaderInt64", (int)q.features.shaderInt64, en_p ? en_p->shaderInt64 : -1 },
-            { "shaderInt8", core12 ? (int)f12.shaderInt8 : 0, en_p ? en_p->shaderInt8 : -1 },
-            { "storageBuffer16BitAccess", core12 ? (int)f11.storageBuffer16BitAccess : 0, en_p ? en_p->storageBuffer16BitAccess : -1 },
-            { "storageBuffer8BitAccess", core12 ? (int)f12.storageBuffer8BitAccess : 0, en_p ? en_p->storageBuffer8BitAccess : -1 },
-            { "variablePointers", core12 ? (int)f11.variablePointers : 0, en_p ? en_p->variablePointers : -1 },
-            { "variablePointersStorageBuffer", core12 ? (int)f11.variablePointersStorageBuffer : 0, en_p ? en_p->variablePointersStorageBuffer : -1 },
+            { "shaderInt8", core12 ? (int)f12.shaderInt8 : (int)x_f16i8.shaderInt8, en_p ? en_p->shaderInt8 : -1 },
+            { "storageBuffer16BitAccess", core12 ? (int)f11.storageBuffer16BitAccess : (int)x_16b.storageBuffer16BitAccess, en_p ? en_p->storageBuffer16BitAccess : -1 },
+            { "storageBuffer8BitAccess", core12 ? (int)f12.storageBuffer8BitAccess : (int)x_8b.storageBuffer8BitAccess, en_p ? en_p->storageBuffer8BitAccess : -1 },
+            { "variablePointers", core12 ? (int)f11.variablePointers : (int)x_vp.variablePointers, en_p ? en_p->variablePointers : -1 },
+            { "variablePointersStorageBuffer", core12 ? (int)f11.variablePointersStorageBuffer : (int)x_vp.variablePointersStorageBuffer, en_p ? en_p->variablePointersStorageBuffer : -1 },
         };
         char o[620];
         size_t n = 0;

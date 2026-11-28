@@ -31,7 +31,7 @@ typedef struct {
     const char *const *exts;
     uint32_t n_exts;
     int32_t dynamicRendering, dynamicRenderingLocalRead, rasterizationOrderColorAttachmentAccess, shaderTileImageColorReadAccess, shaderTileImageDepthReadAccess, shaderTileImageStencilReadAccess,
-            subgroupSizeControl, computeFullSubgroups, shaderFloat16, shaderInt64, shaderInt8, storageBuffer16BitAccess, storageBuffer8BitAccess, variablePointers, variablePointersStorageBuffer;
+            subgroupSizeControl, computeFullSubgroups, sampleRateShading, shaderFloat16, shaderInt64, shaderInt8, storageBuffer16BitAccess, storageBuffer8BitAccess, variablePointers, variablePointersStorageBuffer;
 } lagfx_vkdev_enabled_t;
 
 /* Same, plus the ENABLED set (NULL = not recorded: the lines then say feature_enabled=not-recorded). */

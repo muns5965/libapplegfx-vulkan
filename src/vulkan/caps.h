@@ -54,6 +54,9 @@ uint32_t lagfx_spv_required_caps(const void *spv, size_t bytes);
 /* Fail-closed form: returns false when the module could not be analysed (bad magic, truncated, id outside the bound, bound too large, allocation failure,
  * types nested too deep); *mask is then LAGFX_VK_CAP_ALL so a gate that ANDs it with the enabled set rejects the module. */
 bool lagfx_spv_required_caps_ex(const void *spv, size_t bytes, uint32_t *mask);
+/* Where a module uses 64-bit integers (diagnostic for a device without shaderInt64): counts of OpTypeInt 64 types, 64-bit constants, 64-bit results of conversions / arithmetic / bit ops /
+ * loads, and OpAccessChain-family indices that are 64-bit. "only indices and constants" means the 64-bit values could be narrowed to 32 bits. Writes a one-line summary to `out`. */
+void lagfx_spv_int64_report(const void *spv, size_t bytes, char *out, size_t out_n);
 
 /* Declares (OpCapability, plus OpExtension SPV_KHR_8bit_storage below SPIR-V 1.5) the 8/16-bit storage capabilities the module USES but does not declare, so a
  * device that has the feature accepts it. *spv is a malloc'd blob and may be replaced (realloc'd). Returns false only on allocation failure (blob unchanged). */
