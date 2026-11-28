@@ -40,7 +40,7 @@ struct lagfx_vk_state {
     uint32_t caps_enabled, caps_missing;
     /* Subgroup properties (device creation): size and the VK_EXT_subgroup_size_control range; sg_control = the feature is ENABLED and COMPUTE may carry a required size */
     uint32_t sg_size, sg_min, sg_max, sg_required_stages;
-    bool sg_control, sg_full, sg_ext_queried;   /* sg_ext_queried: min/max/stages came from VK_EXT_subgroup_size_control on a device below 1.3 */
+    bool sg_control, sg_full /* computeFullSubgroups SUPPORTED by the device; never requested at vkCreateDevice */, sg_ext_queried;   /* sg_ext_queried: min/max/stages came from VK_EXT_subgroup_size_control on a device below 1.3 */
     /* VK_QCOM_tile_shading opt-in (LAGFX_QCOM_TILE=1), see qcom_tile.h: what the device was asked for and what came of it. Read-only after init. */
     struct {
         bool flag, injected, enabled;                 /* enabled: the device WAS created with VK_QCOM_tile_properties + VK_QCOM_tile_shading + the features of enable_mask */

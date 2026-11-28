@@ -986,7 +986,7 @@ lagfx_status_t lagfx_vk_init(struct lagfx_vk_state **out,
         if (!sg_printed) {
             sg_printed = true;
             char sl[300];
-            snprintf(sl, sizeof sl, "g7-gpu-feat: subgroup size=%u min=%u max=%u via=%s subgroupSizeControl=%d requiredSubgroupSizeStages=0x%x computeFullSubgroups=%d pin32=%s",
+            snprintf(sl, sizeof sl, "g7-gpu-feat: subgroup size=%u min=%u max=%u via=%s subgroupSizeControl=%d requiredSubgroupSizeStages=0x%x computeFullSubgroups(supported)=%d computeFullSubgroups(enabled)=0 pin32=%s",
                      s->sg_size, s->sg_min, s->sg_max, s->sg_ext_queried ? "EXT" : (s->phys_props.apiVersion >= VK_API_VERSION_1_3 ? "core13" : "none"), (int)s->sg_control, (unsigned)s->sg_required_stages, (int)s->sg_full,
                      s->sg_size == 32u ? "native" : lagfx_vk_can_pin_subgroup32(s) ? "required_size" : "no(lane-mapped tile kernels are skipped)");
             fprintf(stderr, "%s\n", sl);
