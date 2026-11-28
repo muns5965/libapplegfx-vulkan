@@ -263,6 +263,7 @@ int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload,
 
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n);
 
+void lagfx_a64_res_test_flush(lagfx_protocol_t *p);   /* test hook: the flush a finished exec performs (frees parked dead objects, retries limbo) */
 const lagfx_a64_stats_t *lagfx_a64_res_stats(lagfx_protocol_t *p);   /* never NULL */
 void lagfx_a64_res_destroy(lagfx_protocol_t *p);                     /* safe on NULL / nothing allocated */
 

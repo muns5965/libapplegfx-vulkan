@@ -403,6 +403,10 @@ void lagfx_diag_stats(lagfx_protocol_t *p, uint64_t t, bool final) {
             if (po + 200 < sizeof pl)
                 snprintf(pl + po, sizeof pl - po, " obj_table[created=%llu destroyed=%llu reused=%llu live=%llu peak_live=%llu high_water=%llu full=%llu lookup_miss=%llu deferred=%llu]",
                          U(obj_created), U(obj_destroyed), U(obj_reused), U(obj_live), U(obj_peak_live), U(obj_high_water), U(obj_full), U(obj_lookup_miss), U(obj_deferred));
+            {   /* objects kept whole because their framebuffers could not be proven idle (WaitIdle failed): parked -> reclaimed on a later flush, leaked only at shutdown / when the list cannot grow */
+                const lagfx_a64_stats_t *L = lagfx_a64_res_stats(p); size_t lo = strlen(pl);
+                if (lo + 100 < sizeof pl) snprintf(pl + lo, sizeof pl - lo, " limbo[parked=%llu reclaimed=%llu leaked=%llu live=%u]", (unsigned long long)L->limbo_parked, (unsigned long long)L->limbo_reclaimed, (unsigned long long)L->limbo_leaked, L->limbo_live);
+            }
         }
         {   /* desc[... tex=N ...] by reason (only the non-zero ones); the first 8 distinct textures of each are logged as g7-gpu-tex-unbound lines when they happen */
             size_t po = strlen(pl);

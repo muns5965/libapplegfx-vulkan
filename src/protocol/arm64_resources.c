@@ -63,6 +63,8 @@ bool lagfx_a64_res_display_info(lagfx_protocol_t *p, uint64_t mapping, uint32_t 
 int lagfx_a64_blit_op(lagfx_protocol_t *p, uint32_t tag, const uint8_t *payload, size_t len) { (void)p; (void)tag; (void)payload; (void)len; return 0; }
 uint32_t lagfx_a64_res_sync_to_guest(lagfx_protocol_t *p, uint32_t task, const uint32_t *refs, uint32_t n) { (void)p; (void)task; (void)refs; (void)n; return 0; }
 bool lagfx_a64_resource_cmd(lagfx_protocol_t *p, const lagfx_cmd_header_t *hdr) { (void)p; (void)hdr; return false; }
+/* stub build: no manager */
+void lagfx_a64_res_test_flush(lagfx_protocol_t *p) { (void)p; }
 void lagfx_a64_res_forget(lagfx_protocol_t *p, uint32_t task, uint32_t ref) { (void)p; (void)task; (void)ref; }
 void lagfx_a64_res_drop_task(lagfx_protocol_t *p, uint32_t task) { (void)p; (void)task; }
 bool lagfx_a64_res_busy(lagfx_protocol_t *p) { (void)p; return false; }
@@ -316,7 +318,7 @@ static void obj_free_m(mgr2_t *m, struct lagfx_vk_state *vk, lagfx_a64_obj_t *o)
     if (m->nlimbo == m->caplimbo) {
         uint32_t nc = m->caplimbo ? m->caplimbo * 2u : 8u;
         lagfx_a64_obj_t **n = realloc(m->limbo, nc * sizeof *n);
-        if (!n) { m->limbo_leaked++; LAGFX_ERR("arm64 res: object task=%u ref=%u leaked (cannot park it)", o->task, o->ref); free(o); return; }
+        if (!n) { m->limbo_leaked++; LAGFX_ERR("arm64 res: object task=%u ref=%u leaked (limbo list cannot grow: out of memory)", o->task, o->ref); free(o); return; }
         m->limbo = n, m->caplimbo = nc;
     }
     m->limbo[m->nlimbo++] = o; m->limbo_parked++; m->st.limbo_parked = m->limbo_parked; m->st.limbo_live = m->nlimbo;
@@ -1827,6 +1829,8 @@ bool lagfx_a64_res_readback_ds(lagfx_protocol_t *p, uint32_t task, uint32_t ref,
 
 
 /* 0x25 (arm64: remove ref from the task's object set): forget the mirror so a reused ref is rebuilt from its new table entry. */
+/* test hook: run the flush a finished exec would (retries parked objects) */
+void lagfx_a64_res_test_flush(lagfx_protocol_t *p) { mgr2_t *m = p ? p->a64_res : NULL; if (m) dead_flush(m, vk_of(p)); }
 void lagfx_a64_res_forget(lagfx_protocol_t *p, uint32_t task, uint32_t ref) {
     mgr2_t *m = p ? p->a64_res : NULL;
     struct lagfx_vk_state *vk = vk_of(p);
